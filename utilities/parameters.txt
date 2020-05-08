@@ -1,0 +1,371 @@
+# $Id: parameters.txt 20 2005-06-22 15:20:16Z brc $
+# $Log$
+# Revision 1.1  2005/06/22 15:19:54  brc
+# Added to complete the contents of the repository.
+#
+# Revision 1.1.1.1  2003/02/03 20:18:44  brc
+# This is the re-organized distribution of libccom (a.k.a. CUBE),
+# which has a more realistic structure for future development.  The
+# code re-organization and build system was contributed by IVS
+# (www.ivs.unb.ca).
+#
+# Revision 1.1.2.3  2003/01/31 22:27:51  dneville
+# (BRC) Modified eeg_q_limit in both locations to essentially turn off this piece
+# of the code.  It isn't required any more, and needs good ad hoc calibration
+# to work effectively in this mode.
+#
+# Revision 1.1.2.2  2003/01/28 16:38:45  dneville
+# (BRC) Added 'sonar_type' element to global section of the vessel parameter
+# clause, and a corresponding element in the Vessel description that
+# allows it to be retained.  This allows one file, with just a Vessel clause, to
+# specify the whole system being used on the survey platform (makes it easier
+# for integrators to keep things together).
+#
+# Revision 1.1.2.1  2003/01/28 16:34:23  dneville
+# Adding a new file that CUBE uses to store the default parameters for platform setup  (offsets, error model params, etc.. ).
+#
+# Revision 1.7.2.1  2002/12/15 01:58:29  brc
+# Added defaults for the blunder filters.
+#
+# Revision 1.7  2002/05/10 22:18:27  brc
+# Added parameter for probability that a node is going to be used under the
+# HyperCUBE scheme.  This is used to adjust the size calculations.
+#
+# Revision 1.6  2002/03/14 04:44:48  brc
+# Added interpolation module, CARIS/HIPS(HDCS) data formats and dual-head
+# vessel specifications.  Removed static roll offsets from error model (now
+# specified through the vessel description on a per-head basis as it always
+# should have been ...)
+#
+# Revision 1.5  2001/12/07 21:26:05  brc
+# Added 'static roll' element in error model code, and 'select' statement in
+# GSF file reader.  The former allows for head roll offsets, typically for
+# dual head arrangements, and the latter allows for selection of which head
+# to report when reading dual-head data from GSF.
+#
+# Revision 1.4  2001/10/15 23:11:17  brc
+# Added SoG default values in Simrad raw module section.
+#
+# Revision 1.3  2001/09/23 19:25:31  brc
+# Added new parameters in nav and tides modules, added HyperCUBE and the
+# separate set of parameters for the standalone version of CUBE.
+#
+# Revision 1.2  2001/05/14 20:45:45  brc
+# Added mapsheet module parameters
+#
+# Revision 1.1  2001/05/14 04:15:22  brc
+# Information and test parameter file for use with test_params.c
+#
+#
+# Prototype parameter defaults file for libccom V1.0.
+# Date: 13 May 2001.
+#
+# This file is used to test the parameter file reader module, and to provide
+# full details of all of the parameters that are known in the various modules
+# of the library.  Each module is identified by its top-level name, and sub-
+# modules nested within them as appropriate.  The parameters are read into a
+# uniform list, and are then passed to the top of the module hierarchy (what
+# happens afterwards depends very much on the module; the top-level executive
+# only sends it to the top of each tree).
+#
+# Notes:
+#  1. Where there are a number of ways to describing a number, or where there
+#     is the possibility of a scale factor, a unit may be given.  Lengths may
+#     have 'nm' for nautical miles, 'm' for meters, 'ft' for feet, and 'in' for
+#     inches; for MKS units, multipliers are allowed from 'u' to 'k'. Durations
+#     have to be in seconds, but multipliers from 'u' to 'c' are allowed.  Rates
+#     have to be in Hertz, multipliers 'k' and 'M' are allowed.
+#  2. Angles are always given in degrees, so no units are required.  Ditto
+#     speeds and m/s.
+#  3. Some numbers have no units, and any units will probably be quietly ignored
+#     by the reader.
+#  4. The data tags have fairly free specification limits.  Numbers can be up
+#     to full floats, and are always interpreted as floats.  Free form text is
+#     allowed, including /, - and . so that filenames can (mostly) be specified.
+#     The only limitation is that spaces are not allowed.
+#  5. Each clause (module) is specified by an identifier, then a brace enclosed
+#     list of sub-clauses and element lines.  Element lines are an identifier,
+#     some data tag, and then a semi-colon.  The parser and lexer are white-
+#     space tolerant, with the exception of comments '# <text>' which extend to
+#     the end of the current line.
+#  6. The parameter file reader doesn't really understand anything about the
+#     module names, parameter names or allowed data.  It just reads the file
+#     and then offers it back to the user; any error checking has to be done in
+#     the individual modules.  The general executive in params_execute() knows
+#     about the modules in the internal table in params.c, and when it is passed
+#     a parameters list, it gives it to each module in turn and in table order.
+#  7. The values in this file are intended to be the defaults that are hard
+#     coded into the modules, so that the user can see what needs to be changed.
+#     The modules use hard defaults if the parameters are not modified in the
+#     parameter list, so only the values that need to be changed need to be in
+#     this file.
+
+# Generic interpolation module
+interp {
+	buffer_quantum 1024;
+}
+
+# Attitude interpolation module
+att {
+	buffer_quantum 1024;
+}
+
+# Navigational interpolation module
+nav {
+	buffer_quantum 1024;
+	latency		   0 s;	# Set navigation latency.  Positive values indicate
+						# that the navigation lags the data.
+}
+
+# Survey Time interpolation and translation module
+stime {
+	buffer_quantum 1024;
+}
+
+# Tide Correction interpolation and translation module
+tides {
+	buffer_quantum 256;
+	time_offset		0 s;	# Time offset to apply on read: +ve => worksite lags
+	scale_factor	1.0;	# Scale factor to apply on read (0.0,1.0].
+}
+
+# Error Model module
+errmod {
+	# Full MBES Error model
+	full {
+		default_surf_sspeed 1500.0;
+	}
+	# Simplified model based on IHO S44 4ed
+	iho {
+		order 		1;			# Set IHO survey order 1..4
+		vert_fixed	20 cm;		# These specifically set the elements in the
+		vert_var	0.0075;		# survey order table, but are unnecessary if the
+		horizontal	2 m;		# survey matches the IHO table.  These allow
+								# the entries to be over-ridden if required.
+								#   The code uses 'order' to set base values,
+								# and then modifies any which are specified.
+	}
+}
+
+# Vessel configuration and auxilliary instrument measurement errors
+vessel {
+	timestamp	1970/01/01:00:00:00;
+	sonar_type	unknown;	# device module recognition string for data generator
+	draft		0 m;	# Transducer draft below RP
+	tx_latency	0 ms;	# Transducer transmit latency
+	static_roll	0;		# Head mounting angle, deg., +ve => port up
+	gps {
+		x		0 m;	# GPS 3D offsets from transducer
+		y		0 m;
+		z		0 m;
+		latency	0 ms;	# GPS latency
+	}
+	imu {
+		x		0 m;	# IMU 3D offsets from transducer
+		y		0 m;
+		z		0 m;
+		roll	0;		# Alignment angles for IMU to transducer.
+						# Note that angles are always given in degrees.
+		pitch	0;
+		gyro	0;
+	}
+	port {					# Port head definitions (optional)
+		draft		0 m;	# Transducer draft below RP
+		tx_latency	0 ms;	# Transducer transmit latency
+		static_roll	0;		# Head mounting angle, deg., +ve => port up
+		gps {
+			x		0 m;	# GPS 3D offsets from transducer
+			y		0 m;
+			z		0 m;
+			latency	0 ms;	# GPS latency
+		}
+		imu {
+			x		0 m;	# IMU 3D offsets from transducer
+			y		0 m;
+			z		0 m;
+			roll	0;		# Alignment angles for IMU to transducer.
+							# Note that angles are always given in degrees.
+			pitch	0;
+			gyro	0;
+		}
+	}
+	stbd {					# Starboard head definitions (optional)
+		draft		0 m;	# Transducer draft below RP
+		tx_latency	0 ms;	# Transducer transmit latency
+		static_roll	0;		# Head mounting angle, deg., +ve => port up
+		gps {
+			x		0 m;	# GPS 3D offsets from transducer
+			y		0 m;
+			z		0 m;
+			latency	0 ms;	# GPS latency
+		}
+		imu {
+			x		0 m;	# IMU 3D offsets from transducer
+			y		0 m;
+			z		0 m;
+			roll	0;		# Alignment angles for IMU to transducer.
+							# Note that angles are always given in degrees.
+			pitch	0;
+			gyro	0;
+		}
+	}
+	sdev {						# These are measurement errors for the various
+								# auxilliary instruments in the survey platform.
+		gps_offset		5 mm;	# All 3D GPS offsets
+		gps_drms		2 m;	# Base GPS 2D horizontal uncertainty
+		gps_latency		30 ms;
+		imu_offset		5 mm;	# All 3D IMU offsets
+		imu_rp_align	0.05;	# IMU Roll/Pitch alignment
+		imu_g_align		0.05;	# IMU Gyro alignment
+		imu_latency		5 ms;
+		roll			0.05;	# Roll measurement error
+		pitch			0.05;	# Pitch measurement error
+		pitch_stab		0;		# Pitch stabilisation measurement error
+								# i.e., here, no pitch stabilisation
+		gyro			0.50;	# Gyro measurement error
+		svp				0.52;	# Sound velocity profile measurement error.
+								# Note that speeds are always given in m/s, so
+								# no units are required
+		surf_sspeed		0.50;	# Surface sound speed measurement error
+		heave_fixed		5 cm;	# Fixed component of heave measurement error
+		heave_var		0.05;	# Variable component of heave measurement error
+		draft			2 cm;
+		ddraft			2 cm;	# Dynamic draft (e.g., squat)
+		loading			1 cm;	# Known loading (e.g., fuel use)
+		sog				0.2;	# Speed over ground
+		tide_meas		2 cm;	# Tide measurement error at gauge
+		tide_pred		2 cm;	# Tide error due to spatial/temporal variation
+	}
+}
+
+# Sounding provision/translation module
+sounding {
+	default_surf_sspeed		1500.0;		# Default surface sound speed, m/s
+	gsf {
+		default_surf_sspeed	1500;		# Same for GSF reader module
+		select				any;		# Can be port, stbd or any to select
+										# sonar head from GSF file.
+	}
+	hips {
+		default_surf_sspeed	1500;		# Default surface sound speed, m/s
+		amp_phase_trans		12;			# Number of samples in footprint needed
+										# to jump to phase detection
+	}
+	omg {
+		honour_flags		yes;		# yes|no - whether to use edit flags
+		default_mean_speed	1500.0;		# Mean water column speed, m/s
+		default_surf_sspeed	1500.0;		# Surface sound speed, m/s
+		default_vessel_speed   3.0;		# Vessel speed, m/s
+	}
+	raw {
+		buffer_exageration		3.0;	# Buffer safety factor (1.0, 10.0)
+		simrad {
+			max_resynch			1000;		# Maximum number of synch failures
+											# before giving up
+			att_op_rate			10.0 Hz;	# Output rate for decimated high-
+											# rate attitude data
+			att_failure_rate	1.0 Hz;		# Input rate of high-rate attitude
+											# before deciding latencies reported
+											# in file are erroneous
+			att_min_rate		10.0 Hz;	# Minimum attitude input rate before
+											# switching to pass-through FIR
+			att_fir_len			51;			# Length of decimation FIR
+			att_rate_slop		0.05;		# Fractional change in measured
+											# input rate before changing the FIR
+			default_sog			4.116;		# Ship's speed-over-ground if not
+											# available from position datagram
+											# (in m/s, range (0.0,15.4); 4.116
+											# m/s is 8 kts, 15.4 m/s is 30 kts).
+		}
+	}
+}
+
+# MapSheet depth estimation and organisation module
+mapsheet {
+	max_height		10000;			# Maximum sizes in nodes
+	max_width		10000;
+	
+	# Iterative Trimmed Mean Estimation Algorithm
+	mean {
+		null_depth			0 m;	# Reconstruction depth with no data
+		reject_sdev_limit	2.0;	# Std. Dev. limit at which to cull outliers
+		mean_ratio_eps		0.01;	# Mean ratio convergence limit
+		sdev_ratio_eps		0.01;	# SDev ratio convergence limit
+		max_iterations		100;	# Max. Iter. before giving up on convergence
+		buffer_quantum		256;	# Buffer allocation quantum
+		max_buffer_pt		65536;	# Maximum buffer size
+	}
+	
+	# Median Bin Estimation Algorithm
+	median {
+		null_depth			0 m;	# Reconstruction depth with no data
+		subsample_at		500;	# Median filtering sub-sample limit
+		buffer_quantum		256;	# Buffer allocation quantum
+		max_buffer_pt		65536;	# Maximum buffer size
+	}
+	
+	# Concurrent Uncertainty and Bathymetry Estimation (CUBE) Algorithm
+	nodal {
+		null_depth			0 m;	# Reconstruction depth with no data
+		null_sdev			1 km;	# Reconstruction sdev with no data
+		confidence_int		C95;	# Confidence interval to report
+									# Values: C68 (1 s.d.), C90, C95, C99
+		distance_exp		2.0;	# Uncertainty dilution function exponent
+		median_length		11;		# Median pre-queue length
+		eeg_q_limit			255.0;	# Continuous Eeg-Clipping Quotient Limit
+		evolution_discount	1.0;	# West & Harrison evolution variance
+									# discount factor (range [0.8,1.0]).
+		monitor_offset		4.0;	# Model monitoring vertical offset
+									# (range (0.0, \infty))
+		monitor_tau			0.135;	# Model monitoring Bayes factor limit
+									# (range (0.0, \infty))
+		monitor_runlength	5;		# Model monitoring `bad run' limit before
+									# intervention.  Integer, positive
+		extractor			likelihood;	# Hypothesis selection algorithm
+										# Values: 'prior', 'likelihood' or
+										# 'posterior'.
+		min_context			5 m;	# Minimum search radius for guide node in
+									# spatial context hypothesis selection
+									# (i.e., in 'likelihood' and 'posterior'
+									# selection modes).
+		max_context			10 m;	# Maximum search radius for guide node
+	}
+	
+	# The HyperCUBE algorithm: multiple CUBE sheets with LRU caching
+	hcube {
+		max_memory			128 Mb;	# Maximum amount of memory to use
+		hypothesis_hint		1.25;	# Scale for Expected num. hypotheses
+		prob_use			0.80;	# Probability a node is used (expected)
+		max_tile_dim		511;	# Maximum size of a tile
+		tile_expiry_delta	600 s;	# Time-out before flushing tiles
+	}
+}
+
+# The base CUBE algorithm
+cube {
+		null_depth			0 m;	# Reconstruction depth with no data
+		null_sdev			1 km;	# Reconstruction unct. with no data
+		confidence_int		C95;	# Report 95% confidence intervals
+		distance_exp		2.0;	# User exponent for dilution function
+		median_length		11;		# Size of median pre-queue in node
+		eeg_q_limit			255.0;	# Continual culling with Egg's Quotients
+		evolution_discount	1.0;	# West & Harrison evolution variance
+									# discount factor (range [0.8,1.0])
+									# 1.0 = no discount (max. smoothing).
+		monitor_offset		4.0;	# Model monitoring vertical offset limit
+									# (range (0.0, \infty))
+		monitor_tau			0.135;	# Model monitoring Bayes factor limit for
+									# single and sequential monitoring.
+									# (range (0.0, \infty)).
+		monitor_runlength	5;		# Model monitoring `bad run' limit before
+									# intervention; integer, positive.
+		extractor			likelihood;	# Disambiguation method; choices are
+										# 'prior', 'likelihood', 'posterior'
+		min_context			5 m;	# Minimum disambiguation search limit
+		max_context			10 m;	# Maximum disambiguation search limit
+		blunder_min			10 m;	# Minimum blunder threshold (m)
+		blunder_pcent			25.0;	# Percentage of depth to consider a blunder
+							# (in deep direction only).
+		blunder_scalar			3.0;	# Scale of initialisation surface variance to allow
+							# before declaring deeps to be blunders
+}

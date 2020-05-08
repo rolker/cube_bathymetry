@@ -1,0 +1,67 @@
+#!/bin/bash
+#
+# $Id: get_data 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		get_data
+# Purpose:	Get data from the network share into local disc, and inventory
+# Date:		18 August 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: start get_data: $*" >>./libccom.log
+
+# Get configuration script set up by the setup_project script.  This gives
+# lists of platforms, data locations, etc.
+. ${PWD}/config/setup
+
+if [ ! -d ${BASE}/HDCS_Data ]
+then
+	echo "Error: can't find ${BASE}/HDCS_Data for raw data input."
+	exit 1
+fi
+
+PLATFORMLIST=${PLATFORMS}
+
+if [ $# -gt 0 ]
+then
+	DAY=$1;
+	shift;
+else
+	DAY=`date --utc +"%Y-%j"`
+fi
+
+if [ $# -gt 0 ]
+then
+	PLATFORMLIST="$*"
+fi
+
+for plat in $PLATFORMLIST
+do
+	SRC=${RAWDIR}/${PROJECT}/${plat}/${DAY}
+	DST=${BASE}/HDCS_Data/${PROJECT}/${plat}
+	echo "Copying from ${SRC} to ${DST} ..."
+	cp -r ${SRC} ${DST}
+	echo "Making file list for ${DST} ..."
+	ls -lR ${DST}/${DAY} | grep ':$' | tail +2 | sed -e '1,$s|:$||' |\
+		tr '/' '\\' >${BASE}/Processing/lists/${plat}_${DAY}.lst
+	cat ${BASE}/processing/lists/${plat}_${DAY}.lst >>${BASE}/processing/lists/${DAY}.lst
+	cat ${BASE}/processing/lists/${plat}_${DAY}.lst >>${BASE}/processing/lists/${plat}.lst
+done
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end get_data: $*" >>./libccom.log
+
+exit 0

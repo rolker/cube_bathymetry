@@ -1,0 +1,53 @@
+#!/bin/bash
+#
+# $Id: mergesingle 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		MergeSingle
+# Purpose:	Merge CUBE composite with singlebeam and shoreline
+# Date:		11 Sept 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: start merge_single: $*" >>./libccom.log
+
+# Get setup configuration
+. ${PWD}/config/setup
+
+# Output Missing Neighbors file
+gzt -gi ${GUTMDIR}/merged_combo.gutm -mno ${POINTDATADIR}/mno.txt 
+
+#Copy the singlebeam, shoreline and missing neighbors xyzu files together
+cat ${POINTDATADIR}/sbsound.txt ${POINTDATADIR}/shorexyzu.txt ${POINTDATADIR}/mno.txt > ${POINTDATADIR}/all.txt
+
+#Call Mapinfo and execute preptin.mbx, which fixes up the input file to prep it for tinning
+#"c:/program files/mapinfo/professional/mapinfow.exe" ${SCRIPTSDIR}/preptin.mbx
+
+#Reads the ascii grid output, adjusts each node back to the original value
+gzt -ai ${POINTDATADIR}/shorensinglegrid.txt -pp ${POINTDATADIR}/allxyz.txt -pd -co -go ${GUTMDIR}/shorensingle.gutm -fy
+
+#Calculates the uncertainty of the tinned grid, based on the original measurements
+gzt -gi ${GUTMDIR}/shorensingle.gutm -cu ${POINTDATADIR}/all.txt 10 -sc ${GUTMDIR}/shorensinglecombo.gutm
+
+#Fills the gaps in the cube gutm with the interpolated values from the tin grid
+gzt -gi ${GUTMDIR}/merged_combo.gutm -merge ${GUTMDIR}/shorensinglecombo.gutm -sc ${GUTMDIR}/comp_combo.gutm -fillgaps
+
+#Transforms the uncertainty to iho order 1 percentage and saves to HIPS
+gzt -gi ${GUTMDIR}/comp_combo.gutm -iho 1 -sc ${GUTMDIR}/comp_iho.gutm -wgo ${BASE}/fieldsheets ${PROJECT} depth comp_combo -huo -ioinit ${GZTIOINIT}
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end merge_single: $*" >>./libccom.log
+
+exit 0

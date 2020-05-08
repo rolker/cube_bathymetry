@@ -1,0 +1,32 @@
+dim Cmer as float
+
+'get utm zone and the location of the points directory
+include "mbsetup.def"
+print PointDataDir
+
+'calculate cmer
+Cmer=-183+6*UTMzone
+
+'Open all.txt file, save as type MI, alter type of 4th column, update the uncertainty value of the singlebeam.
+Register Table PointDataDir + "all.txt"  TYPE ASCII Delimiter 32 Charset "WindowsLatin1" Into PointDataDir + "all.TAB"
+Open Table PointDataDir + "all.TAB" Interactive
+Commit Table all As PointDataDir + "shorensingle.TAB" TYPE NATIVE Charset "WindowsLatin1"
+Close Table all Interactive
+Open Table PointDataDir + "shorensingle.TAB" Interactive
+Alter Table "shorensingle" ( modify _COL4 Float ) Interactive
+select * from shorensingle where col3>0 and col4=0 into makeuncert noselect
+Update makeuncert  Set _COL4 = sqr(.25+.000169*col3*col3)
+commit table shorensingle
+
+'Save new xyzu, xyz files
+export shorensingle into PointDataDir + "all.txt" Type "ASCII" Overwrite Delimiter " " CharSet "WindowsLatin1"
+Select _COL1, _COL2, _COL3 from shorensingle into xyz
+Export "xyz" Into PointDataDir + "allxyz.txt" Type "ASCII" Overwrite Delimiter " " CharSet "WindowsLatin1"
+
+'Create points
+Create Map For shorensingle CoordSys Earth Projection 8, 33, "m", Cmer, 0, 0.9996, 500000, 0 Bounds (-7745844.29605, -9997964.94315) (8745844.29605, 9997964.94315)
+set coordsys table shorensingle
+update shorensingle set obj=createpoint(col1, col2)
+map from shorensingle
+Set Map Window frontwindow()  Zoom Entire Layer 1
+commit table shorensingle

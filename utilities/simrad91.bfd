@@ -1,0 +1,189 @@
+# Simrad Data Format, vintage 1991.
+
+block em91hdr {
+	u32	datasize;	# Length in bytes, not including this word
+	u8	stx;		# STX == 2 if sequence if synchronised
+	u8	type;		# Hex code for datagram to follow.
+}
+
+block em91tail {
+	u8	etx;
+	u16	chksum;
+}
+
+# Note that this is used for a number of different dgram types --- and should be
+# issued when lines are started, stopped, and whenever parameters are modified.\
+# These three conditions have different codes.
+#
+block em91param {
+	u8	date[until ','];			# DDMMYY
+	u8	time[until ','];			# HHMMSSSS (show be interpreted SS.SS)
+	u8	pos_ip[until ','];			# 'PIS=' then 0..9
+	u8	posdelay[until ','];		# 'PTD=' then delay, 0.1s resolution
+	u8	roll_off[until ','];		# 'MSR=' then roll offset, 0.01 deg. res.
+	u8	pitch_off[until ','];		# 'MSP=' then pitch offset, 0.01 deg. res.
+	u8	gyro_off[until ','];		# 'MSG=' then gyro offset, 0.01 deg. res.
+	u8	em100_td[until ','];		# 'EM100TD=', then tx depth, 0.1m res.
+	u8	em100_alongoff[until ','];	# 'EM100TX=', then alongship offset, 0.1m
+	u8	em100_athwrtoff[until ','];	# 'EM100TY=', then athwartship off., 0.1m
+	u8	em12_td[until ','];			# 'EM12TD=', then tx depth, 0.1m res.
+	u8	em12_alongoff[until ','];	# 'EM12TX=', then alongship offset, 0.1m
+	u8	em12_athwrtoff[until ','];	# 'EM12TY=', then athwartship off., 0.1m
+	u8	em1000_td[until ','];		# 'EM1000TD=', then tx depth, 0.1m res.
+	u8	em1000_alongoff[until ','];	# 'EM1000TX=', then alongship off., 0.1m
+	u8	em1000_athwrtoff[until ','];# 'EM1000TY=', then athwartship off., 0.1m
+	u8	spare[128];
+	u8	linenum[until ','];			# 'SURVEY LINE ', then linenumber 0--9999
+	u8	comment[88];				# 'COMMENT:', then comment line.
+}
+
+# Note that quality byte is bit significant:
+#	b[7]	Flag: 0 => amplitude detection, 1 => phase detection
+#	b[6]	If b[7]==1, Flag: 0 => first order fit to phase, 1 => second order
+#	b[0:5]	If b[7]==0, Number of amplitude samples used in computation
+#			If b[7]==1, 64*variance of fit to phase curve/max. limit
+block em91em1000bd {
+	s16			depth;		# 0.02m resolution
+	s16			atwart_d;	# 0.1m resolution
+	s16			along_d;	# 0.1m resolution
+	s16			range;		# 50us resolution
+	s8			backscatter;# 0.5dB resolution
+	u8			quality;	# 0--9 (bit significant)
+	u8			spare;
+}
+
+block em91em1000depth {
+	u8			date[6];	# DDMMYY
+	u8			time[8];	# HHMMSS.SS
+	u16			pingnum;
+	u8			mode;		# 1 = Narrow, 2 = Wide, 3 = Ultra-Wide
+	u8			quality;	# +ve => accepted, and number of beams accepted
+							# -ve => rejected, and number of beams accepted
+	u16			depth_uk;	# Depth under keel 0.02m resolution
+	u16			gyro;		# 0.1 deg. resolution
+	s16			roll;		# 0.01 deg. resolution
+	s16			pitch;		# 0.01 deg. resolution
+	s16			td_pitch;	# Transducer pitch angle 0.01 deg. resolution
+	s16			heave;		# 0.01m resolution
+	u16			sound_spd;	# 0.1 m/s resolution
+	em91em1000bd	beam[60];
+}
+
+# This is filtered heave differences, i.e., the filtered heave minus the heave
+# which was measured.
+block em91heave {
+	u8			date[6];			# DDMMYY
+	u8			time[8];			# HHMMSS.SS
+	u8			spare[8];
+	s16			heavediff[500];		# 0.01m resolution
+}
+
+block em91beam {
+	u8		number;
+	u8		frequency;	# 0 = 12.7kHz, 1 = 13kHz, 2 = 13.3kHz, 3 = 95 kHz.
+	u16		nsamples;
+	u16		center;		# Sample position of center of beam (aka detection pt).
+}
+
+# Note that the number of datagrams which are generated depends on the operating
+# mode, since the data packets are limited in size because they are send by
+# UDP protocol.  The number of samples per beam depends on pointing angle and
+# depth, etc., so the number of packets varies even with mode.  The 'dgram_num'
+# field tracks which packet it is.
+#
+block em91image {
+	u8		date[6];	# DDMMYY
+	u8		time[8];	# HHMMSS.SS
+	u16		pingnum;
+	u16		sound_spd;	# 0.1m/s resolution
+	u8		mode;		# 1..5, Modes:
+						# 1 = EM12 shallow	(0.6m/sample)
+						# 2 = EM12 deep		(2.4m/sample)
+						# 3 = EM1K narrow	(0.3m/sample)
+						# 4 = EM1K wide		(0.3m/sample)
+						# 5 = EM1K ultrawide(0.15m/sample)
+	u8		n_dgrams;	# Number of datagrams for this ping
+	u8		dgram_num;	# This datagram's number in sequence
+	u8		n_beams;	# Number of beams in this datagram
+	em91beam	hdrs[n_beams];
+	s8		image[n_beams][hdrs.nsamples];
+	u8		spare[1];	# This is padding to avoid over-running the dgram length
+}
+
+# pos_north and pos_east depend on whether the system is recording data in
+# geographic coordinates or projected coordinates (which are limited to UTM).
+# In geographic coordinates, format is:
+#  | DDMM.MMMMx| DD=0..89, MM.MMMM=0..59.9999, x = N|S
+#  |DDDMM.MMMMx| DD=0..179, MM.MMMM=0..59.9999, x = E|W
+#
+# In UTM format, units are meters, and format is simply decimal value in ASCII
+# format (note: no terminating zero byte!), possibly with leading spaces or
+# zeros.
+#
+block em91processed {
+	u8		date[6];			# DDMMYY
+	u8		time[8];			# HHMMSS.SS (but `.' not in data).
+	u8		pos_north[11];		# Format depends on whether LL or UTM.
+	u8		pos_east[11];		# "
+	u8		pos_sys;			# 0|1
+	u16		pingnum;
+	u8		dgram_num;			# 0..3 (dgram is in four parts, p->s)
+	u8		heading[5];			# Doc. says binary, but probably ASCII
+	s8		min_amp_port;		# 0.5dB resolution
+	s8		amp_step_port;		# 0.5dB resolution
+	s8		min_amp_stbd;		# 0.5dB resolution
+	s8		amp_step_stbd;		# 0.5dB resolution
+	u8		pix_res;			# 0.05m resolution
+	s8		backscatter[992];	# 0.5dB resolution
+}
+
+# Simrad'90 Position Input Datagram (i.e., positioning info throughput)
+# Quality factor limits are:
+# 9: <1m, 8: <3m, 7: <10m, 6: <30m, 5: <100m, 4: <300m, 3: <1000m, 2: <3000m,
+# 1: <10000m, 0: not valid.
+# 
+block em91position {
+	u8	date[until ','];		# DDMMYY
+	u8	time[until ','];		# HHMMSS.SS (but '.' not in data)
+	u8	latitude[until ','];	# DDMM.MMMMX (X=N|S)
+	u8	longitude[until ','];	# DDDMM.MMMMX (X=E|W)
+	u8	utm_north[until ','];	# MMMMMMMM.M (meters)
+	u8	utm_east[until ','];	# MMMMMMM.M (meters)
+	u8	utm_zone[until ','];	# Two digits.
+	u8	utm_zon_lon[until ','];	# DDDMM.MMMMX (X=E|W)
+	u8	system[until ','];		# 0|1 (0=lat/lon, 1 = UTM)
+	u8	quality[until ','];		# 0-9 (9 is most accurate, 0 == not valid).
+	u8	speed[until ','];		# VV.V (m/s)
+	u8	line_hdg[5];			# HHH.H (degrees, 0.1 deg. res.)
+}
+
+# SVP entry description.
+block em91svpent {
+	u16		depth;		# Depth in meters
+	u16		velocity;	# Velocity in dm/s
+}
+
+block em91svp {
+	u8			date[6];		# Date SVP cast was taken
+	u8			time[8];		# Time SVP cast was taken
+	u16			n_valid_values;	# Number of valid values
+	em91svpent	svp[100];		# The SVP cast itself
+}
+
+sonar simrad91 {
+	resynch		100;
+	reclen		40960;
+	header		em91hdr type validate_simrad91;
+	idtable {
+		0x85	start_iparam	em91param;
+		0x86	stop_iparam		em91param;
+		0x87	param			em91param;
+		0x93	position		em91position;
+		0x92	flt_heave		em91heave;
+		0x97	em1000depth		em91em1000depth;
+		0xb4	procdata		em91processed;
+		0xca	imagery			em91image;
+		0x9a	svp				em91svp;
+	}
+	tail		em91tail;
+}

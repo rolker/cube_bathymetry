@@ -1,0 +1,97 @@
+#!/bin/bash -x
+#
+# $Id: run_data 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		run_data
+# Purpose:	Run a day's worth of data through into a specified mapsheet, optionally from only one platform
+# Date:		18 August 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: start run_data: $*" >>./libccom.log
+
+# Get setup configuration
+. ${PWD}/config/setup
+
+if [ $# -lt 1 ]
+then
+	echo "Syntax: run_data <sheet> [<day> [<platform> [<platform> ... ]]]"
+	echo " MapSheet set ------^       ^        ^"
+	echo " Optional day to run -------'        |"
+	echo " Optional platforms to run ----------'"
+	exit 1
+fi
+
+SHEET=$1; shift;
+if [ ! -d ${SHEETDIR}/${SHEET} ]
+then
+	echo "Error: directory ${SHEETDIR}/${SHEET} does not exist."
+	exit 1
+fi
+
+PLATFORMLIST=${PLATFORMS}
+
+if [ $# -gt 0 ]
+then
+	DAY=$1;
+	shift;
+else
+	DAY=`date --utc +"%Y-%j"`
+fi
+
+if [ $# -gt 0 ]
+then
+	PLATFORMLIST="$*"
+	for plat in $PLATFORMLIST
+	do
+		# Get platform specific over-rides to generate configuration
+		. ${CONFIGDIR}/setup.${plat}
+		# Check that the list file exists
+		if [ ! -s ${LISTDIR}/${plat}_${DAY}.lst ]
+		then
+			echo "Error: list file ${LISTDIR}/${plat}_${DAY}.lst does not exist!"
+			exit 1
+		fi
+		if [ $SENSOR == "UNKNOWN" ]
+		then
+			echo "Error: platform ${plat} does not have a defined sensor type."
+			echo "       You need to edit ${CONFIGDIR}/setup.${plat}"
+			echo "       to correct this."
+			exit 1
+		fi
+		cat ${LISTDIR}/${plat}_${DAY}.lst >>${LISTDIR}/tmplist.$$
+	done
+	LISTFILE=${LISTDIR}/tmplist.$$
+else
+	LISTFILE=${LISTDIR}/${DAY}.lst
+	if [ ! -f $LISTFILE ]
+	then
+		echo "Error: list file ${LISTDIR}/${DAY}.lst (for all platforms)"
+		echo "       does not exist.  You can correct this by using specific platforms"
+		echo "       or fixing get_data."
+		exit 1
+	fi
+fi
+
+baseinit=`basename ${MASKGEOREF}`
+
+assimilate -d hips -i ${IHOORDER} -f ${CONFIGDIR}/init.par \
+	-s ${INITDIR},${baseinit} ${LISTFILE} ${PLATSPEC} ${SHEETDIR}/${SHEET}
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end run_data: $*" >>./libccom.log
+
+exit 0

@@ -1,0 +1,103 @@
+#!/bin/bash
+#
+# $Id: gen_gutms 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		gen_gutms
+# Purpose:	Generate all required GUTMS from the MapSheets
+# Date:		18 August 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: start gen_gutms: $*" >>./libccom.log
+
+export PATH=${PATH}:"/cygdrive/c/program files/gridmanipulator"
+
+# Get setup configuration
+. ${PWD}/config/setup
+
+if [ $# -ne 1 ]
+then
+	echo "Syntax: gen_gutms <sheetset>"
+	echo " Set to build ---------^"
+	exit 1
+fi
+
+sheetset=$1
+
+if [ ! -f ${CONFIGDIR}/disam.par ]
+then
+	echo "Error: need a disambiguation engine configuration file in"
+	echo "       ${CONFIGDIR}/disam.par, and it does not exist."
+	exit 1
+fi
+
+for sheet in `ls ${SHEETDIR}/${sheetset}`
+do
+	shtbase=${sheet%.sht}
+	summarise -p -f ${CONFIGDIR}/disam.par ${SHEETDIR}/${sheetset}/${sheet} ${GUTMDIR} ${shtbase}
+done
+
+echo "Combining depth and uncertainty to combos"
+for sheet in `ls ${SHEETDIR}/${sheetset}`
+do
+	shtbase=${sheet%.sht}
+	gzt -gi ${GUTMDIR}/${shtbase}_depth.gutm -ui ${GUTMDIR}/${shtbase}_uncrt.gutm -sc ${GUTMDIR}/${shtbase}_combo.gutm
+done
+
+echo "Merging all grids to a composite..."
+ls -1 ${SHEETDIR}/${sheetset} | sort -nr -t_ +0 -1 > sheettemplist
+first=`head -1 sheettemplist`
+len=`wc -l sheettemplist | tr -s ' ' ' ' | cut -d' ' -f 2`
+if [ $len -gt 1 ]
+then
+	second=`tail +2 sheettemplist | head -1`
+	gzt -gi ${GUTMDIR}/${first%.sht}_combo.gutm -merge ${GUTMDIR}/${second%.sht}_combo.gutm -sc ${GUTMDIR}/merged_combo.gutm	
+	if [ $len -gt 2 ]
+	then
+	for sheet in `tail +3 sheettemplist`
+		do 
+			gzt -gi ${GUTMDIR}/merged_combo.gutm -merge ${GUTMDIR}/${sheet%.sht}_combo.gutm -sc ${GUTMDIR}/merged_combo.gutm
+		done
+	fi
+else
+	cp ${GUTMDIR}/${first%.sht}_combo.gutm ${GUTMDIR}/merged_combo.gutm
+fi
+
+echo "Merging 1m grid..."
+ls -d1 ${SHEETDIR}/${sheetset}/1m* | sort -nr -t_ +0 -1 > sheettemplist
+first=`head -1 sheettemplist`
+first=`basename $first`
+len=`wc -l sheettemplist | tr -s ' ' ' ' | cut -d' ' -f 2`
+if [ $len -gt 1 ]
+then
+	gzt -gi ${POINTDATADIR}/1mseed.gutm -merge ${GUTMDIR}/${first%.sht}_combo.gutm -sc ${GUTMDIR}/1m_combo.gutm	
+	second=`tail +2 sheettemplist | head -1`
+	second=`basename $second`
+	gzt -gi ${GUTMDIR}/1m_combo.gutm -merge ${GUTMDIR}/${second%.sht}_combo.gutm -sc ${GUTMDIR}/1m_combo.gutm	
+	if [ $len -gt 2 ]
+	then
+		for sheet in `tail +3 sheettemplist`
+			do 
+				shtname=`basename $sheet`
+				gzt -gi ${GUTMDIR}/1m_combo.gutm -merge ${GUTMDIR}/${shtname%.sht}_combo.gutm -sc ${GUTMDIR}/1m_combo.gutm
+			done
+	fi
+fi
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end gen_gutms: $*" >>./libccom.log
+
+exit 0

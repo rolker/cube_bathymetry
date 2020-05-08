@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# $Id: gen_mapsheets 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		gen_mapsheets
+# Purpose:	Construct initialised MapSheets from SDFs and [optionally] an initialistion GUTM
+# Date:		18 August 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: start gen_mapsheets: $*" >>./libccom.log
+
+# Get setup configuration
+. ${PWD}/config/setup
+
+if [ $# -lt 1 ]
+then
+	echo "Syntax: gen_mapsheets <sheetset>"
+	echo " Set to build -------------^"
+	exit 1
+fi
+
+sheetset=$1;
+
+if [ ! -d ${SHEETDIR}/${sheetset} ]
+then
+	echo "Error: MapSheet directory ${SHEETDIR}/${sheetset} does not exist."
+	exit 1
+fi
+
+if [ ! -f ${CONFIGDIR}/init.par ]
+then
+	echo "Error: need an initialisation CUBE parameter file in ${CONFIGDIR}/init.par"
+	echo "       (and it doesn't currently exist)."
+	exit 1
+fi
+
+for sdf in `ls ${SDFDIR}/*_${sheetset}.sdf`
+do
+	base=`basename ${sdf%.sdf}`
+	opsheet=${base%_${sheetset}}
+	if [ $INITSURF == "UNKNOWN" ]
+	then
+		sdf2sht -i ${IHOORDER} $sdf ${SHEETDIR}/${sheetset}/${base}.sht
+	else
+		if [ -f ${INITDIR}/${opsheet}.tif ]
+		then
+			MASK="-m ${INITDIR}/${opsheet}.tif"
+		else
+			MASK=""
+		fi
+		initsheet -a cube -p -u 5.0 -i ${IHOORDER} ${MASK} -f ${CONFIGDIR}/init.par\
+			${sdf} ${INITSURF} ${SHEETDIR}/${sheetset}/${opsheet}.sht
+	fi
+done
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end gen_mapsheets: $*" >>./libccom.log
+
+exit 0

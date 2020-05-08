@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+# $Id: gen_hipsgrids 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		gen_hipsgrids
+# Purpose:	Generate HIPS weighted grids from GUTMs
+# Date:		18 August 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: end gen_hipsgrids: $*" >>./libccom.log
+
+# Get setup configuration
+. ${PWD}/config/setup
+
+if [ $# -ne 1 ]
+then
+	echo "Syntax: gen_hipsgrids <sheetset>"
+	echo " Set to build -------------^"
+	exit 1
+fi
+
+sheetset=$1
+
+PATH=${PATH}:"/cygdrive/c/program files/gridmanipulator"
+
+for sheet in `ls ${SHEETDIR}/${sheetset}`
+do
+	shtname=${sheet%.sht}
+	echo ${shtname}
+	for comp in depth uncrt nhypo hypstr
+	do
+		rm -f ${BASE}/Fieldsheets/${PROJECT}/${comp}/${shtname}*
+		gzt -ioinit ${GZTIOINIT} -gi ${GUTMDIR}/${shtname}_${comp}.gutm -co -wgo ${BASE}\\Fieldsheets ${PROJECT} ${comp} ${shtname}
+	done
+done
+if [ -f ${GUTMDIR}/comp_combo.gutm ]
+then
+	gzt -ioinit ${GZTIOINIT} -gi ${GUTMDIR}/1m_combo.gutm -co -wgo ${BASE}\\Fieldsheets ${PROJECT} depth 1m -huo
+	gzt -ioinit ${GZTIOINIT} -gi ${GUTMDIR}/comp_combo.gutm -co -wgo ${BASE}\\Fieldsheets ${PROJECT} depth composite -huo
+	gzt -ioinit ${GZTIOINIT} -gi ${GUTMDIR}/comp_iho.gutm -co -wgo ${BASE}\\Fieldsheets ${PROJECT} depth composite -huo
+fi
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end gen_hipsgrids: $*" >>./libccom.log
+
+exit 0

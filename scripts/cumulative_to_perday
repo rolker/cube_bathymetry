@@ -1,0 +1,35 @@
+#!/bin/bash
+#
+# $Id: cumulative_to_perday 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		cumulative_to_perday
+# Purpose:	Copy cumulative MapSheets to initialise the perday set
+# Date:		31 August 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: start cumulative_to_perday: $*" >>./libccom.log
+
+# Get setup configuration
+. ${PWD}/config/setup
+
+rm -rf ${SHEETDIR}/perday/*.sht
+cp -r ${SHEETDIR}/cumulative/*.sht ${SHEETDIR}/perday
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end cumulative_to_perday: $*" >>./libccom.log
+
+exit 0

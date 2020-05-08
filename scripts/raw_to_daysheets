@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# $Id: raw_to_daysheets 9 2003-02-12 01:57:52Z brc $
+# $Log$
+# Revision 1.1  2003/02/12 01:57:52  brc
+# Scripts used to synchronise the running of CUBE and friends in
+# the NOAA mold.
+#
+#
+# File:		raw_to_daysheets
+# Purpose:	Run a CUBE pass from raw data into the perday mapsheets (phase I)
+# Date:		18 August 2002
+#
+
+if [ ! -f ${PWD}/config/setup ]
+then
+	echo "Error: project is not set up correctly (this script can only be"
+	echo "       run from the \$BASE/processing directory so that the config"
+	echo "       scripts can be found).  Please rebuild project."
+	exit 1
+fi
+
+START=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$START: start raw_to_daysheets: $*" >>./libccom.log
+
+# Get configuration script set up by the setup_project script.  This gives
+# lists of platforms, data locations, etc.
+. ${PWD}/config/setup
+
+if [ ! -d ${BASE}/HDCS_Data ]
+then
+	echo "Error: can't find ${BASE}/HDCS_Data for raw data input."
+	exit 1
+fi
+
+PLATFORMLIST=${PLATFORMS}
+
+if [ $# -gt 0 ]
+then
+	DAY=$1;
+	shift;
+else
+	DAY=`date --utc +"%Y-%j"`
+fi
+
+if [ $# -gt 0 ]
+then
+	PLATFORMLIST="$*"
+fi
+
+run_data perday ${DAY} ${PLATFORMLIST}
+gen_gutms perday
+gen_hipsgrids perday
+
+END=`date --utc +"%H:%M:%S %d %b %Y"`
+echo "$END: end raw_to_daysheets: $*" >>./libccom.log
+
+exit 0
