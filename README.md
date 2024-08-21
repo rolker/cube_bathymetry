@@ -1,5 +1,7 @@
 # CUBE Library Source Code
 
+(forked from <https://bitbucket.org/ccomjhc/cube>)
+
 This repository contains the reference version of the CUBE algorithm (Calder & Mayer, "Automatic processing of high-rate, high-density multibeam echosounder data", Geochem., Geophy., Geosys. 4(6), 2003, 10.1029/2002GC000486), supplied with an MIT license.
 
 The code was developed mostly over the period 2000-2002, and first released under a commercial license in 2003.  Since then, of course, many things have changed.  You should not expect, therefore, that the code will compile cleanly on any particular system, or that it will compile completely (there may be libraries that need to be installed to support, and it is known that not all of those libraries are still available).  Development moved on to CHRT in approximately 2009, and this code was mostly abandoned.
