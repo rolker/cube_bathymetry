@@ -82,7 +82,7 @@ static const char *modname = "mapsheet_par";
 
 extern int maplex(void);
 
-SheetList *alloc_sheetlist(void);
+static SheetList *alloc_sheetlist(void);
 extern SheetList *sheets;
 void maperror(char *msg);
 

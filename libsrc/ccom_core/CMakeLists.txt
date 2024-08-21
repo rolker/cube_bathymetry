@@ -1,0 +1,13 @@
+add_library(ccom_core
+  att.c
+  device.c
+  error.c
+  interp.c
+  nav.c
+  omg.c
+  params.c
+  projection.c
+  stime.c
+  tides.c
+  vessel.c
+)

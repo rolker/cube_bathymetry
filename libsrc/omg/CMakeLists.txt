@@ -1,0 +1,13 @@
+add_library(omg
+  backscatter.c
+  DCM_rthand.c
+  geoutm.c
+  j_proj.c
+  mercator.c
+  OMG_HDCS_jversion.c
+  ref_coeffs.c
+  stdtime.c
+  support.c
+  swapio.c
+  utmgeo.c
+)
