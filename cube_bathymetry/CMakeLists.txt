@@ -3,7 +3,7 @@ project(cube_bathymetry)
 
 set(CMAKE_CXX_STANDARD 14)
 
-find_package(catkin REQUIRED COMPONENTS
+find_package(catkin REQUIRED COMPONENTS grid_map_ros
   roscpp rosbag tf2_ros tf2_sensor_msgs
 )
 

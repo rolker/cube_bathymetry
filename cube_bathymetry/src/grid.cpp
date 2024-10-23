@@ -14,7 +14,7 @@ bool Grid::insert(const std::vector<Sounding> & soundings)
 {
   bool ret = false;
   for(const auto &s: soundings)
-    ret = ret || insert(s);
+    ret = insert(s) || ret;
   return ret;
 }
 

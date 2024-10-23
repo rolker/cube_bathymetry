@@ -24,7 +24,7 @@ struct XY
 
   friend bool operator<(const DT &lhs, const DT &rhs)
   {
-    return valid(lhs) && valid(rhs) && lhs.x < rhs.x && lhs.y < rhs.y;
+    return valid(lhs) && valid(rhs) &&  (lhs.x < rhs.x || lhs.x == rhs.x && lhs.y < rhs.y);
   }
 
   friend bool operator==(const DT &lhs, const DT &rhs)

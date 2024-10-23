@@ -3,6 +3,7 @@
 
 #include "grid.h"
 #include <map>
+#include <chrono>
 
 namespace cube
 {
@@ -16,7 +17,7 @@ public:
   /// individual cells and order is the IHO order.
   MapSheet(CellCounts counts, CellSizes sizes, std::string iho_order = "order1a");
 
-  void addSoundings(const std::vector<Sounding> & soundings);
+  void addSoundings(const std::vector<Sounding> & soundings, std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
 
   /// Return the grids within the bounds, creating new ones if necessary
   std::vector<std::shared_ptr<Grid> > getOrCreateGridsIn(const MapBounds& bounds);
@@ -35,6 +36,8 @@ public:
 
   GridIndex gridIndex(const MapPosition &position) const;
 
+  std::chrono::steady_clock::time_point lastUpdateTime() const;
+
 private:
   /// Grid cell counts
   CellCounts counts_;
@@ -44,6 +47,8 @@ private:
   Parameters parameters_;
 
   std::map<GridIndex, std::shared_ptr<Grid> > grids_;
+
+  std::chrono::steady_clock::time_point last_update_time_;
 };
 
 } // namespace cube

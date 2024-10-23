@@ -1,5 +1,6 @@
 #include "cube_bathymetry/map_sheet.h"
 #include <cmath>
+#include <iostream>
 
 namespace cube
 {
@@ -21,7 +22,7 @@ const CellCounts& MapSheet::cellCountsPerGrid() const
 }
 
 
-void MapSheet::addSoundings(const std::vector<Sounding> & soundings)
+void MapSheet::addSoundings(const std::vector<Sounding> & soundings, std::chrono::steady_clock::time_point time)
 {
   if(soundings.empty())
     return;
@@ -32,8 +33,8 @@ void MapSheet::addSoundings(const std::vector<Sounding> & soundings)
 
   auto grids = getOrCreateGridsIn(bounds);
   for(auto g: grids)
-    g->insert(soundings);
-
+    if(g->insert(soundings));
+      last_update_time_ = time;
 }
 
 std::vector<std::shared_ptr<Grid> > MapSheet::getOrCreateGridsIn(const MapBounds& bounds)
@@ -91,6 +92,11 @@ MapBounds MapSheet::gridBounds() const
 GridIndex MapSheet::gridIndex(const MapPosition &position) const
 {
   return floorDivide(position, sizes_*counts_);
+}
+
+std::chrono::steady_clock::time_point MapSheet::lastUpdateTime() const
+{
+  return last_update_time_;
 }
 
 }
