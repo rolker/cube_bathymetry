@@ -44,26 +44,26 @@ bool Grid::insert(const Sounding &sounding)
     * to make the insertion more efficient by only offering the sounding
     * where it is likely to be used.
     */
-  int32_t min_x = ((sounding.x - radius) - origin_.x)/sizes_.x;
-  int32_t max_x = ((sounding.x + radius) - origin_.x)/sizes_.x;
-  int32_t min_y = ((sounding.y - radius) - origin_.y)/sizes_.y;
-  int32_t max_y = ((sounding.y + radius) - origin_.y)/sizes_.y;
+  int32_t min_x = std::floor(((sounding.x - radius) - origin_.x)/sizes_.x);
+  int32_t max_x = std::ceil(((sounding.x + radius) - origin_.x)/sizes_.x);
+  int32_t min_y = std::floor(((sounding.y - radius) - origin_.y)/sizes_.y);
+  int32_t max_y = std::ceil(((sounding.y + radius) - origin_.y)/sizes_.y);
   
+ /* Clip to interior of current grid */
+  min_x = std::max(0, min_x);
+  max_x = std::min<int32_t>(counts_.x, max_x);
+  min_y = std::max(0, min_y);
+  max_y = std::min<int32_t>(counts_.y, max_y);
+
   /* Check that the sounding hits somewhere in the grid */
   if(max_x < 0 || min_x >= counts_.x || max_y < 0 || min_y >= counts_.y)
     return false;
 
-  /* Clip to interior of current grid */
-  min_x = std::max(0, min_x);
-  max_x = std::min<int32_t>(counts_.x - 1, max_x);
-  min_y = std::max(0, min_y);
-  max_y = std::min<int32_t>(counts_.y - 1, max_y);
-
   auto radius_squared = radius * radius;
 
-  for (auto y = min_y; y <= max_y; ++y)
+  for (auto y = min_y; y < max_y; ++y)
   {
-    for (auto x = min_x; x <= max_x; ++x)
+    for (auto x = min_x; x < max_x; ++x)
     {
       auto node_x = origin_.x + x * sizes_.x;
       auto node_y = origin_.y + y * sizes_.y;
@@ -73,7 +73,9 @@ bool Grid::insert(const Sounding &sounding)
       {
         auto index = y*counts_.x+x;
         if(!nodes_[index])
+        {
           nodes_[index] = std::make_shared<Node>();
+        }
         nodes_[index]->insert(node_x, node_y, distance_squared, sounding, parameters_);
       }
 

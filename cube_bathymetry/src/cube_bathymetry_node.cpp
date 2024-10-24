@@ -63,9 +63,7 @@ void publishGrid()
               map.at("uncertainty", index) = depth_uncertainty.uncertainty;
             }
         }
-
       }
-
   }
   grid_map_msgs::GridMap message;
   grid_map::GridMapRosConverter::toMessage(map, message);
@@ -74,7 +72,6 @@ void publishGrid()
 
 void pingCallback(const sensor_msgs::PointCloud2::ConstPtr msg)
 {
-  ROS_INFO_STREAM(msg->header);
   try
   {
     auto transform = tfBuffer->lookupTransform(map_frame, msg->header.frame_id, msg->header.stamp, ros::Duration(1.0));
@@ -114,7 +111,7 @@ void pingCallback(const sensor_msgs::PointCloud2::ConstPtr msg)
           }
 
           map_sheet->addSoundings(soundings, timestamp);
-    
+
     if(last_grid_publish_time.isZero() || msg->header.stamp - last_grid_publish_time > ros::Duration(5.0))
     {
       publishGrid();
@@ -139,7 +136,7 @@ int main(int argc, char **argv)
 
   map_frame = ros::NodeHandle("~").param("map_frame", map_frame);
 
-  map_sheet = std::make_shared<cube::MapSheet>(cube::CellCounts(50), cube::CellSizes(5.0));
+  map_sheet = std::make_shared<cube::MapSheet>(cube::CellCounts(5), cube::CellSizes(5.0));
 
   tfBuffer = std::make_shared<tf2_ros::Buffer>();
   tf2_ros::TransformListener tfListener(*tfBuffer);

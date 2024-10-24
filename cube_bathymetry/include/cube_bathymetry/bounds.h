@@ -39,6 +39,13 @@ struct Bounds
     return expand(other.minimum).expand(other.maximum);
   }
 
+  inline Bounds &buffer(const RT &b)
+  {
+    minimum -= b;
+    maximum += b;
+    return *this;
+  }
+
   inline bool contains(const T &p)
   {
     return valid(*this) && p >= minimum && p <= maximum;

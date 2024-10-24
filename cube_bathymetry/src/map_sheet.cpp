@@ -30,6 +30,9 @@ void MapSheet::addSoundings(const std::vector<Sounding> & soundings, std::chrono
   MapBounds bounds;
   for(const auto &s: soundings)
     bounds.expand(s);
+  
+  // quick hack to make sure to go a bit beyound the outer soundings
+  bounds.buffer(MapOffset(sizes_.x*2, sizes_.y*2));
 
   auto grids = getOrCreateGridsIn(bounds);
   for(auto g: grids)

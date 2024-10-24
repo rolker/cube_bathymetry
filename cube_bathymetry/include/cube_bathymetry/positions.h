@@ -60,6 +60,7 @@ template <typename T, typename PT, typename DT>
 struct XYOffset: public XYPositionBase<T, DT>
 {
   XYOffset(){}
+  XYOffset(double x, double y):XYPositionBase<T, DT>(x, y){}
   XYOffset(const PT& from, const PT& to):XYPositionBase<T, DT>(to.x-from.x, to.y-from.y){}
 
   inline DT operator-() const {return DT(-this->x, -this->y);}
@@ -86,6 +87,7 @@ struct XYOffset: public XYPositionBase<T, DT>
 struct MapOffset: public XYOffset<double, MapPosition, MapOffset>
 { 
   MapOffset(){}
+  MapOffset(double x, double y): XYOffset<double, MapPosition, MapOffset>(x, y){}
   MapOffset(const MapPosition& from, const MapPosition& to): XYOffset<double, MapPosition, MapOffset>(from, to){}
 };
 
