@@ -51,7 +51,9 @@ public:
   bool insert(const Sounding &sounding);
   bool insert(const std::vector<Sounding> & soundings);
 
+  // Returns the lower left grid position
   const MapPosition &origin() const;
+
   const CellCounts &cellCounts() const;
   const CellSizes &cellSizes() const;
   

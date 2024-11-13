@@ -21,6 +21,7 @@ include_directories(
 )
 
 set(CUBE_LIBRARY_SOURCES
+  src/error_model.cpp
   src/grid.cpp
   src/hypothesis.cpp
   src/map_sheet.cpp
@@ -29,6 +30,7 @@ set(CUBE_LIBRARY_SOURCES
 )
 
 add_library(cube_bathymetry ${CUBE_LIBRARY_SOURCES})
+target_compile_options(cube_bathymetry PUBLIC -O0)
 
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
 

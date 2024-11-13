@@ -59,7 +59,7 @@ void publishGrid()
           grid_map::Index index;
             if(map.getIndex(p,index))
             {
-              map.at("elevation", index) = -depth_uncertainty.depth;
+              map.at("elevation", index) = depth_uncertainty.depth;
               map.at("uncertainty", index) = depth_uncertainty.uncertainty;
             }
         }
@@ -104,7 +104,7 @@ void pingCallback(const sensor_msgs::PointCloud2::ConstPtr msg)
             cube::Sounding s;
             s.x = *iter_x;
             s.y = *iter_y;
-            s.depth = -*iter_z;
+            s.depth = *iter_z;
             s.vertical_error =  *iter_vertical_uncertainty;
             s.horizontal_error = *iter_horizontal_uncertainty;
             soundings.push_back(s);

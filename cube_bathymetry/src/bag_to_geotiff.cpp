@@ -36,6 +36,8 @@ int main(int argc, char *argv[])
   std::string output_filename;
   std::string nav_topic;
 
+  int ping_count_limit = 0;
+
   for (auto arg = arguments.begin(); arg != arguments.end();arg++) 
   {
     if (*arg == "-h")
@@ -61,6 +63,11 @@ int main(int argc, char *argv[])
     {
       arg++;
       bathymetry_topic = *arg;
+    }
+    else if (*arg == "-l")
+    {
+      arg++;
+      ping_count_limit = std::stoi(*arg);
     }
     else
     {
@@ -93,6 +100,10 @@ int main(int argc, char *argv[])
 
   std::cout << "reading messages..." << std::endl;
 
+  geometry_msgs::TransformStamped map_to_earth;
+
+  int ping_count = 0;
+
   for(const auto m: view)
   {
     bool check_buffer = false; // did we get a sounding or updated tf message?
@@ -113,6 +124,14 @@ int main(int argc, char *argv[])
         for(const auto &t :msg->transforms)
         {
           tfBuffer.setTransform(t, m.getCallerId(), false);
+          if(t.header.frame_id == "earth")
+          {
+            if(t.transform.translation.x != map_to_earth.transform.translation.x || t.transform.translation.y != map_to_earth.transform.translation.y || t.transform.translation.z != map_to_earth.transform.translation.z)
+            {
+              std::cout << "\nnew map to earth transform:\n" << t << std::endl;
+              map_to_earth = t;
+            }
+          }
         }
         if(!msg->transforms.empty())
         {
@@ -137,7 +156,7 @@ int main(int argc, char *argv[])
         soundings_buffer.push_back(std::make_pair(msg, last_nav));
 
         double progress = (msg->header.stamp - begin_time).toSec()/total_duration.toSec();
-        std::cout << "\r" << int(100*progress) << "%\t" << soundings_buffer.size() << " soundings in buffer";
+        std::cout << "\r" << int(100*progress) << "%\t" << soundings_buffer.size() << " soundings in buffer   ";
         std::cout.flush();
         check_buffer = true;
       }
@@ -170,8 +189,7 @@ int main(int argc, char *argv[])
             cube::Sounding s;
             s.x = *iter_x;
             s.y = *iter_y;
-            s.depth = -*iter_z;
-            //s.range = std::sqrt(*iter_x_sensor * *iter_x_sensor + *iter_y_sensor * *iter_y_sensor + *iter_z_sensor * *iter_z_sensor);
+            s.depth = *iter_z;
             s.vertical_error = last_nav.position_covariance[8]*10.0;
             s.horizontal_error = std::max(last_nav.position_covariance[0], last_nav.position_covariance[4])*10.0;
 
@@ -180,6 +198,7 @@ int main(int argc, char *argv[])
 
           map_sheet.addSoundings(soundings);
           buffer_iterator = soundings_buffer.erase(buffer_iterator);
+          ping_count++;
         }
         catch (const tf2::ExtrapolationException& e)
         {
@@ -187,6 +206,11 @@ int main(int argc, char *argv[])
         }
 
       }
+    }
+    if(ping_count_limit > 0 && ping_count >= ping_count_limit)
+    {
+      std::cout << "\nPing count limit of " << ping_count_limit << " reached" << std::endl;
+      break;
     }
   }
 
@@ -208,7 +232,7 @@ int main(int argc, char *argv[])
 
   auto cellsizes = map_sheet.cellSizes();
 
-  double geo_transform[6] = {bounds.minimum.x, cellsizes.x, 0, bounds.minimum.y, 0, -cellsizes.y};
+  double geo_transform[6] = {bounds.minimum.x, cellsizes.x, 0, bounds.maximum.y, 0, -cellsizes.y};
   dataset->SetGeoTransform(geo_transform);
 
   geometry_msgs::PointStamped p;
@@ -220,12 +244,28 @@ int main(int argc, char *argv[])
   tf2::doTransform(p, origin, earth_transform);
 
   std::cout << "origin: " << origin << std::endl;
-
+  
   // Example proj string: +proj=topocentric +X_0=3771793.97 +Y_0=140253.34 +Z_0=5124304.35
 
   std::stringstream projection;
   projection << "+proj=topocentric +X_0=" << origin.point.x << " +Y_0=" << origin.point.y << " +Z_0=" << origin.point.z;
-  dataset->SetProjection(projection.str().c_str());
+
+  OGRSpatialReference spatial_reference;
+  spatial_reference.importFromProj4(projection.str().c_str());
+  spatial_reference.SetWellKnownGeogCS("WGS84");
+
+  char * wkt = nullptr;
+  spatial_reference.exportToWkt( &wkt);
+
+  std::cout << wkt;
+  
+  dataset->SetProjection(wkt);
+  CPLFree(wkt);
+
+  float nan = std::numeric_limits<float>::quiet_NaN();
+
+  dataset->GetRasterBand(1)->RasterIO(GF_Write, 0, 0, total_cell_counts.x, total_cell_counts.y, &nan, 1, 1, GDT_Float32, 0, 0);
+  dataset->GetRasterBand(2)->RasterIO(GF_Write, 0, 0, total_cell_counts.x, total_cell_counts.y, &nan, 1, 1, GDT_Float32, 0, 0);
 
   auto grids = map_sheet.grids();
   auto cell_counts = map_sheet.cellCountsPerGrid();
@@ -233,14 +273,21 @@ int main(int argc, char *argv[])
   {
     auto origin_index = cube::MapOffset(bounds.minimum, grid->origin())/grid->cellSizes();
     auto values = grid->values();
-    dataset->GetRasterBand(1)->RasterIO(GF_Write, origin_index.x, origin_index.y, cell_counts.x, cell_counts.y, values.data(), cell_counts.x, cell_counts.y, GDT_Float32, 0, 0);
+    // gdal organizes data with first row being top row
+    auto gdal_y_index = total_cell_counts.y - origin_index.y - cell_counts.y;
+    for(int row = 0; row < cell_counts.y; row++)
+    {
+      dataset->GetRasterBand(1)->RasterIO(GF_Write, origin_index.x, gdal_y_index+cell_counts.y-1-row, cell_counts.x, 1, &(values[row*cell_counts.x].depth), cell_counts.x, 1, GDT_Float32, 2*sizeof(float), 0);
+      dataset->GetRasterBand(2)->RasterIO(GF_Write, origin_index.x, gdal_y_index+cell_counts.y-1-row, cell_counts.x, 1, &(values[row*cell_counts.x].uncertainty), cell_counts.x, 1, GDT_Float32, 2*sizeof(float), 0);
+    }
   }
-
 
   GDALClose( (GDALDatasetH) dataset );
 
+// example reprojection command
+// gdalwarp -t_srs EPSG:4326 -ct "+proj=pipeline +step +inv +proj=topocentric +X_0=1274750 +Y_0=-4812100 +Z_0=3974030 +step +inv +proj=cart +ellps=WGS84 +step +proj=unitconvert +xy_in=rad +xy_out=deg +step +proj=axisswap +order=2,1"  2024-08-08_map.tiff 2024-08-08_map_reprojected.tiff
 
-
+  std::cout << "\ngdalwarp -t_srs EPSG:4326 -ct \"+proj=pipeline +step +inv +proj=topocentric +X_0=" << origin.point.x << " +Y_0=" << origin.point.y << " +Z_0=" << origin.point.z << " +step +inv +proj=cart +ellps=WGS84 +step +proj=unitconvert +xy_in=rad +xy_out=deg +step +proj=axisswap +order=2,1\" " << output_filename << " " << output_filename << ".geographic.tiff" << std::endl;
 
   return 0;
 }

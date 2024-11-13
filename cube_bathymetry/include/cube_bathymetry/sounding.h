@@ -8,8 +8,8 @@ namespace cube
 
 struct Sounding: public MapPosition
 {
+  /// Depth is positive up above sea surface and negative is down below sea surface
   float depth;
-  //float range = 0.0;
   float vertical_error;
   float horizontal_error;
 };

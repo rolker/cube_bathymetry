@@ -48,6 +48,8 @@ inline CellIndex operator/(const MapOffset &lhs, const CellSizes &rhs)
   return CellIndex(std::floor(lhs.x/rhs.x), std::floor(lhs.y/rhs.y));
 }
 
+
+#pragma pack(push, 1)
 struct DepthAndUncertainty
 {
   float depth;
@@ -55,7 +57,7 @@ struct DepthAndUncertainty
 
   DepthAndUncertainty(float depth = std::numeric_limits<float>::quiet_NaN(), float uncertainty = std::numeric_limits<float>::quiet_NaN()): depth(depth), uncertainty(uncertainty){}
 };
-
+#pragma pack(pop)
 
 } // namespace cube
 
