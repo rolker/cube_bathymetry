@@ -11,6 +11,7 @@
   <buildtool_depend>catkin</buildtool_depend>
   <depend>grid_map_ros</depend>
   <build_depend>libgdal-dev</build_depend>
+  <depend>project11</depend>
   <depend>rosbag</depend>
   <depend>roscpp</depend>
   <depend>tf2_ros</depend>

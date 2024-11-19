@@ -71,8 +71,7 @@ public:
   ///    True if inserted OK, otherwise False
   /// This computes the variance scale factor for the new data, and then
   /// sends the data into the estimation queue, building it if required.
-  bool insert(double node_x, double node_y, double distance_squared, const Sounding &sounding, const Parameters & parameters);
-
+  bool insert(double distance, const Sounding &sounding, const Parameters & parameters);
 
   /// Insert points into the queue of estimates, and insert point into
   /// filter sequence if queue is filled

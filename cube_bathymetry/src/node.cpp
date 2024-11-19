@@ -63,7 +63,7 @@ std::shared_ptr<Hypothesis> Node::bestHypothesis(float depth, float variance)
   return ret;
 }
 
-bool Node::insert(double node_x, double node_y, double distance_squared, const Sounding &sounding, const Parameters & parameters)
+bool Node::insert(double distance, const Sounding& sounding, const Parameters& parameters)
 {
   if(std::isnan(predicted_depth_))
     return true;
@@ -71,7 +71,7 @@ bool Node::insert(double node_x, double node_y, double distance_squared, const S
   /* Euclidean distance in projected space, i.e., distance sounding is being
    * propagated from touchdown boresight to node estimation point.
    */
-  auto distance = sqrt(distance_squared);
+  // distance
 
   float target_depth;
   if(predicted_depth_ != INVALID_DATA)

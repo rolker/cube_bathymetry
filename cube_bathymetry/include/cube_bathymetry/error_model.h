@@ -14,6 +14,21 @@ struct Device
   double along_track_beamwidth = 2.0;
 };
 
+struct Platform
+{
+  double timestamp;		/* seconds (with ms accuracy) since 00:00 01/01/1970 */
+  double latitude;		/* Latitude in degrees */
+  double longitude;		/* Longitude in degrees */
+  float roll;			/* Roll in degrees, +ve is port side up */
+  float pitch;			/* Pitch in degrees, +ve is bow up */
+  float heading;		/* Heading in degrees, +ve CW from N */
+  float heave;			/* Heave in meters, +ve down */
+  float surf_sspeed;	/* Surface sound speed, m/s */
+  float mean_speed;		/* Geometric mean equivalent sound speed, m/s */
+  float vessel_speed;	/* Vessel's speed-over-ground, m/s */
+};
+
+
 struct Vessel
 {
   /* Direct offsets, usu. measured wrt transducer head */

@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.10.2)
 project(cube_bathymetry)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
-find_package(catkin REQUIRED COMPONENTS grid_map_ros
+find_package(catkin REQUIRED COMPONENTS grid_map_ros project11
   roscpp rosbag tf2_ros tf2_sensor_msgs
 )
 
@@ -22,6 +22,8 @@ include_directories(
 
 set(CUBE_LIBRARY_SOURCES
   src/error_model.cpp
+  src/geo_grid.cpp
+  src/geo_map_sheet.cpp
   src/grid.cpp
   src/hypothesis.cpp
   src/map_sheet.cpp
@@ -30,7 +32,6 @@ set(CUBE_LIBRARY_SOURCES
 )
 
 add_library(cube_bathymetry ${CUBE_LIBRARY_SOURCES})
-target_compile_options(cube_bathymetry PUBLIC -O0)
 
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
 

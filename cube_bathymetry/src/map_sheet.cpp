@@ -22,7 +22,7 @@ const CellCounts& MapSheet::cellCountsPerGrid() const
 }
 
 
-void MapSheet::addSoundings(const std::vector<Sounding> & soundings, std::chrono::steady_clock::time_point time)
+void MapSheet::addSoundings(const std::vector<MapSounding> & soundings, std::chrono::steady_clock::time_point time)
 {
   if(soundings.empty())
     return;

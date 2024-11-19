@@ -1,10 +1,10 @@
-#ifndef CUBE_BATHYMETRY_GRID_H
-#define CUBE_BATHYMETRY_GRID_H
+#ifndef CUBE_BATHYMETRY_GEO_GRID_H
+#define CUBE_BATHYMETRY_GEO_GRID_H
 
 #include "node.h"
 #include "parameters.h"
-#include "sounding.h"
-#include "bounds.h"
+#include "geo_sounding.h"
+#include "project11/gggs.h"
 
 #include <memory>
 
@@ -12,10 +12,10 @@
 namespace cube
 {
 
-class Grid
+class GeoGrid
 {
 public:
-  Grid(CellCounts counts, CellSizes sizes, MapPosition origin, const Parameters& parameters);
+  GeoGrid(gggs::GridIndex index, const Parameters& parameters);
 
 
   /* Routine:	cube_grid_insert_depths
@@ -48,28 +48,21 @@ public:
   *			caller needs to specify absolute bounds here, and we modify the
   *			node positions from the CubeGrid relative system accordingly.
   */
-  bool insert(const MapSounding &sounding);
-  bool insert(const std::vector<MapSounding> & soundings);
+  bool insert(const GeoSounding &sounding);
+  bool insert(const std::vector<GeoSounding> & soundings);
 
-  // Returns the lower left grid position
-  const MapPosition &origin() const;
+  /// Returns the lower left grid position
+  const gggs::GridIndex &index() const;
 
-  const CellCounts &cellCounts() const;
-  const CellSizes &cellSizes() const;
-  
-  MapBounds bounds() const;
-  
   std::vector<DepthAndUncertainty> values() const;
 
 private:
-  CellCounts counts_;
-  CellSizes sizes_;
-
-  MapPosition origin_;
+  gggs::GridIndex index_;
 
   const Parameters& parameters_;
 
-  std::vector<std::shared_ptr<Node> > nodes_;
+  //std::vector<std::shared_ptr<Node> > nodes_;
+  std::map<gggs::CellIndex, std::shared_ptr<Node> > nodes_;
 
 };
 

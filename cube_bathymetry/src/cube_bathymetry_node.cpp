@@ -78,7 +78,7 @@ void pingCallback(const sensor_msgs::PointCloud2::ConstPtr msg)
     sensor_msgs::PointCloud2 soundings_in_map_frame;
     tf2::doTransform(*msg, soundings_in_map_frame, transform);
 
-    std::vector<cube::Sounding> soundings;
+    std::vector<cube::MapSounding> soundings;
 
     sensor_msgs::PointCloud2ConstIterator<float> iter_original_z(*msg, "z");
 
@@ -101,12 +101,9 @@ void pingCallback(const sensor_msgs::PointCloud2::ConstPtr msg)
            ++iter_x, ++iter_y, ++iter_z,
            ++iter_vertical_uncertainty, ++iter_horizontal_uncertainty)
           {
-            cube::Sounding s;
-            s.x = *iter_x;
-            s.y = *iter_y;
-            s.depth = *iter_z;
-            s.vertical_error =  *iter_vertical_uncertainty;
-            s.horizontal_error = *iter_horizontal_uncertainty;
+            cube::MapSounding s(*iter_x, *iter_y, *iter_z);
+            s.sounding.vertical_error =  *iter_vertical_uncertainty;
+            s.sounding.horizontal_error = *iter_horizontal_uncertainty;
             soundings.push_back(s);
           }
 

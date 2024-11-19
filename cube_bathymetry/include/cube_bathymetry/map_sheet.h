@@ -17,7 +17,7 @@ public:
   /// individual cells and order is the IHO order.
   MapSheet(CellCounts counts, CellSizes sizes, std::string iho_order = "order1a");
 
-  void addSoundings(const std::vector<Sounding> & soundings, std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
+  void addSoundings(const std::vector<MapSounding> & soundings, std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
 
   /// Return the grids within the bounds, creating new ones if necessary
   std::vector<std::shared_ptr<Grid> > getOrCreateGridsIn(const MapBounds& bounds);

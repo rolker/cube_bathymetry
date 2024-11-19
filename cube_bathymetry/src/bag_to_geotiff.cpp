@@ -8,10 +8,10 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <sensor_msgs/NavSatFix.h>
 #include <cube_bathymetry/map_sheet.h>
+#include <cube_bathymetry/geo_map_sheet.h>
 #include <geometry_msgs/PointStamped.h>
 
 #include "gdal_priv.h"
-//#include <errno.h>
 
 void usage()
 { 
@@ -20,6 +20,7 @@ void usage()
   std::cout << "  -n /fix: NavSatFix topic, optionally used to assess GPS uncertainty\n";
   std::cout << "  -o output.tiff: Output file name\n";
   std::cout << "  -t /soundings: Topic containing soundings as sensor_msgs/PointCloud2 messages\n";
+  std::cout << "  -l 0: Number of pings to process before exiting (mainly for debugging)\n";
   exit(-1);
 }
 
@@ -35,6 +36,7 @@ int main(int argc, char *argv[])
   std::string map_frame = "map";
   std::string output_filename;
   std::string nav_topic;
+  double resolution = 0.1;
 
   int ping_count_limit = 0;
 
@@ -59,6 +61,11 @@ int main(int argc, char *argv[])
       arg++;
       output_filename = *arg;
     }
+    else if (*arg == "-r")
+    {
+      arg++;
+      resolution = std::stod(*arg);
+    }
     else if (*arg == "-t")
     {
       arg++;
@@ -74,6 +81,8 @@ int main(int argc, char *argv[])
       bagfile_names.push_back(*arg);
     }
   }
+
+  std::cout << "Bathymetry topic: " << bathymetry_topic << std::endl;
 
   rosbag::View view(true);
 
@@ -94,7 +103,10 @@ int main(int argc, char *argv[])
   
   sensor_msgs::NavSatFix last_nav;
 
-  cube::MapSheet map_sheet(cube::CellCounts(100), cube::CellSizes(0.1));
+  cube::MapSheet map_sheet(cube::CellCounts(100), cube::CellSizes(resolution));
+  cube::GeoMapSheet geo_map_sheet(resolution);
+  if(map_frame == "earth")
+    std::cout << "requested resolution: " << resolution << " nominal used: "  << geo_map_sheet.nominalCellSizeMeters() << std::endl;
 
   std::list<std::pair<sensor_msgs::PointCloud2::ConstPtr, sensor_msgs::NavSatFix> > soundings_buffer;
 
@@ -103,6 +115,7 @@ int main(int argc, char *argv[])
   geometry_msgs::TransformStamped map_to_earth;
 
   int ping_count = 0;
+  int ping_since_cout = 0;
 
   for(const auto m: view)
   {
@@ -120,45 +133,72 @@ int main(int argc, char *argv[])
       }
       if(m.getTopic() == "/tf")
       {
-        tf2_msgs::TFMessage::ConstPtr msg = m.instantiate<tf2_msgs::TFMessage>();
-        for(const auto &t :msg->transforms)
+        try
         {
-          tfBuffer.setTransform(t, m.getCallerId(), false);
-          if(t.header.frame_id == "earth")
+          tf2_msgs::TFMessage::ConstPtr msg = m.instantiate<tf2_msgs::TFMessage>();
+          for(const auto &t :msg->transforms)
           {
-            if(t.transform.translation.x != map_to_earth.transform.translation.x || t.transform.translation.y != map_to_earth.transform.translation.y || t.transform.translation.z != map_to_earth.transform.translation.z)
+            tfBuffer.setTransform(t, m.getCallerId(), false);
+            if(t.header.frame_id == "earth")
             {
-              std::cout << "\nnew map to earth transform:\n" << t << std::endl;
-              map_to_earth = t;
+              if(t.transform.translation.x != map_to_earth.transform.translation.x || t.transform.translation.y != map_to_earth.transform.translation.y || t.transform.translation.z != map_to_earth.transform.translation.z)
+              {
+                std::cout << "\nnew map to earth transform:\n" << t << std::endl;
+                map_to_earth = t;
+              }
             }
           }
+          if(!msg->transforms.empty())
+          {
+            double progress = (msg->transforms.front().header.stamp - begin_time).toSec()/total_duration.toSec();
+            std::cout << "\r" << int(100*progress) << "%";
+            std::cout.flush();
+          }
+          check_buffer = true;
         }
-        if(!msg->transforms.empty())
+        catch(const std::exception& e)
         {
-          double progress = (msg->transforms.front().header.stamp - begin_time).toSec()/total_duration.toSec();
-          std::cout << "\r" << int(100*progress) << "%";
-          std::cout.flush();
+          std::cerr << e.what() << '\n';
         }
-        check_buffer = true;
       }
     }
 
     if (!nav_topic.empty() && m.getTopic() == nav_topic && m.getDataType() == "sensor_msgs/NavSatFix")
     {
-      last_nav = *m.instantiate<sensor_msgs::NavSatFix>();
+      try
+      {
+        last_nav = *m.instantiate<sensor_msgs::NavSatFix>();
+      }
+      catch(const std::exception& e)
+      {
+        std::cerr << e.what() << '\n';
+      }
     }
 
     if (m.getDataType() == "sensor_msgs/PointCloud2")
     {
       if(bathymetry_topic == "" || m.getTopic() == bathymetry_topic)
       {
-        sensor_msgs::PointCloud2::ConstPtr msg = m.instantiate<sensor_msgs::PointCloud2>();
-        soundings_buffer.push_back(std::make_pair(msg, last_nav));
+        try
+        {
+          sensor_msgs::PointCloud2::ConstPtr msg = m.instantiate<sensor_msgs::PointCloud2>();
+          soundings_buffer.push_back(std::make_pair(msg, last_nav));
 
-        double progress = (msg->header.stamp - begin_time).toSec()/total_duration.toSec();
-        std::cout << "\r" << int(100*progress) << "%\t" << soundings_buffer.size() << " soundings in buffer   ";
-        std::cout.flush();
-        check_buffer = true;
+          double progress = (msg->header.stamp - begin_time).toSec()/total_duration.toSec();
+          ping_since_cout++;
+          if(ping_since_cout >= 100)
+          {
+            std::cout << "\r" << int(100*progress) << "%  ";
+            std::cout.flush();
+            ping_since_cout = 0;
+          }
+          check_buffer = true;
+        }
+        catch(const std::exception& e)
+        {
+          std::cerr << e.what() << '\n';
+        }
+        
       }
     }
 
@@ -172,31 +212,58 @@ int main(int argc, char *argv[])
         try
         {
           auto transform = tfBuffer.lookupTransform(map_frame, msg->header.frame_id, msg->header.stamp);
-          sensor_msgs::PointCloud2 soundings_in_map_frame;
-          tf2::doTransform(*msg, soundings_in_map_frame, transform);
 
-          std::vector<cube::Sounding> soundings;
-
-          sensor_msgs::PointCloud2ConstIterator<float> iter_x_sensor(*msg, "x");
-          sensor_msgs::PointCloud2ConstIterator<float> iter_y_sensor(*msg, "y");
-          sensor_msgs::PointCloud2ConstIterator<float> iter_z_sensor(*msg, "z");
-
-          sensor_msgs::PointCloud2ConstIterator<float> iter_x(soundings_in_map_frame, "x");
-          sensor_msgs::PointCloud2ConstIterator<float> iter_y(soundings_in_map_frame, "y");
-          sensor_msgs::PointCloud2ConstIterator<float> iter_z(soundings_in_map_frame, "z");
-          for (; (iter_x != iter_x.end()) && (iter_y != iter_y.end()) && (iter_z != iter_z.end()) && (iter_x_sensor != iter_x_sensor.end()) && (iter_y_sensor != iter_y_sensor.end()) && (iter_z_sensor != iter_z_sensor.end()); ++iter_x, ++iter_y, ++iter_z, ++iter_x_sensor, ++iter_y_sensor, ++iter_z_sensor)
+          if(map_frame == "earth")
           {
-            cube::Sounding s;
-            s.x = *iter_x;
-            s.y = *iter_y;
-            s.depth = *iter_z;
-            s.vertical_error = last_nav.position_covariance[8]*10.0;
-            s.horizontal_error = std::max(last_nav.position_covariance[0], last_nav.position_covariance[4])*10.0;
+            std::vector<cube::GeoSounding> soundings;
+            sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
+            sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
+            sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+            for (; (iter_x != iter_x.end()) && (iter_y != iter_y.end()) && (iter_z != iter_z.end()); ++iter_x, ++iter_y, ++iter_z)
+            {
+              geometry_msgs::PointStamped sounding_re_sensor;
+              sounding_re_sensor.point.x = *iter_x;
+              sounding_re_sensor.point.y = *iter_y;
+              sounding_re_sensor.point.z = *iter_z;
+              sounding_re_sensor.header = msg->header;
 
-            soundings.push_back(s);
+              geometry_msgs::PointStamped sounding_ecef;
+              tf2::doTransform(sounding_re_sensor, sounding_ecef, transform);
+
+              gz4d::GeoPointECEF ecef(sounding_ecef.point.x, sounding_ecef.point.y, sounding_ecef.point.z);
+              gz4d::GeoPointLatLongDegrees ll(ecef);
+              cube::GeoSounding s(ll);
+              s.sounding.vertical_error = last_nav.position_covariance[8]*10.0;
+              s.sounding.horizontal_error = std::max(last_nav.position_covariance[0], last_nav.position_covariance[4])*10.0;
+
+              soundings.push_back(s);
+            }
+            geo_map_sheet.addSoundings(soundings);
           }
+          else
+          {
+            sensor_msgs::PointCloud2 soundings_in_map_frame;
+            tf2::doTransform(*msg, soundings_in_map_frame, transform);
+            std::vector<cube::MapSounding> soundings;
 
-          map_sheet.addSoundings(soundings);
+            sensor_msgs::PointCloud2ConstIterator<float> iter_x_sensor(*msg, "x");
+            sensor_msgs::PointCloud2ConstIterator<float> iter_y_sensor(*msg, "y");
+            sensor_msgs::PointCloud2ConstIterator<float> iter_z_sensor(*msg, "z");
+
+            sensor_msgs::PointCloud2ConstIterator<float> iter_x(soundings_in_map_frame, "x");
+            sensor_msgs::PointCloud2ConstIterator<float> iter_y(soundings_in_map_frame, "y");
+            sensor_msgs::PointCloud2ConstIterator<float> iter_z(soundings_in_map_frame, "z");
+            for (; (iter_x != iter_x.end()) && (iter_y != iter_y.end()) && (iter_z != iter_z.end()) && (iter_x_sensor != iter_x_sensor.end()) && (iter_y_sensor != iter_y_sensor.end()) && (iter_z_sensor != iter_z_sensor.end()); ++iter_x, ++iter_y, ++iter_z, ++iter_x_sensor, ++iter_y_sensor, ++iter_z_sensor)
+            {
+              cube::MapSounding s(*iter_x, *iter_y, *iter_z);
+              s.sounding.vertical_error = last_nav.position_covariance[8]*10.0;
+              s.sounding.horizontal_error = std::max(last_nav.position_covariance[0], last_nav.position_covariance[4])*10.0;
+
+              soundings.push_back(s);
+            }
+
+            map_sheet.addSoundings(soundings);
+          }
           buffer_iterator = soundings_buffer.erase(buffer_iterator);
           ping_count++;
         }
@@ -204,7 +271,11 @@ int main(int argc, char *argv[])
         {
           buffer_iterator++;
         }
-
+        catch (const tf2::TransformException& e)
+        {
+          std::cerr << "Transform Exception: " << e.what() << std::endl;
+          buffer_iterator = soundings_buffer.erase(buffer_iterator);
+        }
       }
     }
     if(ping_count_limit > 0 && ping_count >= ping_count_limit)
@@ -218,76 +289,133 @@ int main(int argc, char *argv[])
 
   std::cout << "Generating output..." << std::endl;
 
-  auto total_cell_counts = map_sheet.totalCellCounts();
-
-  std::cout << "Total cells: " << total_cell_counts << std::endl;
-
-  GDALAllRegister();
-
-  auto driver = GetGDALDriverManager()->GetDriverByName("GTiff");
-  auto dataset = driver->Create(output_filename.c_str(), total_cell_counts.x, total_cell_counts.y, 2, GDT_Float32, nullptr);
-
-  auto bounds = map_sheet.gridBounds();
-  std::cout << "grid bounds: " << bounds << std::endl;
-
-  auto cellsizes = map_sheet.cellSizes();
-
-  double geo_transform[6] = {bounds.minimum.x, cellsizes.x, 0, bounds.maximum.y, 0, -cellsizes.y};
-  dataset->SetGeoTransform(geo_transform);
-
-  geometry_msgs::PointStamped p;
-  p.header.frame_id = map_frame;
-  p.header.stamp = view.getEndTime();
-
-  auto earth_transform = tfBuffer.lookupTransform("earth", map_frame, ros::Time());
-  geometry_msgs::PointStamped origin;
-  tf2::doTransform(p, origin, earth_transform);
-
-  std::cout << "origin: " << origin << std::endl;
-  
-  // Example proj string: +proj=topocentric +X_0=3771793.97 +Y_0=140253.34 +Z_0=5124304.35
-
-  std::stringstream projection;
-  projection << "+proj=topocentric +X_0=" << origin.point.x << " +Y_0=" << origin.point.y << " +Z_0=" << origin.point.z;
-
-  OGRSpatialReference spatial_reference;
-  spatial_reference.importFromProj4(projection.str().c_str());
-  spatial_reference.SetWellKnownGeogCS("WGS84");
-
-  char * wkt = nullptr;
-  spatial_reference.exportToWkt( &wkt);
-
-  std::cout << wkt;
-  
-  dataset->SetProjection(wkt);
-  CPLFree(wkt);
-
-  float nan = std::numeric_limits<float>::quiet_NaN();
-
-  dataset->GetRasterBand(1)->RasterIO(GF_Write, 0, 0, total_cell_counts.x, total_cell_counts.y, &nan, 1, 1, GDT_Float32, 0, 0);
-  dataset->GetRasterBand(2)->RasterIO(GF_Write, 0, 0, total_cell_counts.x, total_cell_counts.y, &nan, 1, 1, GDT_Float32, 0, 0);
-
-  auto grids = map_sheet.grids();
-  auto cell_counts = map_sheet.cellCountsPerGrid();
-  for(auto grid: grids)
+  if(map_frame == "earth")
   {
-    auto origin_index = cube::MapOffset(bounds.minimum, grid->origin())/grid->cellSizes();
-    auto values = grid->values();
-    // gdal organizes data with first row being top row
-    auto gdal_y_index = total_cell_counts.y - origin_index.y - cell_counts.y;
-    for(int row = 0; row < cell_counts.y; row++)
+    auto bounds = geo_map_sheet.gridBounds();
+    std::cout << "grid bounds: " << bounds << std::endl;
+
+    auto rows =  bounds.cellRowCount();
+    auto columns = bounds.cellColumnCount();
+    std::cout << "Total cells: " << rows << " rows by " << columns << " columns" << std::endl;
+
+    GDALAllRegister();
+    auto driver = GetGDALDriverManager()->GetDriverByName("GTiff");
+    auto dataset = driver->Create(output_filename.c_str(), columns, rows, 2, GDT_Float32, nullptr);
+
+    auto cellsize = geo_map_sheet.cellSizeDegrees();
+
+    double geo_transform[6] = {bounds.minimum().westLongitude(), cellsize, 0, bounds.maximum().northLatitude(), 0, -cellsize};
+    dataset->SetGeoTransform(geo_transform);
+
+    OGRSpatialReference spatial_reference;
+    spatial_reference.SetWellKnownGeogCS("WGS84");
+
+    char * wkt = nullptr;
+    spatial_reference.exportToWkt( &wkt);
+
+    std::cout << wkt << std::endl;
+    
+    dataset->SetProjection(wkt);
+    CPLFree(wkt);
+
+    float nan = std::numeric_limits<float>::quiet_NaN();
+
+    dataset->GetRasterBand(1)->RasterIO(GF_Write, 0, 0, columns, rows, &nan, 1, 1, GDT_Float32, 0, 0);
+    dataset->GetRasterBand(2)->RasterIO(GF_Write, 0, 0, columns, rows, &nan, 1, 1, GDT_Float32, 0, 0);
+
+    auto grids = geo_map_sheet.grids();
+    for(auto grid: grids)
     {
-      dataset->GetRasterBand(1)->RasterIO(GF_Write, origin_index.x, gdal_y_index+cell_counts.y-1-row, cell_counts.x, 1, &(values[row*cell_counts.x].depth), cell_counts.x, 1, GDT_Float32, 2*sizeof(float), 0);
-      dataset->GetRasterBand(2)->RasterIO(GF_Write, origin_index.x, gdal_y_index+cell_counts.y-1-row, cell_counts.x, 1, &(values[row*cell_counts.x].uncertainty), cell_counts.x, 1, GDT_Float32, 2*sizeof(float), 0);
+      auto row_offset = (grid->index().row() - bounds.minimum().row())*grid->index().cellRowCount();
+      auto column_offset = (grid->index().column() - bounds.minimum().column())*grid->index().cellColumnCount();
+      auto values = grid->values();
+      // gdal organizes data with first row being top row
+      auto gdal_y_index = rows - row_offset - grid->index().cellRowCount();
+      for(int row = 0; row < grid->index().cellRowCount(); row++)
+      {
+        dataset->GetRasterBand(1)->RasterIO(GF_Write, column_offset, gdal_y_index+grid->index().cellRowCount()-1-row, grid->index().cellColumnCount(), 1, &(values[row*grid->index().cellColumnCount()].depth), grid->index().cellColumnCount(), 1, GDT_Float32, 2*sizeof(float), 0);
+        dataset->GetRasterBand(2)->RasterIO(GF_Write, column_offset, gdal_y_index+grid->index().cellRowCount()-1-row, grid->index().cellColumnCount(), 1, &(values[row*grid->index().cellColumnCount()].uncertainty), grid->index().cellColumnCount(), 1, GDT_Float32, 2*sizeof(float), 0);
+      }
     }
+
+    GDALClose( (GDALDatasetH) dataset );
+
+    std::cout << "done!" << std::endl;
+
   }
+  else
+  {
+    auto total_cell_counts = map_sheet.totalCellCounts();
 
-  GDALClose( (GDALDatasetH) dataset );
+    std::cout << "Total cells: " << total_cell_counts << std::endl;
 
-// example reprojection command
-// gdalwarp -t_srs EPSG:4326 -ct "+proj=pipeline +step +inv +proj=topocentric +X_0=1274750 +Y_0=-4812100 +Z_0=3974030 +step +inv +proj=cart +ellps=WGS84 +step +proj=unitconvert +xy_in=rad +xy_out=deg +step +proj=axisswap +order=2,1"  2024-08-08_map.tiff 2024-08-08_map_reprojected.tiff
+    GDALAllRegister();
 
-  std::cout << "\ngdalwarp -t_srs EPSG:4326 -ct \"+proj=pipeline +step +inv +proj=topocentric +X_0=" << origin.point.x << " +Y_0=" << origin.point.y << " +Z_0=" << origin.point.z << " +step +inv +proj=cart +ellps=WGS84 +step +proj=unitconvert +xy_in=rad +xy_out=deg +step +proj=axisswap +order=2,1\" " << output_filename << " " << output_filename << ".geographic.tiff" << std::endl;
+    auto driver = GetGDALDriverManager()->GetDriverByName("GTiff");
+    auto dataset = driver->Create(output_filename.c_str(), total_cell_counts.x, total_cell_counts.y, 2, GDT_Float32, nullptr);
+
+    auto bounds = map_sheet.gridBounds();
+    std::cout << "grid bounds: " << bounds << std::endl;
+
+    auto cellsizes = map_sheet.cellSizes();
+
+    double geo_transform[6] = {bounds.minimum.x, cellsizes.x, 0, bounds.maximum.y, 0, -cellsizes.y};
+    dataset->SetGeoTransform(geo_transform);
+
+    geometry_msgs::PointStamped p;
+    p.header.frame_id = map_frame;
+    p.header.stamp = view.getEndTime();
+
+    auto earth_transform = tfBuffer.lookupTransform("earth", map_frame, ros::Time());
+    geometry_msgs::PointStamped origin;
+    tf2::doTransform(p, origin, earth_transform);
+
+    std::cout << "origin: " << origin << std::endl;
+    
+    // Example proj string: +proj=topocentric +X_0=3771793.97 +Y_0=140253.34 +Z_0=5124304.35
+
+    std::stringstream projection;
+    projection << "+proj=topocentric +X_0=" << origin.point.x << " +Y_0=" << origin.point.y << " +Z_0=" << origin.point.z;
+
+    OGRSpatialReference spatial_reference;
+    spatial_reference.importFromProj4(projection.str().c_str());
+    spatial_reference.SetWellKnownGeogCS("WGS84");
+
+    char * wkt = nullptr;
+    spatial_reference.exportToWkt( &wkt);
+
+    std::cout << wkt;
+    
+    dataset->SetProjection(wkt);
+    CPLFree(wkt);
+
+    float nan = std::numeric_limits<float>::quiet_NaN();
+
+    dataset->GetRasterBand(1)->RasterIO(GF_Write, 0, 0, total_cell_counts.x, total_cell_counts.y, &nan, 1, 1, GDT_Float32, 0, 0);
+    dataset->GetRasterBand(2)->RasterIO(GF_Write, 0, 0, total_cell_counts.x, total_cell_counts.y, &nan, 1, 1, GDT_Float32, 0, 0);
+
+    auto grids = map_sheet.grids();
+    auto cell_counts = map_sheet.cellCountsPerGrid();
+    for(auto grid: grids)
+    {
+      auto origin_index = cube::MapOffset(bounds.minimum, grid->origin())/grid->cellSizes();
+      auto values = grid->values();
+      // gdal organizes data with first row being top row
+      auto gdal_y_index = total_cell_counts.y - origin_index.y - cell_counts.y;
+      for(int row = 0; row < cell_counts.y; row++)
+      {
+        dataset->GetRasterBand(1)->RasterIO(GF_Write, origin_index.x, gdal_y_index+cell_counts.y-1-row, cell_counts.x, 1, &(values[row*cell_counts.x].depth), cell_counts.x, 1, GDT_Float32, 2*sizeof(float), 0);
+        dataset->GetRasterBand(2)->RasterIO(GF_Write, origin_index.x, gdal_y_index+cell_counts.y-1-row, cell_counts.x, 1, &(values[row*cell_counts.x].uncertainty), cell_counts.x, 1, GDT_Float32, 2*sizeof(float), 0);
+      }
+    }
+
+    GDALClose( (GDALDatasetH) dataset );
+
+  // example reprojection command
+  // gdalwarp -t_srs EPSG:4326 -ct "+proj=pipeline +step +inv +proj=topocentric +X_0=1274750 +Y_0=-4812100 +Z_0=3974030 +step +inv +proj=cart +ellps=WGS84 +step +proj=unitconvert +xy_in=rad +xy_out=deg +step +proj=axisswap +order=2,1"  2024-08-08_map.tiff 2024-08-08_map_reprojected.tiff
+
+    std::cout << "\ngdalwarp -t_srs EPSG:4326 -ct \"+proj=pipeline +step +inv +proj=topocentric +X_0=" << origin.point.x << " +Y_0=" << origin.point.y << " +Z_0=" << origin.point.z << " +step +inv +proj=cart +ellps=WGS84 +step +proj=unitconvert +xy_in=rad +xy_out=deg +step +proj=axisswap +order=2,1\" " << output_filename << " " << output_filename << ".geographic.tiff" << std::endl;
+  }
 
   return 0;
 }

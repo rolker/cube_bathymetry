@@ -10,7 +10,7 @@ Grid::Grid(CellCounts counts, CellSizes sizes, MapPosition origin, const Paramet
   nodes_.resize(counts.x*counts.y);
 }
 
-bool Grid::insert(const std::vector<Sounding> & soundings)
+bool Grid::insert(const std::vector<MapSounding> & soundings)
 {
   bool ret = false;
   for(const auto &s: soundings)
@@ -19,16 +19,16 @@ bool Grid::insert(const std::vector<Sounding> & soundings)
 }
 
 
-bool Grid::insert(const Sounding &sounding)
+bool Grid::insert(const MapSounding &sounding)
 {
-  double max_variance_allowed = parameters_.iho_fixed + parameters_.iho_percent*sounding.depth*sounding.depth/(CONF_95PC * CONF_95PC);
-  double ratio = max_variance_allowed / sounding.vertical_error;
+  double max_variance_allowed = parameters_.iho_fixed + parameters_.iho_percent*sounding.sounding.depth*sounding.sounding.depth/(CONF_95PC * CONF_95PC);
+  double ratio = max_variance_allowed / sounding.sounding.vertical_error;
 
   /* Ensure some spreading on point */
   if(ratio <= 2.0)
     ratio = 2.0;
 
-  double max_radius = CONF_99PC * std::sqrt(sounding.horizontal_error);
+  double max_radius = CONF_99PC * std::sqrt(sounding.sounding.horizontal_error);
 
   double radius = parameters_.distance_scale * pow(ratio - 1.0, parameters_.inverse_distance_exponent) - max_radius;
   if (radius < 0.0)
@@ -76,9 +76,8 @@ bool Grid::insert(const Sounding &sounding)
         {
           nodes_[index] = std::make_shared<Node>();
         }
-        nodes_[index]->insert(node_x, node_y, distance_squared, sounding, parameters_);
+        nodes_[index]->insert(sqrt(distance_squared), sounding.sounding, parameters_);
       }
-
     }
   }
   return true;
