@@ -1,26 +1,26 @@
-cmake_minimum_required(VERSION 3.10.2)
+cmake_minimum_required(VERSION 3.14.4)
 project(cube_bathymetry)
 
-set(CMAKE_CXX_STANDARD 17)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
-find_package(catkin REQUIRED COMPONENTS grid_map_ros project11
-  roscpp rosbag tf2_ros tf2_sensor_msgs
-)
+find_package(ament_cmake REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(grid_map_ros REQUIRED)
+find_package(project11 REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_sensor_msgs REQUIRED)
 
 find_package(GDAL REQUIRED)
 
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES cube_bathymetry
-)
-
-include_directories(
-  include
-  ${catkin_INCLUDE_DIRS}
-  ${GDAL_INCLUDE_DIR}
-)
-
-set(CUBE_LIBRARY_SOURCES
+add_library(cube_bathymetry
   src/error_model.cpp
   src/geo_grid.cpp
   src/geo_map_sheet.cpp
@@ -31,30 +31,60 @@ set(CUBE_LIBRARY_SOURCES
   src/parameters.cpp
 )
 
-add_library(cube_bathymetry ${CUBE_LIBRARY_SOURCES})
+target_include_directories(cube_bathymetry PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(cube_bathymetry
+  project11::project11
+)
+
+install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
+
 
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
-
+target_include_directories(cube_bathymetry_node PUBLIC
+  ${grid_map_ros_INCLUDE_DIRS}
+)
 target_link_libraries(cube_bathymetry_node
   cube_bathymetry
-  ${catkin_LIBRARIES}
+  ${geometry_msgs_TARGETS}
+  ${grid_map_ros_LIBRARIES}
+  rclcpp::rclcpp
+  ${sensor_msgs_TARGETS}
+  tf2_sensor_msgs::tf2_sensor_msgs
 )
 
-add_executable(bag_to_geotiff src/bag_to_geotiff.cpp)
-
-target_link_libraries(bag_to_geotiff
-  cube_bathymetry
-  ${catkin_LIBRARIES}
-  ${GDAL_LIBRARY}
+install(TARGETS cube_bathymetry_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
-install(TARGETS cube_bathymetry cube_bathymetry_node
-    ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-    LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-    RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-    )
 
-install(DIRECTORY include/${PROJECT_NAME}/
-DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-PATTERN ".svn" EXCLUDE
-)
+# add_executable(bag_to_geotiff src/bag_to_geotiff.cpp)
+
+# target_link_libraries(bag_to_geotiff
+#   cube_bathymetry
+#   ${GDAL_LIBRARY}
+# )
+
+# install(TARGETS bag_to_geotiff
+#   DESTINATION lib/${PROJECT_NAME}
+# )
+
+ament_export_dependencies(rclcpp)
+
+# Export old-style CMake variables
+ament_export_include_directories(include/${PROJECT_NAME})
+ament_export_libraries(cube_bathymetry)
+
+# Export modern CMake targets
+ament_export_targets(export_${PROJECT_NAME})
+
+ament_package()
