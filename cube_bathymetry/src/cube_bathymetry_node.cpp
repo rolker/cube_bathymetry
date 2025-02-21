@@ -23,7 +23,7 @@ public:
     map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(5), cube::CellSizes(5.0));
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
 
 
     grid_publisher_ = this->create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
