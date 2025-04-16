@@ -12,9 +12,11 @@
   <depend>geometry_msgs</depend>
   <depend>grid_map_ros</depend>
   <build_depend>libgdal-dev</build_depend>
+  <depend>lifecycle_msgs</depend>
   <depend>project11</depend>
   <!-- <depend>rosbag</depend> -->
   <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
