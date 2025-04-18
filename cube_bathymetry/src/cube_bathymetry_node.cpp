@@ -1,4 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "lifecycle_msgs/msg/state.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "cube_bathymetry/map_sheet.h"
@@ -12,23 +14,47 @@
 #include "grid_map_msgs/msg/grid_map.hpp"
 
 
-class CubeBathymetry : public rclcpp::Node
+class CubeBathymetry : public rclcpp_lifecycle::LifecycleNode
 {
 public:
   CubeBathymetry()
-  : Node("cube_bathymetry")
+  :rclcpp_lifecycle::LifecycleNode("cube_bathymetry")
+  {
+
+  }
+
+
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
+  on_configure(const rclcpp_lifecycle::State &state)
   {
     map_frame_ = this->declare_parameter("map_frame", "map");
 
-    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(5), cube::CellSizes(5.0));
+    declare_parameter("cell_size", 1.0);
+    double cell_size = get_parameter("cell_size").as_double();
+
+    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(5), cube::CellSizes(cell_size));
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
 
 
-    grid_publisher_ = this->create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
+    grid_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
 
-    ping_subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>("soundings", 10, std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
+    ping_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>("soundings", 10, std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
+
+    return rclcpp_lifecycle::LifecycleNode::on_configure(state);
+  }
+
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
+  on_activate(const rclcpp_lifecycle::State & state)
+  {
+    return LifecycleNode::on_activate(state);
+  }
+
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
+  on_cleanup(const rclcpp_lifecycle::State &state)
+  {
+    return LifecycleNode::on_cleanup(state);
   }
 
 private:
@@ -40,7 +66,7 @@ private:
 
   std::string map_frame_ = "map";
   rclcpp::Time last_grid_publish_time_;
-  rclcpp::Publisher<grid_map_msgs::msg::GridMap>::SharedPtr grid_publisher_;
+  rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr grid_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
 
   void publishGrid()
@@ -48,6 +74,8 @@ private:
     grid_map::GridMap map;
 
     auto bounds = map_sheet_->gridBounds();
+    if(isnan(bounds.maximum.x))
+      return;
     auto cell_counts = map_sheet_->totalCellCounts();
     auto cell_sizes = map_sheet_->cellSizes();
 
@@ -97,9 +125,12 @@ private:
 
   void pingCallback(const sensor_msgs::msg::PointCloud2::UniquePtr& msg)
   {
+    if (get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+      return;
+
     try
     {
-      auto transform = tf_buffer_->lookupTransform(map_frame_, msg->header.frame_id, msg->header.stamp, tf2::durationFromSec(1.0));
+      auto transform = tf_buffer_->lookupTransform(map_frame_, msg->header.frame_id, msg->header.stamp, tf2::durationFromSec(2.0));
       sensor_msgs::msg::PointCloud2 soundings_in_map_frame;
       tf2::doTransform(*msg, soundings_in_map_frame, transform);
 
@@ -134,7 +165,7 @@ private:
 
             map_sheet_->addSoundings(soundings, timestamp);
 
-      if(last_grid_publish_time_ == rclcpp::Time(0,0) || rclcpp::Time(msg->header.stamp) - last_grid_publish_time_ > rclcpp::Duration::from_seconds(5.0))
+      if(last_grid_publish_time_.nanoseconds() == 0 || rclcpp::Time(msg->header.stamp) - last_grid_publish_time_ > rclcpp::Duration::from_seconds(5.0))
       {
         publishGrid();
         last_grid_publish_time_ = msg->header.stamp;
@@ -154,7 +185,13 @@ private:
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<CubeBathymetry>());
+  auto cube = std::make_shared<CubeBathymetry>();
+
+  rclcpp::executors::SingleThreadedExecutor exe;
+  exe.add_node(cube->get_node_base_interface());
+  exe.spin();
+
+
   rclcpp::shutdown();
   return 0;
 }

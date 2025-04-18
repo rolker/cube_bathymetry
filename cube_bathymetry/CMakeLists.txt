@@ -11,8 +11,10 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(grid_map_ros REQUIRED)
+find_package(lifecycle_msgs)
 find_package(project11 REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rosbag2_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -66,6 +68,8 @@ target_link_libraries(cube_bathymetry_node
 install(TARGETS cube_bathymetry_node
   DESTINATION lib/${PROJECT_NAME}
 )
+
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 
 add_executable(bag_to_geotiff src/bag_to_geotiff.cpp)
