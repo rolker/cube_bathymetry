@@ -14,11 +14,12 @@ find_package(grid_map_ros REQUIRED)
 find_package(project11 REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
+find_package(rosbag2_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 
-find_package(GDAL REQUIRED)
+find_package(GDAL CONFIG REQUIRED)
 
 add_library(cube_bathymetry
   src/error_model.cpp
@@ -67,16 +68,26 @@ install(TARGETS cube_bathymetry_node
 )
 
 
-# add_executable(bag_to_geotiff src/bag_to_geotiff.cpp)
+add_executable(bag_to_geotiff src/bag_to_geotiff.cpp)
 
-# target_link_libraries(bag_to_geotiff
-#   cube_bathymetry
-#   ${GDAL_LIBRARY}
-# )
+target_include_directories(bag_to_geotiff PUBLIC
+  ${grid_map_ros_INCLUDE_DIRS}
+)
 
-# install(TARGETS bag_to_geotiff
-#   DESTINATION lib/${PROJECT_NAME}
-# )
+target_link_libraries(bag_to_geotiff
+  cube_bathymetry
+  GDAL::GDAL
+  ${geometry_msgs_TARGETS}
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  rosbag2_transport::rosbag2_transport
+  ${sensor_msgs_TARGETS}
+  tf2_ros::tf2_ros
+)
+
+install(TARGETS bag_to_geotiff
+   DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_export_dependencies(rclcpp)
 

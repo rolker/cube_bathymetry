@@ -94,7 +94,7 @@ struct Hypothesis
   /// hypothesis.  Under some conditions this doesn't make sense, and we might
   /// want to report the sample variance of the samples used to make the
   /// hypothesis. This tracks the input sample variance.
-  float input_sample_variance = 0.0;;
+  float input_sample_variance = 0.0;
 
   /// In normal operation, the algorithm does not pay any attention to the input
   /// sample variance, reporting only the post. est. var. for the chosen depth
