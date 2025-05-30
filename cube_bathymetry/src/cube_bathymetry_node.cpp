@@ -40,7 +40,7 @@ public:
 
     grid_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
 
-    ping_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>("soundings", 10, std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
+    ping_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>("soundings", rclcpp::SensorDataQoS(), std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
 
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }

@@ -12,6 +12,7 @@ find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(grid_map_ros REQUIRED)
 find_package(lifecycle_msgs)
+find_package(marine_acoustic_msgs REQUIRED)
 find_package(project11 REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -71,6 +72,20 @@ install(TARGETS cube_bathymetry_node
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
+add_executable(detections_to_pointcloud src/detections_to_pointcloud.cpp)
+
+target_link_libraries(detections_to_pointcloud
+  cube_bathymetry
+  ${geometry_msgs_TARGETS}
+  ${marine_acoustic_msgs_TARGETS}
+  rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
+  ${sensor_msgs_TARGETS}
+)
+
+install(TARGETS detections_to_pointcloud
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 add_executable(bag_to_geotiff src/bag_to_geotiff.cpp)
 

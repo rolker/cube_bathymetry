@@ -185,6 +185,7 @@ struct Ping
 
 class ErrorModel
 {
+public:
   ErrorModel(const Vessel& vessel, const Device& device);
 
   std::vector<Sounding> compute(Ping& ping, Platform& platform);
