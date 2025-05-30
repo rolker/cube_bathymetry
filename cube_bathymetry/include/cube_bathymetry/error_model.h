@@ -1,6 +1,9 @@
 #ifndef CUBE_BATHYMETRY_ERROR_MODEL_H
 #define CUBE_BATHYMETRY_ERROR_MODEL_H
 
+#include <cstdint>
+#include <vector>
+#include "cube_bathymetry/sounding.h"
 
 namespace cube
 {
@@ -61,7 +64,7 @@ struct Vessel
 
 	double draft = 0.0;					/* Draft of tx head below water line, m */
 	double	tx_latency_sdev = 0.005;		/* SDev of tx head latency, s. */
-	double	static_roll = 0.0;			/* Static head roll (mounting angle), deg. */
+	double	static_roll = 0.0;			/* Static head roll (mounting angle), deg. +ve is port side up*/
 
 
 	/* Measurement accuracies */
@@ -78,6 +81,9 @@ struct Vessel
   double	draft_sdev = 0.02;				/* SDev of water level measurements, m */
 	double	ddraft_sdev = 0.02;			/* SDev of dynamic draft measurements, m */
 	double	loading_sdev = 0.02;			/* SDev of platform loading meas., m */
+	double	sog_sdev = 0.02;				/* SDev of speed-over-ground meas., m/s */
+	double  tide_measured_sdev = 0.02;		/* SDev of tide guage readings, m */
+	double	tide_predicted_sdev = 0.02;	/* SDev of tide prediction error, m */
 
 };
 
@@ -98,7 +104,7 @@ struct StaticErrorSources
   double sound_speed_profile_variance;
 
   /// Coefficient of depth for along track beamwidth component (eqn. 3.51)
-  double along_track_beamwdith_coefficient;
+  double along_track_beamwidth_coefficient;
 
   /// Static pitch error variance
   double total_pitch_variance;
@@ -139,7 +145,7 @@ struct StaticErrorSources
 struct PerPingErrorSources
 {
   /// Dynamically component total roll error
-  double total_roll_variance;
+  //double total_roll_variance;
 
   /// Dynamic per ping heave error variance, m2
   double total_heave_variance;
@@ -154,12 +160,122 @@ struct PerPingErrorSources
   double cos_roll, sin_roll, cos_pitch, sin_pitch;
 };
 
+/// Adapts arrays of data from a ping for use with the error model
+/// Designed to work with ROS marine_acoustic_msgs::msg::SonarDetections, but adaptable
+/// to other similar data structures.
+struct Ping
+{
+  /// Frequency in Hz
+  float frequency = 0.0;
+  /// Sound speed in m/s
+  float sound_speed = 0.0;
+  /// Sonar reported -3db transmit beamwidths in radians
+  const std::vector<float>* tx_beamwidths = nullptr;
+  /// Sonar reported -3db transmit beamwidths in radians
+  const std::vector<float>* rx_beamwidths = nullptr;
+  /// Detection flags. 0 means good.
+  const std::vector<uint8_t>* detection_flags = nullptr;
+  /// travel times in seconds
+  const std::vector<float>* two_way_travel_times = nullptr;
+  /// Transmit steering angles in radians, positive is forwards
+  const std::vector<float>* tx_angles = nullptr;
+  /// Receive steering angles in radians, positive is starboard
+  const std::vector<float>* rx_angles = nullptr;
+};
+
 class ErrorModel
 {
   ErrorModel(const Vessel& vessel, const Device& device);
 
-private:
+  std::vector<Sounding> compute(Ping& ping, Platform& platform);
 
+private:
+  /// Compute induced and measured heave components.
+  /// Returns variance of total heave component of vertical error.
+  /// This implements eqn. 3.57, 3.58, and 3.59.
+  double swath_heave(Platform& platform, PerPingErrorSources& per_ping_sources);
+
+  /// Compute variance of horizontal positioning error caused by
+  /// GPS antennae not being at the transducer head
+  /// Returns approximate 95% confidence interval for error
+  /// This computes eqn. 3.90, summarising the component of horizontal
+  /// error due to misalignment of the GPS antennae and the tx head.
+  /// Note that in keeping with the report and spreadsheet, we return
+  /// twice the nominal variance in order to approximate the 95% conf.
+  /// interval assuming a Gaussian distribution.
+  double horizontal_positioning_error(Platform& platform, PerPingErrorSources& per_ping_sources);
+
+  /// Compute approximate 95% error bound due to latency errors
+  /// We assume that the coefficients for eqn 3.100 have been pre-computed
+  /// and stored in the workspace, and that the trig. functions for the
+  /// current swath orientation have been computed.
+  double horizontal_latency(Platform& platform, PerPingErrorSources& per_ping_sources);
+
+  double beam_angle(const Ping& ping, size_t i);
+
+  /// Compute vertical roll/pointing angle error
+  /// This computes Eqns. 3.43 and its parents.
+  double swath_angle_error(
+    Platform& platform,
+    PerPingErrorSources& per_ping_sources,
+    const Ping& ping, size_t i
+  );
+
+  /// Compute vertical swath error budget
+  /// Returns variance estimate of total reduced depth error
+  /// Comment: This implements eqn. 3.65, 3.63, and 3.61, and uses sub-routines
+  /// to compute the other components (heave and measured depth). Result
+  /// is the total variance associated with the reduced depth. Note that
+  /// for speed, eqn. 3.63 and 3.61 (water level reduction and dynamic
+  /// draft variance) are pre-computed and stored in the workspace.
+  double swath_vertical(
+    Platform& platform,
+    PerPingErrorSources& per_ping_sources,
+    const Ping& ping, size_t i
+  );
+
+  double range_error(double depth);
+
+  /// Compute measured depth error component
+  /// Returns variance of total measured depth component of vert. error.
+  /// This implements eqn. 3.52, and the various components which
+  /// are required for it.
+  /// Returns depth and error.
+  std::pair<double, double> swath_depth(
+    Platform& platform,
+    PerPingErrorSources& per_ping_sources,
+    const Ping& ping, size_t i
+  );
+
+  /// Compute horizontal swath error budget.
+  /// Returns variance estimate for total horizontal error budget.
+  /// This implements equations 3.100, 3.90, 3.82 and 3.69 for the
+  /// components of the error budget, combining them with 3.70.
+  double swath_horizontal(
+    Platform& platform,
+    PerPingErrorSources& per_ping_sources,
+    const Ping& ping,
+    size_t i,
+    Sounding& sounding
+  );
+
+  /// Compute component of horizontal positioning error associated with
+  /// ship attitude and offsets.
+  /// Returns approximate 95% confidence interval.
+  /// This assumes, per the spreadsheet and report, that we have to work
+  /// at the 95% confidence level due to the drms approximation. We
+  /// multiply the standard deviation estimate by 2.0 to approximate this.
+  /// We are computing eqns. 3.77-3.82. Note that the spreadsheet
+  /// does not include any component for the along-track beam angle,
+  /// unlike the report, and we ignore it here also.
+  double horizontal_positioning_error(
+    Platform& platform,
+    PerPingErrorSources& per_ping_sources,
+    const Ping& ping, size_t i,
+    Sounding& sounding
+  );
+
+  Vessel vessel_;
   StaticErrorSources static_error_sources_;
 };
 
