@@ -1,3 +1,24 @@
+// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
+
 #include "cube_bathymetry/error_model.h"
 #include <cmath>
 
@@ -5,7 +26,7 @@ namespace cube
 {
 
 ErrorModel::ErrorModel(const Vessel& vessel, const Device& device):
-  vessel_(vessel)
+  vessel_(vessel), device_(device)
 {
   static_error_sources_.vertical_reduction = 
     vessel.draft_sdev*vessel.draft_sdev +
@@ -44,7 +65,7 @@ ErrorModel::ErrorModel(const Vessel& vessel, const Device& device):
   static_error_sources_.total_gps_variance = vessel.gps_drms*vessel.gps_drms;
 }
 
-double ErrorModel::swath_heave(Platform& platform, PerPingErrorSources& per_ping_sources)
+double ErrorModel::swath_heave(const Platform& platform, const PerPingErrorSources& per_ping_sources) const
 {
   double measured_heave = vessel_.heave_var_percent * 2.0 * platform.heave *
     vessel_.heave_var_percent*2.0*platform.heave;
@@ -69,7 +90,7 @@ double ErrorModel::swath_heave(Platform& platform, PerPingErrorSources& per_ping
   return induced_heave + measured_heave;
 }
 
-double ErrorModel::horizontal_positioning_error(Platform& platform, PerPingErrorSources& per_ping_sources)
+double ErrorModel::horizontal_positioning_error(const Platform& platform, const PerPingErrorSources& per_ping_sources) const
 {
   double offset_err = per_ping_sources.cos_pitch * per_ping_sources.cos_pitch +
     per_ping_sources.cos_roll * per_ping_sources.cos_roll +
@@ -104,14 +125,18 @@ double ErrorModel::horizontal_positioning_error(Platform& platform, PerPingError
   return offset_err + heading_err + roll_err + pitch_err;
 }
 
-double ErrorModel::horizontal_latency(Platform& platform, PerPingErrorSources& per_ping_sources)
+double ErrorModel::horizontal_latency(const Platform& platform, const PerPingErrorSources& per_ping_sources) const
 {
   // full horizontal latency
   double sog_error = vessel_.gps_latency * vessel_.gps_latency * vessel_.sog_sdev * vessel_.sog_sdev * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch; // Eqn. 3.96
 
   double jitter_error = platform.vessel_speed * platform.vessel_speed *
     static_error_sources_.total_latency_variance * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch; // Eqn. 3.97
-
+  auto vessel_speed = platform.vessel_speed;
+  if(!std::isnan(platform.vessel_speed))
+  {
+    vessel_speed = platform.vessel_speed; // Avoid negative speed
+  }
   double head_error = platform.vessel_speed * platform.vessel_speed *
     vessel_.gps_latency * vessel_.gps_latency * (M_PI / 180.0) * (M_PI / 180.0) *
     vessel_.gyro_sdev * vessel_.gyro_sdev * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch; // Eqn. 3.98
@@ -123,18 +148,19 @@ double ErrorModel::horizontal_latency(Platform& platform, PerPingErrorSources& p
   return sog_error + jitter_error + head_error + pitch_error; // Eqn. 3.100
 }
 
-double ErrorModel::beam_angle(const Ping& ping, size_t i)
+double ErrorModel::beam_angle(const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i) const
 {
-  return -ping.rx_beamwidths->at(i)+(M_PI / 180.0) * vessel_.static_roll;
+
+  return -detections.rx_angles[i] + (M_PI / 180.0) * vessel_.static_roll;
 }
 
 double ErrorModel::swath_angle_error(
-  Platform& platform,
-  PerPingErrorSources& per_ping_sources,
-  const Ping& ping, size_t i
-)
+  const Platform& platform,
+  const PerPingErrorSources& per_ping_sources,
+  const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i
+) const
 {
-  double meas_angle = beam_angle(ping, i);
+  double meas_angle = beam_angle(detections, i);
 
   double offset = 0.0;
   double ang_surf_speed = 0.0;
@@ -156,7 +182,11 @@ double ErrorModel::swath_angle_error(
   double ang_svp = tan(meas_angle) * tan(meas_angle) * static_error_sources_.sound_speed_profile_variance /
     (4.0 * platform.mean_speed * platform.mean_speed); // Eqn. 3.34
   
-  double ang_meas = ping.rx_beamwidths->at(i)/12.0;
+  double ang_meas = device_.across_track_beamwidth/12.0;
+  if(i < detections.ping_info.rx_beamwidths.size())
+  {
+    ang_meas = detections.ping_info.rx_beamwidths[i]*(M_PI / 180.0) / 12.0;
+  }
   ang_meas *= ang_meas;
 
   return ang_meas + ang_svp + ang_surf_speed + static_error_sources_.base_roll_variance; // Eqn. 3.43
@@ -164,35 +194,36 @@ double ErrorModel::swath_angle_error(
 }
 
 double ErrorModel::swath_vertical(
-  Platform& platform,
-  PerPingErrorSources& per_ping_sources,
-  const Ping& ping, size_t i
-)
+  const Platform& platform,
+  const PerPingErrorSources& per_ping_sources,
+  const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i
+) const
 {
   return static_error_sources_.vertical_reduction
     + per_ping_sources.total_heave_variance
-    + swath_depth(platform, per_ping_sources, ping, i).second;
+    + swath_depth(platform, per_ping_sources, detections, i).second;
 }
 
-double ErrorModel::range_error(double depth)
+double ErrorModel::range_error(double depth) const
 {
   // todo: replace with device specific info
-  return depth*0.003;
+  auto error = depth * 0.05;
+  return error * error;
 }
 
 std::pair<double, double> ErrorModel::swath_depth(
-    Platform& platform,
-    PerPingErrorSources& per_ping_sources,
-    const Ping& ping, size_t i
-)
+    const Platform& platform,
+    const PerPingErrorSources& per_ping_sources,
+    const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i
+) const
 {
-  double meas_angle = beam_angle(ping, i);
+  double meas_angle = beam_angle(detections, i);
   double cosT = cos((platform.roll * M_PI / 180.0) + meas_angle);
   double sinT = sin((platform.roll * M_PI / 180.0) + meas_angle);
 
-  double range = (*ping.two_way_travel_times)[i] * ping.sound_speed / 2.0;
+  double range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0;
 
-  double depth = range * cosT;
+  double depth = -range * cosT;
 
   double range_err = range_error(depth)
     + (range*range*static_error_sources_.sound_speed_profile_variance)
@@ -201,7 +232,7 @@ std::pair<double, double> ErrorModel::swath_depth(
   range_err *= per_ping_sources.cos_pitch * cosT * per_ping_sources.cos_pitch * cosT; // Eqn. 3.47
 
   double total_roll_variance = swath_angle_error(
-    platform, per_ping_sources, ping, i
+    platform, per_ping_sources, detections, i
   );
 
   double angle_err = total_roll_variance * range * range *
@@ -218,27 +249,29 @@ std::pair<double, double> ErrorModel::swath_depth(
 
 
 double ErrorModel::swath_horizontal(
-  Platform& platform,
-  PerPingErrorSources& per_ping_sources,
-  const Ping& ping,
+  const Platform& platform,
+  const PerPingErrorSources& per_ping_sources,
+  const marine_acoustic_msgs::msg::SonarDetections& detections,
   size_t i,
-  Sounding& sounding
-)
+  const Sounding& sounding
+) const
 {
   return horizontal_positioning_error(
-    platform, per_ping_sources, ping, i, sounding
+    platform, per_ping_sources, detections, i, sounding
   ) + per_ping_sources.horizontal_tx_relative_variance
     + per_ping_sources.horizontal_latency_variance
     + static_error_sources_.total_gps_variance;
 }
 
 double ErrorModel::horizontal_positioning_error(
-  Platform& platform,
-  PerPingErrorSources& per_ping_sources,
-  const Ping& ping, size_t i, Sounding& sounding
-)
+  const Platform& platform,
+  const PerPingErrorSources& per_ping_sources,
+  const marine_acoustic_msgs::msg::SonarDetections& detections,
+  size_t i,
+  const Sounding& sounding
+) const
 {
-  double meas_angle = beam_angle(ping, i);
+  double meas_angle = beam_angle(detections, i);
 
   double profile_err = static_error_sources_.sound_speed_profile_variance * sounding.depth / (platform.mean_speed * cos(meas_angle));
   profile_err *= profile_err;
@@ -249,10 +282,10 @@ double ErrorModel::horizontal_positioning_error(
   double heading_err = static_error_sources_.total_gyro_variance * sounding.depth * sounding.depth *
     (per_ping_sources.sin_pitch * per_ping_sources.sin_pitch + tan(meas_angle) * tan(meas_angle)); // Eqn. 3.78
 
-  double range = (*ping.two_way_travel_times)[i] * ping.sound_speed / 2.0;
+  double range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0;
 
   double angle_err = swath_angle_error(
-    platform, per_ping_sources, ping, i
+    platform, per_ping_sources, detections, i
   ) * range * range * (1.0 - per_ping_sources.cos_pitch * per_ping_sources.cos_pitch * sin(meas_angle) * sin(meas_angle));
 
   double pitch_err = sounding.depth * sounding.depth * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch * static_error_sources_.total_pitch_variance; // Eqn. 3.80
@@ -260,7 +293,8 @@ double ErrorModel::horizontal_positioning_error(
   return range_err + heading_err + angle_err + pitch_err;
 }
 
-std::vector<Sounding> ErrorModel::compute(Ping& ping, Platform& platform)
+//std::vector<Sounding> ErrorModel::compute(marine_acoustic_msgs::msg::SonarDetections& detections, Platform& platform)
+std::vector<Sounding> ErrorModel::compute(const marine_acoustic_msgs::msg::SonarDetections& detections, const Platform& platform) const
 {
   PerPingErrorSources per_ping_sources;
   per_ping_sources.cos_pitch = cos(platform.pitch * M_PI / 180.0);
@@ -281,16 +315,16 @@ std::vector<Sounding> ErrorModel::compute(Ping& ping, Platform& platform)
 
   std::vector<Sounding> soundings;
 
-  for(size_t i = 0; i < ping.two_way_travel_times->size(); ++i)
+  for(size_t i = 0; i < detections.two_way_travel_times.size(); ++i)
   {
-    Sounding sounding(swath_depth(platform, per_ping_sources, ping, i).first);
+    Sounding sounding(detections, i, swath_depth(platform, per_ping_sources, detections, i).first);
 
     sounding.vertical_error = swath_vertical(
-      platform, per_ping_sources, ping, i);
+      platform, per_ping_sources, detections, i);
 
     
     sounding.horizontal_error = swath_horizontal(
-      platform, per_ping_sources, ping, i, sounding);
+      platform, per_ping_sources, detections, i, sounding);
 
 
     soundings.push_back(sounding);

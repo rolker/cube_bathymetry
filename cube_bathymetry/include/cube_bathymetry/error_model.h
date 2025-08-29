@@ -1,9 +1,31 @@
+// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
+
 #ifndef CUBE_BATHYMETRY_ERROR_MODEL_H
 #define CUBE_BATHYMETRY_ERROR_MODEL_H
 
 #include <cstdint>
 #include <vector>
 #include "cube_bathymetry/sounding.h"
+#include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 
 namespace cube
 {
@@ -188,39 +210,39 @@ class ErrorModel
 public:
   ErrorModel(const Vessel& vessel, const Device& device);
 
-  std::vector<Sounding> compute(Ping& ping, Platform& platform);
+  std::vector<Sounding> compute(const marine_acoustic_msgs::msg::SonarDetections& detections, const Platform& platform) const;
 
 private:
   /// Compute induced and measured heave components.
   /// Returns variance of total heave component of vertical error.
   /// This implements eqn. 3.57, 3.58, and 3.59.
-  double swath_heave(Platform& platform, PerPingErrorSources& per_ping_sources);
+  double swath_heave(const Platform& platform, const PerPingErrorSources& per_ping_sources) const;
 
   /// Compute variance of horizontal positioning error caused by
   /// GPS antennae not being at the transducer head
   /// Returns approximate 95% confidence interval for error
-  /// This computes eqn. 3.90, summarising the component of horizontal
+  /// This computes eqn. 3.90, summarizing the component of horizontal
   /// error due to misalignment of the GPS antennae and the tx head.
   /// Note that in keeping with the report and spreadsheet, we return
   /// twice the nominal variance in order to approximate the 95% conf.
   /// interval assuming a Gaussian distribution.
-  double horizontal_positioning_error(Platform& platform, PerPingErrorSources& per_ping_sources);
+  double horizontal_positioning_error(const Platform& platform, const PerPingErrorSources& per_ping_sources) const;
 
   /// Compute approximate 95% error bound due to latency errors
   /// We assume that the coefficients for eqn 3.100 have been pre-computed
   /// and stored in the workspace, and that the trig. functions for the
   /// current swath orientation have been computed.
-  double horizontal_latency(Platform& platform, PerPingErrorSources& per_ping_sources);
+  double horizontal_latency(const Platform& platform, const PerPingErrorSources& per_ping_sources) const;
 
-  double beam_angle(const Ping& ping, size_t i);
+  double beam_angle(const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i) const;
 
   /// Compute vertical roll/pointing angle error
   /// This computes Eqns. 3.43 and its parents.
   double swath_angle_error(
-    Platform& platform,
-    PerPingErrorSources& per_ping_sources,
-    const Ping& ping, size_t i
-  );
+    const Platform& platform,
+    const PerPingErrorSources& per_ping_sources,
+    const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i
+  ) const;
 
   /// Compute vertical swath error budget
   /// Returns variance estimate of total reduced depth error
@@ -230,12 +252,12 @@ private:
   /// for speed, eqn. 3.63 and 3.61 (water level reduction and dynamic
   /// draft variance) are pre-computed and stored in the workspace.
   double swath_vertical(
-    Platform& platform,
-    PerPingErrorSources& per_ping_sources,
-    const Ping& ping, size_t i
-  );
+    const Platform& platform,
+    const PerPingErrorSources& per_ping_sources,
+    const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i
+  ) const;
 
-  double range_error(double depth);
+  double range_error(double depth) const;
 
   /// Compute measured depth error component
   /// Returns variance of total measured depth component of vert. error.
@@ -243,22 +265,22 @@ private:
   /// are required for it.
   /// Returns depth and error.
   std::pair<double, double> swath_depth(
-    Platform& platform,
-    PerPingErrorSources& per_ping_sources,
-    const Ping& ping, size_t i
-  );
+    const Platform& platform,
+    const PerPingErrorSources& per_ping_sources,
+    const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i
+  ) const;
 
   /// Compute horizontal swath error budget.
   /// Returns variance estimate for total horizontal error budget.
   /// This implements equations 3.100, 3.90, 3.82 and 3.69 for the
   /// components of the error budget, combining them with 3.70.
   double swath_horizontal(
-    Platform& platform,
-    PerPingErrorSources& per_ping_sources,
-    const Ping& ping,
+    const Platform& platform,
+    const PerPingErrorSources& per_ping_sources,
+    const marine_acoustic_msgs::msg::SonarDetections& detections,
     size_t i,
-    Sounding& sounding
-  );
+    const Sounding& sounding
+  ) const;
 
   /// Compute component of horizontal positioning error associated with
   /// ship attitude and offsets.
@@ -270,14 +292,15 @@ private:
   /// does not include any component for the along-track beam angle,
   /// unlike the report, and we ignore it here also.
   double horizontal_positioning_error(
-    Platform& platform,
-    PerPingErrorSources& per_ping_sources,
-    const Ping& ping, size_t i,
-    Sounding& sounding
-  );
+    const Platform& platform,
+    const PerPingErrorSources& per_ping_sources,
+    const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i,
+    const Sounding& sounding
+  ) const;
 
   Vessel vessel_;
   StaticErrorSources static_error_sources_;
+  Device device_;
 };
 
 

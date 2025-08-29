@@ -41,6 +41,7 @@ target_include_directories(cube_bathymetry PUBLIC
 )
 
 target_link_libraries(cube_bathymetry
+  ${marine_acoustic_msgs_TARGETS}
   project11::project11
 )
 
@@ -107,6 +108,11 @@ target_link_libraries(bag_to_geotiff
 install(TARGETS bag_to_geotiff
    DESTINATION lib/${PROJECT_NAME}
 )
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+endif()
 
 ament_export_dependencies(rclcpp)
 

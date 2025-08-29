@@ -6,7 +6,7 @@
 
   <maintainer email="roland@ccom.unh.edu">Roland Arsenault</maintainer>
 
-  <license>BSD</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake_ros</buildtool_depend>
   <depend>geometry_msgs</depend>
@@ -21,7 +21,10 @@
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
-  
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
   <export>
     <build_type>ament_cmake</build_type>
   </export>
