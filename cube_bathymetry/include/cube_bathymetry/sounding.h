@@ -44,7 +44,7 @@ struct Sounding
     {
       tx_angle = detections.tx_angles[i];
     }
-    sonar_relative_position.x = range * sin(tx_angle);
+    sonar_relative_position.x = range * -sin(tx_angle);
     sonar_relative_position.y = range * sin(detections.rx_angles[i]);
     sonar_relative_position.z = range * cos(tx_angle) * cos(detections.rx_angles[i]);
   }

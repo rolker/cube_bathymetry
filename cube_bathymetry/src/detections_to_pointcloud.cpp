@@ -26,6 +26,7 @@
 #include "cube_bathymetry/error_model.h"
 #include "geometry_msgs/msg/twist_with_covariance_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
+#include "mru_transform/navigation_sensors.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -50,23 +51,7 @@ public:
       std::bind(&DetectionsToPointCloud::detectionsCallback, this, std::placeholders::_1)
     );
 
-    position_subscriber_ = create_subscription<sensor_msgs::msg::NavSatFix>(
-      "position",
-      rclcpp::SensorDataQoS(),
-      std::bind(&DetectionsToPointCloud::positionCallback, this, std::placeholders::_1)
-    );
-
-    orientation_subscriber_ = create_subscription<sensor_msgs::msg::Imu>(
-      "orientation",
-      rclcpp::SensorDataQoS(),
-      std::bind(&DetectionsToPointCloud::orientationCallback, this, std::placeholders::_1)
-    );
-
-    velocity_subscriber_ = create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(
-      "velocity",
-      rclcpp::SensorDataQoS(),
-      std::bind(&DetectionsToPointCloud::velocityCallback, this, std::placeholders::_1)
-    );
+    navigation_sensors_ = std::make_shared<mru_transform::NavigationSensors>(*this);
 
     pointcloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
       "soundings",
@@ -93,40 +78,56 @@ public:
   }
 
 private:
+  bool notTooOld(const rclcpp::Time& msg_time, const rclcpp::Time& current_time)
+  {
+    if(msg_time.nanoseconds() == 0)
+    {
+      return false;
+    }
+    return (current_time - msg_time).seconds() < 1.0;
+  }
+
   void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr& msg)
   {
     cube::Platform platform;
     platform.timestamp = rclcpp::Time(msg->header.stamp).seconds();
-    if(position_)
+
+    auto position = navigation_sensors_->latest_position();
+    if(notTooOld(position.header.stamp, msg->header.stamp))
     {
-      platform.latitude = position_->latitude;
-      platform.longitude = position_->longitude;
+      platform.latitude = position.position.latitude;
+      platform.longitude = position.position.longitude;
     }
     else
     {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000, "No recent position data, setting lat/lon to NaN");
       platform.latitude = std::nan("");
       platform.longitude = std::nan("");
     }
-    if(orientation_)
+    auto orientation = navigation_sensors_->latest_orientation();
+    if(notTooOld(orientation.header.stamp, msg->header.stamp))
     {
       double y,p,r;
-      tf2::getEulerYPR(orientation_->orientation, y,p,r);
+      tf2::getEulerYPR(orientation.orientation, y,p,r);
       platform.roll = r;
       platform.pitch = p;
       platform.heading = (M_PI/2.0)-y;
     }
     else
     {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000, "No recent orientation data, setting roll/pitch/heading to NaN");
       platform.roll = std::nan("");
       platform.pitch = std::nan("");
       platform.heading = std::nan("");
     }
-    if(velocity_)
+    auto velocity = navigation_sensors_->latest_velocity();
+    if(notTooOld(velocity.header.stamp, msg->header.stamp))
     {
-      platform.vessel_speed = velocity_->twist.twist.linear.x;
+      platform.vessel_speed = velocity.twist.linear.x;
     }
     else
     {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000, "No recent velocity data, setting speed to NaN");
       platform.vessel_speed = std::nan("");
     }
 
@@ -183,33 +184,14 @@ private:
     pointcloud_publisher_->publish(pointcloud);
   }
 
-  void positionCallback(sensor_msgs::msg::NavSatFix::SharedPtr msg)
-  {
-    position_ = msg;
-  }
-
-  void orientationCallback(sensor_msgs::msg::Imu::SharedPtr msg)
-  {
-    orientation_ = msg;
-  }
-
-  void velocityCallback(geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg)
-  {
-    velocity_ = msg;
-  }
 
   rclcpp::Subscription<marine_acoustic_msgs::msg::SonarDetections>::SharedPtr detections_subscriber_;
-  rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr velocity_subscriber_;
-  rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr position_subscriber_;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr orientation_subscriber_;
+
+  std::shared_ptr<mru_transform::NavigationSensors> navigation_sensors_;
 
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_publisher_;
 
   std::shared_ptr<cube::ErrorModel> error_model_;
-  sensor_msgs::msg::NavSatFix::SharedPtr position_;
-  sensor_msgs::msg::Imu::SharedPtr orientation_;
-  geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr velocity_;
-
 
 };
 
