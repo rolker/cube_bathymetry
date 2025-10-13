@@ -57,7 +57,7 @@ void MapSheet::addSoundings(const std::vector<MapSounding> & soundings, std::chr
 
   auto grids = getOrCreateGridsIn(bounds);
   for(auto g: grids)
-    if(g->insert(soundings));
+    if(g->insert(soundings))
       last_update_time_ = time;
 }
 
@@ -107,9 +107,11 @@ CellCounts MapSheet::totalCellCounts() const
 MapBounds MapSheet::gridBounds() const
 {
   MapBounds ret;
-  for(const auto g: grids_)
+  for(const auto& g: grids_)
     if(g.second)
+    {
       ret.expand(g.second->bounds());
+    }
   return ret;
 }
 
