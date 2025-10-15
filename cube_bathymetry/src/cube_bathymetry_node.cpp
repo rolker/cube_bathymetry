@@ -53,7 +53,10 @@ public:
     declare_parameter("cell_size", 1.0);
     double cell_size = get_parameter("cell_size").as_double();
 
-    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(5), cube::CellSizes(cell_size));
+    declare_parameter("grid_cell_count", 25);
+    int grid_cell_count = get_parameter("grid_cell_count").as_int();
+
+    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(grid_cell_count), cube::CellSizes(cell_size));
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
