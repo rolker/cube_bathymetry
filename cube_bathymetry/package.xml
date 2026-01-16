@@ -15,7 +15,7 @@
   <depend>lifecycle_msgs</depend>
   <depend>marine_acoustic_msgs</depend>
   <depend>mru_transform</depend>  <!-- For navigation_sensors -->
-  <depend>project11</depend>
+  <depend>marine_autonomy</depend>
   <depend>rclcpp</depend>
   <depend>rosbag2_transport</depend>
   <depend>rclcpp_lifecycle</depend>
