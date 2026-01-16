@@ -14,7 +14,7 @@ find_package(grid_map_ros REQUIRED)
 find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(mru_transform REQUIRED)  # For navigation_sensors
-find_package(project11 REQUIRED)
+find_package(marine_autonomy REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -43,7 +43,7 @@ target_include_directories(cube_bathymetry PUBLIC
 
 target_link_libraries(cube_bathymetry
   ${marine_acoustic_msgs_TARGETS}
-  project11::project11
+  marine_autonomy::marine_autonomy
 )
 
 install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}

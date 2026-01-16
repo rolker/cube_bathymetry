@@ -25,7 +25,7 @@
 #include "node.h"
 #include "parameters.h"
 #include "geo_sounding.h"
-#include "project11/gggs.h"
+#include "marine_autonomy/gggs.h"
 
 #include <memory>
 #include <map>
