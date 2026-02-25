@@ -172,7 +172,7 @@ bool Node::queueEstimate(float depth, float variance, const Parameters & paramet
 DepthAndUncertainty Node::extractDepthAndUncertainty(const Parameters & parameters)
 {
   if(nominated_hypothesis_)
-    return {nominated_hypothesis_->current_estimate, parameters.stddev_to_confidence_interval_scale*std::sqrt(nominated_hypothesis_->current_variance)};
+    return {nominated_hypothesis_->current_estimate, parameters.stddev_to_confidence_interval_scale*std::sqrt(nominated_hypothesis_->input_sample_variance)};
 
   auto h = chooseHypothesis();
 
@@ -181,8 +181,8 @@ DepthAndUncertainty Node::extractDepthAndUncertainty(const Parameters & paramete
     if(h->number_of_samples > 0)
     {
       float depth = h->current_estimate;
-      float variance = parameters.stddev_to_confidence_interval_scale*std::sqrt(h->current_variance);
-      return {depth, variance};
+      float uncertainty = parameters.stddev_to_confidence_interval_scale*std::sqrt(h->input_sample_variance);
+      return {depth, uncertainty};
     }
   }
   
@@ -240,12 +240,28 @@ void Node::queueFlush(const Parameters & parameters)
 
   truncate(parameters);
 
-  while(!queue_.empty())
-  {
-    auto mi = queue_.begin();
-    advance(mi, queue_.size()/2);
-    update(mi->depth, mi->uncertainty, parameters);
-    queue_.erase(mi);
+  // Copy to vector for indexed access (original uses array indices)
+  std::vector<DepthAndUncertainty> q(queue_.begin(), queue_.end());
+  queue_.clear();
+
+  int n = q.size();
+  int ex_pt, direction, scale = 1;
+
+  if ((n % 2) == 0) {
+    // Even: start just left of center, go right first
+    ex_pt = n / 2 - 1;
+    direction = +1;
+  } else {
+    // Odd: start at center, go left first
+    ex_pt = n / 2;
+    direction = -1;
+  }
+
+  while (ex_pt >= 0) {
+    update(q[ex_pt].depth, q[ex_pt].uncertainty, parameters);
+    ex_pt += direction * scale;
+    direction = -direction;
+    scale++;
   }
 
 }
