@@ -114,6 +114,23 @@ install(TARGETS bag_to_geotiff
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_hypothesis test/test_hypothesis.cpp)
+  target_link_libraries(test_hypothesis cube_bathymetry)
+
+  ament_add_gtest(test_node test/test_node.cpp)
+  target_link_libraries(test_node cube_bathymetry)
+
+  ament_add_gtest(test_parameters test/test_parameters.cpp)
+  target_link_libraries(test_parameters cube_bathymetry)
+
+  ament_add_gtest(test_grid test/test_grid.cpp)
+  target_link_libraries(test_grid cube_bathymetry)
+
+  ament_add_gtest(test_map_sheet test/test_map_sheet.cpp)
+  target_link_libraries(test_map_sheet cube_bathymetry)
 endif()
 
 ament_export_dependencies(rclcpp)
