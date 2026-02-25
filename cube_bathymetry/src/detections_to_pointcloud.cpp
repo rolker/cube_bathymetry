@@ -50,12 +50,14 @@ public:
       declare_parameter("minimum_range", minimum_range_);
     }
     minimum_range_ = get_parameter("minimum_range").as_double();
+    minimum_range_sq_ = minimum_range_ * minimum_range_;
 
     if(!has_parameter("maximum_range"))
     {
       declare_parameter("maximum_range", maximum_range_);
     }
     maximum_range_ = get_parameter("maximum_range").as_double();
+    maximum_range_sq_ = maximum_range_ * maximum_range_;
 
     detections_subscriber_ = create_subscription<marine_acoustic_msgs::msg::SonarDetections>(
       "detections",
@@ -152,15 +154,20 @@ private:
     filtered_soundings.reserve(soundings.size());
     for(const auto& sounding : soundings)
     {
-      double range = sqrt(
+      double range_sq =
         sounding.sonar_relative_position.x * sounding.sonar_relative_position.x +
         sounding.sonar_relative_position.y * sounding.sonar_relative_position.y +
-        sounding.sonar_relative_position.z * sounding.sonar_relative_position.z
-      );
-      if(range >= minimum_range_ && range <= maximum_range_)
+        sounding.sonar_relative_position.z * sounding.sonar_relative_position.z;
+      if(range_sq >= minimum_range_sq_ && range_sq <= maximum_range_sq_)
       {
         filtered_soundings.push_back(sounding);
       }
+    }
+    auto filtered_count = soundings.size() - filtered_soundings.size();
+    if(filtered_count > 0)
+    {
+      RCLCPP_DEBUG_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        filtered_count << " of " << soundings.size() << " soundings filtered by range");
     }
     soundings = std::move(filtered_soundings);
 
@@ -222,7 +229,9 @@ private:
   std::shared_ptr<cube::ErrorModel> error_model_;
 
   double minimum_range_ = 0.0; // meters
+  double minimum_range_sq_ = 0.0;
   double maximum_range_ = 12000.0; // meters
+  double maximum_range_sq_ = 12000.0 * 12000.0;
 
 };
 
