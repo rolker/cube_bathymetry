@@ -204,6 +204,9 @@ std::shared_ptr<Hypothesis> Node::chooseHypothesis()
 
 void Node::truncate(const Parameters & parameters)
 {
+  if(queue_.size() < 3)
+    return;
+
   float mean = 0.0;
   float ssd = 0.0;
   auto n = queue_.size()-1;

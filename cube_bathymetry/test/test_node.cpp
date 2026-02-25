@@ -74,11 +74,13 @@ TEST_F(NodeTest, UpdateWithOutlierCreatesNewHypothesis)
   // Very different depth with tight variance triggers intervention
   n.update(50.0f, 0.01f, params);
 
-  // Should now have two hypotheses
+  // Should now have two hypotheses; chosen one should not be
+  // near the midpoint, confirming they are separate hypotheses
   auto chosen = n.chooseHypothesis();
   ASSERT_NE(chosen, nullptr);
-  // The chosen one has the most samples (1 each), so either could be chosen
-  // but we should have at least one hypothesis
+  EXPECT_TRUE(
+    std::abs(chosen->current_estimate - 10.0) < 1.0 ||
+    std::abs(chosen->current_estimate - 50.0) < 1.0);
 }
 
 TEST_F(NodeTest, ChooseHypothesisPicksMostSamples)
@@ -141,11 +143,14 @@ TEST_F(NodeTest, ExtractDepthAndUncertaintyNoData)
 TEST_F(NodeTest, ExtractDepthAndUncertaintyWithData)
 {
   Node n;
+  // Need multiple updates with varying depths so input_sample_variance > 0
   n.update(10.0f, 1.0f, params);
+  n.update(10.5f, 1.0f, params);
+  n.update(9.5f, 1.0f, params);
 
   auto result = n.extractDepthAndUncertainty(params);
   EXPECT_FALSE(std::isnan(result.depth));
-  EXPECT_NEAR(result.depth, 10.0, 0.1);
+  EXPECT_NEAR(result.depth, 10.0, 0.5);
   EXPECT_FALSE(std::isnan(result.uncertainty));
   EXPECT_GT(result.uncertainty, 0.0);
 }

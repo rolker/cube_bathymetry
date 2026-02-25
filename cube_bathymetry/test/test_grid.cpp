@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 #include "cube_bathymetry/grid.h"
 #include <cmath>
+#include <vector>
 
 namespace cube
 {
