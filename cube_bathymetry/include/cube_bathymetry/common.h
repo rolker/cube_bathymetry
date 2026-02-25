@@ -31,7 +31,7 @@ namespace cube
 {
 
 static constexpr double CONF_95PC = 1.96; /* Scale for 95% CI on Unit Normal */
-static constexpr double CONF_99PC = 2.95; /* Scale for 99% CI on Unit Normal */
+static constexpr double CONF_99PC = 2.576; /* Scale for 99% CI on Unit Normal */
 
 static constexpr float INVALID_DATA = std::numeric_limits<float>::max();
 
