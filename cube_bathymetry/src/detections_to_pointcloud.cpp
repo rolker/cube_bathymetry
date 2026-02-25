@@ -45,6 +45,18 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_configure(const rclcpp_lifecycle::State &state)
   {
+    if(!has_parameter("minimum_range"))
+    {
+      declare_parameter("minimum_range", minimum_range_);
+    }
+    minimum_range_ = get_parameter("minimum_range").as_double();
+
+    if(!has_parameter("maximum_range"))
+    {
+      declare_parameter("maximum_range", maximum_range_);
+    }
+    maximum_range_ = get_parameter("maximum_range").as_double();
+
     detections_subscriber_ = create_subscription<marine_acoustic_msgs::msg::SonarDetections>(
       "detections",
       rclcpp::SensorDataQoS(),
@@ -136,6 +148,22 @@ private:
 
     auto soundings =error_model_->compute(*msg, platform);
 
+    std::vector<cube::Sounding> filtered_soundings;
+    filtered_soundings.reserve(soundings.size());
+    for(const auto& sounding : soundings)
+    {
+      double range = sqrt(
+        sounding.sonar_relative_position.x * sounding.sonar_relative_position.x +
+        sounding.sonar_relative_position.y * sounding.sonar_relative_position.y +
+        sounding.sonar_relative_position.z * sounding.sonar_relative_position.z
+      );
+      if(range >= minimum_range_ && range <= maximum_range_)
+      {
+        filtered_soundings.push_back(sounding);
+      }
+    }
+    soundings = std::move(filtered_soundings);
+
     sensor_msgs::msg::PointCloud2 pointcloud;
     pointcloud.header = msg->header;
 
@@ -192,6 +220,9 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_publisher_;
 
   std::shared_ptr<cube::ErrorModel> error_model_;
+
+  double minimum_range_ = 0.0; // meters
+  double maximum_range_ = 12000.0; // meters
 
 };
 
