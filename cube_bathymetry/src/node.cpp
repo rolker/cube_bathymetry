@@ -115,7 +115,7 @@ bool Node::insert(double distance, const Sounding& sounding, const Parameters& p
   distance += CONF_95PC * std::sqrt(sounding.horizontal_error);
 
   float offset = 0.0;
-  double variance = sounding.vertical_error*(1.0 + parameters.stddev_to_confidence_interval_scale*pow(distance, parameters.distance_exponent));
+  double variance = sounding.vertical_error*(1.0 + parameters.variance_scale*pow(distance, parameters.distance_exponent));
 
 
   // if (sounding.range != 0.0 && predicted_depth_  != parameters.no_data_value)
@@ -216,7 +216,7 @@ void Node::truncate(const Parameters & parameters)
   }
   ssd -= mean*mean/(n+1);
   mean /= (n+1);
-  float ssd_k = n*ssd/(n*n+1);
+  float ssd_k = n*ssd/(n*n-1);
 
   /* Run the list computing quotients; outliers are removed from the queue.
    */
