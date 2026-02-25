@@ -229,9 +229,9 @@ private:
   std::shared_ptr<cube::ErrorModel> error_model_;
 
   double minimum_range_ = 0.0; // meters
-  double minimum_range_sq_ = 0.0;
+  double minimum_range_sq_ = minimum_range_ * minimum_range_;
   double maximum_range_ = 12000.0; // meters
-  double maximum_range_sq_ = 12000.0 * 12000.0;
+  double maximum_range_sq_ = maximum_range_ * maximum_range_;
 
 };
 
