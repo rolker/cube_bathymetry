@@ -52,7 +52,7 @@ void GeoMapSheet::addSoundings(const std::vector<GeoSounding> & soundings, std::
 
   auto grids = getOrCreateGridsIn(bounds);
   for(auto g: grids)
-    if(g->insert(soundings));
+    if(g->insert(soundings))
       last_update_time_ = time;
 }
 

@@ -131,6 +131,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_map_sheet test/test_map_sheet.cpp)
   target_link_libraries(test_map_sheet cube_bathymetry)
+
+  ament_add_gtest(test_geo_map_sheet test/test_geo_map_sheet.cpp)
+  target_link_libraries(test_geo_map_sheet cube_bathymetry)
 endif()
 
 ament_export_dependencies(rclcpp)
