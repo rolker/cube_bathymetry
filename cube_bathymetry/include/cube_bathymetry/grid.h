@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,24 +20,24 @@
 // THE SOFTWARE.
 
 
-#ifndef CUBE_BATHYMETRY_GRID_H
-#define CUBE_BATHYMETRY_GRID_H
-
-#include "node.h"
-#include "parameters.h"
-#include "sounding.h"
-#include "bounds.h"
+#ifndef CUBE_BATHYMETRY__GRID_H_
+#define CUBE_BATHYMETRY__GRID_H_
 
 #include <memory>
+#include <vector>
+#include "cube_bathymetry/node.h"
+#include "cube_bathymetry/parameters.h"
+#include "cube_bathymetry/sounding.h"
+#include "cube_bathymetry/bounds.h"
 
 
 namespace cube
 {
 
-class Grid
-{
+  class Grid
+  {
 public:
-  Grid(CellCounts counts, CellSizes sizes, MapPosition origin, const Parameters& parameters);
+    Grid(CellCounts counts, CellSizes sizes, MapPosition origin, const Parameters & parameters);
 
 
   /* Routine:	cube_grid_insert_depths
@@ -69,31 +70,30 @@ public:
   *			caller needs to specify absolute bounds here, and we modify the
   *			node positions from the CubeGrid relative system accordingly.
   */
-  bool insert(const MapSounding &sounding);
-  bool insert(const std::vector<MapSounding> & soundings);
+    bool insert(const MapSounding & sounding);
+    bool insert(const std::vector < MapSounding > &soundings);
 
   // Returns the lower left grid position
-  const MapPosition &origin() const;
+    const MapPosition & origin() const;
 
-  const CellCounts &cellCounts() const;
-  const CellSizes &cellSizes() const;
-  
-  MapBounds bounds() const;
-  
-  std::vector<DepthAndUncertainty> values() const;
+    const CellCounts & cellCounts() const;
+    const CellSizes & cellSizes() const;
+
+    MapBounds bounds() const;
+
+    std::vector < DepthAndUncertainty > values() const;
 
 private:
-  CellCounts counts_;
-  CellSizes sizes_;
+    CellCounts counts_;
+    CellSizes sizes_;
 
-  MapPosition origin_;
+    MapPosition origin_;
 
-  const Parameters& parameters_;
+    const Parameters & parameters_;
 
-  std::vector<std::shared_ptr<Node> > nodes_;
+    std::vector < std::shared_ptr < Node >> nodes_;
+  };
 
-};
+}  // namespace cube
 
-} // namespace cube
-
-#endif
+#endif  // CUBE_BATHYMETRY__GRID_H_

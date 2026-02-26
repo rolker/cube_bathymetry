@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,12 +20,12 @@
 // THE SOFTWARE.
 
 
-#ifndef CUBE_BATHYMETRY_HYPOTHESIS_H
-#define CUBE_BATHYMETRY_HYPOTHESIS_H
+#ifndef CUBE_BATHYMETRY__HYPOTHESIS_H_
+#define CUBE_BATHYMETRY__HYPOTHESIS_H_
 
 #include <cstdint>
 #include <memory>
-#include "parameters.h"
+#include "cube_bathymetry/parameters.h"
 
 namespace cube
 {
@@ -35,14 +36,14 @@ namespace cube
 /// of elements incorporated in the node is also recorded so that a pseudo-MAP
 /// estimate of best model (or at least most frequently visited model) can be
 /// computed.
-struct Hypothesis
-{
-  Hypothesis(float initial_mean, float initial_variance);
+  struct Hypothesis
+  {
+    Hypothesis(float initial_mean, float initial_variance);
 
-  static std::shared_ptr<Hypothesis> generateNullHypothesis(float depth, float variance);
+    static std::shared_ptr < Hypothesis > generateNullHypothesis(float depth, float variance);
 
   /// Reset monitoring structure to defaults
-  void resetMonitor();
+    void resetMonitor();
 
   /// Compute West & Harrison's monitoring statistics for the node
   /// This code depends on the parameters:
@@ -63,7 +64,7 @@ struct Hypothesis
   ///   variance: Observation noise variance
   /// Outputs:
   ///    true if an intervention is indicated, otherwise false
-  bool monitor(float depth, float variance, const Parameters& parameters);
+    bool monitor(float depth, float variance, const Parameters & parameters);
 
   /// Update a particular hypothesis being tracked at a node
   /// This implements the standard univariate dynamic linear model update
@@ -80,42 +81,42 @@ struct Hypothesis
   ///   hypothesis: Hypothesis to be updated
   ///   depth: Estimate of beam depth
   ///   variance: Estimate of beam depth variance
-  ///   *p			Parameter structure for algorithm
+  ///   *p      Parameter structure for algorithm
   /// Outputs:
   ///   Returns False if the estimate does not really match the track that
   ///   the hypothesis represents (i.e., an intervention is required).
-  bool update(float depth, float variance, const Parameters& parameters);
+    bool update(float depth, float variance, const Parameters & parameters);
 
   /// Current depth mean estimate
-  double current_estimate;
+    double current_estimate;
 
   /// Current depth variance estimate
-  double current_variance;
+    double current_variance;
 
   /// Current depth next-state mean prediction
-  double predicted_estimate;
+    double predicted_estimate;
 
   /// Current depth next-state variance pred.
-  double predicted_variance;
+    double predicted_variance;
 
   /// Cumulative Bayes factor for node monitoring
-  double cumulative_bayes_factor = 1.0;
+    double cumulative_bayes_factor = 1.0;
 
   /// Worst-case sequence length for monitoring
-  uint16_t sequence_length = 0;
+    uint16_t sequence_length = 0;
 
   /// Index term for debugging
-  uint16_t hypothesis_number = 0;
+    uint16_t hypothesis_number = 0;
 
   /// Number of samples incorporated into this node
-  uint32_t number_of_samples = 0;
+    uint32_t number_of_samples = 0;
 
   /// In normal operation, the algorithm does not pay any attention to the input
   /// sample variance, reporting only the post. est. var. for the chosen depth
   /// hypothesis.  Under some conditions this doesn't make sense, and we might
   /// want to report the sample variance of the samples used to make the
   /// hypothesis. This tracks the input sample variance.
-  float input_sample_variance = 0.0;
+    float input_sample_variance = 0.0;
 
   /// In normal operation, the algorithm does not pay any attention to the input
   /// sample variance, reporting only the post. est. var. for the chosen depth
@@ -123,9 +124,9 @@ struct Hypothesis
   /// want to report the maximum of
   /// the input sample variance and the predicted post. est. var.
   /// This tracks the maximum of the two estimates.
-  float maximum_of_input_and_predicted_variance = 0.0;
-};
+    float maximum_of_input_and_predicted_variance = 0.0;
+  };
 
-} // namespace cube
+}  // namespace cube
 
-#endif
+#endif  // CUBE_BATHYMETRY__HYPOTHESIS_H_

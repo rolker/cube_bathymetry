@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,12 +20,15 @@
 // THE SOFTWARE.
 
 
-#ifndef CUBE_BATHYMETRY_GEO_MAP_SHEET_H
-#define CUBE_BATHYMETRY_GEO_MAP_SHEET_H
+#ifndef CUBE_BATHYMETRY__GEO_MAP_SHEET_H_
+#define CUBE_BATHYMETRY__GEO_MAP_SHEET_H_
 
-#include "geo_grid.h"
-#include <map>
 #include <chrono>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+#include "cube_bathymetry/geo_grid.h"
 
 #include "marine_autonomy/gggs.h"
 
@@ -32,45 +36,48 @@ namespace cube
 {
 
 /// Uses GlobalGGS grid heirarchy to organize Grids.
-class GeoMapSheet
-{
+  class GeoMapSheet
+  {
 public:
   /// Constructor where cell_size is approximate resolution requested.
-  GeoMapSheet(float cell_size, std::string iho_order = "order1a");
+    explicit GeoMapSheet(float cell_size, std::string iho_order = "order1a");
 
-  void addSoundings(const std::vector<GeoSounding> & soundings, std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
+    void addSoundings(
+      const std::vector < GeoSounding > &soundings,
+      std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
 
   /// Return the grids within the bounds, creating new ones if necessary
-  std::vector<std::shared_ptr<GeoGrid> > getOrCreateGridsIn(const gz4d::BoundsDegrees& bounds);
+    std::vector < std::shared_ptr <
+    GeoGrid >> getOrCreateGridsIn(const gz4d::BoundsDegrees & bounds);
 
   /// Return all existing grids
-  std::vector<std::shared_ptr<GeoGrid> > grids() const;
+    std::vector < std::shared_ptr < GeoGrid >> grids() const;
 
   /// Return gggs::GridIndex bounds of rectangle containing all the grids
-  gggs::GridBounds gridBounds() const;
+    gggs::GridBounds gridBounds() const;
 
   /// Cell size in degrees
-  double cellSizeDegrees() const;
+    double cellSizeDegrees() const;
 
-  double nominalCellSizeMeters() const;
+    double nominalCellSizeMeters() const;
 
-  std::chrono::steady_clock::time_point lastUpdateTime() const;
+    std::chrono::steady_clock::time_point lastUpdateTime() const;
 
 private:
   /// Grid cell counts
-  //CellCounts counts_;
+  // CellCounts counts_;
   /// Cell sizes (meters)
-  //CellSizes sizes_;
+  // CellSizes sizes_;
 
-  Parameters parameters_;
+    Parameters parameters_;
 
-  gggs::Level grid_level_;
+    gggs::Level grid_level_;
 
-  std::map<gggs::GridIndex, std::shared_ptr<GeoGrid> > grids_;
+    std::map < gggs::GridIndex, std::shared_ptr < GeoGrid >> grids_;
 
-  std::chrono::steady_clock::time_point last_update_time_;
-};
+    std::chrono::steady_clock::time_point last_update_time_;
+  };
 
-} // namespace cube
+}  // namespace cube
 
-#endif
+#endif  // CUBE_BATHYMETRY__GEO_MAP_SHEET_H_

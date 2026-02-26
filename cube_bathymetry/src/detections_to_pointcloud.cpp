@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -39,21 +40,18 @@ public:
   DetectionsToPointCloud()
   :rclcpp_lifecycle::LifecycleNode("detections_to_pointcloud")
   {
-
   }
 
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
-  on_configure(const rclcpp_lifecycle::State &state)
+  on_configure(const rclcpp_lifecycle::State & state)
   {
-    if(!has_parameter("minimum_range"))
-    {
+    if(!has_parameter("minimum_range")) {
       declare_parameter("minimum_range", minimum_range_);
     }
     minimum_range_ = get_parameter("minimum_range").as_double();
     minimum_range_sq_ = minimum_range_ * minimum_range_;
 
-    if(!has_parameter("maximum_range"))
-    {
+    if(!has_parameter("maximum_range")) {
       declare_parameter("maximum_range", maximum_range_);
     }
     maximum_range_ = get_parameter("maximum_range").as_double();
@@ -86,86 +84,76 @@ public:
   }
 
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
-  on_cleanup(const rclcpp_lifecycle::State &state)
+  on_cleanup(const rclcpp_lifecycle::State & state)
   {
     return LifecycleNode::on_cleanup(state);
   }
 
 private:
-  bool notTooOld(const rclcpp::Time& msg_time, const rclcpp::Time& current_time)
+  bool notTooOld(const rclcpp::Time & msg_time, const rclcpp::Time & current_time)
   {
-    if(msg_time.nanoseconds() == 0)
-    {
+    if(msg_time.nanoseconds() == 0) {
       return false;
     }
     return (current_time - msg_time).seconds() < 1.0;
   }
 
-  void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr& msg)
+  void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr & msg)
   {
     cube::Platform platform;
     platform.timestamp = rclcpp::Time(msg->header.stamp).seconds();
 
     auto position = navigation_sensors_->latest_position();
-    if(notTooOld(position.header.stamp, msg->header.stamp))
-    {
+    if(notTooOld(position.header.stamp, msg->header.stamp)) {
       platform.latitude = position.position.latitude;
       platform.longitude = position.position.longitude;
-    }
-    else
-    {
-      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000, "No recent position data, setting lat/lon to NaN");
+    } else {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        "No recent position data, setting lat/lon to NaN");
       platform.latitude = std::nan("");
       platform.longitude = std::nan("");
     }
     auto orientation = navigation_sensors_->latest_orientation();
-    if(notTooOld(orientation.header.stamp, msg->header.stamp))
-    {
-      double y,p,r;
-      tf2::getEulerYPR(orientation.orientation, y,p,r);
+    if(notTooOld(orientation.header.stamp, msg->header.stamp)) {
+      double y, p, r;
+      tf2::getEulerYPR(orientation.orientation, y, p, r);
       platform.roll = r;
       platform.pitch = p;
-      platform.heading = (M_PI/2.0)-y;
-    }
-    else
-    {
-      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000, "No recent orientation data, setting roll/pitch/heading to NaN");
+      platform.heading = (M_PI / 2.0) - y;
+    } else {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        "No recent orientation data, setting roll/pitch/heading to NaN");
       platform.roll = std::nan("");
       platform.pitch = std::nan("");
       platform.heading = std::nan("");
     }
     auto velocity = navigation_sensors_->latest_velocity();
-    if(notTooOld(velocity.header.stamp, msg->header.stamp))
-    {
+    if(notTooOld(velocity.header.stamp, msg->header.stamp)) {
       platform.vessel_speed = velocity.twist.linear.x;
-    }
-    else
-    {
-      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000, "No recent velocity data, setting speed to NaN");
+    } else {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        "No recent velocity data, setting speed to NaN");
       platform.vessel_speed = std::nan("");
     }
 
     platform.mean_speed = msg->ping_info.sound_speed;
     platform.surf_sspeed = msg->ping_info.sound_speed;
 
-    auto soundings =error_model_->compute(*msg, platform);
+    auto soundings = error_model_->compute(*msg, platform);
 
     std::vector<cube::Sounding> filtered_soundings;
     filtered_soundings.reserve(soundings.size());
-    for(const auto& sounding : soundings)
-    {
+    for (const auto & sounding   :  soundings) {
       double range_sq =
         sounding.sonar_relative_position.x * sounding.sonar_relative_position.x +
         sounding.sonar_relative_position.y * sounding.sonar_relative_position.y +
         sounding.sonar_relative_position.z * sounding.sonar_relative_position.z;
-      if(range_sq >= minimum_range_sq_ && range_sq <= maximum_range_sq_)
-      {
+      if(range_sq >= minimum_range_sq_ && range_sq <= maximum_range_sq_) {
         filtered_soundings.push_back(sounding);
       }
     }
     auto filtered_count = soundings.size() - filtered_soundings.size();
-    if(filtered_count > 0)
-    {
+    if(filtered_count > 0) {
       RCLCPP_DEBUG_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
         filtered_count << " of " << soundings.size() << " soundings filtered by range");
     }
@@ -176,7 +164,7 @@ private:
 
     pointcloud.height = 1;
     pointcloud.width = soundings.size();
-    pointcloud.point_step = 20; // 5 fields * 4 bytes each
+    pointcloud.point_step = 20;  // 5 fields * 4 bytes each
     pointcloud.row_step = pointcloud.point_step * pointcloud.width;
     pointcloud.is_dense = true;
     pointcloud.is_bigendian = false;
@@ -204,35 +192,35 @@ private:
     pointcloud.fields[4].count = 1;
 
     pointcloud.data.resize(pointcloud.row_step * pointcloud.height);
-    float* data_ptr = reinterpret_cast<float*>(pointcloud.data.data());
+    float * data_ptr = reinterpret_cast<float *>(pointcloud.data.data());
 
-    for(const auto& sounding : soundings)
-    {
+    for (const auto & sounding   :  soundings) {
       data_ptr[0] = sounding.sonar_relative_position.x;
       data_ptr[1] = sounding.sonar_relative_position.y;
       data_ptr[2] = sounding.sonar_relative_position.z;
       data_ptr[3] = sounding.vertical_error;
       data_ptr[4] = sounding.horizontal_error;
-      data_ptr += 5; // Move to the next point
+      data_ptr += 5;  // Move to the next point
     }
 
     pointcloud_publisher_->publish(pointcloud);
   }
 
 
-  rclcpp::Subscription<marine_acoustic_msgs::msg::SonarDetections>::SharedPtr detections_subscriber_;
+  rclcpp::Subscription<marine_acoustic_msgs::msg::SonarDetections>::SharedPtr
+    detections_subscriber_;
 
   std::shared_ptr<mru_transform::NavigationSensors> navigation_sensors_;
 
-  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_publisher_;
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+    pointcloud_publisher_;
 
   std::shared_ptr<cube::ErrorModel> error_model_;
 
-  double minimum_range_ = 0.0; // meters
+  double minimum_range_ = 0.0;  // meters
   double minimum_range_sq_ = minimum_range_ * minimum_range_;
-  double maximum_range_ = 12000.0; // meters
+  double maximum_range_ = 12000.0;  // meters
   double maximum_range_sq_ = maximum_range_ * maximum_range_;
-
 };
 
 int main(int argc, char **argv)

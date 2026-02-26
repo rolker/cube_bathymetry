@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,6 +20,8 @@
 // THE SOFTWARE.
 
 
+#include <chrono>
+
 #include "tf2_ros/buffer.h"
 #include "tf2_msgs/msg/tf_message.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -30,12 +33,10 @@
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "rosbag2_transport/reader_writer_factory.hpp"
-#include <chrono>
-
 #include "gdal_priv.h"
 
 void usage()
-{ 
+{
   std::cout << "usage: bag_to_geotiff [options and input files]\n";
   std::cout << "  -n /fix: NavSatFix topic, optionally used to assess GPS uncertainty\n";
   std::cout << "  -o output.tiff: Output file name\n";
@@ -44,26 +45,26 @@ void usage()
   exit(-1);
 }
 
-bool bag_filter(const std::string& type)
+bool bag_filter(const std::string & type)
 {
-  if(type == "tf2_msgs/msg/TFMessage")
+  if(type == "tf2_msgs/msg/TFMessage") {
     return true;
-  if(type == "sensor_msgs/msg/NavSatFix")
+  }
+  if(type == "sensor_msgs/msg/NavSatFix") {
     return true;
-  if(type == "sensor_msgs/msg/PointCloud2")
+  }
+  if(type == "sensor_msgs/msg/PointCloud2") {
     return true;
+  }
   return false;
 }
 
 
-bool ends_with(const std::string& str, const std::string& suffix)
+bool ends_with(const std::string & str, const std::string & suffix)
 {
-  if (str.length() >= suffix.length())
-  {
-    return (0 == str.compare(str.length() - suffix.length(), suffix.length(), suffix));
-  }
-  else
-  {
+  if (str.length() >= suffix.length()) {
+    return  0 == str.compare(str.length() - suffix.length(), suffix.length(), suffix);
+  } else {
     return false;
   }
 }
@@ -72,7 +73,6 @@ bool ends_with(const std::string& str, const std::string& suffix)
 class BagReaders
 {
 public:
-
   /// A bag serialized message with the data type
   struct Message
   {
@@ -81,13 +81,13 @@ public:
 
     using ConstPtr = std::shared_ptr<const Message>;
 
-    Message(rosbag2_storage::SerializedBagMessageSharedPtr message, const rosbag2_cpp::Reader& reader)
+    Message(
+      rosbag2_storage::SerializedBagMessageSharedPtr message,
+      const rosbag2_cpp::Reader & reader)
     : message(message)
     {
-      for(auto & topic_info: reader.get_all_topics_and_types())
-      {
-        if(topic_info.name == message->topic_name)
-        {
+      for (auto & topic_info  :  reader.get_all_topics_and_types()) {
+        if(topic_info.name == message->topic_name) {
           data_type = topic_info.type;
           break;
         }
@@ -96,10 +96,9 @@ public:
   };
 
 
-  BagReaders(const std::vector<std::string>& bagfile_names)
+  explicit BagReaders(const std::vector<std::string> & bagfile_names)
   {
-    for(const auto& bagfile_name: bagfile_names)
-    {
+    for (const auto & bagfile_name  :  bagfile_names) {
       readers_[bagfile_name].open(bagfile_name);
     }
   }
@@ -107,43 +106,45 @@ public:
   auto start_time()
   {
     auto start_time = readers_.begin()->second.reader->get_metadata().starting_time;
-    for (auto & reader: readers_)
-    {
-      if(reader.second.reader->get_metadata().starting_time < start_time)
+    for (auto & reader  :  readers_) {
+      if(reader.second.reader->get_metadata().starting_time < start_time) {
         start_time = reader.second.reader->get_metadata().starting_time;
+      }
     }
     return start_time;
   }
 
   auto end_time()
   {
-    auto end_time = readers_.begin()->second.reader->get_metadata().starting_time + readers_.begin()->second.reader->get_metadata().duration;
-    for (auto & reader: readers_)
-    {
-      if(reader.second.reader->get_metadata().starting_time + reader.second.reader->get_metadata().duration > end_time)
-        end_time = reader.second.reader->get_metadata().starting_time + reader.second.reader->get_metadata().duration;
+    auto end_time = readers_.begin()->second.reader->get_metadata().starting_time +
+      readers_.begin()->second.reader->get_metadata().duration;
+    for (auto & reader  :  readers_) {
+      if(reader.second.reader->get_metadata().starting_time +
+        reader.second.reader->get_metadata().duration > end_time)
+      {
+        end_time = reader.second.reader->get_metadata().starting_time +
+          reader.second.reader->get_metadata().duration;
+      }
     }
     return end_time;
   }
 
   Message::ConstPtr next()
   {
-    Bag* has_next = nullptr;
+    Bag * has_next = nullptr;
 
-    for(auto & reader: readers_)
-    {
-      if(reader.second.has_next())
-      {
-        if(!has_next || reader.second.peek_next()->message->send_timestamp< has_next->peek_next()->message->send_timestamp)
+    for (auto & reader  :  readers_) {
+      if(reader.second.has_next()) {
+        if(!has_next ||
+          reader.second.peek_next()->message->send_timestamp <
+          has_next->peek_next()->message->send_timestamp)
         {
           has_next = &reader.second;
         }
       }
-
     }
 
-    if (has_next)
-    {
+    if (has_next) {
       return has_next->pop_next();
     }
     return {};
@@ -155,21 +156,20 @@ private:
     std::unique_ptr<rosbag2_cpp::Reader> reader;
     Message::ConstPtr next_message;
 
-    void open(const std::string& file_name)
+    void open(const std::string & file_name)
     {
       rosbag2_storage::StorageOptions storage_options;
       storage_options.uri = file_name;
       reader = rosbag2_transport::ReaderWriterFactory::make_reader(storage_options);
       reader->open(storage_options);
-      if(reader->has_next())
-      {
+      if(reader->has_next()) {
         next_message = std::make_shared<Message>(reader->read_next(), *reader);
       }
     }
 
     bool has_next()
     {
-      return bool(next_message);
+      return static_cast<bool>(next_message);
     }
 
     Message::ConstPtr peek_next()
@@ -180,12 +180,9 @@ private:
     Message::ConstPtr pop_next()
     {
       auto return_value = next_message;
-      if(reader->has_next())
-      {
+      if(reader->has_next()) {
         next_message = std::make_shared<Message>(reader->read_next(), *reader);
-      }
-      else
-      {
+      } else {
         next_message.reset();
       }
       return return_value;
@@ -198,10 +195,11 @@ private:
 
 int main(int argc, char *argv[])
 {
-  std::vector<std::string> arguments(argv+1,argv+argc);
+  std::vector<std::string> arguments(argv + 1, argv + argc);
 
-  if (arguments.empty())
+  if (arguments.empty()) {
     usage();
+  }
 
   std::vector<std::string> bagfile_names;
   std::string bathymetry_topic = "/soundings";
@@ -211,39 +209,25 @@ int main(int argc, char *argv[])
 
   int ping_count_limit = 0;
 
-  for (auto arg = arguments.begin(); arg != arguments.end();arg++) 
-  {
-    if (*arg == "-h")
-    {
+  for (auto arg = arguments.begin(); arg != arguments.end(); arg++) {
+    if (*arg == "-h") {
       usage();
-    }
-    else if (*arg == "-n")
-    {
+    } else if (*arg == "-n") {
       arg++;
       nav_topic = *arg;
-    }
-    else if (*arg == "-o")
-    {
+    } else if (*arg == "-o") {
       arg++;
       output_filename = *arg;
-    }
-    else if (*arg == "-r")
-    {
+    } else if (*arg == "-r") {
       arg++;
       resolution = std::stod(*arg);
-    }
-    else if (*arg == "-t")
-    {
+    } else if (*arg == "-t") {
       arg++;
       bathymetry_topic = *arg;
-    }
-    else if (*arg == "-l")
-    {
+    } else if (*arg == "-l") {
       arg++;
       ping_count_limit = std::stoi(*arg);
-    }
-    else
-    {
+    } else {
       bagfile_names.push_back(*arg);
     }
   }
@@ -261,24 +245,30 @@ int main(int argc, char *argv[])
   auto total_duration = end_time - begin_time;
 
   auto start_time_t = std::chrono::system_clock::to_time_t(begin_time);
-  std::cout << "start time: " << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+  std::cout << "start time: " << std::put_time(std::gmtime(&start_time_t),
+    "%Y-%m-%d %H:%M:%S") << std::endl;
 
   auto end_time_t = std::chrono::system_clock::to_time_t(end_time);
-  std::cout << "end time: " << std::put_time(std::gmtime(&end_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+  std::cout << "end time: " << std::put_time(std::gmtime(&end_time_t),
+    "%Y-%m-%d %H:%M:%S") << std::endl;
 
 
-  std::cout << "total time: " << std::chrono::duration_cast<std::chrono::seconds>(total_duration).count() << " seconds" << std::endl;
+  std::cout << "total time: " <<
+    std::chrono::duration_cast<std::chrono::seconds>(total_duration).count() << " seconds" <<
+    std::endl;
 
   auto clock = std::make_shared<rclcpp::Clock>();
 
   tf2_ros::Buffer tfBuffer(clock, total_duration);
-  
+
   sensor_msgs::msg::NavSatFix last_nav;
 
   cube::GeoMapSheet geo_map_sheet(resolution);
-  std::cout << "requested resolution: " << resolution << " nominal used: "  << geo_map_sheet.nominalCellSizeMeters() << std::endl;
+  std::cout << "requested resolution: " << resolution << " nominal used: " <<
+    geo_map_sheet.nominalCellSizeMeters() << std::endl;
 
-  std::list<std::pair<sensor_msgs::msg::PointCloud2::SharedPtr, sensor_msgs::msg::NavSatFix> > soundings_buffer;
+  std::list<std::pair<sensor_msgs::msg::PointCloud2::SharedPtr,
+    sensor_msgs::msg::NavSatFix>> soundings_buffer;
 
   std::cout << "reading messages..." << std::endl;
 
@@ -287,121 +277,113 @@ int main(int argc, char *argv[])
   int ping_count = 0;
   uint64_t msg_count = 0;
   auto last_report_time = std::chrono::system_clock::now();
-  std::chrono::seconds	report_interval(1);
+  std::chrono::seconds  report_interval(1);
 
-  for(auto message = bag_readers.next(); message; message = bag_readers.next())
-  {
-
-    if(!bag_filter(message->data_type))
-    {
+  for(auto message = bag_readers.next(); message; message = bag_readers.next()) {
+    if(!bag_filter(message->data_type)) {
       continue;
     }
 
 
-    bool check_buffer = false; // did we get a sounding or updated tf message?
+    bool check_buffer = false;  // did we get a sounding or updated tf message?
     ++msg_count;
 
-    if (message->data_type == "tf2_msgs/msg/TFMessage")
-    {
-      if(ends_with(message->message->topic_name, "/tf_static"))
-      {
+    if (message->data_type == "tf2_msgs/msg/TFMessage") {
+      if(ends_with(message->message->topic_name, "/tf_static")) {
         rclcpp::SerializedMessage serialized_message(*message->message->serialized_data);
         tf2_msgs::msg::TFMessage tf_message;
-        rclcpp::Serialization<tf2_msgs::msg::TFMessage>().deserialize_message(&serialized_message, &tf_message);
-        for(const auto &t :tf_message.transforms)
-        {
+        rclcpp::Serialization<tf2_msgs::msg::TFMessage>().deserialize_message(&serialized_message,
+          &tf_message);
+        for (const auto & t   : tf_message.transforms) {
           tfBuffer.setTransform(t, "", true);
         }
       }
-      if(ends_with(message->message->topic_name, "/tf"))
-      {
-        try
-        {
+      if(ends_with(message->message->topic_name, "/tf")) {
+        try {
           rclcpp::SerializedMessage serialized_message(*message->message->serialized_data);
           tf2_msgs::msg::TFMessage tf_message;
-          rclcpp::Serialization<tf2_msgs::msg::TFMessage>().deserialize_message(&serialized_message, &tf_message);
-          for(const auto &t :tf_message.transforms)
-          {
+          rclcpp::Serialization<tf2_msgs::msg::TFMessage>().deserialize_message(&serialized_message,
+            &tf_message);
+          for (const auto & t   : tf_message.transforms) {
             tfBuffer.setTransform(t, "", false);
-            if(t.header.frame_id == "earth")
-            {
-              if(t.transform.translation.x != map_to_earth.transform.translation.x || t.transform.translation.y != map_to_earth.transform.translation.y || t.transform.translation.z != map_to_earth.transform.translation.z)
+            if(t.header.frame_id == "earth") {
+              if(t.transform.translation.x != map_to_earth.transform.translation.x ||
+                t.transform.translation.y != map_to_earth.transform.translation.y ||
+                t.transform.translation.z != map_to_earth.transform.translation.z)
               {
-                std::cout << "\nnew map to earth transform:\n" << t.transform.translation.x << ", " << t.transform.translation.y << ", " << t.transform.translation.z << std::endl;
+                std::cout << "\nnew map to earth transform:\n" << t.transform.translation.x <<
+                  ", " << t.transform.translation.y << ", " << t.transform.translation.z <<
+                  std::endl;
                 map_to_earth = t;
               }
             }
           }
           auto now = std::chrono::system_clock::now();
-          if(now >= last_report_time + report_interval)
-            if(!tf_message.transforms.empty())
-            {
-              double progress = ( tf2_ros::fromMsg(tf_message.transforms.front().header.stamp) - begin_time).count() /double(total_duration.count());
-              std::cout << "\r" << int(100*progress) << "%";
-              std::cout << "\t" << (tf2_ros::fromMsg(tf_message.transforms.front().header.stamp) - begin_time).count()/1000000000.0 << " of " << total_duration.count()/1000000000.0 << " seconds, " << msg_count << " messages, " << ping_count << " pings            ";
+          if(now >= last_report_time + report_interval) {
+            if(!tf_message.transforms.empty()) {
+              double progress = ( tf2_ros::fromMsg(tf_message.transforms.front().header.stamp) -
+                begin_time).count() / static_cast<double>(total_duration.count());
+              std::cout << "\r" << int(100 * progress) << "%";
+              std::cout << "\t" <<
+                (tf2_ros::fromMsg(tf_message.transforms.front().header.stamp) -
+              begin_time).count() / 1000000000.0 << " of " <<
+                total_duration.count() / 1000000000.0 << " seconds, " << msg_count <<
+                " messages, " << ping_count << " pings            ";
               std::cout.flush();
               last_report_time = now;
             }
+          }
           check_buffer = true;
-        }
-        catch(const std::exception& e)
-        {
+        } catch(const std::exception & e) {
           std::cerr << e.what() << '\n';
         }
       }
     }
 
-    if (!nav_topic.empty() && message->message->topic_name == nav_topic && message->data_type == "sensor_msgs/msg/NavSatFix")
+    if (!nav_topic.empty() && message->message->topic_name == nav_topic &&
+      message->data_type == "sensor_msgs/msg/NavSatFix")
     {
-      try
-      {
+      try {
         rclcpp::SerializedMessage serialized_message(*message->message->serialized_data);
         sensor_msgs::msg::NavSatFix nsf_message;
-        rclcpp::Serialization<sensor_msgs::msg::NavSatFix>().deserialize_message(&serialized_message, &nsf_message);
+        rclcpp::Serialization<sensor_msgs::msg::NavSatFix>().deserialize_message(
+          &serialized_message, &nsf_message);
         last_nav = nsf_message;
-      }
-      catch(const std::exception& e)
-      {
+      } catch(const std::exception & e) {
         std::cerr << e.what() << '\n';
       }
     }
 
-    if (message->data_type == "sensor_msgs/msg/PointCloud2")
-    {
-      if(bathymetry_topic == "" || message->message->topic_name == bathymetry_topic)
-      {
-        try
-        {
+    if (message->data_type == "sensor_msgs/msg/PointCloud2") {
+      if(bathymetry_topic == "" || message->message->topic_name == bathymetry_topic) {
+        try {
           rclcpp::SerializedMessage serialized_message(*message->message->serialized_data);
           auto pc_message = std::make_shared<sensor_msgs::msg::PointCloud2>();
-          rclcpp::Serialization<sensor_msgs::msg::PointCloud2>().deserialize_message(&serialized_message, &(*pc_message));
+          rclcpp::Serialization<sensor_msgs::msg::PointCloud2>().deserialize_message(
+            &serialized_message, &(*pc_message));
           soundings_buffer.push_back(std::make_pair(pc_message, last_nav));
           check_buffer = true;
-        }
-        catch(const std::exception& e)
-        {
+        } catch(const std::exception & e) {
           std::cerr << e.what() << '\n';
         }
-        
       }
     }
 
-    if(check_buffer)
-    {
+    if(check_buffer) {
       auto buffer_iterator = soundings_buffer.begin();
-      while(buffer_iterator != soundings_buffer.end())
-      {
+      while(buffer_iterator != soundings_buffer.end()) {
         auto msg = buffer_iterator->first;
         auto last_nav = buffer_iterator->second;
-        try
-        {
-          auto transform = tfBuffer.lookupTransform("earth", msg->header.frame_id, msg->header.stamp);
+        try {
+          auto transform = tfBuffer.lookupTransform("earth", msg->header.frame_id,
+            msg->header.stamp);
 
           std::vector<cube::GeoSounding> soundings;
           sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
           sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
           sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
-          for (; (iter_x != iter_x.end()) && (iter_y != iter_y.end()) && (iter_z != iter_z.end()); ++iter_x, ++iter_y, ++iter_z)
+          for (; (iter_x != iter_x.end()) && (iter_y != iter_y.end()) && (iter_z != iter_z.end());
+            ++iter_x, ++iter_y, ++iter_z)
           {
             geometry_msgs::msg::PointStamped sounding_re_sensor;
             sounding_re_sensor.point.x = *iter_x;
@@ -412,31 +394,28 @@ int main(int argc, char *argv[])
             geometry_msgs::msg::PointStamped sounding_ecef;
             tf2::doTransform(sounding_re_sensor, sounding_ecef, transform);
 
-            gz4d::GeoPointECEF ecef(sounding_ecef.point.x, sounding_ecef.point.y, sounding_ecef.point.z);
+            gz4d::GeoPointECEF ecef(sounding_ecef.point.x, sounding_ecef.point.y,
+              sounding_ecef.point.z);
             gz4d::GeoPointLatLongDegrees ll(ecef);
             cube::GeoSounding s(ll);
-            s.sounding.vertical_error = last_nav.position_covariance[8]*10.0;
-            s.sounding.horizontal_error = std::max(last_nav.position_covariance[0], last_nav.position_covariance[4])*10.0;
+            s.sounding.vertical_error = last_nav.position_covariance[8] * 10.0;
+            s.sounding.horizontal_error = std::max(last_nav.position_covariance[0],
+              last_nav.position_covariance[4]) * 10.0;
 
             soundings.push_back(s);
           }
           geo_map_sheet.addSoundings(soundings);
           buffer_iterator = soundings_buffer.erase(buffer_iterator);
           ping_count++;
-        }
-        catch (const tf2::ExtrapolationException& e)
-        {
+        } catch (const tf2::ExtrapolationException & e) {
           buffer_iterator++;
-        }
-        catch (const tf2::TransformException& e)
-        {
+        } catch (const tf2::TransformException & e) {
           std::cerr << "Transform Exception: " << e.what() << std::endl;
           buffer_iterator = soundings_buffer.erase(buffer_iterator);
         }
       }
     }
-    if(ping_count_limit > 0 && ping_count >= ping_count_limit)
-    {
+    if(ping_count_limit > 0 && ping_count >= ping_count_limit) {
       std::cout << "\nPing count limit of " << ping_count_limit << " reached" << std::endl;
       break;
     }
@@ -449,31 +428,32 @@ int main(int argc, char *argv[])
   auto bounds = geo_map_sheet.gridBounds();
   std::cout << "grid bounds: " << bounds << std::endl;
 
-  auto rows =  bounds.cellRowCount();
+  auto rows = bounds.cellRowCount();
   auto columns = bounds.cellColumnCount();
   std::cout << "Total cells: " << rows << " rows by " << columns << " columns" << std::endl;
 
   GDALAllRegister();
   auto driver = GetGDALDriverManager()->GetDriverByName("GTiff");
 
-  char** options = nullptr;
+  char ** options = nullptr;
   options = CSLSetNameValue(options, "COMPRESS", "LZW");
   auto dataset = driver->Create(output_filename.c_str(), columns, rows, 2, GDT_Float32, options);
   CSLDestroy(options);
 
   auto cellsize = geo_map_sheet.cellSizeDegrees();
 
-  double geo_transform[6] = {bounds.minimum().westLongitude(), cellsize, 0, bounds.maximum().northLatitude(), 0, -cellsize};
+  double geo_transform[6] = {bounds.minimum().westLongitude(), cellsize, 0,
+    bounds.maximum().northLatitude(), 0, -cellsize};
   dataset->SetGeoTransform(geo_transform);
 
   OGRSpatialReference spatial_reference;
   spatial_reference.SetWellKnownGeogCS("WGS84");
 
   char * wkt = nullptr;
-  spatial_reference.exportToWkt( &wkt);
+  spatial_reference.exportToWkt(&wkt);
 
   std::cout << wkt << std::endl;
-  
+
   dataset->SetProjection(wkt);
   CPLFree(wkt);
 
@@ -483,25 +463,29 @@ int main(int argc, char *argv[])
   dataset->GetRasterBand(2)->RasterIO(GF_Write, 0, 0, columns, rows, &nan, 1, 1, GDT_Float32, 0, 0);
 
   auto grids = geo_map_sheet.grids();
-  for(auto grid: grids)
-  {
-    auto row_offset = (grid->index().row() - bounds.minimum().row())*grid->index().cellRowCount();
-    auto column_offset = (grid->index().column() - bounds.minimum().column())*grid->index().cellColumnCount();
+  for (auto grid  :  grids) {
+    auto row_offset = (grid->index().row() - bounds.minimum().row()) * grid->index().cellRowCount();
+    auto column_offset = (grid->index().column() - bounds.minimum().column()) *
+      grid->index().cellColumnCount();
     auto values = grid->values();
     // gdal organizes data with first row being top row
     auto gdal_y_index = rows - row_offset - grid->index().cellRowCount();
-    for(int row = 0; row < grid->index().cellRowCount(); row++)
-    {
-      dataset->GetRasterBand(1)->RasterIO(GF_Write, column_offset, gdal_y_index+grid->index().cellRowCount()-1-row, grid->index().cellColumnCount(), 1, &(values[row*grid->index().cellColumnCount()].depth), grid->index().cellColumnCount(), 1, GDT_Float32, 2*sizeof(float), 0);
-      dataset->GetRasterBand(2)->RasterIO(GF_Write, column_offset, gdal_y_index+grid->index().cellRowCount()-1-row, grid->index().cellColumnCount(), 1, &(values[row*grid->index().cellColumnCount()].uncertainty), grid->index().cellColumnCount(), 1, GDT_Float32, 2*sizeof(float), 0);
+    for(int row = 0; row < grid->index().cellRowCount(); row++) {
+      dataset->GetRasterBand(1)->RasterIO(GF_Write, column_offset,
+        gdal_y_index + grid->index().cellRowCount() - 1 - row, grid->index().cellColumnCount(), 1,
+        &(values[row * grid->index().cellColumnCount()].depth), grid->index().cellColumnCount(), 1,
+        GDT_Float32, 2 * sizeof(float), 0);
+      dataset->GetRasterBand(2)->RasterIO(GF_Write, column_offset,
+        gdal_y_index + grid->index().cellRowCount() - 1 - row, grid->index().cellColumnCount(), 1,
+        &(values[row * grid->index().cellColumnCount()].uncertainty),
+        grid->index().cellColumnCount(), 1, GDT_Float32, 2 * sizeof(float), 0);
     }
   }
 
-  GDALClose( (GDALDatasetH) dataset );
+  GDALClose(static_cast<GDALDatasetH>(dataset));
 
   std::cout << "done!" << std::endl;
 
 
   return 0;
 }
-

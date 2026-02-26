@@ -20,9 +20,9 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
+#include <cmath>
 #include "cube_bathymetry/hypothesis.h"
 #include "cube_bathymetry/parameters.h"
-#include <cmath>
 
 namespace cube
 {
@@ -151,7 +151,7 @@ TEST_F(HypothesisTest, MonitorDetectsDriftByRunlength)
   for (int i = 0; i < 20; ++i) {
     // Moderate outlier that individually passes but cumulatively fails
     last_result = h.monitor(10.0f + 3.0f * std::sqrt(2.0f), 1.0f, params);
-    if (!last_result) break;
+    if (!last_result) {break;}
   }
   // Should eventually detect drift
   EXPECT_FALSE(last_result);

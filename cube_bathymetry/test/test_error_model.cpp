@@ -20,9 +20,9 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
-#include "cube_bathymetry/error_model.h"
 #include <cmath>
 #include <vector>
+#include "cube_bathymetry/error_model.h"
 
 namespace cube
 {
@@ -47,7 +47,7 @@ protected:
   }
 
   marine_acoustic_msgs::msg::SonarDetections makeDetections(
-    const std::vector<float>& rx_angles,
+    const std::vector<float> & rx_angles,
     float travel_time,
     float sound_speed = 1500.0f)
   {
@@ -110,7 +110,7 @@ TEST_F(ErrorModelTest, ErrorsAreNonNegative)
   auto det = makeDetections({0.0f, 0.3f, -0.3f}, 0.02f);
 
   auto soundings = em.compute(det, platform);
-  for (const auto& s : soundings) {
+  for (const auto & s  : soundings) {
     EXPECT_GE(s.vertical_error, 0.0f);
     EXPECT_GE(s.horizontal_error, 0.0f);
   }

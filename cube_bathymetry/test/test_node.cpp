@@ -20,8 +20,8 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
-#include "cube_bathymetry/node.h"
 #include <cmath>
+#include "cube_bathymetry/node.h"
 
 namespace cube
 {

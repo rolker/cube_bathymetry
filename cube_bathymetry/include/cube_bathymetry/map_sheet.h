@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,59 +20,64 @@
 // THE SOFTWARE.
 
 
-#ifndef CUBE_BATHYMETRY_MAP_SHEET_H
-#define CUBE_BATHYMETRY_MAP_SHEET_H
+#ifndef CUBE_BATHYMETRY__MAP_SHEET_H_
+#define CUBE_BATHYMETRY__MAP_SHEET_H_
 
-#include "grid.h"
-#include <map>
 #include <chrono>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+#include "cube_bathymetry/grid.h"
 
 namespace cube
 {
 
 /// A grid of Grids used to grow surfaces without knowing the bounds
 /// ahead of time.
-class MapSheet
-{
+  class MapSheet
+  {
 public:
   /// Constructor where counts is number of cells in individual grids, sizes contains the size of
   /// individual cells and order is the IHO order.
-  MapSheet(CellCounts counts, CellSizes sizes, std::string iho_order = "order1a");
+    MapSheet(CellCounts counts, CellSizes sizes, std::string iho_order = "order1a");
 
-  void addSoundings(const std::vector<MapSounding> & soundings, std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
+    void addSoundings(
+      const std::vector < MapSounding > &soundings,
+      std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
 
   /// Return the grids within the bounds, creating new ones if necessary
-  std::vector<std::shared_ptr<Grid> > getOrCreateGridsIn(const MapBounds& bounds);
+    std::vector < std::shared_ptr < Grid >> getOrCreateGridsIn(const MapBounds & bounds);
 
   /// Return all existing grids
-  std::vector<std::shared_ptr<Grid> > grids() const;
+    std::vector < std::shared_ptr < Grid >> grids() const;
 
   /// Return total cell count of rectangle containing all the grids
-  CellCounts totalCellCounts() const;
+    CellCounts totalCellCounts() const;
 
   /// Return bounds in map coordinates of rectangle containing all the grids
-  MapBounds gridBounds() const;
+    MapBounds gridBounds() const;
 
-  const CellSizes& cellSizes() const;
-  const CellCounts& cellCountsPerGrid() const;
+    const CellSizes & cellSizes() const;
+    const CellCounts & cellCountsPerGrid() const;
 
-  GridIndex gridIndex(const MapPosition &position) const;
+    GridIndex gridIndex(const MapPosition & position) const;
 
-  std::chrono::steady_clock::time_point lastUpdateTime() const;
+    std::chrono::steady_clock::time_point lastUpdateTime() const;
 
 private:
   /// Grid cell counts
-  CellCounts counts_;
+    CellCounts counts_;
   /// Cell sizes (meters)
-  CellSizes sizes_;
+    CellSizes sizes_;
 
-  Parameters parameters_;
+    Parameters parameters_;
 
-  std::map<GridIndex, std::shared_ptr<Grid> > grids_;
+    std::map < GridIndex, std::shared_ptr < Grid >> grids_;
 
-  std::chrono::steady_clock::time_point last_update_time_;
-};
+    std::chrono::steady_clock::time_point last_update_time_;
+  };
 
-} // namespace cube
+}  // namespace cube
 
-#endif
+#endif  // CUBE_BATHYMETRY__MAP_SHEET_H_

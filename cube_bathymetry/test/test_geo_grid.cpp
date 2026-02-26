@@ -20,9 +20,9 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
-#include "cube_bathymetry/geo_grid.h"
 #include <cmath>
 #include <vector>
+#include "cube_bathymetry/geo_grid.h"
 
 namespace cube
 {
@@ -38,7 +38,8 @@ protected:
     return level.gridIndex(lat, lon);
   }
 
-  GeoSounding makeGeoSounding(double lat, double lon, double depth,
+  GeoSounding makeGeoSounding(
+    double lat, double lon, double depth,
     float vert_err = 0.5f, float horiz_err = 0.1f)
   {
     gz4d::GeoPointLatLongDegrees point(lat, lon, depth);
@@ -98,7 +99,7 @@ TEST_F(GeoGridTest, ValuesAfterInsertionsContainsValidDepths)
 
   auto vals = g.values();
   bool found_valid = false;
-  for (const auto& v : vals) {
+  for (const auto & v  : vals) {
     if (!std::isnan(v.depth)) {
       found_valid = true;
       break;
@@ -119,7 +120,7 @@ TEST_F(GeoGridTest, MultipleSoundingsConverge)
 
   auto vals = g.values();
   bool found_close = false;
-  for (const auto& v : vals) {
+  for (const auto & v  : vals) {
     if (!std::isnan(v.depth)) {
       // Depth should converge toward the inserted value
       EXPECT_NEAR(v.depth, -10.0f, 2.0f);

@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,54 +20,56 @@
 // THE SOFTWARE.
 
 
-#ifndef CUBE_BATHYMETRY_SOUNDING_H
-#define CUBE_BATHYMETRY_SOUNDING_H
+#ifndef CUBE_BATHYMETRY__SOUNDING_H_
+#define CUBE_BATHYMETRY__SOUNDING_H_
 
-#include "common.h"
+#include "cube_bathymetry/common.h"
 #include "geometry_msgs/msg/point.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 
 namespace cube
 {
 
-struct Sounding
-{
-  Sounding(float depth):
-    depth(depth)
-  {}
+  struct Sounding
+  {
+    explicit Sounding(float depth)
+    : depth(depth)
+  {
+    }
 
-  Sounding(const marine_acoustic_msgs::msg::SonarDetections& detections, size_t i, float depth):
-    depth(depth)
+    Sounding(const marine_acoustic_msgs::msg::SonarDetections & detections, size_t i, float depth)
+      : depth(depth)
   {
     auto range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0;
     float tx_angle = 0.0;
-    if(i < detections.tx_angles.size())
-    {
-      tx_angle = detections.tx_angles[i];
+    if(i < detections.tx_angles.size()) {
+        tx_angle = detections.tx_angles[i];
     }
     sonar_relative_position.x = range * -sin(tx_angle);
     sonar_relative_position.y = range * sin(detections.rx_angles[i]);
     sonar_relative_position.z = range * cos(tx_angle) * cos(detections.rx_angles[i]);
-  }
+    }
 
-  /// Depth relative to the sea surface. Positive is up above sea surface and negative is down below sea surface
-  float depth = std::nan("");
-  float vertical_error = 0.0;
-  float horizontal_error = 0.0;
+  /// Depth relative to the sea surface. Positive is up above sea surface
+  /// and negative is down below sea surface
+    float depth = std::nan("");
+    float vertical_error = 0.0;
+    float horizontal_error = 0.0;
 
   // Position relative to the sonar head, in meters.
   // For a typical down looking sonar, x is along the heading, y is to starboard, and z is down.
-  geometry_msgs::msg::Point sonar_relative_position;
-};
+    geometry_msgs::msg::Point sonar_relative_position;
+  };
 
-struct MapSounding: public MapPosition
-{
-  MapSounding(double x, double y, float z):
-    MapPosition(x, y), sounding(z)
-  {}
-  Sounding sounding;
-};
+  struct MapSounding : public MapPosition
+  {
+    MapSounding(double x, double y, float z)
+      : MapPosition(x, y), sounding(z)
+  {
+    }
+    Sounding sounding;
+  };
 
-} // namespace cube
+}  // namespace cube
 
-#endif
+#endif  // CUBE_BATHYMETRY__SOUNDING_H_

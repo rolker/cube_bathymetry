@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,24 +20,24 @@
 // THE SOFTWARE.
 
 
-#ifndef CUBE_BATHYMETRY_GEO_GRID_H
-#define CUBE_BATHYMETRY_GEO_GRID_H
+#ifndef CUBE_BATHYMETRY__GEO_GRID_H_
+#define CUBE_BATHYMETRY__GEO_GRID_H_
 
-#include "node.h"
-#include "parameters.h"
-#include "geo_sounding.h"
-#include "marine_autonomy/gggs.h"
-
-#include <memory>
 #include <map>
+#include <memory>
+#include <vector>
+#include "cube_bathymetry/node.h"
+#include "cube_bathymetry/parameters.h"
+#include "cube_bathymetry/geo_sounding.h"
+#include "marine_autonomy/gggs.h"
 
 namespace cube
 {
 
-class GeoGrid
-{
+  class GeoGrid
+  {
 public:
-  GeoGrid(gggs::GridIndex index, const Parameters& parameters);
+    GeoGrid(gggs::GridIndex index, const Parameters & parameters);
 
 
   /* Routine:	cube_grid_insert_depths
@@ -69,24 +70,23 @@ public:
   *			caller needs to specify absolute bounds here, and we modify the
   *			node positions from the CubeGrid relative system accordingly.
   */
-  bool insert(const GeoSounding &sounding);
-  bool insert(const std::vector<GeoSounding> & soundings);
+    bool insert(const GeoSounding & sounding);
+    bool insert(const std::vector < GeoSounding > &soundings);
 
   /// Returns the lower left grid position
-  const gggs::GridIndex &index() const;
+    const gggs::GridIndex & index() const;
 
-  std::vector<DepthAndUncertainty> values() const;
+    std::vector < DepthAndUncertainty > values() const;
 
 private:
-  gggs::GridIndex index_;
+    gggs::GridIndex index_;
 
-  const Parameters& parameters_;
+    const Parameters & parameters_;
 
-  //std::vector<std::shared_ptr<Node> > nodes_;
-  std::map<gggs::CellIndex, std::shared_ptr<Node> > nodes_;
+  // std::vector<std::shared_ptr<Node> > nodes_;
+    std::map < gggs::CellIndex, std::shared_ptr < Node >> nodes_;
+  };
 
-};
+}  // namespace cube
 
-} // namespace cube
-
-#endif
+#endif  // CUBE_BATHYMETRY__GEO_GRID_H_
