@@ -64,6 +64,7 @@ bool GeoGrid::insert(const GeoSounding &geo_sounding)
 
   gggs::CellAreaIterator i(index_, bounds);
 
+  bool inserted = false;
   while(i.valid())
   {
     auto distance = i->position().distanceFrom(geo_sounding);
@@ -73,12 +74,12 @@ bool GeoGrid::insert(const GeoSounding &geo_sounding)
       {
         nodes_[*i] = std::make_shared<Node>();
       }
-      nodes_[*i]->insert(distance, sounding, parameters_);
+      inserted = nodes_[*i]->insert(distance, sounding, parameters_) || inserted;
     }
     i.next();
   }
 
-  return true;
+  return inserted;
 
 }
 
