@@ -37,6 +37,7 @@ jobs:
         run: |
           git clone --depth 1 -b jazzy https://github.com/rolker/unh_marine_autonomy.git ../ws/src/unh_marine_autonomy
           git clone --depth 1 -b jazzy https://github.com/rolker/mru_transform.git ../ws/src/mru_transform
+          git clone --depth 1 -b ros2 https://github.com/ros-geographic-info/geographic_info.git ../ws/src/geographic_info
 
       - name: Install ROS dependencies
         working-directory: ../ws
