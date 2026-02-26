@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [jazzy]
+  pull_request:
+    branches: [jazzy]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    container:
+      image: ros:jazzy-ros-core
+
+    steps:
+      - name: Update apt
+        run: apt-get update
+
+      - name: Install ros dev tools
+        run: DEBIAN_FRONTEND=noninteractive apt-get -y install ros-dev-tools
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init rosdep
+        run: rosdep init
+
+      - name: Update rosdep
+        run: rosdep update
+
+      - name: Create workspace
+        run: mkdir -p ../ws/src && ln -s $GITHUB_WORKSPACE ../ws/src/cube_bathymetry
+
+      - name: Clone unreleased dependencies
+        run: |
+          git clone --depth 1 -b jazzy https://github.com/rolker/unh_marine_autonomy.git ../ws/src/unh_marine_autonomy
+          git clone --depth 1 -b jazzy https://github.com/rolker/mru_transform.git ../ws/src/mru_transform
+          git clone --depth 1 -b ros2 https://github.com/ros-geographic-info/geographic_info.git ../ws/src/geographic_info
+
+      - name: Install ROS dependencies
+        working-directory: ../ws
+        run: >
+          DEBIAN_FRONTEND=noninteractive
+          rosdep install --from-paths src --ignore-src -r -y
+
+      - name: Build
+        working-directory: ../ws
+        run: >
+          bash -c 'source /opt/ros/jazzy/setup.bash &&
+          colcon build --packages-up-to cube_bathymetry
+          --cmake-args -DBUILD_TESTING=ON'
+
+      - name: Test
+        working-directory: ../ws
+        run: >
+          bash -c 'source /opt/ros/jazzy/setup.bash &&
+          source install/setup.bash &&
+          colcon test --packages-select cube_bathymetry
+          --event-handlers console_direct+
+          --return-code-on-test-failure'
+
+      - name: Test results
+        working-directory: ../ws
+        run: >
+          bash -c 'source /opt/ros/jazzy/setup.bash &&
+          colcon test-result --verbose'
+        if: always()

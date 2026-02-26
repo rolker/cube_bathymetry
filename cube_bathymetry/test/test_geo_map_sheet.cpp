@@ -20,11 +20,11 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
-#include "cube_bathymetry/geo_map_sheet.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <vector>
+#include "cube_bathymetry/geo_map_sheet.h"
 
 namespace cube
 {
@@ -100,13 +100,13 @@ TEST_F(GeoMapSheetTest, TimestampNotUpdatedWhenNoInsert)
 
   // Verify the first insertion produced non-NaN grid data
   bool has_real_data = false;
-  for(const auto& g: ms.grids())
-  {
+  for (const auto & g  :  ms.grids()) {
     auto vals = g->values();
     has_real_data = std::any_of(vals.begin(), vals.end(),
-        [](const auto& v){ return !std::isnan(v.depth); });
-    if(has_real_data)
+        [](const auto & v){return !std::isnan(v.depth);});
+    if(has_real_data) {
       break;
+    }
   }
   EXPECT_TRUE(has_real_data) << "First insertion should produce non-NaN grid data";
 

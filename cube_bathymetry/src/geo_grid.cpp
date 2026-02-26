@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,39 +26,46 @@
 namespace cube
 {
 
-GeoGrid::GeoGrid(gggs::GridIndex index, const Parameters& parameters)
-  :index_(index), parameters_(parameters)
+GeoGrid::GeoGrid(gggs::GridIndex index, const Parameters & parameters)
+:index_(index), parameters_(parameters)
 {
 }
 
 bool GeoGrid::insert(const std::vector<GeoSounding> & soundings)
 {
   bool ret = false;
-  for(const auto &s: soundings)
+  for (const auto & s  :  soundings) {
     ret = insert(s) || ret;
+  }
   return ret;
 }
 
 
-bool GeoGrid::insert(const GeoSounding &geo_sounding)
+bool GeoGrid::insert(const GeoSounding & geo_sounding)
 {
-  const Sounding& sounding = geo_sounding.sounding;
-  double max_variance_allowed = parameters_.iho_fixed + parameters_.iho_percent*sounding.depth*sounding.depth/(CONF_95PC * CONF_95PC);
+  const Sounding & sounding = geo_sounding.sounding;
+  double max_variance_allowed = parameters_.iho_fixed + parameters_.iho_percent * sounding.depth *
+    sounding.depth / (CONF_95PC * CONF_95PC);
   double ratio = max_variance_allowed / sounding.vertical_error;
 
   /* Ensure some spreading on point */
-  if(ratio <= 2.0)
+  if(ratio <= 2.0) {
     ratio = 2.0;
+  }
 
   double max_radius = CONF_99PC * std::sqrt(sounding.horizontal_error);
 
-  double radius = parameters_.distance_scale * pow(ratio - 1.0, parameters_.inverse_distance_exponent) - max_radius;
-  if (radius < 0.0)
+  double radius = parameters_.distance_scale * pow(ratio - 1.0,
+      parameters_.inverse_distance_exponent) - max_radius;
+  if (radius < 0.0) {
     radius = parameters_.distance_scale;
-  if (radius > max_radius)
+  }
+  if (radius > max_radius) {
     radius = max_radius;
-  if (radius < parameters_.distance_scale)
+  }
+  if (radius < parameters_.distance_scale) {
     radius = parameters_.distance_scale;
+  }
 
 
   auto bounds = gz4d::BoundsDegrees::radiusFromCenter(geo_sounding, radius);
@@ -65,13 +73,10 @@ bool GeoGrid::insert(const GeoSounding &geo_sounding)
   gggs::CellAreaIterator i(index_, bounds);
 
   bool inserted = false;
-  while(i.valid())
-  {
+  while(i.valid()) {
     auto distance = i->position().distanceFrom(geo_sounding);
-    if(distance < radius)
-    {
-      if(!nodes_[*i])
-      {
+    if(distance < radius) {
+      if(!nodes_[*i]) {
         nodes_[*i] = std::make_shared<Node>();
       }
       inserted = nodes_[*i]->insert(distance, sounding, parameters_) || inserted;
@@ -80,31 +85,26 @@ bool GeoGrid::insert(const GeoSounding &geo_sounding)
   }
 
   return inserted;
-
 }
 
-const gggs::GridIndex& GeoGrid::index() const
+const gggs::GridIndex & GeoGrid::index() const
 {
   return index_;
 }
-  
-std::vector<DepthAndUncertainty > GeoGrid::values() const
+
+std::vector<DepthAndUncertainty> GeoGrid::values() const
 {
   std::vector<DepthAndUncertainty> ret;
 
   gggs::CellAreaIterator i(index_);
 
-  while(i.valid())
-  {
+  while(i.valid()) {
     auto node = nodes_.find(*i);
 
-    if(node == nodes_.end() || !node->second)
-    {
+    if(node == nodes_.end() || !node->second) {
       // empty node, so default nan value
       ret.push_back(DepthAndUncertainty());
-    }
-    else
-    {
+    } else {
       node->second->queueFlush(parameters_);
       ret.push_back(node->second->extractDepthAndUncertainty(parameters_));
     }
@@ -113,4 +113,4 @@ std::vector<DepthAndUncertainty > GeoGrid::values() const
   return ret;
 }
 
-} // namespace cube
+}  // namespace cube

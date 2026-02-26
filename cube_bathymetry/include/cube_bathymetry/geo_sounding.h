@@ -1,4 +1,5 @@
-// Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+// Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+// Hydrographic Center, University of New Hampshire
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,24 +20,25 @@
 // THE SOFTWARE.
 
 
-#ifndef CUBE_BATHYMETRY_GEO_SOUNDING_H
-#define CUBE_BATHYMETRY_GEO_SOUNDING_H
+#ifndef CUBE_BATHYMETRY__GEO_SOUNDING_H_
+#define CUBE_BATHYMETRY__GEO_SOUNDING_H_
 
 #include "marine_autonomy/utils.h"
-#include "sounding.h"
+#include "cube_bathymetry/sounding.h"
 
 namespace cube
 {
 
-struct GeoSounding: public gz4d::PositionDegrees
-{
-  GeoSounding(const gz4d::GeoPointLatLongDegrees& point):
-    gz4d::PositionDegrees(point), sounding(point[2])
-  {}
+  struct GeoSounding : public gz4d::PositionDegrees
+  {
+    explicit GeoSounding(const gz4d::GeoPointLatLongDegrees & point)
+    : gz4d::PositionDegrees(point), sounding(point[2])
+  {
+    }
 
-  Sounding sounding;
-};
+    Sounding sounding;
+  };
 
-} // namespace cube
+}  // namespace cube
 
-#endif
+#endif  // CUBE_BATHYMETRY__GEO_SOUNDING_H_

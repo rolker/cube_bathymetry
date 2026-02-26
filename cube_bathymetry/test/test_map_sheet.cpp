@@ -20,9 +20,9 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
-#include "cube_bathymetry/map_sheet.h"
 #include <cmath>
 #include <vector>
+#include "cube_bathymetry/map_sheet.h"
 
 namespace cube
 {

@@ -1,4 +1,5 @@
-# Copyright 2025 Center for Coastal and Ocean Mapping and NOAA-UNH Joint Hydrographic Center, University of New Hampshire
+# Copyright 2025 Center for Coastal and Ocean Mapping & NOAA-UNH Joint
+# Hydrographic Center, University of New Hampshire
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -27,8 +28,8 @@ from launch_ros.actions import LifecycleTransition
 
 from lifecycle_msgs.msg import Transition
 
-def generate_launch_description():
 
+def generate_launch_description():
     return LaunchDescription([
         LifecycleNode(
             package='cube_bathymetry',
@@ -42,9 +43,11 @@ def generate_launch_description():
         LifecycleTransition(
             lifecycle_node_names=(
                 PythonExpression(
-                    expression = [
+                    expression=[
                         '"',
-                        LaunchConfiguration("ros_namespace", default=''),
+                        LaunchConfiguration(
+                            'ros_namespace', default=''
+                        ),
                         '" + "/cube_bathymetry"'
                     ],
                 ),

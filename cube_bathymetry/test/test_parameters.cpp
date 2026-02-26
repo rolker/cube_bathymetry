@@ -20,9 +20,9 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
-#include "cube_bathymetry/parameters.h"
 #include <cmath>
 #include <stdexcept>
+#include "cube_bathymetry/parameters.h"
 
 namespace cube
 {

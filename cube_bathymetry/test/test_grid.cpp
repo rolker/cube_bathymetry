@@ -20,9 +20,9 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
-#include "cube_bathymetry/grid.h"
 #include <cmath>
 #include <vector>
+#include "cube_bathymetry/grid.h"
 
 namespace cube
 {
@@ -74,7 +74,7 @@ TEST_F(GridTest, ValuesInitiallyNaN)
   auto vals = g.values();
 
   EXPECT_EQ(vals.size(), 25u);
-  for (const auto& v : vals) {
+  for (const auto & v  : vals) {
     EXPECT_TRUE(std::isnan(v.depth));
   }
 }
@@ -114,7 +114,7 @@ TEST_F(GridTest, InsertMultipleSoundingsProducesDepth)
 
   // At least some nodes should have non-NaN values
   bool found_valid = false;
-  for (const auto& v : vals) {
+  for (const auto & v  : vals) {
     if (!std::isnan(v.depth)) {
       found_valid = true;
       break;
