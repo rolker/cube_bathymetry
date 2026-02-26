@@ -74,8 +74,7 @@ bool GeoGrid::insert(const GeoSounding &geo_sounding)
       {
         nodes_[*i] = std::make_shared<Node>();
       }
-      nodes_[*i]->insert(distance, sounding, parameters_);
-      inserted = true;
+      inserted = nodes_[*i]->insert(distance, sounding, parameters_) || inserted;
     }
     i.next();
   }

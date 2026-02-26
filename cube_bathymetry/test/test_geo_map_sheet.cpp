@@ -21,7 +21,9 @@
 
 #include <gtest/gtest.h>
 #include "cube_bathymetry/geo_map_sheet.h"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <vector>
 
 namespace cube
@@ -82,7 +84,7 @@ TEST_F(GeoMapSheetTest, TimestampNotUpdatedWhenNoInsert)
 {
   GeoMapSheet ms(cell_size);
 
-  // Add soundings at a known position to establish grids and a baseline timestamp
+  // Add soundings to establish grids and a baseline timestamp
   std::vector<GeoSounding> soundings1;
   gz4d::GeoPointLatLongDegrees point1(43.0, -70.0, -10.0);
   GeoSounding s1(point1);
@@ -96,42 +98,25 @@ TEST_F(GeoMapSheetTest, TimestampNotUpdatedWhenNoInsert)
   auto baseline_time = ms.lastUpdateTime();
   EXPECT_EQ(baseline_time, time1);
 
-  // Add soundings far away — within bounds that create a new grid, but
-  // positioned so no sounding falls within radius of any cell center.
-  // Use a position very far from the first so they end up in a different grid.
-  // The sounding has very tight error so the insert radius will be very small,
-  // and likely won't match any cell center.
-  std::vector<GeoSounding> soundings2;
-  // Place at a grid boundary where the sounding is between cell centers
-  double offset = ms.cellSizeDegrees() * 0.5;
-  gz4d::GeoPointLatLongDegrees point2(43.0 + offset, -70.0 + offset, -0.01);
-  GeoSounding s2(point2);
-  s2.sounding.vertical_error = 100.0f;   // large error -> tiny ratio -> minimal radius
-  s2.sounding.horizontal_error = 0.0001f; // very small -> tiny max_radius
-  soundings2.push_back(s2);
+  // Verify the first insertion produced non-NaN grid data
+  bool has_real_data = false;
+  for(const auto& g: ms.grids())
+  {
+    auto vals = g->values();
+    has_real_data = std::any_of(vals.begin(), vals.end(),
+        [](const auto& v){ return !std::isnan(v.depth); });
+    if(has_real_data)
+      break;
+  }
+  EXPECT_TRUE(has_real_data) << "First insertion should produce non-NaN grid data";
 
+  // Add an empty soundings vector at a later time — no data inserted,
+  // so the timestamp must not advance
+  std::vector<GeoSounding> empty_soundings;
   auto time2 = time1 + std::chrono::seconds(10);
-  ms.addSoundings(soundings2, time2);
+  ms.addSoundings(empty_soundings, time2);
 
-  // If insert() returns false for all grids, timestamp should not advance
-  // This test may need the sounding parameters tuned if insert() still finds
-  // matching cells. The key behavior being tested: when no nodes are updated,
-  // the timestamp must not change.
-  if(ms.lastUpdateTime() == time2)
-  {
-    // If the sounding did get inserted (parameters allow it), that's OK —
-    // the critical fix is that the semicolon bug is gone and the conditional
-    // actually works. Verify by checking that at least one grid has data.
-    bool any_grid_has_nodes = false;
-    for(const auto& g: ms.grids())
-      if(!g->values().empty())
-        any_grid_has_nodes = true;
-    EXPECT_TRUE(any_grid_has_nodes) << "Timestamp advanced but no grid has data";
-  }
-  else
-  {
-    EXPECT_EQ(ms.lastUpdateTime(), baseline_time);
-  }
+  EXPECT_EQ(ms.lastUpdateTime(), baseline_time);
 }
 
 }  // namespace cube

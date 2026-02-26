@@ -102,7 +102,7 @@ bool Node::insert(double distance, const Sounding& sounding, const Parameters& p
     double blunder_limit = std::min(target_depth - parameters.blunder_minimum, target_depth - parameters.blunder_percent*std::abs(target_depth));
     blunder_limit = std::min(blunder_limit, target_depth - parameters.blunder_scalar*sqrt(predicted_depth_variance_));
 		if (sounding.depth < blunder_limit)
-      return true;
+      return false;
   }
   else
   {
@@ -110,7 +110,7 @@ bool Node::insert(double distance, const Sounding& sounding, const Parameters& p
   }
 
   if(distance > std::max<double>(parameters.capture_distance_scale*std::abs(target_depth), 0.5))
-    return true;
+    return false;
   
   distance += CONF_95PC * std::sqrt(sounding.horizontal_error);
 
