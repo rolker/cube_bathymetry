@@ -108,7 +108,7 @@ target_link_libraries(bag_to_geotiff
 )
 
 install(TARGETS bag_to_geotiff
-   DESTINATION lib/${PROJECT_NAME}
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
