@@ -20,6 +20,7 @@
 // THE SOFTWARE.
 
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <vector>
@@ -490,6 +491,15 @@ int main(int argc, char *argv[])
 
     // gdal organizes data with first row being top row
     auto gdal_y_index = rows - row_offset - grid->index().cellRowCount();
+
+    // Allocate interpolation buffers once per grid (reused across rows)
+    std::vector<float> depth_buf;
+    std::vector<float> uncert_buf;
+    if(stretch_factor != 1) {
+      depth_buf.resize(out_cols);
+      uncert_buf.resize(out_cols);
+    }
+
     for(int row = 0; row < grid->index().cellRowCount(); row++) {
       auto gdal_row = gdal_y_index + grid->index().cellRowCount() - 1 - row;
       auto src_row_offset = row * src_cols;
@@ -506,8 +516,6 @@ int main(int argc, char *argv[])
           GDT_Float32, 2 * sizeof(float), 0);
       } else {
         // Polar-scaled row: interpolate to fill the wider raster
-        std::vector<float> depth_buf(out_cols);
-        std::vector<float> uncert_buf(out_cols);
 
         for(uint32_t p = 0; p < out_cols; p++) {
           // Map output pixel center to source cell position
