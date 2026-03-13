@@ -20,7 +20,11 @@
 // THE SOFTWARE.
 
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <limits>
+#include <vector>
 
 #include "tf2_ros/buffer.h"
 #include "tf2_msgs/msg/tf_message.hpp"
@@ -429,7 +433,13 @@ int main(int argc, char *argv[])
   std::cout << "grid bounds: " << bounds << std::endl;
 
   auto rows = bounds.cellRowCount();
-  auto columns = bounds.cellColumnCount();
+
+  // Compute max column count across all grid rows to determine raster width.
+  // Column count varies by latitude due to GGGS polar scaling (1x/3x/9x).
+  uint64_t columns = 0;
+  for(uint32_t r = bounds.minimum().row(); r <= bounds.maximum().row(); r++) {
+    columns = std::max(columns, bounds.cellColumnCount(r));
+  }
   std::cout << "Total cells: " << rows << " rows by " << columns << " columns" << std::endl;
 
   GDALAllRegister();
@@ -442,7 +452,8 @@ int main(int argc, char *argv[])
 
   auto cellsize = geo_map_sheet.cellSizeDegrees();
 
-  double geo_transform[6] = {bounds.minimum().westLongitude(), cellsize, 0,
+  double raster_west = bounds.minimum().westLongitude();
+  double geo_transform[6] = {raster_west, cellsize, 0,
     bounds.maximum().northLatitude(), 0, -cellsize};
   dataset->SetGeoTransform(geo_transform);
 
@@ -464,21 +475,108 @@ int main(int argc, char *argv[])
 
   auto grids = geo_map_sheet.grids();
   for (auto grid  :  grids) {
-    auto row_offset = (grid->index().row() - bounds.minimum().row()) * grid->index().cellRowCount();
-    auto column_offset = (grid->index().column() - bounds.minimum().column()) *
-      grid->index().cellColumnCount();
+    auto grid_row = grid->index().row();
+    auto row_offset = (grid_row - bounds.minimum().row()) * grid->index().cellRowCount();
+
+    // Compute output column offset from longitude difference
+    auto column_offset = static_cast<int64_t>(
+      std::round((grid->index().westLongitude() - raster_west) / cellsize));
+
+    // Stretch factor: ratio of max columns to this row's columns (1, 3, or 9)
+    auto row_columns = bounds.cellColumnCount(grid_row);
+    uint32_t stretch_factor = (row_columns > 0) ? columns / row_columns : 1;
+
     auto values = grid->values();
+    auto src_cols = grid->index().cellColumnCount();  // always 960
+    auto out_cols = static_cast<uint32_t>(src_cols) * stretch_factor;
+
     // gdal organizes data with first row being top row
     auto gdal_y_index = rows - row_offset - grid->index().cellRowCount();
+
+    // Precompute interpolation lookup table and buffers once per grid
+    struct InterpEntry
+    {
+      int left;
+      int right;
+      float t;
+    };
+    std::vector<InterpEntry> interp_table;
+    std::vector<float> depth_buf;
+    std::vector<float> uncert_buf;
+    if(stretch_factor != 1) {
+      depth_buf.resize(out_cols);
+      uncert_buf.resize(out_cols);
+      interp_table.resize(out_cols);
+      for(uint32_t p = 0; p < out_cols; p++) {
+        double src_pos = (p + 0.5) / stretch_factor - 0.5;
+        int left = static_cast<int>(std::floor(src_pos));
+        int right = left + 1;
+        interp_table[p].t = static_cast<float>(src_pos - left);
+        interp_table[p].left = std::clamp(left, 0, static_cast<int>(src_cols) - 1);
+        interp_table[p].right = std::clamp(right, 0, static_cast<int>(src_cols) - 1);
+      }
+    }
+
     for(int row = 0; row < grid->index().cellRowCount(); row++) {
-      dataset->GetRasterBand(1)->RasterIO(GF_Write, column_offset,
-        gdal_y_index + grid->index().cellRowCount() - 1 - row, grid->index().cellColumnCount(), 1,
-        &(values[row * grid->index().cellColumnCount()].depth), grid->index().cellColumnCount(), 1,
-        GDT_Float32, 2 * sizeof(float), 0);
-      dataset->GetRasterBand(2)->RasterIO(GF_Write, column_offset,
-        gdal_y_index + grid->index().cellRowCount() - 1 - row, grid->index().cellColumnCount(), 1,
-        &(values[row * grid->index().cellColumnCount()].uncertainty),
-        grid->index().cellColumnCount(), 1, GDT_Float32, 2 * sizeof(float), 0);
+      auto gdal_row = gdal_y_index + grid->index().cellRowCount() - 1 - row;
+      auto src_row_offset = row * src_cols;
+
+      if(stretch_factor == 1) {
+        // No stretching needed — write source data directly
+        dataset->GetRasterBand(1)->RasterIO(GF_Write, column_offset,
+          gdal_row, src_cols, 1,
+          &(values[src_row_offset].depth), src_cols, 1,
+          GDT_Float32, 2 * sizeof(float), 0);
+        dataset->GetRasterBand(2)->RasterIO(GF_Write, column_offset,
+          gdal_row, src_cols, 1,
+          &(values[src_row_offset].uncertainty), src_cols, 1,
+          GDT_Float32, 2 * sizeof(float), 0);
+      } else {
+        // Polar-scaled row: interpolate to fill the wider raster
+
+        for(uint32_t p = 0; p < out_cols; p++) {
+          const auto & ie = interp_table[p];
+
+          float d_left = values[src_row_offset + ie.left].depth;
+          float d_right = values[src_row_offset + ie.right].depth;
+          float u_left = values[src_row_offset + ie.left].uncertainty;
+          float u_right = values[src_row_offset + ie.right].uncertainty;
+
+          // NaN-aware linear interpolation
+          bool d_left_nan = std::isnan(d_left);
+          bool d_right_nan = std::isnan(d_right);
+          if(d_left_nan && d_right_nan) {
+            depth_buf[p] = nan;
+          } else if(d_left_nan) {
+            depth_buf[p] = d_right;
+          } else if(d_right_nan) {
+            depth_buf[p] = d_left;
+          } else {
+            depth_buf[p] = (1.0f - ie.t) * d_left + ie.t * d_right;
+          }
+
+          bool u_left_nan = std::isnan(u_left);
+          bool u_right_nan = std::isnan(u_right);
+          if(u_left_nan && u_right_nan) {
+            uncert_buf[p] = nan;
+          } else if(u_left_nan) {
+            uncert_buf[p] = u_right;
+          } else if(u_right_nan) {
+            uncert_buf[p] = u_left;
+          } else {
+            uncert_buf[p] = (1.0f - ie.t) * u_left + ie.t * u_right;
+          }
+        }
+
+        dataset->GetRasterBand(1)->RasterIO(GF_Write, column_offset,
+          gdal_row, out_cols, 1,
+          depth_buf.data(), out_cols, 1,
+          GDT_Float32, 0, 0);
+        dataset->GetRasterBand(2)->RasterIO(GF_Write, column_offset,
+          gdal_row, out_cols, 1,
+          uncert_buf.data(), out_cols, 1,
+          GDT_Float32, 0, 0);
+      }
     }
   }
 
