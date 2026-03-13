@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "tf2_ros/buffer.h"
@@ -492,12 +493,28 @@ int main(int argc, char *argv[])
     // gdal organizes data with first row being top row
     auto gdal_y_index = rows - row_offset - grid->index().cellRowCount();
 
-    // Allocate interpolation buffers once per grid (reused across rows)
+    // Precompute interpolation lookup table and buffers once per grid
+    struct InterpEntry
+    {
+      int left;
+      int right;
+      float t;
+    };
+    std::vector<InterpEntry> interp_table;
     std::vector<float> depth_buf;
     std::vector<float> uncert_buf;
     if(stretch_factor != 1) {
       depth_buf.resize(out_cols);
       uncert_buf.resize(out_cols);
+      interp_table.resize(out_cols);
+      for(uint32_t p = 0; p < out_cols; p++) {
+        double src_pos = (p + 0.5) / stretch_factor - 0.5;
+        int left = static_cast<int>(std::floor(src_pos));
+        int right = left + 1;
+        interp_table[p].t = static_cast<float>(src_pos - left);
+        interp_table[p].left = std::clamp(left, 0, static_cast<int>(src_cols) - 1);
+        interp_table[p].right = std::clamp(right, 0, static_cast<int>(src_cols) - 1);
+      }
     }
 
     for(int row = 0; row < grid->index().cellRowCount(); row++) {
@@ -518,19 +535,12 @@ int main(int argc, char *argv[])
         // Polar-scaled row: interpolate to fill the wider raster
 
         for(uint32_t p = 0; p < out_cols; p++) {
-          // Map output pixel center to source cell position
-          double src_pos = (p + 0.5) / stretch_factor - 0.5;
-          int left = static_cast<int>(std::floor(src_pos));
-          int right = left + 1;
-          double t = src_pos - left;
+          const auto & ie = interp_table[p];
 
-          left = std::clamp(left, 0, static_cast<int>(src_cols) - 1);
-          right = std::clamp(right, 0, static_cast<int>(src_cols) - 1);
-
-          float d_left = values[src_row_offset + left].depth;
-          float d_right = values[src_row_offset + right].depth;
-          float u_left = values[src_row_offset + left].uncertainty;
-          float u_right = values[src_row_offset + right].uncertainty;
+          float d_left = values[src_row_offset + ie.left].depth;
+          float d_right = values[src_row_offset + ie.right].depth;
+          float u_left = values[src_row_offset + ie.left].uncertainty;
+          float u_right = values[src_row_offset + ie.right].uncertainty;
 
           // NaN-aware linear interpolation
           bool d_left_nan = std::isnan(d_left);
@@ -542,7 +552,7 @@ int main(int argc, char *argv[])
           } else if(d_right_nan) {
             depth_buf[p] = d_left;
           } else {
-            depth_buf[p] = static_cast<float>((1.0 - t) * d_left + t * d_right);
+            depth_buf[p] = (1.0f - ie.t) * d_left + ie.t * d_right;
           }
 
           bool u_left_nan = std::isnan(u_left);
@@ -554,7 +564,7 @@ int main(int argc, char *argv[])
           } else if(u_right_nan) {
             uncert_buf[p] = u_left;
           } else {
-            uncert_buf[p] = static_cast<float>((1.0 - t) * u_left + t * u_right);
+            uncert_buf[p] = (1.0f - ie.t) * u_left + ie.t * u_right;
           }
         }
 
