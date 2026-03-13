@@ -36,10 +36,11 @@ interpolate narrower (polar-scaled) rows to fill the full width.
    the max column count to the current row's column count (always 1, 3, or 9).
 
    For rows that need stretching:
-   - Use nearest-neighbor resampling: each source cell maps to
-     `stretch_factor` output pixels.
+   - Use bilinear interpolation: blend adjacent source cells to produce
+     smooth output pixels across the stretch factor boundary.
    - Expand values into a temporary row buffer before writing to GDAL.
    - Apply the same stretching to both depth and uncertainty bands.
+   - Treat NaN source cells as missing — do not blend NaN into neighbors.
 
 3. **Adjust column_offset for polar rows** — The `column_offset` calculation
    on line 468 uses `grid->index().cellColumnCount()` (always 960). This is
@@ -82,9 +83,7 @@ interpolate narrower (polar-scaled) rows to fill the full width.
 
 ## Open Questions
 
-- **Interpolation method**: Nearest-neighbor is simplest and preserves exact
-  depth/uncertainty values. Bilinear would smooth across cell boundaries.
-  Plan uses nearest-neighbor; maintainer can request bilinear if preferred.
+None — interpolation method (bilinear) confirmed by maintainer.
 
 ## Estimated Scope
 
