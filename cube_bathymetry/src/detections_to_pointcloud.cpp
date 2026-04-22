@@ -129,7 +129,10 @@ private:
     }
     auto velocity = navigation_sensors_->latest_velocity();
     if(notTooOld(velocity.header.stamp, msg->header.stamp)) {
-      platform.vessel_speed = velocity.twist.linear.x;
+      // mru_transform's VelocitySensor::ValueType is TwistWithCovarianceStamped,
+      // so velocity.twist is a TwistWithCovariance wrapping the inner Twist
+      // at .twist.twist.  See rolker/mru_transform#18 / PR #19.
+      platform.vessel_speed = velocity.twist.twist.linear.x;
     } else {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
         "No recent velocity data, setting speed to NaN");
