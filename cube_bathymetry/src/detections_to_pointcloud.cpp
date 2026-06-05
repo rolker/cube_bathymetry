@@ -20,18 +20,22 @@
 // THE SOFTWARE.
 
 
+#include <cmath>
+#include <mutex>
+#include <string>
+
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 
 #include "cube_bathymetry/error_model.h"
-#include "geometry_msgs/msg/twist_with_covariance_stamped.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
-#include "mru_transform/navigation_sensors.hpp"
-#include "sensor_msgs/msg/imu.hpp"
-#include "sensor_msgs/msg/nav_sat_fix.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
 #include "tf2/utils.hpp"
 
 class DetectionsToPointCloud : public rclcpp_lifecycle::LifecycleNode
@@ -57,13 +61,35 @@ public:
     maximum_range_ = get_parameter("maximum_range").as_double();
     maximum_range_sq_ = maximum_range_ * maximum_range_;
 
+    // TF frame names (platform-specific; set via params/yaml). Defaults are the
+    // unprefixed mru_transform names; e.g. on BizzyBoat set to bizzy/base_link etc.
+    if(!has_parameter("base_link_frame")) {
+      declare_parameter("base_link_frame", base_link_frame_);
+    }
+    base_link_frame_ = get_parameter("base_link_frame").as_string();
+    if(!has_parameter("level_frame")) {
+      declare_parameter("level_frame", level_frame_);
+    }
+    level_frame_ = get_parameter("level_frame").as_string();
+    if(!has_parameter("tide_frame")) {
+      declare_parameter("tide_frame", tide_frame_);
+    }
+    tide_frame_ = get_parameter("tide_frame").as_string();
+
     detections_subscriber_ = create_subscription<marine_acoustic_msgs::msg::SonarDetections>(
       "detections",
       rclcpp::SensorDataQoS(),
       std::bind(&DetectionsToPointCloud::detectionsCallback, this, std::placeholders::_1)
     );
 
-    navigation_sensors_ = std::make_shared<mru_transform::NavigationSensors>(*this);
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    odom_subscriber_ = create_subscription<nav_msgs::msg::Odometry>(
+      "odom",
+      rclcpp::SensorDataQoS(),
+      std::bind(&DetectionsToPointCloud::odomCallback, this, std::placeholders::_1)
+    );
 
     pointcloud_publisher_ = create_publisher<sensor_msgs::msg::PointCloud2>(
       "soundings",
@@ -98,45 +124,81 @@ private:
     return (current_time - msg_time).seconds() < 1.0;
   }
 
+  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+  {
+    const auto & v = msg->twist.twist.linear;  // body-frame velocity
+    std::lock_guard<std::mutex> lock(odom_mutex_);
+    last_vessel_speed_ = static_cast<float>(std::hypot(v.x, v.y));  // SOG
+    last_odom_stamp_ = msg->header.stamp;
+  }
+
+  // Look up target<-source at the ping stamp; if TF is momentarily behind (an
+  // "extrapolation into the future", common under bag replay), fall back to the
+  // latest available transform. Attitude/heave vary slowly, so tens of ms of
+  // staleness is harmless. Returns false only if no transform is available.
+  bool lookupAtOrLatest(
+    const std::string & target, const std::string & source,
+    const rclcpp::Time & stamp, geometry_msgs::msg::TransformStamped & out)
+  {
+    try {
+      out = tf_buffer_->lookupTransform(target, source, stamp);
+      return true;
+    } catch (const tf2::ExtrapolationException &) {
+      try {
+        out = tf_buffer_->lookupTransform(target, source, tf2::TimePointZero);
+        return true;
+      } catch (const tf2::TransformException &) {
+        return false;
+      }
+    } catch (const tf2::TransformException &) {
+      return false;
+    }
+  }
+
   void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr & msg)
   {
     cube::Platform platform;
     platform.timestamp = rclcpp::Time(msg->header.stamp).seconds();
 
-    auto position = navigation_sensors_->latest_position();
-    if(notTooOld(position.header.stamp, msg->header.stamp)) {
-      platform.latitude = position.position.latitude;
-      platform.longitude = position.position.longitude;
-    } else {
-      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-        "No recent position data, setting lat/lon to NaN");
-      platform.latitude = std::nan("");
-      platform.longitude = std::nan("");
-    }
-    auto orientation = navigation_sensors_->latest_orientation();
-    if(notTooOld(orientation.header.stamp, msg->header.stamp)) {
+    const rclcpp::Time stamp(msg->header.stamp);
+
+    // Attitude (roll/pitch) from TF at the ping stamp -- the SAME pose used
+    // downstream to place the soundings, so the error budget is coherent.
+    // Position and heading are not needed by the error model.
+    geometry_msgs::msg::TransformStamped level;
+    if(lookupAtOrLatest(level_frame_, base_link_frame_, stamp, level)) {
       double y, p, r;
-      tf2::getEulerYPR(orientation.orientation, y, p, r);
+      tf2::getEulerYPR(level.transform.rotation, y, p, r);
       platform.roll = r;
       platform.pitch = p;
-      platform.heading = (M_PI / 2.0) - y;
+      (void)y;  // yaw/heading unused by the error model
     } else {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-        "No recent orientation data, setting roll/pitch/heading to NaN");
+        "No attitude TF (" << level_frame_ << " <- " << base_link_frame_ <<
+        "); roll/pitch = NaN");
       platform.roll = std::nan("");
       platform.pitch = std::nan("");
-      platform.heading = std::nan("");
     }
-    auto velocity = navigation_sensors_->latest_velocity();
-    if(notTooOld(velocity.header.stamp, msg->header.stamp)) {
-      // mru_transform's VelocitySensor::ValueType is TwistWithCovarianceStamped,
-      // so velocity.twist is a TwistWithCovariance wrapping the inner Twist
-      // at .twist.twist.  See rolker/mru_transform#18 / PR #19.
-      platform.vessel_speed = velocity.twist.twist.linear.x;
+
+    // Heave = boat vertical offset from the tide-corrected surface. It enters
+    // the budget only squared, so it is non-critical; default to 0 if absent.
+    geometry_msgs::msg::TransformStamped tide;
+    if(lookupAtOrLatest(tide_frame_, base_link_frame_, stamp, tide)) {
+      platform.heave = static_cast<float>(tide.transform.translation.z);
     } else {
-      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-        "No recent velocity data, setting speed to NaN");
-      platform.vessel_speed = std::nan("");
+      platform.heave = 0.0f;
+    }
+
+    // Speed over ground from odometry (latest cached value).
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      if(notTooOld(last_odom_stamp_, stamp)) {
+        platform.vessel_speed = last_vessel_speed_;
+      } else {
+        RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+          "No recent odometry; vessel_speed = NaN");
+        platform.vessel_speed = std::nan("");
+      }
     }
 
     platform.mean_speed = msg->ping_info.sound_speed;
@@ -213,12 +275,22 @@ private:
   rclcpp::Subscription<marine_acoustic_msgs::msg::SonarDetections>::SharedPtr
     detections_subscriber_;
 
-  std::shared_ptr<mru_transform::NavigationSensors> navigation_sensors_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscriber_;
 
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr
     pointcloud_publisher_;
 
   std::shared_ptr<cube::ErrorModel> error_model_;
+
+  std::string base_link_frame_ = "base_link";
+  std::string level_frame_ = "base_link_north_up";  // level, north-aligned
+  std::string tide_frame_ = "map_tide";
+
+  std::mutex odom_mutex_;
+  float last_vessel_speed_ = std::nanf("");
+  rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};
 
   double minimum_range_ = 0.0;  // meters
   double minimum_range_sq_ = minimum_range_ * minimum_range_;

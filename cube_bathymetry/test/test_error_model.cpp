@@ -34,11 +34,8 @@ protected:
   {
     Platform p{};
     p.timestamp = 0.0;
-    p.latitude = 43.07;
-    p.longitude = -70.76;
     p.roll = 0.0f;
     p.pitch = 0.0f;
-    p.heading = 0.0f;
     p.heave = 0.0f;
     p.surf_sspeed = 1500.0f;
     p.mean_speed = 1500.0f;
