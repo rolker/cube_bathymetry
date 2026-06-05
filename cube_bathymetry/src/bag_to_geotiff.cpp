@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include "tf2_ros/buffer.h"
@@ -382,10 +383,30 @@ int main(int argc, char *argv[])
           auto transform = tfBuffer.lookupTransform("earth", msg->header.frame_id,
             msg->header.stamp);
 
+          // Use the cloud's per-sounding TPU (from cube::ErrorModel via
+          // detections_to_pointcloud) when present -- the same data the live
+          // cube_bathymetry_node grid uses. Fall back to the nav-covariance
+          // estimate only for older bags that lack the fields.
+          bool has_vu = false;
+          bool has_hu = false;
+          for (const auto & f  :  msg->fields) {
+            if (f.name == "vertical_uncertainty") {has_vu = true;}
+            if (f.name == "horizontal_uncertainty") {has_hu = true;}
+          }
+          const bool has_tpu = has_vu && has_hu;  // need both, else fall back
+          const double fallback_vert = last_nav.position_covariance[8] * 10.0;
+          const double fallback_horiz = std::max(last_nav.position_covariance[0],
+            last_nav.position_covariance[4]) * 10.0;
+
           std::vector<cube::GeoSounding> soundings;
           sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
           sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
           sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+          std::optional<sensor_msgs::PointCloud2ConstIterator<float>> iter_vu, iter_hu;
+          if (has_tpu) {
+            iter_vu.emplace(*msg, "vertical_uncertainty");
+            iter_hu.emplace(*msg, "horizontal_uncertainty");
+          }
           for (; (iter_x != iter_x.end()) && (iter_y != iter_y.end()) && (iter_z != iter_z.end());
             ++iter_x, ++iter_y, ++iter_z)
           {
@@ -402,9 +423,15 @@ int main(int argc, char *argv[])
               sounding_ecef.point.z);
             gz4d::GeoPointLatLongDegrees ll(ecef);
             cube::GeoSounding s(ll);
-            s.sounding.vertical_error = last_nav.position_covariance[8] * 10.0;
-            s.sounding.horizontal_error = std::max(last_nav.position_covariance[0],
-              last_nav.position_covariance[4]) * 10.0;
+            if (has_tpu) {
+              s.sounding.vertical_error = **iter_vu;
+              s.sounding.horizontal_error = **iter_hu;
+              ++(*iter_vu);
+              ++(*iter_hu);
+            } else {
+              s.sounding.vertical_error = fallback_vert;
+              s.sounding.horizontal_error = fallback_horiz;
+            }
 
             soundings.push_back(s);
           }
