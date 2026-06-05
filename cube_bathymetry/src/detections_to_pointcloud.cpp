@@ -103,29 +103,20 @@ private:
     cube::Platform platform;
     platform.timestamp = rclcpp::Time(msg->header.stamp).seconds();
 
-    auto position = navigation_sensors_->latest_position();
-    if(notTooOld(position.header.stamp, msg->header.stamp)) {
-      platform.latitude = position.position.latitude;
-      platform.longitude = position.position.longitude;
-    } else {
-      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-        "No recent position data, setting lat/lon to NaN");
-      platform.latitude = std::nan("");
-      platform.longitude = std::nan("");
-    }
+    // Position (lat/lon) is not needed: the error model never uses it, and the
+    // sounding placement is done downstream by TF.
     auto orientation = navigation_sensors_->latest_orientation();
     if(notTooOld(orientation.header.stamp, msg->header.stamp)) {
       double y, p, r;
       tf2::getEulerYPR(orientation.orientation, y, p, r);
       platform.roll = r;
       platform.pitch = p;
-      platform.heading = (M_PI / 2.0) - y;
+      (void)y;  // yaw/heading unused by the error model (#31; #32)
     } else {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-        "No recent orientation data, setting roll/pitch/heading to NaN");
+        "No recent orientation data, setting roll/pitch to NaN");
       platform.roll = std::nan("");
       platform.pitch = std::nan("");
-      platform.heading = std::nan("");
     }
     auto velocity = navigation_sensors_->latest_velocity();
     if(notTooOld(velocity.header.stamp, msg->header.stamp)) {
