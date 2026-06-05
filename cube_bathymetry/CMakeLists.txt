@@ -13,7 +13,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(grid_map_ros REQUIRED)
 find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
-find_package(mru_transform REQUIRED)  # For navigation_sensors
+find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -80,10 +80,11 @@ target_link_libraries(detections_to_pointcloud
   cube_bathymetry
   ${geometry_msgs_TARGETS}
   ${marine_acoustic_msgs_TARGETS}
-  mru_transform::mru_transform
+  ${nav_msgs_TARGETS}
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
   ${sensor_msgs_TARGETS}
+  tf2_ros::tf2_ros
 )
 
 install(TARGETS detections_to_pointcloud

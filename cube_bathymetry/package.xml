@@ -14,7 +14,7 @@
   <build_depend>libgdal-dev</build_depend>
   <depend>lifecycle_msgs</depend>
   <depend>marine_acoustic_msgs</depend>
-  <depend>mru_transform</depend>  <!-- For navigation_sensors -->
+  <depend>nav_msgs</depend>  <!-- odometry for speed-over-ground -->
   <depend>marine_autonomy</depend>
   <depend>rclcpp</depend>
   <depend>rosbag2_transport</depend>
