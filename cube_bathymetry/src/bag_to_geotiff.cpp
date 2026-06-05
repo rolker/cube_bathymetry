@@ -387,13 +387,13 @@ int main(int argc, char *argv[])
           // detections_to_pointcloud) when present -- the same data the live
           // cube_bathymetry_node grid uses. Fall back to the nav-covariance
           // estimate only for older bags that lack the fields.
-          bool has_tpu = false;
+          bool has_vu = false;
+          bool has_hu = false;
           for (const auto & f  :  msg->fields) {
-            if (f.name == "vertical_uncertainty") {
-              has_tpu = true;
-              break;
-            }
+            if (f.name == "vertical_uncertainty") {has_vu = true;}
+            if (f.name == "horizontal_uncertainty") {has_hu = true;}
           }
+          const bool has_tpu = has_vu && has_hu;  // need both, else fall back
           const double fallback_vert = last_nav.position_covariance[8] * 10.0;
           const double fallback_horiz = std::max(last_nav.position_covariance[0],
             last_nav.position_covariance[4]) * 10.0;
