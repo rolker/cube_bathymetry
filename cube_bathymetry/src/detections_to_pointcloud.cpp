@@ -29,6 +29,7 @@
 #include "lifecycle_msgs/msg/state.hpp"
 
 #include "cube_bathymetry/error_model.h"
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
@@ -131,6 +132,29 @@ private:
     last_odom_stamp_ = msg->header.stamp;
   }
 
+  // Look up target<-source at the ping stamp; if TF is momentarily behind (an
+  // "extrapolation into the future", common under bag replay), fall back to the
+  // latest available transform. Attitude/heave vary slowly, so tens of ms of
+  // staleness is harmless. Returns false only if no transform is available.
+  bool lookupAtOrLatest(
+    const std::string & target, const std::string & source,
+    const rclcpp::Time & stamp, geometry_msgs::msg::TransformStamped & out)
+  {
+    try {
+      out = tf_buffer_->lookupTransform(target, source, stamp);
+      return true;
+    } catch (const tf2::ExtrapolationException &) {
+      try {
+        out = tf_buffer_->lookupTransform(target, source, tf2::TimePointZero);
+        return true;
+      } catch (const tf2::TransformException &) {
+        return false;
+      }
+    } catch (const tf2::TransformException &) {
+      return false;
+    }
+  }
+
   void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr & msg)
   {
     cube::Platform platform;
@@ -139,30 +163,29 @@ private:
     const rclcpp::Time stamp(msg->header.stamp);
 
     // Attitude (roll/pitch) from TF at the ping stamp -- the SAME pose used
-    // downstream to place the soundings, so the error budget is coherent, and
-    // it is interpolated to the exact stamp rather than "latest received".
+    // downstream to place the soundings, so the error budget is coherent.
     // Position and heading are not needed by the error model.
-    try {
-      const auto level = tf_buffer_->lookupTransform(level_frame_, base_link_frame_, stamp);
+    geometry_msgs::msg::TransformStamped level;
+    if(lookupAtOrLatest(level_frame_, base_link_frame_, stamp, level)) {
       double y, p, r;
       tf2::getEulerYPR(level.transform.rotation, y, p, r);
       platform.roll = r;
       platform.pitch = p;
       (void)y;  // yaw/heading unused by the error model
-    } catch (const tf2::TransformException & e) {
+    } else {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
         "No attitude TF (" << level_frame_ << " <- " << base_link_frame_ <<
-        ") at ping time; roll/pitch = NaN: " << e.what());
+        "); roll/pitch = NaN");
       platform.roll = std::nan("");
       platform.pitch = std::nan("");
     }
 
     // Heave = boat vertical offset from the tide-corrected surface. It enters
     // the budget only squared, so it is non-critical; default to 0 if absent.
-    try {
-      platform.heave = static_cast<float>(tf_buffer_->lookupTransform(
-        tide_frame_, base_link_frame_, stamp).transform.translation.z);
-    } catch (const tf2::TransformException &) {
+    geometry_msgs::msg::TransformStamped tide;
+    if(lookupAtOrLatest(tide_frame_, base_link_frame_, stamp, tide)) {
+      platform.heave = static_cast<float>(tide.transform.translation.z);
+    } else {
       platform.heave = 0.0f;
     }
 
