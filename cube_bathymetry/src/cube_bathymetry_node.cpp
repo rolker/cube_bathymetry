@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include <tf2_ros/transform_listener.h>
+#include "tf2_ros/transform_listener.h"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
@@ -159,8 +159,8 @@ private:
     // carry a depth estimate (a persistently-zero count means soundings arrive
     // but never resolve into the grid).
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-      "Published grid: " << populated << " populated cells over "
-      << map_sheet_->grids().size() << " tiles");
+      "Published grid: " << populated << " populated cells over " <<
+      map_sheet_->grids().size() << " tiles");
   }
 
   // Look up target<-source at the exact stamp; on extrapolation (the requested
@@ -209,8 +209,10 @@ private:
     sensor_msgs::msg::PointCloud2 soundings_in_map_frame;
     tf2::doTransform(*msg, soundings_in_map_frame, transform);
 
+    // PointCloud2 point count is width * height (height > 1 for organized clouds).
+    const size_t point_count = static_cast<size_t>(msg->width) * msg->height;
     std::vector<cube::MapSounding> soundings;
-    soundings.reserve(msg->width);
+    soundings.reserve(point_count);
 
     try {
       sensor_msgs::PointCloud2ConstIterator<float> iter_x(soundings_in_map_frame, "x");
@@ -233,14 +235,16 @@ private:
         const float x = *iter_x, y = *iter_y, z = *iter_z;
         const float vu = *iter_vertical_uncertainty, hu = *iter_horizontal_uncertainty;
 
-        // A non-finite position or uncertainty would poison the CUBE estimator:
-        // NaN variance -> NaN depth estimate -> the whole cell drops out of the
-        // published grid. Skip such soundings so one bad input can't blank the
-        // grid. (Upstream cause is usually missing attitude/odom TF -- e.g. the
-        // simulator before its frame params were set -- which makes
-        // detections_to_pointcloud emit NaN uncertainty.)
+        // Drop soundings the CUBE estimator can't use. A non-finite position or
+        // uncertainty -- or a non-positive vertical / negative horizontal
+        // uncertainty (sqrt of which is NaN) -- propagates a NaN variance into
+        // the estimator: NaN depth estimate -> the whole cell drops out of the
+        // published grid. Skipping here keeps the dropped-count diagnostic
+        // honest and matches Grid::insert's guard. (Upstream cause is usually
+        // missing attitude/odom TF -- e.g. the simulator before its frame
+        // params were set -- which makes detections_to_pointcloud emit NaN.)
         if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
-          !std::isfinite(vu) || !std::isfinite(hu))
+          !std::isfinite(vu) || !std::isfinite(hu) || vu <= 0.0f || hu < 0.0f)
         {
           ++dropped;
           continue;
@@ -254,9 +258,9 @@ private:
 
       if(dropped > 0) {
         RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
-          dropped << " of " << msg->width << " soundings dropped (non-finite "
-          "position/uncertainty) -- check attitude/odom TF feeding "
-          << msg->header.frame_id);
+          dropped << " of " << point_count << " soundings dropped (non-finite "
+          "or non-positive position/uncertainty) -- check attitude/odom TF "
+          "feeding " << msg->header.frame_id);
       }
     } catch (const std::exception & e) {
       // Missing field in the cloud, etc. -- don't let it kill the callback.

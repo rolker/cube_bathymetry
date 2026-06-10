@@ -54,8 +54,11 @@ bool Grid::insert(const MapSounding & sounding)
     !std::isfinite(sounding.sounding.depth) ||
     !std::isfinite(sounding.sounding.vertical_error) ||
     !std::isfinite(sounding.sounding.horizontal_error) ||
-    sounding.sounding.vertical_error <= 0.0)
+    sounding.sounding.vertical_error <= 0.0 ||
+    sounding.sounding.horizontal_error < 0.0)
   {
+    // Note: horizontal_error feeds std::sqrt() below, so a negative value
+    // (not just NaN) would reintroduce NaN; reject it here.
     return false;
   }
 

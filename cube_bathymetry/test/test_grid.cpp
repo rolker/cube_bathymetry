@@ -189,6 +189,13 @@ TEST_F(GridTest, InsertNonFiniteSoundingReturnsFalse)
   zero_vu.sounding.horizontal_error = 0.1f;
   EXPECT_FALSE(g.insert(zero_vu));
 
+  // Negative horizontal uncertainty: finite, but sqrt(horizontal_error) is NaN,
+  // which would reintroduce the NaN propagation the guard prevents.
+  MapSounding neg_hu(5.0, 5.0, -10.0f);
+  neg_hu.sounding.vertical_error = 0.5f;
+  neg_hu.sounding.horizontal_error = -0.1f;
+  EXPECT_FALSE(g.insert(neg_hu));
+
   // Nothing got inserted: the whole grid is still empty.
   for (const auto & v  : g.values()) {
     EXPECT_TRUE(std::isnan(v.depth));
