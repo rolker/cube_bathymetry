@@ -20,6 +20,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rosbag2_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 
@@ -65,6 +66,7 @@ target_link_libraries(cube_bathymetry_node
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
+  ${std_srvs_TARGETS}
   tf2_sensor_msgs::tf2_sensor_msgs
 )
 

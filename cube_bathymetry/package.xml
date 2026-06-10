@@ -20,6 +20,7 @@
   <depend>rosbag2_transport</depend>
   <depend>rclcpp_lifecycle</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
 
