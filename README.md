@@ -62,7 +62,11 @@ disappears (the other half of
 `detections_to_pointcloud`'s frame parameters default to the **unprefixed**
 `mru_transform` names. These defaults are a fallback for a single-vehicle,
 un-namespaced graph — **any namespaced deployment (a real boat, or the
-simulator) MUST override them**, or the node silently produces useless output.
+simulator) MUST override them**, or the attitude TF lookup misses and no usable
+grid is produced. The failure is not silent: `detections_to_pointcloud` logs a
+throttled warning when the attitude TF is missing, and `cube_bathymetry_node`
+warns when it drops non-finite soundings — but the headline symptom is an empty
+grid in CAMP/rviz, so the warnings are easy to miss.
 
 | Param | Default | Set it to (namespaced example) |
 |---|---|---|
@@ -71,7 +75,11 @@ simulator) MUST override them**, or the node silently produces useless output.
 | `tide_frame` | `map_tide` | `<ns>/map_tide` |
 | `cube_bathymetry_node`'s `map_frame` | `map` | `<ns>/map` |
 
-…and remap `odom → /<ns>/odom`.
+…and remap `odom`. The node is normally launched in a sensor **sub**-namespace
+(e.g. `<ns>/sensors/mbes`), where a relative `odom` resolves to
+`/<ns>/sensors/mbes/odom`; remap `odom → /<ns>/odom` to reach the platform's
+odometry. (Only if the node runs directly under `/<ns>` does the namespace
+alone resolve it, with no remap needed.)
 
 Live boat wiring is in
 [unh_echoboats_project11#226](https://github.com/rolker/unh_echoboats_project11/pull/226)
@@ -85,23 +93,45 @@ Live boat wiring is in
 > so under a namespace such as `ben/` the attitude TF lookup misses. See the
 > failure mode below.
 
-## Failure mode: active node, soundings flowing, but no grid
+## Failure modes: active node, soundings flowing, but no usable grid
 
-If `cube_bathymetry_node` is lifecycle-**active**, `soundings` is publishing, and
-the placement TF (`map_frame ← soundings frame_id`) resolves, but `grid`
-publishes **0 messages**, the most likely cause is **`NaN` uncertainty poisoning
-the grid**:
+If `cube_bathymetry_node` is lifecycle-**active** and `soundings` is publishing
+but nothing useful reaches CAMP/rviz, there are **two distinct symptoms** with
+different causes — check which one you have first.
+
+### A. `grid` publishes no messages at all
+
+The placement TF (`map_frame ← soundings frame_id`) never resolves at the ping
+stamps, so no soundings are added, `gridBounds()` stays `NaN`, and
+`publishGrid()` early-returns every time. A `ros2 topic hz /…/grid` shows zero.
+
+This was the BizzyBoat symptom in
+[#36](https://github.com/rolker/cube_bathymetry/issues/36): the `map ← sensor`
+chain includes the position-driven `map` transform, which updated ~1 Hz against
+9 Hz pings, so an exact-stamp lookup routinely extrapolated and the ping was
+dropped. The placement lookup now falls back to the latest available transform
+(`lookupAtOrLatest`), so this no longer blanks the grid.
+
+### B. `grid` publishes, but the cells are all-`NaN` / empty
+
+Messages arrive (roughly every 5 s once any tiles exist) but carry no usable
+depth — the grid renders empty. This is **`NaN` uncertainty poisoning**:
 
 1. The attitude TF (`level_frame ← base_link_frame`) lookup throws — usually
    because the frame-name params above were not set for the namespace — so
    `detections_to_pointcloud` sets `roll`/`pitch` to `NaN`
-   (or `vessel_speed` is `NaN` because `/odom` is missing/stale).
+   (or `vessel_speed` is `NaN` because `odom` is missing/mis-resolved).
 2. `cube::ErrorModel` propagates that into `NaN` `vertical_uncertainty` /
    `horizontal_uncertainty`. **The sounding x/y/z stay valid** (pure geometry),
    so the cloud looks healthy in rviz — only the uncertainty fields are bad.
-3. In the grid, `NaN` uncertainty becomes a `NaN` CUBE variance, the hypothesis
-   update produces a `NaN` depth estimate, and `publishGrid()` skips every cell
-   whose depth is `NaN`. The result is an empty `GridMap`.
+3. A `NaN` uncertainty becomes a `NaN` CUBE variance → a `NaN` cell estimate,
+   so the cell drops out of the published grid.
+
+`cube_bathymetry_node` now guards against (B): it drops non-finite soundings
+before they reach the estimator (and `Grid::insert` rejects them defensively),
+logging a throttled count that names the offending frame — so a future
+occurrence is diagnosable rather than a silently empty grid. The real fix is
+still to set the frame params / `odom` remap above so the uncertainty is valid.
 
 This is the diagnosis for the empty-grid symptom seen both in the simulator and
 on BizzyBoat (gabby, 2026-06-09 —
