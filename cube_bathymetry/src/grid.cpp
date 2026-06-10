@@ -44,6 +44,21 @@ bool Grid::insert(const std::vector<MapSounding> & soundings)
 
 bool Grid::insert(const MapSounding & sounding)
 {
+  // Reject non-finite soundings at the door. A NaN depth, position, or
+  // uncertainty propagates through the CUBE variance math (gain, predicted
+  // variance) into a NaN hypothesis estimate, which then blanks the cell and,
+  // because medians/queues mix neighbours, can corrupt good data. One bad
+  // sounding must never be able to empty the grid. (Upstream cause is usually
+  // missing attitude/odom TF making the error model emit NaN uncertainty.)
+  if(!std::isfinite(sounding.x) || !std::isfinite(sounding.y) ||
+    !std::isfinite(sounding.sounding.depth) ||
+    !std::isfinite(sounding.sounding.vertical_error) ||
+    !std::isfinite(sounding.sounding.horizontal_error) ||
+    sounding.sounding.vertical_error <= 0.0)
+  {
+    return false;
+  }
+
   double max_variance_allowed = parameters_.iho_fixed + parameters_.iho_percent *
     sounding.sounding.depth * sounding.sounding.depth / (CONF_95PC * CONF_95PC);
   double ratio = max_variance_allowed / sounding.sounding.vertical_error;
