@@ -20,7 +20,11 @@
 // THE SOFTWARE.
 
 
-#include <tf2_ros/transform_listener.h>
+#include <cmath>
+#include <string>
+#include <vector>
+
+#include "tf2_ros/transform_listener.h"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
@@ -101,6 +105,8 @@ private:
 
     auto bounds = map_sheet_->gridBounds();
     if(isnan(bounds.maximum.x)) {
+      // No tiles populated yet (no soundings have been added). pingCallback
+      // emits the actionable diagnostics for why soundings aren't arriving.
       return;
     }
     auto cell_counts = map_sheet_->totalCellCounts();
@@ -123,6 +129,7 @@ private:
     map.add("elevation");
     map.add("uncertainty");
 
+    size_t populated = 0;
     for (auto grid  :  map_sheet_->grids()) {
       auto origin = grid->origin();
       auto counts = grid->cellCounts();
@@ -139,6 +146,7 @@ private:
             if(map.getIndex(p, index)) {
               map.at("elevation", index) = depth_uncertainty.depth;
               map.at("uncertainty", index) = depth_uncertainty.uncertainty;
+              ++populated;
             }
           }
         }
@@ -146,6 +154,40 @@ private:
     }
     auto message = grid_map::GridMapRosConverter::toMessage(map);
     grid_publisher_->publish(*message);
+
+    // Liveness heartbeat: confirms the grid is being emitted and how many cells
+    // carry a depth estimate (a persistently-zero count means soundings arrive
+    // but never resolve into the grid).
+    RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+      "Published grid: " << populated << " populated cells over " <<
+      map_sheet_->grids().size() << " tiles");
+  }
+
+  // Look up target<-source at the exact stamp; on extrapolation (the requested
+  // time is outside the buffered window) fall back to the latest available
+  // transform. The map<-sensor chain includes the position-driven `map`
+  // transform, which on some platforms updates slower (~1 Hz) than the sonar
+  // ping rate (#36), so an exact-stamp lookup routinely extrapolates. Platform
+  // pose varies slowly relative to a ping interval, so the latest transform is
+  // an acceptable placement -- far better than dropping the ping and silently
+  // emptying the grid. Mirrors detections_to_pointcloud (PR #33).
+  bool lookupAtOrLatest(
+    const std::string & target, const std::string & source,
+    const rclcpp::Time & stamp, geometry_msgs::msg::TransformStamped & out)
+  {
+    try {
+      out = tf_buffer_->lookupTransform(target, source, stamp);
+      return true;
+    } catch (const tf2::ExtrapolationException &) {
+      try {
+        out = tf_buffer_->lookupTransform(target, source, tf2::TimePointZero);
+        return true;
+      } catch (const tf2::TransformException &) {
+        return false;
+      }
+    } catch (const tf2::TransformException &) {
+      return false;
+    }
   }
 
   void pingCallback(const sensor_msgs::msg::PointCloud2::UniquePtr & msg)
@@ -154,17 +196,25 @@ private:
       return;
     }
 
+    geometry_msgs::msg::TransformStamped transform;
+    if(!lookupAtOrLatest(map_frame_, msg->header.frame_id,
+        rclcpp::Time(msg->header.stamp), transform))
+    {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "No transform " << map_frame_ << " <- " << msg->header.frame_id <<
+        " (at ping time or latest); dropping ping -- grid will not update");
+      return;
+    }
+
+    sensor_msgs::msg::PointCloud2 soundings_in_map_frame;
+    tf2::doTransform(*msg, soundings_in_map_frame, transform);
+
+    // PointCloud2 point count is width * height (height > 1 for organized clouds).
+    const size_t point_count = static_cast<size_t>(msg->width) * msg->height;
+    std::vector<cube::MapSounding> soundings;
+    soundings.reserve(point_count);
+
     try {
-      auto transform = tf_buffer_->lookupTransform(map_frame_, msg->header.frame_id,
-        msg->header.stamp, tf2::durationFromSec(2.0));
-      sensor_msgs::msg::PointCloud2 soundings_in_map_frame;
-      tf2::doTransform(*msg, soundings_in_map_frame, transform);
-
-      std::vector<cube::MapSounding> soundings;
-
-      sensor_msgs::PointCloud2ConstIterator<float> iter_original_z(*msg, "z");
-
-
       sensor_msgs::PointCloud2ConstIterator<float> iter_x(soundings_in_map_frame, "x");
       sensor_msgs::PointCloud2ConstIterator<float> iter_y(soundings_in_map_frame, "y");
       sensor_msgs::PointCloud2ConstIterator<float> iter_z(soundings_in_map_frame, "z");
@@ -173,11 +223,7 @@ private:
       sensor_msgs::PointCloud2ConstIterator<float> iter_horizontal_uncertainty(
         soundings_in_map_frame, "horizontal_uncertainty");
 
-      auto epoch = std::chrono::time_point<std::chrono::steady_clock>{};
-
-      auto timestamp = epoch + std::chrono::seconds(msg->header.stamp.sec) +
-        std::chrono::nanoseconds(msg->header.stamp.nanosec);
-
+      size_t dropped = 0;
       for (; (iter_x != iter_x.end()) &&
         (iter_y != iter_y.end()) &&
         (iter_z != iter_z.end()) &&
@@ -186,23 +232,55 @@ private:
         ++iter_x, ++iter_y, ++iter_z,
         ++iter_vertical_uncertainty, ++iter_horizontal_uncertainty)
       {
-        cube::MapSounding s(*iter_x, *iter_y, *iter_z);
-        s.sounding.vertical_error = *iter_vertical_uncertainty;
-        s.sounding.horizontal_error = *iter_horizontal_uncertainty;
+        const float x = *iter_x, y = *iter_y, z = *iter_z;
+        const float vu = *iter_vertical_uncertainty, hu = *iter_horizontal_uncertainty;
+
+        // Drop soundings the CUBE estimator can't use. A non-finite position or
+        // uncertainty -- or a non-positive vertical / negative horizontal
+        // uncertainty (sqrt of which is NaN) -- propagates a NaN variance into
+        // the estimator: NaN depth estimate -> the whole cell drops out of the
+        // published grid. Skipping here keeps the dropped-count diagnostic
+        // honest and matches Grid::insert's guard. (Upstream cause is usually
+        // missing attitude/odom TF -- e.g. the simulator before its frame
+        // params were set -- which makes detections_to_pointcloud emit NaN.)
+        if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+          !std::isfinite(vu) || !std::isfinite(hu) || vu <= 0.0f || hu < 0.0f)
+        {
+          ++dropped;
+          continue;
+        }
+
+        cube::MapSounding s(x, y, z);
+        s.sounding.vertical_error = vu;
+        s.sounding.horizontal_error = hu;
         soundings.push_back(s);
       }
 
-      map_sheet_->addSoundings(soundings, timestamp);
-
-      if(last_grid_publish_time_.nanoseconds() == 0 ||
-        rclcpp::Time(msg->header.stamp) - last_grid_publish_time_ >
-        rclcpp::Duration::from_seconds(5.0))
-      {
-        publishGrid();
-        last_grid_publish_time_ = msg->header.stamp;
+      if(dropped > 0) {
+        RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+          dropped << " of " << point_count << " soundings dropped (non-finite "
+          "or non-positive position/uncertainty) -- check attitude/odom TF "
+          "feeding " << msg->header.frame_id);
       }
-    } catch (const tf2::TransformException & e) {
-      RCLCPP_WARN_STREAM(get_logger(), "tf2 exception: " << e.what());
+    } catch (const std::exception & e) {
+      // Missing field in the cloud, etc. -- don't let it kill the callback.
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "Could not read soundings cloud: " << e.what());
+      return;
+    }
+
+    auto epoch = std::chrono::time_point<std::chrono::steady_clock>{};
+    auto timestamp = epoch + std::chrono::seconds(msg->header.stamp.sec) +
+      std::chrono::nanoseconds(msg->header.stamp.nanosec);
+
+    map_sheet_->addSoundings(soundings, timestamp);
+
+    if(last_grid_publish_time_.nanoseconds() == 0 ||
+      rclcpp::Time(msg->header.stamp) - last_grid_publish_time_ >
+      rclcpp::Duration::from_seconds(5.0))
+    {
+      publishGrid();
+      last_grid_publish_time_ = msg->header.stamp;
     }
   }
 };
