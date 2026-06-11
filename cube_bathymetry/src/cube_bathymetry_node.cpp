@@ -38,6 +38,7 @@
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include "grid_map_ros/grid_map_ros.hpp"
 #include "grid_map_msgs/msg/grid_map.hpp"
+#include "std_srvs/srv/trigger.hpp"
 
 
 class CubeBathymetry : public rclcpp_lifecycle::LifecycleNode
@@ -55,13 +56,13 @@ public:
     map_frame_ = this->declare_parameter("map_frame", "map");
 
     declare_parameter("cell_size", 1.0);
-    double cell_size = get_parameter("cell_size").as_double();
+    cell_size_ = get_parameter("cell_size").as_double();
 
     declare_parameter("grid_cell_count", 25);
-    int grid_cell_count = get_parameter("grid_cell_count").as_int();
+    grid_cell_count_ = get_parameter("grid_cell_count").as_int();
 
-    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(grid_cell_count),
-      cube::CellSizes(cell_size));
+    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(grid_cell_count_),
+      cube::CellSizes(cell_size_));
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
@@ -72,6 +73,10 @@ public:
     ping_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>("soundings",
       rclcpp::SensorDataQoS(),
       std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
+
+    clear_grid_service_ = create_service<std_srvs::srv::Trigger>("clear_grid",
+      std::bind(&CubeBathymetry::clearGridService, this,
+        std::placeholders::_1, std::placeholders::_2));
 
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
@@ -95,9 +100,13 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   std::string map_frame_ = "map";
+  // Cached so clearGrid() can rebuild the sheet with the configured geometry.
+  double cell_size_ = 1.0;
+  int grid_cell_count_ = 25;
   rclcpp::Time last_grid_publish_time_;
   rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr grid_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_grid_service_;
 
   void publishGrid()
   {
@@ -161,6 +170,32 @@ private:
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
       "Published grid: " << populated << " populated cells over " <<
       map_sheet_->grids().size() << " tiles");
+  }
+
+  // Replace the accumulated surface with a fresh, empty sheet of the same
+  // configured geometry. Lets an operator reset the grid in place -- e.g. to
+  // shed a surface that has grown too large for the telemetry downlink -- with
+  // no process restart and no CONFIGURE/ACTIVATE cycle. Safe from a service
+  // callback: main() runs a SingleThreadedExecutor, so this never overlaps
+  // pingCallback's use of map_sheet_.
+  void clearGrid()
+  {
+    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(grid_cell_count_),
+      cube::CellSizes(cell_size_));
+    // Force the next ping to republish immediately (a zero-nanosecond time is
+    // the same first-publish trigger used at startup) so the cleared surface
+    // propagates without waiting out the ~5 s publish interval.
+    last_grid_publish_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+  }
+
+  void clearGridService(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    clearGrid();
+    response->success = true;
+    response->message = "grid cleared";
+    RCLCPP_INFO(get_logger(), "Grid cleared via clear_grid service");
   }
 
   // Look up target<-source at the exact stamp; on extrapolation (the requested

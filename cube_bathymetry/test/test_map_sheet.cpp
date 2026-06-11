@@ -143,4 +143,29 @@ TEST_F(MapSheetTest, SpreadSoundingsCreateMultipleGrids)
   EXPECT_GT(ms.grids().size(), 1u);
 }
 
+TEST_F(MapSheetTest, ReconstructClearsAccumulatedData)
+{
+  // Mirror the node's map_sheet_ lifecycle: a shared_ptr replaced wholesale.
+  // This is the invariant clearGrid() (the clear_grid service) relies on --
+  // rebuilding the sheet drops all accumulated soundings and returns to the
+  // empty initial state.
+  auto sheet = std::make_shared<MapSheet>(counts, sizes);
+
+  std::vector<MapSounding> soundings;
+  MapSounding s(5.0, 5.0, -10.0f);
+  s.sounding.vertical_error = 0.5f;
+  s.sounding.horizontal_error = 0.1f;
+  soundings.push_back(s);
+  sheet->addSoundings(soundings);
+
+  ASSERT_FALSE(sheet->grids().empty());
+  ASSERT_TRUE(valid(sheet->gridBounds()));
+
+  // What clearGrid() does: swap in a fresh sheet of the same geometry.
+  sheet = std::make_shared<MapSheet>(counts, sizes);
+
+  EXPECT_TRUE(sheet->grids().empty());
+  EXPECT_FALSE(valid(sheet->gridBounds()));
+}
+
 }  // namespace cube
