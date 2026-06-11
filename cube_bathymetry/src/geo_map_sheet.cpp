@@ -23,6 +23,7 @@
 #include "cube_bathymetry/geo_map_sheet.h"
 #include <cmath>
 #include <iostream>
+#include "marine_autonomy/gz4d_geo.h"
 
 namespace cube
 {
@@ -68,8 +69,11 @@ std::vector<std::shared_ptr<GeoGrid>> GeoMapSheet::getOrCreateGridsIn(
 {
   std::vector<std::shared_ptr<GeoGrid>> ret;
 
-  gggs::GridAreaIterator i(grid_level_.gridIndex(bounds.minimum()),
-    grid_level_.gridIndex(bounds.maximum()));
+  // gridIndex now takes lat/lon doubles (gz4d retired from the GGGS API,
+  // unh_marine_autonomy#144); bounds remains a gz4d type internally.
+  gggs::GridAreaIterator i(
+    grid_level_.gridIndex(bounds.minimum().latitude, bounds.minimum().longitude),
+    grid_level_.gridIndex(bounds.maximum().latitude, bounds.maximum().longitude));
 
   while(i.valid()) {
     if(!grids_[*i]) {
