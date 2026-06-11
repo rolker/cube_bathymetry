@@ -22,6 +22,9 @@
 
 #include "cube_bathymetry/geo_grid.h"
 #include <cmath>
+#include "geodesy/geodesics.h"
+#include "geodesy/wgs84_ellipsoid.h"
+#include "marine_autonomy/gz4d_geo.h"
 
 namespace cube
 {
@@ -70,11 +73,22 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
 
   auto bounds = gz4d::BoundsDegrees::radiusFromCenter(geo_sounding, radius);
 
-  gggs::CellAreaIterator i(index_, bounds);
+  // The GGGS CellAreaIterator now takes geographic_msgs GeoPoint corners
+  // (gz4d retired from the GGGS API, unh_marine_autonomy#144). cube keeps
+  // gz4d internally for radiusFromCenter and converts the corners here.
+  gggs::CellAreaIterator i(index_,
+    gggs::geoPoint(bounds.minimum().latitude, bounds.minimum().longitude),
+    gggs::geoPoint(bounds.maximum().latitude, bounds.maximum().longitude));
+
+  // CellIndex::position() returns a GeoPoint; distance to the sounding now
+  // comes from geodesy's WGS84 Vincenty inverse (replacing the gz4d
+  // Position::distanceFrom() the GeoPoint type doesn't provide).
+  const auto sounding_point =
+    gggs::geoPoint(geo_sounding.latitude, geo_sounding.longitude);
 
   bool inserted = false;
   while(i.valid()) {
-    auto distance = i->position().distanceFrom(geo_sounding);
+    auto distance = geodesy::wgs84::inverse(i->position(), sounding_point).distance;
     if(distance < radius) {
       if(!nodes_[*i]) {
         nodes_[*i] = std::make_shared<Node>();

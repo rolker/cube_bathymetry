@@ -16,6 +16,7 @@
   <depend>marine_acoustic_msgs</depend>
   <depend>nav_msgs</depend>  <!-- odometry for speed-over-ground -->
   <depend>marine_autonomy</depend>
+  <depend>geodesy</depend>
   <depend>rclcpp</depend>
   <depend>rosbag2_transport</depend>
   <depend>rclcpp_lifecycle</depend>

@@ -15,6 +15,7 @@ find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
+find_package(geodesy REQUIRED)  # WGS84 Vincenty inverse (geo_grid distance)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -46,6 +47,8 @@ target_link_libraries(cube_bathymetry
   ${marine_acoustic_msgs_TARGETS}
   marine_autonomy::marine_autonomy
 )
+# geodesy (geographic_info) exports via ament, not a namespaced target.
+ament_target_dependencies(cube_bathymetry geodesy)
 
 install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
