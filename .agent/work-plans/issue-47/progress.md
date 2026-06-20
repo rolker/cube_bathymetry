@@ -51,3 +51,22 @@ issue: 47
 
 ### Assessment
 Scope, issue alignment, file targeting, principle alignment (ellipsoidal flag + range params as ROS parameters declared in `on_configure()` per ADR-0008; divergences doc per "capture decisions"), and ADR compliance are all sound. All five Issue-Review action items are addressed by the plan. Range/Device-placement decision (range error on `Device`, not `Vessel`) is correct — range error is a sonar spec. The two test must-fixes (private-method access; mislabeled defaults-preserved test) are the only blockers and are cheap to fix during implementation.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-20 14:43 -0400
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+**Verdict**: approved
+
+**Branch**: feature/issue-47 at `bfa90fe`
+**Mode**: pre-push
+**Depth**: Standard (reason: medium change touching core error-model + a lifecycle node + new ROS params)
+**Must-fix**: 0 | **Suggestions**: 2 (both addressed)
+
+Specialists: static analysis (ament_cpplint + ament_uncrustify, clean) · two disjoint-lens
+Claude adversarial passes (both no must-fix; all source/arithmetic/Calder-reference claims
+verified). 245 tests, 0 failures.
+
+### Findings
+- [x] (suggestion) divergences doc said angle error is beamwidth/√12 but code uses /12 (self-contradictory) — corrected prose + added modeling note — `cube_bathymetry/docs/divergences_from_calder.md:73`
+- [x] (suggestion) new range params unvalidated; negative percent/floor would silently corrupt TPU — added non-negative clamp + warn — `cube_bathymetry/src/detections_to_pointcloud.cpp:90`
