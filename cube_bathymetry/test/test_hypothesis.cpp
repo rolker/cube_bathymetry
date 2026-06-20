@@ -184,4 +184,21 @@ TEST_F(HypothesisTest, MultipleUpdatesConverge)
   EXPECT_LT(h.current_variance, 0.5);
 }
 
+// Characterization (#30): the port computes |error| up front, collapsing Calder's
+// signed +/- 2*h*error monitor branches into one. That is behavior-preserving only
+// if the monitor is symmetric in the sign of the deviation. Symmetric deviations
+// about the prediction must give identical accept/reject, Bayes factor and runlength.
+TEST_F(HypothesisTest, MonitorIsSymmetricInErrorSign)
+{
+  Hypothesis h_plus(10.0f, 1.0f);
+  Hypothesis h_minus(10.0f, 1.0f);
+
+  bool r_plus = h_plus.monitor(10.0f + 2.5f, 1.0f, params);
+  bool r_minus = h_minus.monitor(10.0f - 2.5f, 1.0f, params);
+
+  EXPECT_EQ(r_plus, r_minus);
+  EXPECT_DOUBLE_EQ(h_plus.cumulative_bayes_factor, h_minus.cumulative_bayes_factor);
+  EXPECT_EQ(h_plus.sequence_length, h_minus.sequence_length);
+}
+
 }  // namespace cube

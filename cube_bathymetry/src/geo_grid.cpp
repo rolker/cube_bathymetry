@@ -47,8 +47,7 @@ bool GeoGrid::insert(const std::vector<GeoSounding> & soundings)
 bool GeoGrid::insert(const GeoSounding & geo_sounding)
 {
   const Sounding & sounding = geo_sounding.sounding;
-  double max_variance_allowed = parameters_.iho_fixed + parameters_.iho_percent * sounding.depth *
-    sounding.depth / (CONF_95PC * CONF_95PC);
+  double max_variance_allowed = parameters_.maxVarianceAllowed(sounding.depth);
   double ratio = max_variance_allowed / sounding.vertical_error;
 
   /* Ensure some spreading on point */

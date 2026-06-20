@@ -70,6 +70,13 @@ namespace cube
     void setIHOLimits(std::string order);
     void setGridResolution(CellSizes sizes);
 
+  /// Maximum allowable propagation variance for a sounding at the given depth:
+  /// (iho_fixed + iho_percent*depth^2) / CONF_95PC^2.  The *whole* IHO numerator
+  /// is divided by CONF_95PC^2 (Calder, cube_grid.c:1909-1911).  Kept in one place
+  /// so the operator-precedence trap that dropped iho_fixed out of the division
+  /// (#46) cannot recur in the two grid call sites.
+    double maxVarianceAllowed(double depth) const;
+
   /// Value used to indicate 'no data' (typ. FLT_MAX)
     float no_data_value = std::numeric_limits < float > ::quiet_NaN();
 

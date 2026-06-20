@@ -188,4 +188,47 @@ TEST_F(ErrorModelTest, EmptyDetectionsReturnsEmpty)
   EXPECT_TRUE(soundings.empty());
 }
 
+// Regression for #46 bug 1: the horizontal sound-speed-profile term (Eqn 3.77)
+// must scale as svp_sdev^2 (a variance), not svp_sdev^4. The original double-
+// squared it (used sound_speed_profile_variance = svp_sdev^2 and then squared the
+// whole expression). Every horizontal term that depends on the SVP error scales as
+// svp_sdev^2 in the correct model, so the SVP-dependent part of horizontal_error
+// must be exactly quadratic: net(2s) == 4*net(s). The bug makes it grow faster.
+TEST_F(ErrorModelTest, ProfileErrorScalesQuadraticallyWithSvp)
+{
+  auto platform = makePlatform();
+  // Off-nadir beam so the profile and ang_svp terms are active (both vanish at
+  // nadir). pitch=0 keeps the geometry simple.
+  auto det = makeDetections({0.6f}, 0.02f);
+
+  // Isolate svp_sdev: zero every other horizontal-error contributor so the only
+  // svp-dependent terms left are profile_err (the fixed one) and ang_svp (inside
+  // swath_angle_error), and float cancellation in the net() subtraction stays
+  // negligible.
+  auto horizontalError = [&](double svp) {
+      Vessel v{};
+      v.gps_off_sdev = 0.0; v.gps_latency_sdev = 0.0; v.gps_drms = 0.0;
+      v.gps_latency = 0.0; v.imu_off_sdev = 0.0; v.imu_rp_align_sdev = 0.0;
+      v.imu_g_align_sdev = 0.0; v.imu_latency_sdev = 0.0; v.tx_latency_sdev = 0.0;
+      v.roll_sdev = 0.0; v.pitch_sdev = 0.0; v.gyro_sdev = 0.0;
+      v.surf_ss_sdev = 0.0; v.sog_sdev = 0.0;
+      v.svp_sdev = svp;
+      Device d{};
+      d.across_track_beamwidth = 0.0;  // kill the beamwidth angle term (ang_meas)
+      ErrorModel em(v, d);
+      auto soundings = em.compute(det, platform);
+      return static_cast<double>(soundings.at(0).horizontal_error);
+    };
+
+  const double he0 = horizontalError(0.0);  // svp-independent baseline
+  const double net1 = horizontalError(1.0) - he0;
+  const double net2 = horizontalError(2.0) - he0;
+
+  ASSERT_GT(net1, 0.0);  // the svp terms genuinely contribute at this beam angle
+  // Both surviving svp terms are quadratic in svp_sdev in the correct model, so
+  // their sum is too: net2 == 4*net1. The bug makes profile_err quartic, which
+  // pushes the ratio to ~13.6.
+  EXPECT_NEAR(net2, 4.0 * net1, 1e-3 * net1);
+}
+
 }  // namespace cube

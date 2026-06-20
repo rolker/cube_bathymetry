@@ -300,7 +300,11 @@ double ErrorModel::horizontal_positioning_error(
 {
   double meas_angle = beam_angle(detections, i);
 
-  double profile_err = static_error_sources_.sound_speed_profile_variance * sounding.depth /
+  // Calder forms this term from the SVP standard deviation (svp_sdev) and then
+  // squares once (errmod_full.c:663-664). sound_speed_profile_variance is already
+  // svp_sdev^2, so using it here and squaring the whole expression would carry
+  // svp_sdev^4. Use svp_sdev directly. See #46.
+  double profile_err = vessel_.svp_sdev * sounding.depth /
     (platform.mean_speed * cos(meas_angle));
   profile_err *= profile_err;
 

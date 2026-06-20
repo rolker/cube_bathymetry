@@ -126,4 +126,31 @@ TEST(ParametersTest, DefaultParameterValues)
   EXPECT_EQ(p.extractor, CUBE_LHOOD);
 }
 
+// Regression for #46 bug 2: the whole IHO numerator (iho_fixed + iho_percent*z^2)
+// must be divided by CONF_95PC^2 -- not just the depth-dependent term. The two grid
+// call sites previously relied on operator precedence, which left iho_fixed outside
+// the division. This pins the corrected value via the shared helper.
+TEST(ParametersTest, MaxVarianceAllowedDividesWholeNumerator)
+{
+  Parameters p(CellSizes(1.0f), "order1a");  // iho_fixed=0.25, iho_percent=1.69e-4
+  const double conf2 = 1.96 * 1.96;          // CONF_95PC^2 = 3.8416
+
+  // depth=0 isolates the fixed term: correct = iho_fixed/conf2 = 0.0651,
+  // whereas the precedence bug would return iho_fixed = 0.25 undivided.
+  EXPECT_NEAR(p.maxVarianceAllowed(0.0), 0.25 / conf2, 1e-9);
+  EXPECT_GT(std::abs(p.maxVarianceAllowed(0.0) - 0.25), 0.18);  // far from the bug value
+
+  // depth=100: (0.25 + 1.69) / 3.8416 = 0.50500, not the bug value
+  // 0.25 + 1.69/3.8416 = 0.68992.
+  EXPECT_NEAR(p.maxVarianceAllowed(100.0), 0.50500, 1e-4);
+  const double bug_value = p.iho_fixed + p.iho_percent * 100.0 * 100.0 / conf2;
+  EXPECT_NEAR(bug_value, 0.68992, 1e-4);  // documents what the precedence bug produced
+  EXPECT_GT(std::abs(p.maxVarianceAllowed(100.0) - bug_value), 0.18);
+
+  // Numerator scales with depth^2 inside the single division.
+  EXPECT_NEAR(
+    p.maxVarianceAllowed(50.0),
+    (p.iho_fixed + p.iho_percent * 50.0 * 50.0) / conf2, 1e-12);
+}
+
 }  // namespace cube

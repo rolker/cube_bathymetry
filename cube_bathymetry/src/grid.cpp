@@ -62,8 +62,7 @@ bool Grid::insert(const MapSounding & sounding)
     return false;
   }
 
-  double max_variance_allowed = parameters_.iho_fixed + parameters_.iho_percent *
-    sounding.sounding.depth * sounding.sounding.depth / (CONF_95PC * CONF_95PC);
+  double max_variance_allowed = parameters_.maxVarianceAllowed(sounding.sounding.depth);
   double ratio = max_variance_allowed / sounding.sounding.vertical_error;
 
   /* Ensure some spreading on point */
