@@ -94,29 +94,36 @@ before constructing `ErrorModel`.
 
 ### Step 5 — Add/extend tests in `test_error_model.cpp`
 
-New test cases (in the `ErrorModelTest` fixture):
+New test cases (in the `ErrorModelTest` fixture). Note: `range_error()` is
+`private`, so all range assertions go through the public `compute()` path
+(per review-plan must-fixes) — they isolate the range term by zeroing the other
+`Vessel`/`Device` contributors at a nadir beam, as `ProfileError...` does.
 
-1. **`TideTermsOffByDefaultEllipsoidReferenced`** — construct with default Vessel
-   (ellipsoidal_referenced=true), and a custom Vessel with
-   ellipsoidal_referenced=false but same other fields. Verify:
-   - default `vertical_error` == ellipsoidal mode output
-   - tidal-datum mode produces a *larger* `vertical_error` (tide variances add)
+1. **`TideTermsOffByDefaultEllipsoidReferenced`** — default Vessel vs a Vessel with
+   `ellipsoidal_referenced=false` (other fields zeroed). Verify the ellipsoidal
+   budget collapses to 0, datum mode equals `tide_measured_sdev² + tide_predicted_sdev²`
+   (8e-4), and datum mode is strictly larger.
 
-2. **`RangeErrorParameterized`** — construct Device with range_error_percent=0.01
-   and floor=0.0, compute at a shallow and deep beam; verify vertical_error scales
-   correctly (i.e., changing percent changes the result).
+2. **`RangeErrorParameterizedByDevice`** — through `compute()`, vary
+   `range_error_percent` and confirm `vertical_error` equals `(percent·|depth|)²`
+   (and quadruples when percent doubles).
 
-3. **`RangeErrorFloorDominatesAtShallowDepth`** — set percent=0.005, floor=0.2;
-   at depth ≈0.02 m the floor should dominate; verify `range_error(0.02)` ≈ 0.04
-   (floor² = 0.04).
+3. **`RangeErrorFloorDominatesAtShallowDepth`** — at a very shallow depth where the
+   percent term is tiny, confirm a larger `range_error_floor_m` yields a larger
+   `vertical_error`, each pinned to `floor²`. Routed through `compute()`, not the
+   private method (review-plan must-fix).
 
-4. **`DefaultsPreserveExistingBehavior`** — run all existing tests implicitly pass
-   (they already use default Vessel/Device, so the defaults must match prior
-   behavior). No code change, just note this constraint.
+4. **`DefaultsTideOffAndRangeBehaviourPinned`** — re-scoped from the original
+   "DefaultsPreserveExistingBehavior" (review-plan must-fix: the range default
+   deliberately changes 5%→0.5%, so prior range behaviour is *not* preserved).
+   Pins (a) a default Vessel == an explicitly ellipsoidal one (tide off by default),
+   and (b) the new default range behaviour `max(0.005·|depth|, 0.05)²` at a
+   percent-dominated and a floor-dominated depth.
 
-5. **`IHOBudgetCheck_Order1a`** — at depths 2, 10, 20 m with default vessel/device,
-   verify `vertical_error < maxVarianceAllowed(depth)` for IHO Order 1a. This
-   pins the defaults against the acceptance criterion from the issue.
+5. **`DefaultsInsideIHOOrder1aBudget`** — at depths 2, 10, 20 m with default
+   vessel/device, verify the default `vertical_error` sits inside the IHO Order 1a
+   1σ budget (`maxVarianceAllowed(depth)·CONF_95PC²`). Pins the defaults against the
+   issue's acceptance criterion.
 
 ### Step 6 — Create divergences doc
 
