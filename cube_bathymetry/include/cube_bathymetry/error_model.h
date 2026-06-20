@@ -39,6 +39,14 @@ namespace cube
 
   /// degrees
     double along_track_beamwidth = 2.0;
+
+  /// Range error as a fraction of depth (0.005 == 0.5%). Sonar-device specific.
+  /// Replaces Calder's hardcoded 5% placeholder. See docs/divergences_from_calder.md.
+    double range_error_percent = 0.005;
+
+  /// Absolute floor on range error, m. Prevents a zero error near the surface
+  /// where the percentage term vanishes.
+    double range_error_floor_m = 0.05;
   };
 
   struct Platform
@@ -108,6 +116,13 @@ namespace cube
     double  sog_sdev = 0.02;  /* SDev of speed-over-ground meas., m/s */
     double  tide_measured_sdev = 0.02;  /* SDev of tide guage readings, m */
     double  tide_predicted_sdev = 0.02;  /* SDev of tide prediction error, m */
+
+    /* When true (default), the grid is ellipsoid-referenced and no tidal datum
+     * reduction is applied, so the tide_*_sdev terms are intentionally omitted
+     * from the vertical error budget. Set false to enable tidal-datum mode (the
+     * tide variances are then summed into vertical_reduction). See
+     * docs/divergences_from_calder.md and #47. */
+    bool ellipsoidal_referenced = true;
   };
 
   struct StaticErrorSources
