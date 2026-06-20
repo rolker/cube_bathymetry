@@ -267,12 +267,15 @@ private:
 
     pointcloud.height = 1;
     pointcloud.width = soundings.size();
-    pointcloud.point_step = 20;  // 5 fields * 4 bytes each
+    pointcloud.point_step = 24;  // 6 fields * 4 bytes each
     pointcloud.row_step = pointcloud.point_step * pointcloud.width;
     pointcloud.is_dense = true;
     pointcloud.is_bigendian = false;
 
-    pointcloud.fields.resize(5);
+    // Field order: x, y, z, intensity, vertical_uncertainty, horizontal_uncertainty.
+    // intensity (per-beam backscatter) sits with the geometry, ahead of the
+    // uncertainty fields. Consumers read by field name, so the order is safe.
+    pointcloud.fields.resize(6);
     pointcloud.fields[0].name = "x";
     pointcloud.fields[0].offset = 0;
     pointcloud.fields[0].datatype = sensor_msgs::msg::PointField::FLOAT32;
@@ -285,14 +288,18 @@ private:
     pointcloud.fields[2].offset = 8;
     pointcloud.fields[2].datatype = sensor_msgs::msg::PointField::FLOAT32;
     pointcloud.fields[2].count = 1;
-    pointcloud.fields[3].name = "vertical_uncertainty";
+    pointcloud.fields[3].name = "intensity";
     pointcloud.fields[3].offset = 12;
     pointcloud.fields[3].datatype = sensor_msgs::msg::PointField::FLOAT32;
     pointcloud.fields[3].count = 1;
-    pointcloud.fields[4].name = "horizontal_uncertainty";
+    pointcloud.fields[4].name = "vertical_uncertainty";
     pointcloud.fields[4].offset = 16;
     pointcloud.fields[4].datatype = sensor_msgs::msg::PointField::FLOAT32;
     pointcloud.fields[4].count = 1;
+    pointcloud.fields[5].name = "horizontal_uncertainty";
+    pointcloud.fields[5].offset = 20;
+    pointcloud.fields[5].datatype = sensor_msgs::msg::PointField::FLOAT32;
+    pointcloud.fields[5].count = 1;
 
     pointcloud.data.resize(pointcloud.row_step * pointcloud.height);
     float * data_ptr = reinterpret_cast<float *>(pointcloud.data.data());
@@ -301,9 +308,10 @@ private:
       data_ptr[0] = sounding.sonar_relative_position.x;
       data_ptr[1] = sounding.sonar_relative_position.y;
       data_ptr[2] = sounding.sonar_relative_position.z;
-      data_ptr[3] = sounding.vertical_error;
-      data_ptr[4] = sounding.horizontal_error;
-      data_ptr += 5;  // Move to the next point
+      data_ptr[3] = sounding.intensity;
+      data_ptr[4] = sounding.vertical_error;
+      data_ptr[5] = sounding.horizontal_error;
+      data_ptr += 6;  // Move to the next point
     }
 
     pointcloud_publisher_->publish(pointcloud);

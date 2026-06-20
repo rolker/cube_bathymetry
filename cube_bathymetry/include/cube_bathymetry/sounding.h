@@ -48,6 +48,14 @@ namespace cube
     sonar_relative_position.x = range * -sin(tx_angle);
     sonar_relative_position.y = range * sin(detections.rx_angles[i]);
     sonar_relative_position.z = range * cos(tx_angle) * cos(detections.rx_angles[i]);
+
+    // Per-beam acoustic intensity (backscatter). Sonar-reported and usually
+    // uncalibrated; for the Kongsberg M3 (via kongsberg_em_bridge) it is
+    // reflectivity in dB. Left NaN when the source omits intensities so a
+    // missing value is never mistaken for a real measurement.
+    if(i < detections.intensities.size()) {
+        intensity = detections.intensities[i];
+    }
     }
 
   /// Depth relative to the sea surface. Positive is up above sea surface
@@ -55,6 +63,9 @@ namespace cube
     float depth = std::nan("");
     float vertical_error = 0.0;
     float horizontal_error = 0.0;
+
+  /// Per-beam acoustic intensity / backscatter (NaN when not reported).
+    float intensity = std::nan("");
 
   // Position relative to the sonar head, in meters.
   // For a typical down looking sonar, x is along the heading, y is to starboard, and z is down.
