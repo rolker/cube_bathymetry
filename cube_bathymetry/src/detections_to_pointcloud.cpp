@@ -76,6 +76,23 @@ public:
     }
     tide_frame_ = get_parameter("tide_frame").as_string();
 
+    // Error-model tuning (platform-specific; set via params/yaml).
+    // ellipsoidal_referenced=true (default) keeps the grid ellipsoid-referenced
+    // and omits tide terms; set false for tidal-datum mode. range_error_percent
+    // / range_error_floor_m parameterize the sonar's range measurement error.
+    if(!has_parameter("ellipsoidal_referenced")) {
+      declare_parameter("ellipsoidal_referenced", ellipsoidal_referenced_);
+    }
+    ellipsoidal_referenced_ = get_parameter("ellipsoidal_referenced").as_bool();
+    if(!has_parameter("range_error_percent")) {
+      declare_parameter("range_error_percent", range_error_percent_);
+    }
+    range_error_percent_ = get_parameter("range_error_percent").as_double();
+    if(!has_parameter("range_error_floor_m")) {
+      declare_parameter("range_error_floor_m", range_error_floor_m_);
+    }
+    range_error_floor_m_ = get_parameter("range_error_floor_m").as_double();
+
     detections_subscriber_ = create_subscription<marine_acoustic_msgs::msg::SonarDetections>(
       "detections",
       rclcpp::SensorDataQoS(),
@@ -97,7 +114,10 @@ public:
     );
 
     cube::Vessel vessel;
+    vessel.ellipsoidal_referenced = ellipsoidal_referenced_;
     cube::Device device;
+    device.range_error_percent = range_error_percent_;
+    device.range_error_floor_m = range_error_floor_m_;
     error_model_ = std::make_shared<cube::ErrorModel>(vessel, device);
 
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
@@ -287,6 +307,10 @@ private:
   std::string base_link_frame_ = "base_link";
   std::string level_frame_ = "base_link_north_up";  // level, north-aligned
   std::string tide_frame_ = "map_tide";
+
+  bool ellipsoidal_referenced_ = true;
+  double range_error_percent_ = 0.005;  // fraction of depth (0.5%)
+  double range_error_floor_m_ = 0.05;   // absolute floor, m
 
   std::mutex odom_mutex_;
   float last_vessel_speed_ = std::nanf("");

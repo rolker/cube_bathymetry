@@ -21,7 +21,10 @@
 
 
 #include "cube_bathymetry/error_model.h"
+#include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace cube
 {
@@ -33,6 +36,17 @@ ErrorModel::ErrorModel(const Vessel & vessel, const Device & device)
     vessel.draft_sdev * vessel.draft_sdev +
     vessel.ddraft_sdev * vessel.ddraft_sdev +
     vessel.loading_sdev * vessel.loading_sdev;
+
+  // Tide terms (Calder Eqn. 3.63): only included when the grid is reduced to a
+  // tidal datum. The grid here is ellipsoid-referenced by default (#47), so the
+  // tide_*_sdev terms are intentionally omitted and swath_vertical() is
+  // unchanged. Setting ellipsoidal_referenced = false adds them back here, so
+  // the rest of the model needs no awareness of the mode. See the divergences doc.
+  if(!vessel.ellipsoidal_referenced) {
+    static_error_sources_.vertical_reduction +=
+      vessel.tide_measured_sdev * vessel.tide_measured_sdev +
+      vessel.tide_predicted_sdev * vessel.tide_predicted_sdev;
+  }
 
   static_error_sources_.heave_fixed = vessel.heave_fixed_sdev * vessel.heave_fixed_sdev;
   static_error_sources_.base_roll_variance = vessel.roll_sdev * vessel.roll_sdev +
@@ -233,8 +247,12 @@ double ErrorModel::swath_vertical(
 
 double ErrorModel::range_error(double depth) const
 {
-  // todo: replace with device specific info
-  auto error = depth * 0.05;
+  // Range error as the larger of a depth-proportional term and an absolute
+  // floor (device-specific; see Device::range_error_percent / _floor_m and the
+  // divergences doc). depth is negative by convention, so take the magnitude;
+  // the floor prevents a zero error near the surface.
+  auto error = std::max(std::abs(depth) * device_.range_error_percent,
+      device_.range_error_floor_m);
   return error * error;
 }
 
