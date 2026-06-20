@@ -57,6 +57,17 @@ Remaining design step (open in #31): converge `cube_bathymetry_node` and
 disappears (the other half of
 [#30](https://github.com/rolker/cube_bathymetry/issues/30)).
 
+## Divergences from Calder's CUBE
+
+This package is a faithful port of Brian Calder's CUBE algorithm (vendored under
+`original_cube/`), but it differs from the reference in a few deliberate ways —
+the ellipsoid-referencing tide decision above among them. Where and why the port
+diverges on purpose (datum-aware tide terms, parameterized device errors, the
+unported IHO f(z) model, `CONF_99PC`, and the nomination-uncertainty choice) is
+documented in
+[`cube_bathymetry/docs/divergences_from_calder.md`](cube_bathymetry/docs/divergences_from_calder.md),
+the deliverable of [#30](https://github.com/rolker/cube_bathymetry/issues/30).
+
 ## Configuring frames per platform (REQUIRED)
 
 `detections_to_pointcloud`'s frame parameters default to the **unprefixed**
