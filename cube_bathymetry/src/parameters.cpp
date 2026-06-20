@@ -62,6 +62,11 @@ void Parameters::setIHOLimits(std::string order)
   iho_percent *= iho_percent;
 }
 
+double Parameters::maxVarianceAllowed(double depth) const
+{
+  return (iho_fixed + iho_percent * depth * depth) / (CONF_95PC * CONF_95PC);
+}
+
 void Parameters::setGridResolution(CellSizes sizes)
 {
   /* Compute distance scale based on node spacing */
