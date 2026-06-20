@@ -12,10 +12,15 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. |
 
-`soundings` carries five `float32` fields per point: `x`, `y`, `z`,
-`vertical_uncertainty`, `horizontal_uncertainty`. The positions are in the
-detections' own frame (`header.frame_id`); `cube_bathymetry_node` georeferences
-them with a TF lookup `map_frame ← header.frame_id` at the ping stamp.
+`soundings` carries six `float32` fields per point, in order: `x`, `y`, `z`,
+`intensity`, `vertical_uncertainty`, `horizontal_uncertainty`. `intensity` is the
+per-beam acoustic backscatter copied from `SonarDetections.intensities` — usually
+uncalibrated, but reflectivity in dB for the Kongsberg M3 (via `kongsberg_em_bridge`);
+it is `NaN` when the source omits intensities. The positions are in the detections'
+own frame (`header.frame_id`); `cube_bathymetry_node` georeferences them with a TF
+lookup `map_frame ← header.frame_id` at the ping stamp. Consumers read fields **by
+name** (`cube_bathymetry_node` and `bag_to_geotiff` both use named PointCloud2
+iterators), so the field order is not load-bearing.
 
 ## Data flow & pose sourcing (design: #31)
 

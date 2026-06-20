@@ -454,4 +454,36 @@ TEST_F(ErrorModelTest, DefaultsInsideIHOOrder1aBudget)
   }
 }
 
+// --- #52: per-beam backscatter carried into the sounding ----------------------
+
+// compute() must copy SonarDetections.intensities[i] onto each sounding so the
+// downstream point cloud can publish a backscatter field (x,y,z,intensity,...).
+TEST_F(ErrorModelTest, CarriesPerBeamIntensity)
+{
+  ErrorModel em(vessel, device);
+  auto platform = makePlatform();
+  auto det = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  det.intensities = {-12.5f, -20.0f, -8.0f};  // e.g. reflectivity, dB
+
+  auto soundings = em.compute(det, platform);
+  ASSERT_EQ(soundings.size(), 3u);
+  EXPECT_FLOAT_EQ(soundings[0].intensity, -12.5f);
+  EXPECT_FLOAT_EQ(soundings[1].intensity, -20.0f);
+  EXPECT_FLOAT_EQ(soundings[2].intensity, -8.0f);
+}
+
+// When the source omits intensities the field must be NaN, never a fabricated
+// value (so a missing measurement is distinguishable downstream).
+TEST_F(ErrorModelTest, IntensityIsNaNWhenAbsent)
+{
+  ErrorModel em(vessel, device);
+  auto platform = makePlatform();
+  auto det = makeDetections({0.0f}, 0.02f);  // no intensities populated
+  ASSERT_TRUE(det.intensities.empty());
+
+  auto soundings = em.compute(det, platform);
+  ASSERT_EQ(soundings.size(), 1u);
+  EXPECT_TRUE(std::isnan(soundings[0].intensity));
+}
+
 }  // namespace cube
