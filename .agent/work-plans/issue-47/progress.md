@@ -19,3 +19,15 @@ issue: 47
 - [ ] Add inline comment at `error_model.cpp` constructor lines 32–35 explaining why tide terms are omitted (ellipsoid-referenced; references issue #47).
 - [ ] Link divergences doc from package README and from issue #30.
 - [ ] Confirm existing `test_error_model.cpp` round-trip tests still pass unchanged when defaults are preserved.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-20 19:45 +00:00
+**By**: Claude Code Agent (Claude Sonnet 4.6)
+
+**Plan**: `.agent/work-plans/issue-47/plan.md` at `8672188`
+**Branch**: feature/issue-47 at `8672188`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
