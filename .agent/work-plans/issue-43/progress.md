@@ -20,3 +20,16 @@ issue: 43
 - [ ] Ensure `DetectionsProjector` headers do not pull in `rclcpp` (the existing `cube_bathymetry` library target does not link rclcpp — keep that boundary clean).
 - [ ] Document intensity NaN contract in `DetectionsProjector` API comments (`intensity` is NaN when source omits it — do not interpret as zero).
 - [ ] Use synthetic `SonarDetections` + prepopulated `BufferCore` for regression test (more reliable than bag-replay comparison).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-20 19:15 -04:00
+**By**: Claude Code Agent (Claude Sonnet 4.6)
+
+**Plan**: `.agent/work-plans/issue-43/plan.md` at `b6425e7`
+**Branch**: feature/issue-43 at `b6425e7`
+**Phases**: single
+
+### Open questions
+- [ ] `tf2::BufferCore` vs `tf2_ros::Buffer` in projector: confirm `tf2_ros::fromMsg` (for stamp conversion) does not pull in rclcpp through the library — if it does, convert stamp manually from nanoseconds.
+- [ ] `bag_to_geotiff` projector params from CLI: individual `-f` flags for ~10 params may be unwieldy — consider a YAML/JSON config flag instead (usability only, correctness unaffected by default values).
