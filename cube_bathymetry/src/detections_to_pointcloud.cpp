@@ -93,6 +93,24 @@ public:
     }
     range_error_floor_m_ = get_parameter("range_error_floor_m").as_double();
 
+    // Guard against typo'd configs: a negative percent or floor would feed a
+    // bogus (still-positive, since squared) range variance silently. Clamp to
+    // non-negative and warn rather than propagate a nonsense uncertainty.
+    if(range_error_percent_ < 0.0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "range_error_percent (%g) is negative; clamping to 0.0",
+        range_error_percent_);
+      range_error_percent_ = 0.0;
+    }
+    if(range_error_floor_m_ < 0.0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "range_error_floor_m (%g) is negative; clamping to 0.0",
+        range_error_floor_m_);
+      range_error_floor_m_ = 0.0;
+    }
+
     detections_subscriber_ = create_subscription<marine_acoustic_msgs::msg::SonarDetections>(
       "detections",
       rclcpp::SensorDataQoS(),

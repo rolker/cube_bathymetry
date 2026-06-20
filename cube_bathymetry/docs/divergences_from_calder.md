@@ -70,13 +70,18 @@ parameters with reasonable defaults:
     old 5 % reached ~1.0 m at 20 m, larger than the entire allowance. Pinned by
     `ErrorModelTest.DefaultsInsideIHOOrder1aBudget`.
 
-- **Angle error** — kept as the generic `beamwidth/√12` (uniform-distribution σ
-  over the beamwidth) using the **live per-ping** `rx_beamwidths[i]` from the
-  `SonarDetections` message, with the static `Device::across_track_beamwidth` as
-  fallback (`error_model.cpp`, `swath_angle_error`). This is a reasonable generic
-  equivalent to Calder's per-device `device_compute_angerr`, and uses live
-  per-beam data Calder did not have. No behavioural change in #47 — documented
-  here only.
+- **Angle error** — kept as the generic `beamwidth/12` σ approximation using the
+  **live per-ping** `rx_beamwidths[i]` from the `SonarDetections` message, with the
+  static `Device::across_track_beamwidth` as fallback (`error_model.cpp`,
+  `swath_angle_error`). This is a generic stand-in for Calder's per-device
+  `device_compute_angerr`, and uses live per-beam data Calder did not have. No
+  behavioural change in #47 — documented here only.
+
+  > **Modeling note (not changed in #47):** the code uses `beamwidth / 12` as the
+  > angular σ, *not* the textbook uniform-distribution σ of `beamwidth / √12`.
+  > Whether `/12` is intended or should be `/√12` is an open question; it is left
+  > as-is here (no behavioural change) and tracked as a follow-up alongside the
+  > deg/rad fallback inconsistency below.
 
   > **Known pre-existing inconsistency (not fixed in #47):** the static fallback
   > `across_track_beamwidth / 12` consumes `across_track_beamwidth` in **degrees**,
