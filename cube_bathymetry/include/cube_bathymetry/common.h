@@ -78,9 +78,24 @@ namespace cube
     float depth;
     float uncertainty;
 
+  /// Per-beam acoustic intensity (backscatter), carried through the median
+  /// pre-queue bound to its depth so the two never mismatch when the queue is
+  /// sorted (ADR-0007 D2/D3). NaN when the beam has no reported intensity.
+    float intensity;
+
+  /// Per-beam receive/steering angle (radians) accompanying the intensity, the
+  /// {raw intensity, angle} sufficient-statistics pair (ADR-0007 D3). NaN when
+  /// not reported. NOTE: extending this #pragma pack(push,1) struct from 8 to
+  /// 16 bytes is layout-safe -- no caller depends on sizeof(DepthAndUncertainty)
+  /// (the only sizeof uses are raster-band strides, 2*sizeof(float)).
+    float beam_angle;
+
     DepthAndUncertainty(float depth = std::numeric_limits < float > ::quiet_NaN(),
-      float uncertainty = std::numeric_limits < float > ::quiet_NaN()) : depth(depth),
-      uncertainty(uncertainty) {
+      float uncertainty = std::numeric_limits < float > ::quiet_NaN(),
+      float intensity = std::numeric_limits < float > ::quiet_NaN(),
+      float beam_angle = std::numeric_limits < float > ::quiet_NaN())
+      : depth(depth), uncertainty(uncertainty), intensity(intensity),
+      beam_angle(beam_angle) {
     }
   };
 #pragma pack(pop)

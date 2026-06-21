@@ -696,14 +696,19 @@ int main(int argc, char *argv[])
 
       if(stretch_factor == 1) {
         // No stretching needed — write source data directly
+        // Pixel-space byte stride = the size of one DepthAndUncertainty so the
+        // read walks consecutive elements' .depth/.uncertainty. This MUST track
+        // the struct size: #54 grew it (added intensity + beam_angle) from 8 to
+        // 16 bytes, so a hardcoded 2*sizeof(float) would now stride into the
+        // wrong field. Use sizeof(DepthAndUncertainty).
         dataset->GetRasterBand(1)->RasterIO(GF_Write, column_offset,
           gdal_row, src_cols, 1,
           &(values[src_row_offset].depth), src_cols, 1,
-          GDT_Float32, 2 * sizeof(float), 0);
+          GDT_Float32, sizeof(cube::DepthAndUncertainty), 0);
         dataset->GetRasterBand(2)->RasterIO(GF_Write, column_offset,
           gdal_row, src_cols, 1,
           &(values[src_row_offset].uncertainty), src_cols, 1,
-          GDT_Float32, 2 * sizeof(float), 0);
+          GDT_Float32, sizeof(cube::DepthAndUncertainty), 0);
       } else {
         // Polar-scaled row: interpolate to fill the wider raster
 
