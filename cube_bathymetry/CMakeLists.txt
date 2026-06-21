@@ -189,6 +189,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
+
+  ament_add_gtest(test_store_import test/test_store_import.cpp)
+  target_link_libraries(test_store_import cube_bathymetry)
 endif()
 
 ament_export_dependencies(rclcpp)
