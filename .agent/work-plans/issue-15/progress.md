@@ -240,3 +240,130 @@ review.
 - [ ] Follow-on shape: one umbrella issue for external-prior load + touchdown interpolation
   + Grid/GeoGrid geometry, or split prior-load from interpolation. (Recommend one umbrella —
   they only deliver value together.)
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-21 10:05 -04:00
+**By**: Claude Code Agent (Claude Opus)  <!-- independent fresh-context dispatch (#490); not the plan author's self-review -->
+
+**Plan**: `.agent/work-plans/issue-15/plan.md` at `7abd050`
+**PR**: PR-less (--issue mode)
+**Verdict**: approve-with-suggestions
+
+This is the **third** plan review. v1 was changes-requested (used the vertical `.z`
+component — an obliquity error). v2 was changes-requested (used `depth/cos(angle)` plus a
+self-bootstrap-from-running-estimates path that does not exist in the original). v3 was
+re-verified line-by-line against `original_cube/` for this review; **every load-bearing
+claim holds**, and the formula is finally correct.
+
+### Source verification (independently re-read, not assumed)
+
+| v3 claim | Source | Result |
+|---|---|---|
+| Offset site `offset = node->pred_depth − snd->range`, queued `snd->depth+offset` | `cube_node.c:1846,1847,1864` | ✓ verbatim |
+| `snd->range` OVERWRITTEN before insert with interpolated touchdown pred_depth | `mapsheet_cube.c:2418-2444` (comment + `data[snd].range = cube_grid_interpolate(...de,dn...)`) | ✓ verbatim |
+| Interpolation is at TOUCHDOWN `(de,dn)` from sounding east/north, not the node | `mapsheet_cube.c:2426,2434-2435` | ✓ |
+| `cube_grid_interpolate` bilinearly blends 4 corners' `pred_depth`, returns `0.0f` if any corner no-data | `cube_grid.c:2360,2374-2395,2379-2384` | ✓ |
+| `depth/cos(angle)` is the *error-model* range, computed at file-load while depth still positive, negated after — a different quantity, overwritten before the offset runs | `sounding.c:1268,1280` | ✓ irrelevant at offset site; **no `1/cos²`** |
+| `cube_grid_insert_depths` never interpolates / never sets pred_depth — only calls `cube_node_insert` (NO self-bootstrap) | `cube_grid.c:1877-1992` (only `cube_node_insert` at :1981) | ✓ — v1/v2's invented path confirmed absent |
+| `pred_depth` seeded ONLY from external prior array via `cube_grid_initialise` + base-hypothesis | `cube_grid.c:1665,1712,1730` | ✓ |
+| `cube_node_set_preddepth` is a trivial 1:1 setter; doc: INVALID ⇒ no slope correction, NaN ⇒ don't incorporate | `cube_node.c:1066-1093` | ✓ |
+| Port `predicted_depth_` is negative-down, blunder-checked vs `sounding.depth`, defaults `INVALID_DATA`, set NOWHERE | `node.cpp:93-104`, `node.h:198,202`, `common.h:38` | ✓ — confirmed inert |
+| Port has no `Sounding.range`; `.z` (`sonar_relative_position.z = range*cos(tx)*cos(rx)`) is the v1 vertical-component trap | `sounding.h:50,33-73` | ✓ — new field correctly named `predicted_depth_at_touchdown`, NOT `range` |
+| Commented block's stale `parameters.no_data_value` sentinel vs live `INVALID_DATA` guard | `node.cpp:118` vs `node.cpp:93`; `parameters.h:81` (`no_data_value = quiet_NaN()`) | ✓ — the old sentinel was doubly wrong (NaN, not the live `INVALID_DATA`); plan's correction is right |
+| Both `Grid::insert` and `GeoGrid::insert` call the SAME `Node::insert` and supply no predicted depth | `grid.cpp:122`, `geo_grid.cpp:95` | ✓ — offset-0 safety identical for dense Grid and sparse GeoGrid |
+
+### Findings
+
+- [ ] (suggestion) **Off-boresight test discrimination — tighten the framing.** The corrected
+  offset is **angle-independent**: it depends only on `predicted_depth_` (node) and the
+  `Sounding.predicted_depth_at_touchdown` field, NOT on beam geometry. So the real
+  discriminator against the two prior wrong formulas is *touchdown-position* offset along a
+  known synthetic prior surface, not *beam angle*. The plan's `SlopeCorrectionSurfaceSlopeDelta`
+  (`pred_node=-10`, `pred_touchdown=-10.6`, `depth=-10.5` ⇒ expect `-10.1`) does discriminate —
+  v1 (`.z`) and v2 (`depth/cos`) both depend on beam angle and cannot hit `depth + (pred_node −
+  pred_touchdown)` for a genuinely off-node touchdown — **provided the test reconstructs the
+  expected value independently from `pred_node − pred_touchdown` (the plan says it will) and does
+  NOT echo the implementation**. Just ensure the test prose/asserts key off touchdown *position*,
+  not "off-boresight beam angle"; the plan slightly conflates the two (`plan.md:159,170-171`). —
+  `plan.md:164-185`
+
+- [ ] (suggestion) **`Sounding` default-member-init suffices; "set in both ctors" is redundant.**
+  Both ctors (`sounding.h:35-38,40-59`) only set `depth`; a default member initializer
+  `float predicted_depth_at_touchdown = INVALID_DATA;` covers both with no per-ctor edit. The
+  plan's "set sentinel in both ctors" (`plan.md:137,191`) is harmless but unnecessary — prefer the
+  default initializer (matches how `depth`/`intensity` already default). — `plan.md:132-137`
+
+### Open-question recommendations
+
+- **Sentinel for `predicted_depth_at_touchdown`: use `INVALID_DATA`, NOT the literal `0.0`.**
+  In the original, `range == 0.0` is the no-correction sentinel only because
+  `cube_grid_interpolate` *returns `0.0f`* on no-data corners (`cube_grid.c:2383`) — `0.0` is an
+  artifact of that return convention, not a deliberate semantic choice, and is safe there only
+  because a real seabed `pred_depth` is never exactly `0.0` m. In the port a legitimately
+  interpolated touchdown depth at the shoreline could be `0.0`, which a literal `!= 0.0` guard
+  would wrongly skip. `INVALID_DATA` is the faithful-*intent* port ("no interpolation result ⇒
+  skip") without the value collision. Recommend the plan adopt `INVALID_DATA` (it already prefers
+  this) and add a one-line comment citing `cube_grid.c:2383` so the deviation from the literal
+  `0.0` is documented as intentional, not accidental.
+- **Follow-on shape: one umbrella issue.** External-prior load (`cube_grid_initialise` analog)
+  and per-sounding touchdown interpolation (`cube_grid_interpolate` + the `mapsheet_cube.c` range
+  overwrite) only deliver value together — neither is useful alone — and the Grid-vs-GeoGrid
+  geometry decision belongs to the same producer subsystem. Agree with the plan: one umbrella
+  issue. File it before/with the PR and reference it.
+
+### Producer-deferral judgment (faithful increment vs inert-path-in-disguise)
+
+**This is a faithful, safe increment — not a re-skinned inert-path defect.** Three reasons the
+v2 inert-path objection does not recur here:
+
+1. **The math being landed is now CORRECT**, where v1/v2 landed a *wrong* formula behind the
+   inert guard. v2's defect was "re-enables a path that, if it ran, would corrupt off-boresight
+   depths." v3's path, if it runs, computes the verified `pred_depth(node) − pred_depth(touchdown)`.
+   Landing a correct-but-dormant primitive is categorically different from landing a wrong one.
+2. **The deferred piece is a genuinely separate subsystem**, not a call-site bolt-on. The producer
+   is the entire external-prior pipeline: a prior-bathymetry loader (`cube_grid_initialise`:
+   load array, seed `pred_depth` + base hypothesis per node) plus per-sounding touchdown
+   interpolation (`cube_grid_interpolate` + the `mapsheet_cube.c` `range` overwrite). That is real,
+   sizeable infrastructure the port wholly lacks — deferring it is honest scoping, not a dodge.
+3. **The path is exercised, not silently-dead.** The integration test
+   (`SlopeCorrectionAppliesOnSeededSurface`) seeds `setPredictedDepth` directly and supplies a
+   synthetic `predicted_depth_at_touchdown`, driving the offset end-to-end; the paired cold-grid
+   case proves offset-0. So the block has live test coverage at exactly the cases the prior bugs hid.
+
+**Offset-0-when-unwired is safe for BOTH grids.** `Grid` and `GeoGrid` share the identical
+`Node::insert` (grid.cpp:122 / geo_grid.cpp:95) with the same default-sentinel `predicted_depth_`;
+there is no separate sparse-GeoGrid node path that could diverge. With no producer, both run at
+offset 0 — the defined correct-but-uncorrected behaviour they have today, not a regression.
+
+The one residual reservation (a suggestion, not a blocker): once merged, production CUBE still does
+**no** slope correction until the follow-on lands, so the issue's user-visible "slope correction is
+disabled" symptom persists in deployed behaviour. The plan is explicit and honest about this, files
+the follow-on, and the PR description must say so plainly so a reader doesn't mistake "re-enabled"
+for "active in production." With that framing, the increment is the right call under the Quality
+Standard's "fix it completely at the achievable boundary."
+
+### Evaluation summary
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | 3 small production edits + focused tests; prediction subsystem correctly out-of-scope and tracked. |
+| Issue alignment | Good | Re-enables the offset with the correct algorithm; remaining production-activation gap honestly scoped + filed. |
+| File targeting | Good | `sounding.h`/`node.{h,cpp}`/`test_node.cpp`/`test_grid.cpp` are exactly right; no `grid.cpp`/`geo_grid.cpp` churn (no producer). |
+| Consequences | Good | Both ctors, `setPredictedDepth` primitive, tests, and the follow-on dependency are all captured. |
+| Principle alignment | Good | "Replicate don't invent" (formula + primitive are 1:1 ports; the rejected self-bootstrap is explicitly NOT implemented); "never document from assumptions" (every claim cited and re-verified here); "fix it completely at the achievable boundary." |
+| ADR compliance | Good | No ADR triggered — pure algorithmic faithful-port; `predicted_depth_at_touchdown` is an internal field, not a ROS message change. |
+| ROS conventions | N/A | No topics/params/QoS/lifecycle touched. |
+
+The slope-correction formula is **finally correct**: `offset = predicted_depth_(node) −
+predicted_depth_at_touchdown`, both negative-down predicted-surface depths, with no obliquity
+factor — exactly the original's `node->pred_depth − snd->range` once you account for the
+`mapsheet_cube.c:2434` overwrite. The producer deferral is a faithful, tested, safe increment, not
+the v2 inert-path problem renamed. Approve with two minor suggestions (test-framing precision,
+default-member-init) and the two open-question recommendations above (use `INVALID_DATA`; one
+umbrella follow-on). Ready for implementation.
+
+### Findings checklist (for downstream parsers)
+- [ ] (suggestion) Tighten off-boresight test framing to touchdown-position, reconstruct expected independently — `plan.md:164-185`
+- [ ] (suggestion) Prefer a default member initializer for `predicted_depth_at_touchdown` over per-ctor sets — `plan.md:132-137`
+- [ ] (recommendation) Adopt `INVALID_DATA` sentinel (not literal `0.0`); comment-cite `cube_grid.c:2383` — `plan.md:227-231`
+- [ ] (recommendation) One umbrella follow-on for the external-prior + touchdown-interpolation producer — `plan.md:232-234`
