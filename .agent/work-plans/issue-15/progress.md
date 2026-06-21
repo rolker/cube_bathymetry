@@ -59,3 +59,18 @@ issue: 15
 | ROS conventions | N/A | No topics/params/QoS/lifecycle touched. |
 
 The plan is well-organized and the runtime-inert risk is disclosed, but the core slope-correction formula is incorrect (wrong analog field + wrong sign/obliquity), so implementing as written would silently corrupt off-boresight depths. Fix the formula and its test against the original `pred_depth - depth/cos(angle)` semantics before implementing; resolve the land-dead-path-vs-wire-up-grid decision explicitly.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-21 02:41 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-15/plan.md` at `560b52a` (re-plan, expanded scope — REPLACES the prior plan)
+**Branch**: feature/issue-15 at `560b52a`
+**Phases**: single PR if GeoGrid parity is tractable, else a 2-PR stack (Grid core first, GeoGrid prediction parity second)
+
+This re-plan addresses both `## Plan Review` must-fixes: (1) the offset now reconstructs the original's slant-projected signed-depth analog `range = depth/cos(angle)` (via `depth * slant / |z|`) instead of the vertical `.z` component, with tests at off-boresight angles where the prior bug hid; (2) it builds the prior-surface prediction pipeline (faithful port of `cube_grid_interpolate` + `cube_node_set_preddepth`) and wires `setPredictedDepth` into `Grid::insert` (and `GeoGrid::insert`) so slope correction runs end-to-end rather than as dead code.
+
+### Open questions
+- [ ] GeoGrid bilinear geometry has no exact GGGS-cell analog: port nearest-estimated-neighbour prediction for GeoGrid + document the divergence, or require exact parity with the regular Grid before merge?
+- [ ] PR shape: land Part A + Part B(Grid) + Part C as one PR with GeoGrid parity as a stacked follow-on if it balloons, or insist on a single PR covering both grids?
