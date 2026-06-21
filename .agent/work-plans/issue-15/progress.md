@@ -409,3 +409,24 @@ Plan named `test_grid.cpp` for the integration test. `Grid`/`GeoGrid` keep `node
 
 **Status**: complete
 **By**: Claude Code Agent (Claude Opus)
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-21 14:51 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-15 at `156c705`
+**Mode**: pre-push
+**Depth**: Deep (reason: 226 production+test LOC ≥ 200, and correctness-sensitive CUBE depth-estimation math)
+**Must-fix**: 0 | **Suggestions**: 1
+**Round**: 1 | **Ship**: recommended — no must-fix; formula verified against `original_cube/` by two independent fresh-context passes; tests discriminate the correct formula and pass.
+
+### Findings
+- [ ] (suggestion) `setPredictedDepth(depth, variance)` callers must supply a valid variance — a real `predicted_depth_` paired with a sentinel/`INVALID_DATA` variance would make `sqrt(variance)` ~1.8e19 and neutralize the blunder limit at `node.cpp:96-99`. Latent property of the existing two-field design, now reachable via the new public setter; no current caller triggers it. Add a one-line doc note (or debug assert) — `node.cpp:263-270`, `node.h:186-203`.
+
+### Notes
+- Static analysis (ament_cpplint, ament_uncrustify) clean on all 4 changed C++ files. cppcheck flagged only untouched/pre-existing lines (`constVariableReference` at `node.cpp:241`, single-file `unusedStructMember` false positives) — dropped by the silence filter.
+- Two fresh-context adversarial passes (Lens A logic, Lens B systemic) independently re-derived `offset = predicted_depth_(node) − predicted_depth_at_touchdown` against `cube_node.c:1846` + the `mapsheet_cube.c:2434` `snd->range` overwrite and confirmed it correct (negative-down, no `1/cos²`). Sentinel correction (`INVALID_DATA` vs the old `parameters.no_data_value`=`quiet_NaN()`) confirmed faithful. Unwired producer path confirmed inert (offset 0) for both Grid and GeoGrid.
+- Plan adherence: exact — all 4 planned files changed, no scope creep; the `test_grid.cpp`→`test_node.cpp` deviation was already folded into plan v3's Files-to-Change table.
+- Reminder for the publish checkpoint: file the deferred producer follow-on (external-prior load + per-sounding touchdown interpolation) drafted in the Implementation entry, and have the PR body state plainly that slope correction stays inert (offset 0) in production until that follow-on lands.
