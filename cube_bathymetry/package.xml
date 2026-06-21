@@ -17,6 +17,12 @@
   <depend>nav_msgs</depend>  <!-- odometry for speed-over-ground -->
   <depend>marine_autonomy</depend>
   <depend>marine_bathymetry_store</depend>  <!-- store epoch import (#57) -->
+  <!-- The store is a static lib that propagates nlohmann_json::nlohmann_json as a
+       LINK_ONLY interface dep, so a consumer's CMake still needs its config present
+       at configure time. rosdep installs it from this declaration; UMA#203 removed
+       the need for an explicit find_package(nlohmann_json) (the store now exports it),
+       but not the build-time install dependency. -->
+  <depend>nlohmann-json-dev</depend>
   <depend>geodesy</depend>
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>  <!-- bag readers in import_bag / bag_to_geotiff -->
