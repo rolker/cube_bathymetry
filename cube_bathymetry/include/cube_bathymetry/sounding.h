@@ -56,6 +56,17 @@ namespace cube
     if(i < detections.intensities.size()) {
         intensity = detections.intensities[i];
     }
+
+    // Per-beam receive (steering) angle, captured here alongside intensity so
+    // the {raw intensity, angle} sufficient-statistics pair stays bound to the
+    // same beam (ADR-0007 D3). This is the beam/incidence angle relative to
+    // nadir, NOT a true seafloor grazing angle (the latter needs local slope,
+    // deferred to cube_bathymetry#15); it is the per-beam geometry the deferred
+    // node-output GeoCoder correction reconstructs the grazing angle from. Left
+    // NaN when the source omits rx_angles for this beam.
+    if(i < detections.rx_angles.size()) {
+        beam_angle = detections.rx_angles[i];
+    }
     }
 
   /// Depth relative to the sea surface. Positive is up above sea surface
@@ -66,6 +77,12 @@ namespace cube
 
   /// Per-beam acoustic intensity / backscatter (NaN when not reported).
     float intensity = std::nan("");
+
+  /// Per-beam receive (steering) angle in radians, positive to starboard
+  /// (the detections.rx_angles convention). This is the beam/incidence angle
+  /// relative to nadir, the per-beam geometry retained for the deferred
+  /// node-output backscatter correction (ADR-0007 D3). NaN when not reported.
+    float beam_angle = std::nan("");
 
   // Position relative to the sonar head, in meters.
   // For a typical down looking sonar, x is along the heading, y is to starboard, and z is down.

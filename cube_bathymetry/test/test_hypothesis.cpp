@@ -201,4 +201,46 @@ TEST_F(HypothesisTest, MonitorIsSymmetricInErrorSign)
   EXPECT_EQ(h_plus.sequence_length, h_minus.sequence_length);
 }
 
+// ADR-0007 D3: recordBeam appends the per-beam {raw intensity, grazing angle}
+// sufficient-statistics pair, keeping the raw value re-correctable at output.
+TEST_F(HypothesisTest, RecordBeamAppendsRawAndAngle)
+{
+  Hypothesis h(10.0f, 1.0f);
+  EXPECT_TRUE(h.intensity_samples.empty());
+
+  h.recordBeam(-30.0f, 0.1f);
+  h.recordBeam(-28.0f, 0.2f);
+
+  ASSERT_EQ(h.intensity_samples.size(), 2u);
+  EXPECT_FLOAT_EQ(h.intensity_samples[0].raw_intensity, -30.0f);
+  EXPECT_FLOAT_EQ(h.intensity_samples[0].grazing_angle, 0.1f);
+  EXPECT_FLOAT_EQ(h.intensity_samples[1].raw_intensity, -28.0f);
+  EXPECT_FLOAT_EQ(h.intensity_samples[1].grazing_angle, 0.2f);
+}
+
+// A NaN raw intensity (source omitted intensities) must never become a phantom
+// backscatter sample.
+TEST_F(HypothesisTest, RecordBeamSkipsNanIntensity)
+{
+  Hypothesis h(10.0f, 1.0f);
+
+  h.recordBeam(std::nan(""), 0.1f);
+  EXPECT_TRUE(h.intensity_samples.empty());
+
+  h.recordBeam(-25.0f, 0.3f);
+  EXPECT_EQ(h.intensity_samples.size(), 1u);
+}
+
+// A NaN grazing angle is retained: the beam is still a valid intensity sample,
+// it simply cannot be angle-corrected (emitted uncorrected at output).
+TEST_F(HypothesisTest, RecordBeamRetainsNanAngle)
+{
+  Hypothesis h(10.0f, 1.0f);
+
+  h.recordBeam(-20.0f, std::nan(""));
+  ASSERT_EQ(h.intensity_samples.size(), 1u);
+  EXPECT_FLOAT_EQ(h.intensity_samples[0].raw_intensity, -20.0f);
+  EXPECT_TRUE(std::isnan(h.intensity_samples[0].grazing_angle));
+}
+
 }  // namespace cube
