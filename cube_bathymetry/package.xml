@@ -17,7 +17,6 @@
   <depend>nav_msgs</depend>  <!-- odometry for speed-over-ground -->
   <depend>marine_autonomy</depend>
   <depend>marine_bathymetry_store</depend>  <!-- store epoch import (#57) -->
-  <depend>nlohmann-json-dev</depend>  <!-- store's unexported link-interface dep (#57) -->
   <depend>geodesy</depend>
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>  <!-- bag readers in import_bag / bag_to_geotiff -->
