@@ -21,6 +21,7 @@
 
 
 #include "cube_bathymetry/node.h"
+#include <cassert>
 #include <cmath>
 
 namespace cube
@@ -265,6 +266,16 @@ void Node::setPredictedDepth(float depth, float variance)
   // 1:1 port of cube_node_set_preddepth (cube_node.c:1084): a trivial setter.
   // pred_depth == NaN     => do not incorporate any data into the node
   // pred_depth == INVALID => no prediction available (no slope correction)
+  //
+  // Precondition: a *real* predicted depth must carry a finite, positive,
+  // non-sentinel variance. insert()'s blunder limit uses sqrt(predicted_depth_-
+  // variance_), so pairing a valid depth with an INVALID_DATA (= float max)
+  // variance would make sqrt(.) ~1e19 and silently neutralize blunder rejection.
+  // No producer wires this yet; the assert guards the future external-prior path.
+  assert(
+    (depth == INVALID_DATA || std::isnan(depth) ||
+    (std::isfinite(variance) && variance > 0.0F && variance != INVALID_DATA)) &&
+    "setPredictedDepth: a real predicted depth requires a finite positive variance");
   predicted_depth_ = depth;
   predicted_depth_variance_ = variance;
 }
