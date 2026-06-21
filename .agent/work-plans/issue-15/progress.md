@@ -430,3 +430,37 @@ Plan named `test_grid.cpp` for the integration test. `Grid`/`GeoGrid` keep `node
 - Two fresh-context adversarial passes (Lens A logic, Lens B systemic) independently re-derived `offset = predicted_depth_(node) − predicted_depth_at_touchdown` against `cube_node.c:1846` + the `mapsheet_cube.c:2434` `snd->range` overwrite and confirmed it correct (negative-down, no `1/cos²`). Sentinel correction (`INVALID_DATA` vs the old `parameters.no_data_value`=`quiet_NaN()`) confirmed faithful. Unwired producer path confirmed inert (offset 0) for both Grid and GeoGrid.
 - Plan adherence: exact — all 4 planned files changed, no scope creep; the `test_grid.cpp`→`test_node.cpp` deviation was already folded into plan v3's Files-to-Change table.
 - Reminder for the publish checkpoint: file the deferred producer follow-on (external-prior load + per-sounding touchdown interpolation) drafted in the Implementation entry, and have the PR body state plainly that slope correction stays inert (offset 0) in production until that follow-on lands.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-21 15:47 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-15 at `abec6cb` (merge commit — `origin/jazzy` merged into the branch)
+**Mode**: pre-push (RE-REVIEW after merge)
+**Depth**: Deep (reason: merge union of three branches — #15/#54/#57 — over correctness-sensitive CUBE core)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 2 | **Ship**: recommended — no must-fix; merge is a provably clean additive union (zero-line diff on all #54/#57 files), suite green, composition independently confirmed.
+
+This is Round 2: a re-review of the **merge union**, not the slope math (Round 1 already approved the
+math against `original_cube/`). Since Round 1, `origin/jazzy` advanced with #54 (backscatter
+co-estimation, ADR-0007) and #57 (bathy-store epoch importer); both touched the same CUBE core files
+and were merged into the branch at `abec6cb`. `origin/jazzy` (= `def09d3`) fetched offline → diffed
+against the local ref per SKILL fallback. Round-1's lone suggestion (variance guard on
+`setPredictedDepth`) is now resolved in `node.cpp:364-367` (commit `1367f0c`).
+
+### Findings
+- [ ] (suggestion) `extractNodeRecord` comment is merge-stale: "Slope is gated on cube_bathymetry#15 (disabled today in Node::insert). Until #15 lands…" — #15 has landed and the slope block IS re-enabled in `Node::insert`; it is merely inert (offset 0) until the predicted-surface **producer** follow-on. Reword so a reader doesn't conclude slope is still fully disabled / #15 unmerged. Behavior (identity GeoCoder correction) still correct, so suggestion-only — `src/node.cpp:268-269`.
+- [ ] (suggestion, separate/pre-existing — not introduced by this merge) The "no caller depends on `sizeof(DepthAndUncertainty)`" contract is comment-guarded only; a `static_assert(sizeof(...)==16)` would enforce the `#pragma pack` layout — `include/cube_bathymetry/common.h:88-90`.
+
+### Merge-union verification (the focus)
+- **Combined `Node::insert` composes correctly and independently.** jazzy(#54) already wired `queueEstimate(sounding.depth + offset, …, sounding.intensity, sounding.beam_angle)` with `offset` pinned to `0.0`; #15's net change only makes `offset` non-zero (`node.cpp:162-166`). Offset adds to the depth arg ONLY; intensity/beam_angle pass verbatim. Co-estimation (`recordBeam`) sees the slope-CORRECTED depth — correct per ADR-0007 D2 ("intensity rides the winning depth"): the corrected depth is the same beam projected onto the node, intensity is its passenger. All early-returns drop depth+intensity together (no desync vs jazzy).
+- **`Sounding`**: HEAD = jazzy field set + the single new `predicted_depth_at_touchdown` (`sounding.h:107`). One each of `intensity`/`beam_angle`/`predicted_depth_at_touchdown`; nothing dropped/duplicated.
+- **`test_node.cpp`**: 24 `TEST_F` = 12 original + 4 SlopeCorrection (#15) + 8 backscatter (#54); braces 49/49. `test_node.gtest.xml`: 24 tests, 0 failures, 0 errors. Full package gtest: 105 tests, 0/0 across 10 suites (incl. #57 `test_store_import` 3/0/0). All 8 lint xunit reports 0 failures. (The brief's "300" aggregates per-file lint cases.)
+- **No reversion of #54/#57**: `git diff origin/jazzy...HEAD` on `hypothesis.{cpp,h}`, `error_model.cpp`, `common.h`, `store_import.*`, `import_bag_main.cpp`, `test_store_import.cpp`, `CMakeLists.txt` = 0 lines. #54 API and #57 importer byte-identical to jazzy. No duplicated field/function/include/find_package.
+
+### Notes
+- Two fresh-context adversarial passes (Lens A composition-logic, Lens B merge-integrity) both clean. Lens A confirmed offset never leaks into intensity, queue keeps depth+intensity+beam_angle bound through median sort/extraction, and recordBeam lands on the corrected winning hypothesis (intended). Lens B confirmed `HEAD = jazzy(#54+#57) ⊎ #15` with no drop/dup.
+- Static analysis (cpplint, cppcheck, uncrustify, copyright) 0 failures on the changed files; working tree clean, so the post-merge build/test artifacts (`build/cube_bathymetry/test_results/`) match source.
+- Publish-checkpoint reminders still stand from Round 1: file the deferred predicted-surface producer follow-on; PR body must state slope correction stays inert (offset 0) in production until it lands.
