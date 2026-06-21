@@ -29,11 +29,15 @@
 
 #include "tf2_ros/buffer.h"
 #include "tf2_msgs/msg/tf_message.hpp"
+#include "marine_acoustic_msgs/msg/sonar_detections.hpp"
+#include "std_msgs/msg/header.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "sensor_msgs/msg/point_field.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "tf2_sensor_msgs/tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
+#include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/map_sheet.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "geometry_msgs/msg/point_stamped.hpp"
@@ -45,8 +49,17 @@ void usage()
   std::cout << "usage: bag_to_geotiff [options and input files]\n";
   std::cout << "  -n /fix: NavSatFix topic, optionally used to assess GPS uncertainty\n";
   std::cout << "  -o output.tiff: Output file name\n";
-  std::cout << "  -t /soundings: Topic containing soundings as sensor_msgs/PointCloud2 messages\n";
+  std::cout << "  -t /soundings: Topic containing pre-projected soundings as "
+    "sensor_msgs/PointCloud2 messages\n";
+  std::cout << "  -d /detections: Topic containing marine_acoustic_msgs/SonarDetections; "
+    "projected to soundings offline via DetectionsProjector (vessel_speed = NaN). "
+    "Without an explicit -t, the default /soundings topic is not also gridded.\n";
+  std::cout << "  -r 1.0: Output resolution in meters (nominal; snapped to the grid)\n";
   std::cout << "  -l 0: Number of pings to process before exiting (mainly for debugging)\n";
+  std::cout << "  Frame/range overrides for the -d offline projector (must match the "
+    "bag's namespaced frames, or the grid comes out empty):\n";
+  std::cout << "    --base-link-frame, --level-frame, --tide-frame\n";
+  std::cout << "    --minimum-range, --maximum-range (meters)\n";
   exit(-1);
 }
 
@@ -61,7 +74,51 @@ bool bag_filter(const std::string & type)
   if(type == "sensor_msgs/msg/PointCloud2") {
     return true;
   }
+  if(type == "marine_acoustic_msgs/msg/SonarDetections") {
+    return true;
+  }
   return false;
+}
+
+// Pack projected soundings into the same 6-field (x,y,z,intensity,
+// vertical_uncertainty,horizontal_uncertainty) PointCloud2 layout that
+// detections_to_pointcloud publishes, so the detections offline path feeds the
+// identical downstream soundings_buffer/grid machinery as a pre-projected bag.
+sensor_msgs::msg::PointCloud2::SharedPtr soundingsToPointCloud2(
+  const std::vector<cube::Sounding> & soundings,
+  const std_msgs::msg::Header & header)
+{
+  auto pointcloud = std::make_shared<sensor_msgs::msg::PointCloud2>();
+  pointcloud->header = header;
+  pointcloud->height = 1;
+  pointcloud->width = soundings.size();
+  pointcloud->point_step = 24;  // 6 fields * 4 bytes each
+  pointcloud->row_step = pointcloud->point_step * pointcloud->width;
+  pointcloud->is_dense = true;
+  pointcloud->is_bigendian = false;
+
+  const char * names[6] = {"x", "y", "z", "intensity",
+    "vertical_uncertainty", "horizontal_uncertainty"};
+  pointcloud->fields.resize(6);
+  for (size_t f = 0; f < 6; ++f) {
+    pointcloud->fields[f].name = names[f];
+    pointcloud->fields[f].offset = static_cast<uint32_t>(f * 4);
+    pointcloud->fields[f].datatype = sensor_msgs::msg::PointField::FLOAT32;
+    pointcloud->fields[f].count = 1;
+  }
+
+  pointcloud->data.resize(pointcloud->row_step * pointcloud->height);
+  float * data_ptr = reinterpret_cast<float *>(pointcloud->data.data());
+  for (const auto & sounding : soundings) {
+    data_ptr[0] = sounding.sonar_relative_position.x;
+    data_ptr[1] = sounding.sonar_relative_position.y;
+    data_ptr[2] = sounding.sonar_relative_position.z;
+    data_ptr[3] = sounding.intensity;
+    data_ptr[4] = sounding.vertical_error;
+    data_ptr[5] = sounding.horizontal_error;
+    data_ptr += 6;
+  }
+  return pointcloud;
 }
 
 
@@ -208,9 +265,16 @@ int main(int argc, char *argv[])
 
   std::vector<std::string> bagfile_names;
   std::string bathymetry_topic = "/soundings";
+  bool bathymetry_topic_explicit = false;  // true once -t is given
+  std::string detections_topic;  // empty = detections-offline path disabled
   std::string output_filename;
   std::string nav_topic;
   double resolution = 1.0;
+
+  // DetectionsProjector configuration for the offline (-d) path. Defaults match
+  // detections_to_pointcloud's node defaults so a detections-only bag projects
+  // the same way the live node would.
+  cube::ProjectorParams projector_params;
 
   int ping_count_limit = 0;
 
@@ -229,6 +293,25 @@ int main(int argc, char *argv[])
     } else if (*arg == "-t") {
       arg++;
       bathymetry_topic = *arg;
+      bathymetry_topic_explicit = true;
+    } else if (*arg == "-d") {
+      arg++;
+      detections_topic = *arg;
+    } else if (*arg == "--base-link-frame") {
+      arg++;
+      projector_params.base_link_frame = *arg;
+    } else if (*arg == "--level-frame") {
+      arg++;
+      projector_params.level_frame = *arg;
+    } else if (*arg == "--tide-frame") {
+      arg++;
+      projector_params.tide_frame = *arg;
+    } else if (*arg == "--minimum-range") {
+      arg++;
+      projector_params.minimum_range = std::stod(*arg);
+    } else if (*arg == "--maximum-range") {
+      arg++;
+      projector_params.maximum_range = std::stod(*arg);
     } else if (*arg == "-l") {
       arg++;
       ping_count_limit = std::stoi(*arg);
@@ -237,7 +320,30 @@ int main(int argc, char *argv[])
     }
   }
 
-  std::cout << "Bathymetry topic: " << bathymetry_topic << std::endl;
+  // When projecting detections offline (-d) without an explicit -t, disable the
+  // default /soundings admission. Otherwise a bag carrying BOTH a pre-projected
+  // /soundings topic and the detections topic would grid every sounding twice.
+  const bool process_soundings_topic = detections_topic.empty() || bathymetry_topic_explicit;
+  if (!detections_topic.empty()) {
+    std::cout << "Detections topic: " << detections_topic <<
+      " (offline projection, vessel_speed = NaN)" << std::endl;
+  }
+  if (process_soundings_topic) {
+    std::cout << "Bathymetry topic: " << bathymetry_topic << std::endl;
+  } else {
+    std::cout << "Pre-projected soundings topic disabled (-d given without -t)" << std::endl;
+  }
+
+  cube::DetectionsProjector projector(projector_params);
+
+  // Accumulated offline-projection diagnostics, surfaced at the end so a
+  // misconfigured-frames or over-tight-range run is diagnosable rather than a
+  // silently sparse/empty GeoTIFF (the failure mode #43 exists to kill).
+  size_t proj_pings = 0;
+  size_t proj_soundings = 0;
+  size_t proj_filtered_range = 0;
+  size_t proj_missing_attitude = 0;
+  size_t proj_missing_heave = 0;
 
   BagReaders bag_readers(bagfile_names);
 
@@ -359,7 +465,7 @@ int main(int argc, char *argv[])
       }
     }
 
-    if (message->data_type == "sensor_msgs/msg/PointCloud2") {
+    if (process_soundings_topic && message->data_type == "sensor_msgs/msg/PointCloud2") {
       if(bathymetry_topic == "" || message->message->topic_name == bathymetry_topic) {
         try {
           rclcpp::SerializedMessage serialized_message(*message->message->serialized_data);
@@ -371,6 +477,34 @@ int main(int argc, char *argv[])
         } catch(const std::exception & e) {
           std::cerr << e.what() << '\n';
         }
+      }
+    }
+
+    // Detections-only-bag path: project SonarDetections to soundings offline
+    // using the bag's TF buffer (passed as const tf2::BufferCore&) and NaN
+    // vessel_speed (no odom in a detections-only bag). The resulting soundings
+    // are packed into the same PointCloud2 layout as the live /soundings topic
+    // and fed through the identical buffer/grid machinery.
+    if (!detections_topic.empty() &&
+      message->data_type == "marine_acoustic_msgs/msg/SonarDetections" &&
+      message->message->topic_name == detections_topic)
+    {
+      try {
+        rclcpp::SerializedMessage serialized_message(*message->message->serialized_data);
+        marine_acoustic_msgs::msg::SonarDetections detections;
+        rclcpp::Serialization<marine_acoustic_msgs::msg::SonarDetections>().deserialize_message(
+          &serialized_message, &detections);
+        auto projection = projector.project(detections, tfBuffer, std::nanf(""));
+        ++proj_pings;
+        proj_soundings += projection.soundings.size();
+        proj_filtered_range += projection.diagnostics.filtered_range;
+        proj_missing_attitude += projection.diagnostics.missing_attitude;
+        proj_missing_heave += projection.diagnostics.missing_heave;
+        auto pc_message = soundingsToPointCloud2(projection.soundings, detections.header);
+        soundings_buffer.push_back(std::make_pair(pc_message, last_nav));
+        check_buffer = true;
+      } catch(const std::exception & e) {
+        std::cerr << e.what() << '\n';
       }
     }
 
@@ -453,6 +587,18 @@ int main(int argc, char *argv[])
   }
 
   std::cout << "\ndone." << std::endl;
+
+  if (!detections_topic.empty()) {
+    std::cout << "Offline projection: " << proj_pings << " pings, " << proj_soundings
+              << " soundings (" << proj_filtered_range << " range-filtered, "
+              << proj_missing_attitude << " missing attitude, "
+              << proj_missing_heave << " missing heave)" << std::endl;
+    if (proj_pings > 0 && proj_soundings == 0) {
+      std::cerr << "WARNING: projected 0 soundings from " << proj_pings
+                << " pings -- check the --*-frame overrides match the bag's namespaced "
+                << "frames (see README 'Configuring frames per platform')." << std::endl;
+    }
+  }
 
   std::cout << "Generating output..." << std::endl;
 

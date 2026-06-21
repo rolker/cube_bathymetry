@@ -28,15 +28,12 @@
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 
-#include "cube_bathymetry/error_model.h"
-#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "cube_bathymetry/detections_projector.h"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
-#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
-#include "tf2/utils.hpp"
 
 class DetectionsToPointCloud : public rclcpp_lifecycle::LifecycleNode
 {
@@ -53,13 +50,11 @@ public:
       declare_parameter("minimum_range", minimum_range_);
     }
     minimum_range_ = get_parameter("minimum_range").as_double();
-    minimum_range_sq_ = minimum_range_ * minimum_range_;
 
     if(!has_parameter("maximum_range")) {
       declare_parameter("maximum_range", maximum_range_);
     }
     maximum_range_ = get_parameter("maximum_range").as_double();
-    maximum_range_sq_ = maximum_range_ * maximum_range_;
 
     // TF frame names (platform-specific; set via params/yaml). Defaults are the
     // unprefixed mru_transform names; e.g. on BizzyBoat set to bizzy/base_link etc.
@@ -131,12 +126,16 @@ public:
       rclcpp::SensorDataQoS()
     );
 
-    cube::Vessel vessel;
-    vessel.ellipsoidal_referenced = ellipsoidal_referenced_;
-    cube::Device device;
-    device.range_error_percent = range_error_percent_;
-    device.range_error_floor_m = range_error_floor_m_;
-    error_model_ = std::make_shared<cube::ErrorModel>(vessel, device);
+    cube::ProjectorParams params;
+    params.base_link_frame = base_link_frame_;
+    params.level_frame = level_frame_;
+    params.tide_frame = tide_frame_;
+    params.minimum_range = minimum_range_;
+    params.maximum_range = maximum_range_;
+    params.vessel.ellipsoidal_referenced = ellipsoidal_referenced_;
+    params.device.range_error_percent = range_error_percent_;
+    params.device.range_error_floor_m = range_error_floor_m_;
+    projector_ = std::make_shared<cube::DetectionsProjector>(params);
 
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
@@ -170,97 +169,41 @@ private:
     last_odom_stamp_ = msg->header.stamp;
   }
 
-  // Look up target<-source at the ping stamp; if TF is momentarily behind (an
-  // "extrapolation into the future", common under bag replay), fall back to the
-  // latest available transform. Attitude/heave vary slowly, so tens of ms of
-  // staleness is harmless. Returns false only if no transform is available.
-  bool lookupAtOrLatest(
-    const std::string & target, const std::string & source,
-    const rclcpp::Time & stamp, geometry_msgs::msg::TransformStamped & out)
-  {
-    try {
-      out = tf_buffer_->lookupTransform(target, source, stamp);
-      return true;
-    } catch (const tf2::ExtrapolationException &) {
-      try {
-        out = tf_buffer_->lookupTransform(target, source, tf2::TimePointZero);
-        return true;
-      } catch (const tf2::TransformException &) {
-        return false;
-      }
-    } catch (const tf2::TransformException &) {
-      return false;
-    }
-  }
-
   void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr & msg)
   {
-    cube::Platform platform;
-    platform.timestamp = rclcpp::Time(msg->header.stamp).seconds();
-
     const rclcpp::Time stamp(msg->header.stamp);
 
-    // Attitude (roll/pitch) from TF at the ping stamp -- the SAME pose used
-    // downstream to place the soundings, so the error budget is coherent.
-    // Position and heading are not needed by the error model.
-    geometry_msgs::msg::TransformStamped level;
-    if(lookupAtOrLatest(level_frame_, base_link_frame_, stamp, level)) {
-      double y, p, r;
-      tf2::getEulerYPR(level.transform.rotation, y, p, r);
-      platform.roll = r;
-      platform.pitch = p;
-      (void)y;  // yaw/heading unused by the error model
-    } else {
-      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-        "No attitude TF (" << level_frame_ << " <- " << base_link_frame_ <<
-        "); roll/pitch = NaN");
-      platform.roll = std::nan("");
-      platform.pitch = std::nan("");
-    }
-
-    // Heave = boat vertical offset from the tide-corrected surface. It enters
-    // the budget only squared, so it is non-critical; default to 0 if absent.
-    geometry_msgs::msg::TransformStamped tide;
-    if(lookupAtOrLatest(tide_frame_, base_link_frame_, stamp, tide)) {
-      platform.heave = static_cast<float>(tide.transform.translation.z);
-    } else {
-      platform.heave = 0.0f;
-    }
-
-    // Speed over ground from odometry (latest cached value).
+    // Speed over ground from odometry (latest cached value). The staleness gate
+    // stays in the node: when odom is stale/absent, pass NaN so the error model
+    // produces NaN uncertainty exactly as before.
+    float vessel_speed;
     {
       std::lock_guard<std::mutex> lock(odom_mutex_);
       if(notTooOld(last_odom_stamp_, stamp)) {
-        platform.vessel_speed = last_vessel_speed_;
+        vessel_speed = last_vessel_speed_;
       } else {
         RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
           "No recent odometry; vessel_speed = NaN");
-        platform.vessel_speed = std::nan("");
+        vessel_speed = std::nan("");
       }
     }
 
-    platform.mean_speed = msg->ping_info.sound_speed;
-    platform.surf_sspeed = msg->ping_info.sound_speed;
+    // All projection math (beam geometry, attitude/heave TF reads, TPU, range
+    // gate) lives in the node-free DetectionsProjector. The node only supplies
+    // SOG, packs the cloud, and logs from the returned diagnostics.
+    auto projection = projector_->project(*msg, *tf_buffer_, vessel_speed);
+    const auto & soundings = projection.soundings;
 
-    auto soundings = error_model_->compute(*msg, platform);
-
-    std::vector<cube::Sounding> filtered_soundings;
-    filtered_soundings.reserve(soundings.size());
-    for (const auto & sounding   :  soundings) {
-      double range_sq =
-        sounding.sonar_relative_position.x * sounding.sonar_relative_position.x +
-        sounding.sonar_relative_position.y * sounding.sonar_relative_position.y +
-        sounding.sonar_relative_position.z * sounding.sonar_relative_position.z;
-      if(range_sq >= minimum_range_sq_ && range_sq <= maximum_range_sq_) {
-        filtered_soundings.push_back(sounding);
-      }
+    if(projection.diagnostics.missing_attitude > 0) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        "No attitude TF (" << level_frame_ << " <- " << base_link_frame_ <<
+        "); roll/pitch = NaN");
     }
-    auto filtered_count = soundings.size() - filtered_soundings.size();
-    if(filtered_count > 0) {
+    if(projection.diagnostics.filtered_range > 0) {
       RCLCPP_DEBUG_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-        filtered_count << " of " << soundings.size() << " soundings filtered by range");
+        projection.diagnostics.filtered_range << " of " <<
+        projection.diagnostics.total << " soundings filtered by range");
     }
-    soundings = std::move(filtered_soundings);
 
     sensor_msgs::msg::PointCloud2 pointcloud;
     pointcloud.header = msg->header;
@@ -328,7 +271,7 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::PointCloud2>::SharedPtr
     pointcloud_publisher_;
 
-  std::shared_ptr<cube::ErrorModel> error_model_;
+  std::shared_ptr<cube::DetectionsProjector> projector_;
 
   std::string base_link_frame_ = "base_link";
   std::string level_frame_ = "base_link_north_up";  // level, north-aligned
@@ -343,9 +286,7 @@ private:
   rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};
 
   double minimum_range_ = 0.0;  // meters
-  double minimum_range_sq_ = minimum_range_ * minimum_range_;
   double maximum_range_ = 12000.0;  // meters
-  double maximum_range_sq_ = maximum_range_ * maximum_range_;
 };
 
 int main(int argc, char **argv)
