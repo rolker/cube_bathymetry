@@ -185,3 +185,58 @@ correction is `pred_depth_node − pred_depth_touchdown`. Part B mis-ports the p
 (self-bootstrap from running estimates ≠ the original's external-prior + touchdown-interpolation).
 Re-derive the offset and the prediction source from `mapsheet_cube.c:2424` + `cube_grid_initialise`
 before implementation; defer GeoGrid to a tracked follow-on once Grid is correct.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-21 09:30 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-15/plan.md` (v3 — REPLACES the v2 plan in full)
+**Branch**: feature/issue-15
+**Phases**: single small PR (node-level math + primitive + tests); prior-surface subsystem is a referenced follow-on
+
+This is the **third** plan, re-authored after the round-2 changes-requested pinned the
+correct algorithm. Every claim in v3 was re-verified line-by-line against `original_cube/`
+before writing (see plan's Verification table):
+
+- **Offset corrected** to the predicted-SURFACE slope delta `offset = pred_depth(node) −
+  pred_depth(touchdown)`. Confirmed `snd->range` is OVERWRITTEN at `mapsheet_cube.c:2434`
+  with `cube_grid_interpolate(... de, dn ...)` (the bilinear interpolation of the 4
+  surrounding nodes' `pred_depth` at the touchdown point), so the `depth/cos(angle)`
+  error-model range (`sounding.c:1268`) is irrelevant at the offset site. No `1/cos²`
+  obliquity factor — both terms are same-convention negative-down predicted depths.
+- **No self-bootstrap.** Confirmed `cube_grid_insert_depths` (`cube_grid.c:1877-1992`)
+  never sets `pred_depth` / never interpolates — it only calls `cube_node_insert`.
+  `pred_depth` is seeded from an EXTERNAL prior via `cube_grid_initialise`
+  (`cube_grid.c:1665,1712`) + base hypothesis (`:1730`). Both prior plans invented the
+  interpolate-from-running-estimates path; it does not exist in the original.
+
+**Crux resolution**: the port has **no** predicted-surface mechanism (no prior-load, no
+`setPredictedDepth`, no `Sounding.range`; `predicted_depth_` is `INVALID_DATA` everywhere
+and nothing sets it). A faithful *active* correction needs the whole `cube_grid_initialise`
++ touchdown-interpolation subsystem — too large to port correctly now. v3 therefore ports
+the node-level math **faithfully and correctly** (corrected offset + a 1:1
+`cube_node_set_preddepth` port) and **explicitly defers** active correction behind the
+external-prior subsystem, FILED as a referenced follow-on. With no producer wired,
+`predicted_depth_at_touchdown` stays at its sentinel → offset 0 → the defined,
+correct-but-uncorrected behaviour the grids have today. The block is exercised end-to-end
+by an integration test that supplies a synthetic prediction directly, so it is neither
+non-physical nor silently-dead — it activates the instant a prior surface is supplied.
+
+**Scope**: Grid-only per the review; in fact neither grid is wired to a producer in this
+PR, so both run at offset 0 unchanged. GeoGrid (and the GGGS bilinear-vs-regular geometry
+question) belongs to the prior-surface follow-on. Field named `predicted_depth_at_touchdown`
+(NOT `range`) to avoid resurrecting the misread.
+
+**Size/risk after this third pass**: low. 3 production edits + focused tests; the large,
+risky prediction subsystem is correctly out-of-scope and tracked. Remaining open question
+is the no-correction sentinel choice (`INVALID_DATA` vs literal-original `0.0`), settled at
+review.
+
+### Open questions
+- [ ] Sentinel for `predicted_depth_at_touchdown`: `INVALID_DATA` (preferred — a real
+  interpolated touchdown depth could legitimately be `0.0`) vs the literal original
+  `range != 0.0` test. Flagged for review.
+- [ ] Follow-on shape: one umbrella issue for external-prior load + touchdown interpolation
+  + Grid/GeoGrid geometry, or split prior-load from interpolation. (Recommend one umbrella —
+  they only deliver value together.)
