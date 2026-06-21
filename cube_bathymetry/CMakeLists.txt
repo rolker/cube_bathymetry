@@ -15,6 +15,11 @@ find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
+# marine_bathymetry_store's exported link interface references
+# nlohmann_json::nlohmann_json (its registry JSON I/O) but does not export the
+# dependency, so the IMPORTED target must be resolved here before consuming it.
+find_package(nlohmann_json REQUIRED)
+find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
 find_package(geodesy REQUIRED)  # WGS84 Vincenty inverse (geo_grid distance)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -39,6 +44,7 @@ add_library(cube_bathymetry
   src/map_sheet.cpp
   src/node.cpp
   src/parameters.cpp
+  src/store_import.cpp
 )
 
 target_include_directories(cube_bathymetry PUBLIC
@@ -49,6 +55,8 @@ target_include_directories(cube_bathymetry PUBLIC
 target_link_libraries(cube_bathymetry
   ${marine_acoustic_msgs_TARGETS}
   marine_autonomy::marine_autonomy
+  # GeoGrid -> store-tile conversion (store_import.cpp, #57).
+  marine_bathymetry_store::marine_bathymetry_store
   # DetectionsProjector needs tf2::BufferCore::lookupTransform + tf2::getEulerYPR
   # (tf2::tf2, the minimal core target -- no rclcpp in its own interface) and
   # tf2::fromMsg(Quaternion) used by getEulerYPR (tf2_geometry_msgs, header-only).
@@ -127,6 +135,25 @@ target_link_libraries(bag_to_geotiff
 )
 
 install(TARGETS bag_to_geotiff
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store epoch importer (#57).
+add_executable(import_bag src/import_bag_main.cpp)
+
+target_link_libraries(import_bag
+  cube_bathymetry
+  ${geometry_msgs_TARGETS}
+  ${marine_acoustic_msgs_TARGETS}
+  marine_bathymetry_store::marine_bathymetry_store
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  rosbag2_transport::rosbag2_transport
+  tf2_geometry_msgs::tf2_geometry_msgs
+  tf2_ros::tf2_ros
+)
+
+install(TARGETS import_bag
   DESTINATION lib/${PROJECT_NAME}
 )
 
