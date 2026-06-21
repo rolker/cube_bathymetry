@@ -180,6 +180,40 @@ separately. Adding `DetectionsProjector` to the library preserves this boundary.
   question, not a correctness one — the default values match the node defaults, so most
   users won't need to override.
 
+## Implementation Deviations
+
+These are the deviations from the plan as written, folded in during implementation:
+
+1. **`tf2_geometry_msgs` added to the library** (in addition to the planned
+   `tf2_ros::tf2_ros`). `tf2::getEulerYPR` (from `tf2/utils.hpp`) resolves the
+   quaternion via `tf2::fromMsg(geometry_msgs::Quaternion, ...)`, whose
+   definition lives in `tf2_geometry_msgs` (header-only). Without it the library
+   link failed with an undefined reference. `detections_projector.cpp` includes
+   `tf2_geometry_msgs/tf2_geometry_msgs.hpp` (before `tf2/utils.hpp`) so the
+   symbol is emitted in that TU. `tf2_geometry_msgs` does NOT pull rclcpp, so the
+   rclcpp-free guarantee holds. Added to `find_package`, the library
+   `target_link_libraries`, and `package.xml`.
+
+2. **`ProjectionDiagnostics::total` and `missing_heave` added** (plan listed
+   `filtered_range`, `missing_attitude`, `missing_odom`). `total` carries the
+   pre-filter sounding count so the node's existing "N of M filtered by range"
+   debug log is reproducible from the result. `missing_heave` records the heave
+   TF miss. `missing_odom` was dropped — SOG staleness stays entirely in the node
+   (it owns the odom cache and the `notTooOld` gate and passes NaN), so the
+   projector has no odom to miss.
+
+3. **`-d` projector frame/range overrides** in `bag_to_geotiff` use long flags
+   (`--base-link-frame`, `--level-frame`, `--tide-frame`, `--minimum-range`,
+   `--maximum-range`) rather than a single `-f` flag or a config file. Defaults
+   match the node defaults, so a detections-only bag projects identically to the
+   live node with no flags.
+
+4. **rclcpp-free verification result**: `detections_projector.h` includes zero
+   rclcpp/rclcpp_lifecycle/tf2_ros headers; `detections_projector.cpp.o` has
+   zero UNDEFINED rclcpp symbols (the only `rclcpp::` symbols present are two
+   local-linkage constexpr constants pulled transitively through a message
+   header — not a link dependency). The library target links no rclcpp.
+
 ## Estimated Scope
 
 Single PR.
