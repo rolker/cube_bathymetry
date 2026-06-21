@@ -127,3 +127,21 @@ Added 9 tests:
 - Phase B GeoCoder correction wires in at the per-beam loop in `extractNodeRecord()`
   when cube_bathymetry#15 (slope) lands — hypothesis internals untouched.
 - Did NOT push (per handoff contract). PR not opened.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-21 10:30 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+**Verdict**: approved
+
+**Branch**: feature/issue-54 at `86e0524`
+**Mode**: pre-push
+**Depth**: Deep (reason: correctness-critical CUBE hypothesis core + struct-growth blast radius + cross-layer ADR-0007)
+**Must-fix**: 0 | **Suggestions**: 4
+**Round**: 1 | **Ship**: recommended — no must-fix; struct-growth blast radius fully contained, all 3 update() paths + median binding correct, faithful to ADR-0007 D2/D3/D4/D5
+
+### Findings
+- [ ] (suggestion) Estimate-variance uses sum-of-squares form `(sum_sq - sum*sum/n)/(n-1)`; for O(-30 dB) means over many beams, float rounding can yield a slightly NEGATIVE sample_variance, emitted as negative `intensity_var` (no sqrt guard). Clamp to >=0 or use Welford/two-pass — `cube_bathymetry/src/node.cpp:264`
+- [ ] (suggestion) `Hypothesis::intensity_samples` is never cleared; grows 8 bytes/beam per node for the survey lifetime (same growth class as existing `number_of_samples`, but stores bytes not a counter). Document the worst-case memory budget or reduce to sufficient stats once #15's correction model settles — `cube_bathymetry/include/cube_bathymetry/hypothesis.h:165`
+- [ ] (suggestion) No test exercises intensity/angle binding THROUGH the median pre-queue (`insert`→`queueEstimate`→`queueFlush`); all node tests call `update()` directly. The D3 "no depth/intensity mismatch on median sort" invariant is correct by inspection but unproven end-to-end. Add one `insert()`-driven test with a reordering median — `cube_bathymetry/test/test_node.cpp`
+- [ ] (suggestion) `beam_angle = rx_angles[i]` sign/convention ("positive to starboard") should be cross-checked against the marine_acoustic_msgs producer before #15 consumes it for grazing-angle reconstruction; a sign error would bias the deferred radiometric correction (no current consumer affected) — `cube_bathymetry/include/cube_bathymetry/sounding.h:81`
