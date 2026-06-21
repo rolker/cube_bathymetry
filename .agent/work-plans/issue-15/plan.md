@@ -174,15 +174,25 @@ from a known synthetic prior surface — never the rejected `pred` or `pred − 
    - `NoSlopeCorrectionWhenTouchdownSentinel` and `…WhenPredictedDepthInvalid`: offset stays
      0 (queued `= depth`).
 
-5. **`test_grid.cpp` integration** (`SlopeCorrectionAppliesOnSeededSurface`): seed a small
-   `Grid`'s nodes with a known synthetic planar slope via `setPredictedDepth`, construct
-   off-node soundings whose `predicted_depth_at_touchdown` is set (in the test) to the
-   surface value at their touchdown, run `Grid::insert`, and assert the corrected node
-   estimates reflect `depth + (pred_node − pred_touchdown)` — i.e. the wired path executes
-   end-to-end. A paired run with the touchdown sentinel left unset asserts offset-0
-   (cold-grid / no-prior behaviour), proving the safe default. This demonstrates the block
-   is live-and-correct when fed a prediction, and safe (offset 0) when not — directly
-   answering "not a silently-dead block."
+5. **Synthetic-injection integration test** (`SlopeCorrectionSurfaceSlopeDelta`, in
+   `test_node.cpp`): seed a `Node`'s predicted surface via `setPredictedDepth(pred_node, var)`,
+   construct off-node soundings whose `predicted_depth_at_touchdown` is set (in the test) to
+   the surface value at their touchdown, drive the **full** `Node::insert` → `queueFlush` →
+   `extractDepthAndUncertainty` pipeline, and assert the converged estimate reflects
+   `depth + (pred_node − pred_touchdown)` — i.e. the wired path executes end-to-end. The
+   paired `NoSlopeCorrectionWhenTouchdownSentinel` / `…WhenPredictedDepthInvalid` cases assert
+   offset-0 (cold / no-prior behaviour), proving the safe default. Together these demonstrate
+   the block is live-and-correct when fed a prediction, and safe (offset 0) when not —
+   directly answering "not a silently-dead block."
+
+   **Deviation from earlier draft (this file → `test_grid.cpp`):** `Grid` and `GeoGrid` keep
+   `nodes_` private and expose **no** per-node seed API, so `predicted_depth_` cannot be set
+   through the grid public surface. The end-to-end injection test therefore lives at the
+   **`Node`** level — the shared integration point both `Grid::insert` and `GeoGrid::insert`
+   call (`grid.cpp:122`, `geo_grid.cpp:95`) — driving the identical pipeline. Adding a
+   node-seed API to the grids is the deferred predicted-surface producer's concern (it is what
+   `cube_grid_initialise` does), not this PR's; introducing a test-only grid accessor now would
+   add production surface area ahead of that subsystem. No `test_grid.cpp` change in this PR.
 
 ## Files to Change
 
@@ -191,8 +201,8 @@ from a known synthetic prior surface — never the rejected `pred` or `pred − 
 | `cube_bathymetry/include/cube_bathymetry/sounding.h` | Add `predicted_depth_at_touchdown` field (sentinel default) + doc; set sentinel in both ctors |
 | `cube_bathymetry/include/cube_bathymetry/node.h` | Declare `setPredictedDepth(float,float)` |
 | `cube_bathymetry/src/node.cpp` | Re-enable corrected offset (`pred_depth − touchdown`); implement `setPredictedDepth`; comments + sentinel fix |
-| `cube_bathymetry/test/test_node.cpp` | Surface-slope-delta + flat + sentinel + invalid offset tests |
-| `cube_bathymetry/test/test_grid.cpp` | Seeded-surface integration test (live path) + cold-grid offset-0 test |
+| `cube_bathymetry/test/test_node.cpp` | Surface-slope-delta + flat + sentinel + invalid offset tests, AND the synthetic-injection end-to-end test (seed `setPredictedDepth` + touchdown → insert→flush→extract) |
+| ~~`cube_bathymetry/test/test_grid.cpp`~~ | **No change** — Grid/GeoGrid expose no node-seed API; the end-to-end injection test lives in `test_node.cpp` at the shared `Node::insert` integration point (see Part B.5 deviation) |
 
 No change to `grid.cpp` / `geo_grid.cpp` in this PR (no predicted-surface producer is
 wired — see crux). They continue to run at offset 0 as today.
