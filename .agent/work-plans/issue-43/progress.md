@@ -51,3 +51,27 @@ issue: 43
 - [ ] (suggestion) Range-gate placement: currently the node does range filtering AFTER `compute()` (node lines 247-263). The plan moves it into `project()`. Confirm the projector returns ALREADY-filtered soundings and that `ProjectionDiagnostics.filtered_range` carries the dropped count so the node's existing `RCLCPP_DEBUG_STREAM_THROTTLE` message is reproducible. The plan implies this but the diagnostics field name (`filtered_range`) should map 1:1 to the node's current debug log. — `plan.md:50,80`
 - [ ] (suggestion) package.xml "no change" is defensible (tf2_ros is already `<depend>`, tf2 arrives transitively), but note the pre-existing latent smell: the node already uses `tf2::` symbols directly without a direct `tf2` rosdep. Not introduced by this PR; do not expand scope, but the projector inherits the same transitive reliance. Leave as-is unless CI rosdep validation flags it. — `plan.md:121`
 
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-20 23:30 -0400
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+**Verdict**: approved
+
+**Branch**: feature/issue-43 at `6bb6fce`
+**Mode**: pre-push
+**Depth**: Deep (reason: library extraction + lifecycle-node refactor + offline tool + new class)
+**Must-fix**: 2 (addressed) | **Suggestions**: 3 (addressed)
+
+Specialists: ament_cpplint + ament_uncrustify (clean) · two disjoint-lens Claude adversarial
+passes. Lens A: behavior-equivalence VERIFIED against the pre-refactor node (stamp conversion
+bit-exact, getEulerYPR/heave/lookupAtOrLatest/SOG-staleness/range-gate/packing all identical,
+intensity passthrough preserved); zero must-fix. Lens B: 2 must-fix + 3 suggestions, all fixed.
+rclcpp-free header/source purity re-verified. 265 tests, 0 failures (5 new projector tests).
+
+### Findings
+- [x] (must-fix) library linked tf2_ros::tf2_ros (heavy) — switched to minimal tf2::tf2 + <depend>tf2</depend> — `CMakeLists.txt`, `package.xml`
+- [x] (must-fix) CMake/source comments falsely claimed link-level rclcpp-free — reworded to header/source purity (the .so links rclcpp transitively via marine_autonomy) — `detections_projector.cpp:32`, `CMakeLists.txt:51`
+- [x] (suggestion) bag_to_geotiff double-processing if a bag has both /soundings and -d — disable default /soundings when -d given without -t — `bag_to_geotiff.cpp`
+- [x] (suggestion) offline path discarded projection diagnostics — accumulate + print summary + 0-soundings warning — `bag_to_geotiff.cpp`
+- [x] (suggestion) new CLI flags undocumented — added to usage() + README — `bag_to_geotiff.cpp`, `README.md`
