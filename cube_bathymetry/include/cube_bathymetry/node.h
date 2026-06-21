@@ -23,6 +23,8 @@
 #ifndef CUBE_BATHYMETRY__NODE_H_
 #define CUBE_BATHYMETRY__NODE_H_
 
+#include <cmath>
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <vector>
@@ -36,8 +38,48 @@
 namespace cube
 {
 
+/// Enriched per-node output of the CUBE pass (ADR-0007 D5): the winning
+/// hypothesis's depth/uncertainty PLUS its co-estimated backscatter intensity,
+/// intensity uncertainty and sample count, all from the same data association.
+/// Emitted by Node::extractNodeRecord(); the existing
+/// Node::extractDepthAndUncertainty() is kept unchanged for the depth-only
+/// (bathy) consumers.
+  struct NodeRecord
+  {
+  /// Winning-hypothesis depth (m); NaN when the node has no valid hypothesis.
+    float depth = std::nan("");
+
+  /// Depth uncertainty (confidence-scaled stddev), matching
+  /// extractDepthAndUncertainty(); NaN when no valid hypothesis.
+    float depth_var = std::nan("");
+
+  /// Co-estimated backscatter intensity: the mean of the per-beam corrected
+  /// intensities on the winning hypothesis. NaN when no intensity-bearing beams.
+  /// (Phase B: correction is currently the identity -- emitted UNCORRECTED
+  /// pending cube_bathymetry#15; see extractNodeRecord().)
+    float intensity = std::nan("");
+
+  /// Intensity ESTIMATE variance (variance of the mean, shrinks with n_samples;
+  /// ADR-0007 D4), NOT the raw sample variance. NaN when fewer than 2 samples.
+    float intensity_var = std::nan("");
+
+  /// Number of intensity-bearing beams contributing to the intensity estimate.
+    uint32_t n_samples = 0;
+  };
+
+/// Test-only accessor (defined in test/test_node.cpp) for the private
+/// nominated_hypothesis_ slot, which has no production setter.
+  struct NodeNominationTestAccess;
+
   class Node
   {
+  // The nominated_hypothesis_ priority path of extractNodeRecord() /
+  // extractDepthAndUncertainty() has no public setter (it is a user-nomination
+  // placeholder, only ever reset() on insert). Befriend the unit-test fixture so
+  // that path can be exercised directly, without adding production API whose
+  // only purpose is testing. Forward-declared just above; the test TU defines it.
+    friend class NodeNominationTestAccess;
+
 public:
   ///  Add a specific depth hypothesis to the current list
   ///
@@ -66,7 +108,14 @@ public:
   ///     algorithm parameters, and the discount factor for the
   ///     previous variance in order to compute the current
   ///     evolution noise (a.k.a. system noise variance).
-    bool update(float depth, float variance, const Parameters & parameters);
+  ///   intensity: per-beam raw backscatter for this sample (NaN when absent),
+  ///     recorded on whichever hypothesis accepts/seeds from this beam so the
+  ///     backscatter association tracks the depth association (ADR-0007 D2/D3).
+  ///   beam_angle: per-beam receive/steering angle (radians, NaN when absent),
+  ///     the angle half of the {raw intensity, angle} sufficient-stats pair.
+    bool update(
+      float depth, float variance, const Parameters & parameters,
+      float intensity = std::nan(""), float beam_angle = std::nan(""));
 
   /// Find the closest matching hypothesis in the current linked list.
   /// This computes the normalised absolute error between one-step
@@ -112,7 +161,12 @@ public:
   /// Note that this algorithm means that the queue will always be
   /// full, and hence must be flushed before extracting any depth
   /// estimates (this can also be done to save memory).
-    bool queueEstimate(float depth, float variance, const Parameters & parameters);
+  ///   intensity/beam_angle: the {raw intensity, angle} pair for this beam,
+  ///     carried on the queue entry bound to its depth so the median sort never
+  ///     mismatches a depth with a foreign intensity (ADR-0007 D3).
+    bool queueEstimate(
+      float depth, float variance, const Parameters & parameters,
+      float intensity = std::nan(""), float beam_angle = std::nan(""));
 
   /* Routine: cube_node_extract_depth_unct
   * Purpose:  Extract depth and uncertainty of current best estimate
@@ -131,6 +185,18 @@ public:
   *      variables.
   */
     DepthAndUncertainty extractDepthAndUncertainty(const Parameters & parameters);
+
+  /// Extract the enriched node record (ADR-0007 D5): depth/uncertainty PLUS the
+  /// co-estimated backscatter intensity/uncertainty/sample-count of the winning
+  /// hypothesis. The depth fields match extractDepthAndUncertainty() exactly,
+  /// including the nominated_hypothesis_ priority path, so the two outputs never
+  /// disagree for the same node state. Intensity is computed from the winning
+  /// hypothesis's per-beam {raw, angle} set: each beam is angle-corrected (D3),
+  /// then the corrected values are combined into a mean + ESTIMATE variance
+  /// (D4). The angle correction is currently the identity (no-op) pending
+  /// cube_bathymetry#15 -- intensity is emitted UNCORRECTED, but the per-beam
+  /// raw set is retained so it is re-derivable when #15 provides slope.
+    NodeRecord extractNodeRecord(const Parameters & parameters);
 
   /* Routine:  cube_node_choose_hypothesis
   * Purpose:  Choose the current best hypothesis for the node in question

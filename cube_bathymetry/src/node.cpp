@@ -35,7 +35,9 @@ bool Node::addHypothesis(float depth, float variance)
 }
 
 
-bool Node::update(float depth, float variance, const Parameters & parameters)
+bool Node::update(
+  float depth, float variance, const Parameters & parameters,
+  float intensity, float beam_angle)
 {
   /* Find the best matching hypothesis for the current input sample given
    * those currently being tracked.
@@ -48,15 +50,26 @@ bool Node::update(float depth, float variance, const Parameters & parameters)
      * hypothesis directly.
      */
     addHypothesis(depth, variance);
+    // This beam seeded (and so is a member of) the new hypothesis: record its
+    // backscatter on it. Without this the first beam at every node is dropped.
+    depth_hypotheses_.back()->recordBeam(intensity, beam_angle);
     return true;
   } else {
     /* Update the best hypothesis with the current data */
-    if(!best->update(depth, variance, parameters)) {
+    if(best->update(depth, variance, parameters)) {
+      // Accepted into the winning hypothesis -- accumulate its backscatter on
+      // the SAME hypothesis (ADR-0007 D2: intensity rides the winning depth).
+      best->recordBeam(intensity, beam_angle);
+    } else {
       /* Failed update --- indicates an intervention, so that we need to
                          * start a new hypothesis to capture the outlier/datum shift.
                          */
       best->resetMonitor();
       addHypothesis(depth, variance);
+      // The beam was REJECTED from `best` (depth-geometry outlier) and used to
+      // seed the new hypothesis, so its backscatter belongs to the new
+      // hypothesis, NOT to `best` (exclusion-on-intervention invariant).
+      depth_hypotheses_.back()->recordBeam(intensity, beam_angle);
     }
   }
   return true;
@@ -126,15 +139,18 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
   /* Adding data removes any nomination in effect */
   nominated_hypothesis_.reset();
 
-  return queueEstimate(sounding.depth + offset, variance, parameters);
+  return queueEstimate(sounding.depth + offset, variance, parameters,
+      sounding.intensity, sounding.beam_angle);
 }
 
-bool Node::queueEstimate(float depth, float variance, const Parameters & parameters)
+bool Node::queueEstimate(
+  float depth, float variance, const Parameters & parameters,
+  float intensity, float beam_angle)
 {
   if(queue_.size() >= parameters.median_length) {
     auto mi = queue_.begin();
     advance(mi, parameters.median_length / 2);
-    update(mi->depth, mi->uncertainty, parameters);
+    update(mi->depth, mi->uncertainty, parameters, mi->intensity, mi->beam_angle);
     queue_.erase(mi);
   }
 
@@ -142,7 +158,7 @@ bool Node::queueEstimate(float depth, float variance, const Parameters & paramet
   while(i != queue_.end() && i->depth > depth) {
     i++;
   }
-  queue_.insert(i, DepthAndUncertainty(depth, variance));
+  queue_.insert(i, DepthAndUncertainty(depth, variance, intensity, beam_angle));
 
   if(queue_.size() >= parameters.median_length) {
     /* Compute the likely 99% confidence bound below the shallowest point, and
@@ -184,6 +200,79 @@ DepthAndUncertainty Node::extractDepthAndUncertainty(const Parameters & paramete
   }
 
   return {};
+}
+
+NodeRecord Node::extractNodeRecord(const Parameters & parameters)
+{
+  // Depth half mirrors extractDepthAndUncertainty() EXACTLY, including the
+  // nominated_hypothesis_ priority path, so the enriched record never disagrees
+  // with the depth-only output for the same node state (ADR-0007 D5).
+  std::shared_ptr<Hypothesis> chosen;
+  NodeRecord record;
+
+  if(nominated_hypothesis_) {
+    chosen = nominated_hypothesis_;
+    record.depth = nominated_hypothesis_->current_estimate;
+    record.depth_var = parameters.stddev_to_confidence_interval_scale *
+      std::sqrt(nominated_hypothesis_->input_sample_variance);
+  } else {
+    auto h = chooseHypothesis();
+    if(h && h->number_of_samples > 0) {
+      chosen = h;
+      record.depth = h->current_estimate;
+      record.depth_var = parameters.stddev_to_confidence_interval_scale *
+        std::sqrt(h->input_sample_variance);
+    }
+  }
+
+  if(!chosen) {
+    // No valid hypothesis: depth/intensity stay NaN, n_samples stays 0.
+    return record;
+  }
+
+  // Backscatter half (ADR-0007 D2/D3/D4). Apply the per-beam radiometric
+  // correction to each retained {raw intensity, grazing angle} sample, THEN
+  // combine the corrected values into a mean and an ESTIMATE variance.
+  //
+  // TODO(#54-B / cube_bathymetry#15): apply the GeoCoder incidence/Lambert
+  // correction per beam HERE, using the winning hypothesis's settled depth and
+  // the local seabed slope (ADR-0007 D3). Slope is gated on cube_bathymetry#15
+  // (disabled today in Node::insert). Until #15 lands this is the identity
+  // (flat-geometry) correction: the corrected value equals the raw value and
+  // intensity is emitted UNCORRECTED. The per-beam {raw_intensity, grazing_angle}
+  // set is retained on the hypothesis (Hypothesis::intensity_samples) so the
+  // node value is fully re-derivable when #15 provides slope -- no information
+  // is lost by deferring.
+  double sum = 0.0;
+  double sum_sq = 0.0;
+  uint32_t n = 0;
+  for(const auto & sample : chosen->intensity_samples) {
+    // Phase B no-op correction: corrected == raw for now. recordBeam() already
+    // excluded NaN-intensity beams, so every retained sample is a real value.
+    const double corrected = sample.raw_intensity;
+    sum += corrected;
+    sum_sq += corrected * corrected;
+    ++n;
+  }
+
+  record.n_samples = n;
+  if(n > 0) {
+    const double mean = sum / n;
+    record.intensity = static_cast<float>(mean);
+    if(n >= 2) {
+      // Sample variance (unbiased), then divide by n to get the variance of the
+      // MEAN -- the estimate variance that shrinks with n (ADR-0007 D4), NOT the
+      // raw sample variance. Mirrors the bathy store's depth uncertainty.
+      // Clamp to 0: float rounding on the sum-of-squares form can produce a
+      // tiny negative sample_variance at low-dB means over many beams.
+      const double sample_variance = std::max(
+        0.0, (sum_sq - sum * sum / n) / (n - 1));
+      record.intensity_var = static_cast<float>(sample_variance / n);
+    }
+    // n == 1: intensity set, intensity_var stays NaN (no spread from one beam).
+  }
+
+  return record;
 }
 
 std::shared_ptr<Hypothesis> Node::chooseHypothesis()
@@ -258,7 +347,8 @@ void Node::queueFlush(const Parameters & parameters)
   }
 
   while (ex_pt >= 0) {
-    update(q[ex_pt].depth, q[ex_pt].uncertainty, parameters);
+    update(q[ex_pt].depth, q[ex_pt].uncertainty, parameters,
+      q[ex_pt].intensity, q[ex_pt].beam_angle);
     ex_pt += direction * scale;
     direction = -direction;
     scale++;

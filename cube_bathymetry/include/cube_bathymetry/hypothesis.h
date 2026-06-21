@@ -25,10 +25,29 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include "cube_bathymetry/parameters.h"
 
 namespace cube
 {
+
+/// Per-beam backscatter sufficient statistics retained on a hypothesis
+/// (ADR-0007 D3). Each contributing beam contributes its RAW (uncorrected)
+/// intensity and the per-beam grazing/beam angle, so the radiometric
+/// (GeoCoder incidence/Lambert) correction can be applied later -- at
+/// node-output, once depth and local slope have settled -- rather than baking
+/// an angle-corrupted, non-re-correctable average into the hypothesis.
+  struct BeamIntensitySample
+  {
+  /// Raw, uncorrected per-beam intensity (e.g. M3 reflectivity in dB).
+    float raw_intensity;
+
+  /// Per-beam receive/steering (beam/incidence) angle in radians. May be NaN
+  /// when the source did not report an angle for the beam; the deferred output
+  /// correction treats a NaN angle as "no angle correction available" and emits
+  /// that beam uncorrected.
+    float grazing_angle;
+  };
 
 /// Depth hypothesis structure used to maintain a current track on the depth
 /// at the node in question.  This contains current estimates of depth and
@@ -87,6 +106,17 @@ namespace cube
   ///   the hypothesis represents (i.e., an intervention is required).
     bool update(float depth, float variance, const Parameters & parameters);
 
+  /// Record one beam's backscatter sufficient statistics on this hypothesis
+  /// (ADR-0007 D3). Called by Node::update() only for a beam whose depth was
+  /// accepted by (or used to seed) THIS hypothesis, so the backscatter
+  /// association mirrors the depth association exactly -- depth-geometry
+  /// outliers the W&H monitor rejects never enter this set.
+  ///
+  /// A NaN raw_intensity is skipped (a source that omits intensities must never
+  /// inject a phantom sample); a NaN grazing_angle is retained (the beam is
+  /// still a valid intensity sample, merely uncorrectable for angle).
+    void recordBeam(float raw_intensity, float grazing_angle);
+
   /// Current depth mean estimate
     double current_estimate;
 
@@ -125,6 +155,21 @@ namespace cube
   /// the input sample variance and the predicted post. est. var.
   /// This tracks the maximum of the two estimates.
     float maximum_of_input_and_predicted_variance = 0.0;
+
+  /// Per-beam backscatter sufficient statistics for the beams associated with
+  /// this hypothesis (ADR-0007 D3). Bounded by hypothesis membership -- one
+  /// entry per contributing beam with a non-NaN intensity, a few bytes each.
+  /// The radiometric correction (D3 GeoCoder) is applied per element at
+  /// node-output (Node::extractNodeRecord); these raw pairs are retained so the
+  /// node value stays re-derivable when slope (cube_bathymetry#15) lands.
+  ///
+  /// Memory budget: sizeof(BeamIntensitySample) == 8 bytes (two floats). Growth
+  /// class is identical to number_of_samples (one entry per accepted beam, for
+  /// the survey lifetime of the hypothesis). Worst-case is ~8 bytes/beam/node.
+  /// Once cube_bathymetry#15's correction model settles this can be reduced to
+  /// pure sufficient statistics (mean, M2, count) if the per-beam retention is
+  /// no longer needed for re-derivation.
+    std::vector < BeamIntensitySample > intensity_samples;
   };
 
 }  // namespace cube
