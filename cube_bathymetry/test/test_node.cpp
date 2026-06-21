@@ -185,4 +185,125 @@ TEST_F(NodeTest, MultipleConsistentUpdatesConverge)
   EXPECT_NEAR(result.depth, 15.0, 0.1);
 }
 
+// --- Slope correction (issue #15) ------------------------------------------
+//
+// The re-enabled offset in Node::insert is the predicted-SURFACE slope delta
+//   offset = predicted_depth_(node) - sounding.predicted_depth_at_touchdown
+// (both negative-down predicted-surface depths), queued as
+//   sounding.depth + offset.
+// The discriminator against the two prior wrong formulas (.z vertical component
+// and depth/cos(angle)) is the TOUCHDOWN-POSITION delta along a known synthetic
+// prior surface; the corrected offset is angle-independent. Each test below
+// reconstructs the expected value INDEPENDENTLY from pred_node - pred_touchdown,
+// it does not echo the implementation. Soundings are inserted repeatedly and
+// flushed so the median/CUBE estimate converges to the queued corrected depth,
+// which is what extractDepthAndUncertainty() returns.
+
+// Helper: a sounding sited off-node whose touchdown predicted-surface depth is
+// supplied directly (the per-sounding analog of the original's overwritten
+// snd->range), with the variances the insert path needs.
+static Sounding makeSlopeSounding(float depth, float predicted_depth_at_touchdown)
+{
+  Sounding s(depth);
+  s.predicted_depth_at_touchdown = predicted_depth_at_touchdown;
+  s.vertical_error = 0.01f;
+  s.horizontal_error = 0.0f;
+  return s;
+}
+
+TEST_F(NodeTest, SlopeCorrectionSurfaceSlopeDelta)
+{
+  // Known synthetic prior surface: node sits at -10.0 m, the sounding touched
+  // down at a point where the prior surface is -10.6 m (0.6 m deeper, i.e. a
+  // genuine slope between node and touchdown). The raw sounding depth is -10.5.
+  const float pred_node = -10.0f;
+  const float pred_touchdown = -10.6f;
+  const float depth = -10.5f;
+
+  // Independent reconstruction of the expected corrected depth:
+  //   queued = depth + (pred_node - pred_touchdown)
+  // Deliberately NOT pred_node (the v1 .z trap) and NOT pred - depth/cos (v2).
+  const float expected = depth + (pred_node - pred_touchdown);  // = -9.9
+
+  Node n;
+  n.setPredictedDepth(pred_node, 0.01f);
+
+  // Insert the same off-node sounding many times so the estimate converges to
+  // the queued corrected value, then flush the pre-filter queue.
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_TRUE(n.insert(0.0, makeSlopeSounding(depth, pred_touchdown), params));
+  }
+  n.queueFlush(params);
+
+  auto result = n.extractDepthAndUncertainty(params);
+  ASSERT_FALSE(std::isnan(result.depth));
+  EXPECT_NEAR(result.depth, expected, 0.05);
+  // Sanity: it must NOT collapse to pred_node (v1) or to the raw depth (no corr).
+  EXPECT_GT(std::abs(result.depth - pred_node), 0.05);
+  EXPECT_GT(std::abs(result.depth - depth), 0.05);
+}
+
+TEST_F(NodeTest, SlopeCorrectionZeroOnFlatSurface)
+{
+  // Touchdown predicted depth equals the node predicted depth => offset 0 =>
+  // queued depth is the raw sounding depth, uncorrected.
+  const float pred_node = -10.0f;
+  const float depth = -10.5f;
+
+  Node n;
+  n.setPredictedDepth(pred_node, 0.01f);
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_TRUE(n.insert(0.0, makeSlopeSounding(depth, pred_node), params));
+  }
+  n.queueFlush(params);
+
+  auto result = n.extractDepthAndUncertainty(params);
+  ASSERT_FALSE(std::isnan(result.depth));
+  EXPECT_NEAR(result.depth, depth, 0.05);
+}
+
+TEST_F(NodeTest, NoSlopeCorrectionWhenTouchdownSentinel)
+{
+  // predicted_depth_ is set on the node, but the sounding carries the
+  // no-correction sentinel (INVALID_DATA) for its touchdown depth => offset 0.
+  const float pred_node = -10.0f;
+  const float depth = -10.5f;
+
+  Node n;
+  n.setPredictedDepth(pred_node, 0.01f);
+  for (int i = 0; i < 20; ++i) {
+    // Default Sounding leaves predicted_depth_at_touchdown == INVALID_DATA.
+    Sounding s(depth);
+    s.vertical_error = 0.01f;
+    s.horizontal_error = 0.0f;
+    EXPECT_TRUE(n.insert(0.0, s, params));
+  }
+  n.queueFlush(params);
+
+  auto result = n.extractDepthAndUncertainty(params);
+  ASSERT_FALSE(std::isnan(result.depth));
+  EXPECT_NEAR(result.depth, depth, 0.05);  // offset 0: queued == raw depth
+}
+
+TEST_F(NodeTest, NoSlopeCorrectionWhenPredictedDepthInvalid)
+{
+  // The node has no prediction (predicted_depth_ == INVALID_DATA by default),
+  // even though the sounding supplies a touchdown depth => offset 0. This is
+  // the unwired production path: with no prior surface loaded, behaviour is
+  // unchanged correct-but-uncorrected.
+  const float depth = -10.5f;
+  const float pred_touchdown = -10.6f;
+
+  Node n;  // predicted_depth_ defaults to INVALID_DATA, nothing sets it.
+  EXPECT_EQ(n.predictedDepth(), INVALID_DATA);
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_TRUE(n.insert(0.0, makeSlopeSounding(depth, pred_touchdown), params));
+  }
+  n.queueFlush(params);
+
+  auto result = n.extractDepthAndUncertainty(params);
+  ASSERT_FALSE(std::isnan(result.depth));
+  EXPECT_NEAR(result.depth, depth, 0.05);  // offset 0: queued == raw depth
+}
+
 }  // namespace cube
