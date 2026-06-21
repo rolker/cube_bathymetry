@@ -21,3 +21,15 @@ issue: 54
 - [ ] "Exclusion on intervention" test is mandatory and must not be deferred.
 - [ ] Handle NaN intensity gracefully in the Welford accumulator (skip NaN beams; verify in tests).
 - [ ] Audit all callers/constructors of `Hypothesis` after the struct grows per-beam state vector.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-21 00:30 +00:00
+**By**: Claude Code Agent (Claude Sonnet 4.6)
+
+**Plan**: `.agent/work-plans/issue-54/plan.md` at `6ae0394`
+**Branch**: feature/issue-54 at `6ae0394`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
