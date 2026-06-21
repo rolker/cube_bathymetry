@@ -15,6 +15,11 @@ find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
+# marine_bathymetry_store's exported link interface references
+# nlohmann_json::nlohmann_json (its registry JSON I/O) but does not export the
+# dependency, so the IMPORTED target must be resolved here before consuming it.
+find_package(nlohmann_json REQUIRED)
+find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
 find_package(geodesy REQUIRED)  # WGS84 Vincenty inverse (geo_grid distance)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -70,6 +75,22 @@ install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
 )
 
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
+
+# GeoGrid -> bathymetry-store-tile conversion (#57). Kept in its OWN target so the
+# store dependency does NOT leak into the core cube_bathymetry library, and thus
+# not into the live runtime nodes (cube_bathymetry_node, detections_to_pointcloud)
+# which have no need for the offline data store. Only the offline import_bag tool
+# and its test link this.
+add_library(cube_bathymetry_store_import src/store_import.cpp)
+target_link_libraries(cube_bathymetry_store_import
+  cube_bathymetry
+  marine_bathymetry_store::marine_bathymetry_store
+)
+install(TARGETS cube_bathymetry_store_import EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
 
 
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
@@ -130,6 +151,24 @@ install(TARGETS bag_to_geotiff
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store epoch importer (#57).
+add_executable(import_bag src/import_bag_main.cpp)
+
+target_link_libraries(import_bag
+  cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
+  ${geometry_msgs_TARGETS}
+  ${marine_acoustic_msgs_TARGETS}
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  rosbag2_transport::rosbag2_transport
+  tf2_geometry_msgs::tf2_geometry_msgs
+  tf2_ros::tf2_ros
+)
+
+install(TARGETS import_bag
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
@@ -162,6 +201,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
+
+  ament_add_gtest(test_store_import test/test_store_import.cpp)
+  target_link_libraries(test_store_import cube_bathymetry_store_import)
 endif()
 
 ament_export_dependencies(rclcpp)
