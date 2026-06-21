@@ -52,8 +52,14 @@ void usage()
   std::cout << "  -t /soundings: Topic containing pre-projected soundings as "
     "sensor_msgs/PointCloud2 messages\n";
   std::cout << "  -d /detections: Topic containing marine_acoustic_msgs/SonarDetections; "
-    "projected to soundings offline via DetectionsProjector (vessel_speed = NaN)\n";
+    "projected to soundings offline via DetectionsProjector (vessel_speed = NaN). "
+    "Without an explicit -t, the default /soundings topic is not also gridded.\n";
+  std::cout << "  -r 1.0: Output resolution in meters (nominal; snapped to the grid)\n";
   std::cout << "  -l 0: Number of pings to process before exiting (mainly for debugging)\n";
+  std::cout << "  Frame/range overrides for the -d offline projector (must match the "
+    "bag's namespaced frames, or the grid comes out empty):\n";
+  std::cout << "    --base-link-frame, --level-frame, --tide-frame\n";
+  std::cout << "    --minimum-range, --maximum-range (meters)\n";
   exit(-1);
 }
 
@@ -259,6 +265,7 @@ int main(int argc, char *argv[])
 
   std::vector<std::string> bagfile_names;
   std::string bathymetry_topic = "/soundings";
+  bool bathymetry_topic_explicit = false;  // true once -t is given
   std::string detections_topic;  // empty = detections-offline path disabled
   std::string output_filename;
   std::string nav_topic;
@@ -286,6 +293,7 @@ int main(int argc, char *argv[])
     } else if (*arg == "-t") {
       arg++;
       bathymetry_topic = *arg;
+      bathymetry_topic_explicit = true;
     } else if (*arg == "-d") {
       arg++;
       detections_topic = *arg;
@@ -312,13 +320,30 @@ int main(int argc, char *argv[])
     }
   }
 
-  std::cout << "Bathymetry topic: " << bathymetry_topic << std::endl;
+  // When projecting detections offline (-d) without an explicit -t, disable the
+  // default /soundings admission. Otherwise a bag carrying BOTH a pre-projected
+  // /soundings topic and the detections topic would grid every sounding twice.
+  const bool process_soundings_topic = detections_topic.empty() || bathymetry_topic_explicit;
   if (!detections_topic.empty()) {
     std::cout << "Detections topic: " << detections_topic <<
       " (offline projection, vessel_speed = NaN)" << std::endl;
   }
+  if (process_soundings_topic) {
+    std::cout << "Bathymetry topic: " << bathymetry_topic << std::endl;
+  } else {
+    std::cout << "Pre-projected soundings topic disabled (-d given without -t)" << std::endl;
+  }
 
   cube::DetectionsProjector projector(projector_params);
+
+  // Accumulated offline-projection diagnostics, surfaced at the end so a
+  // misconfigured-frames or over-tight-range run is diagnosable rather than a
+  // silently sparse/empty GeoTIFF (the failure mode #43 exists to kill).
+  size_t proj_pings = 0;
+  size_t proj_soundings = 0;
+  size_t proj_filtered_range = 0;
+  size_t proj_missing_attitude = 0;
+  size_t proj_missing_heave = 0;
 
   BagReaders bag_readers(bagfile_names);
 
@@ -440,7 +465,7 @@ int main(int argc, char *argv[])
       }
     }
 
-    if (message->data_type == "sensor_msgs/msg/PointCloud2") {
+    if (process_soundings_topic && message->data_type == "sensor_msgs/msg/PointCloud2") {
       if(bathymetry_topic == "" || message->message->topic_name == bathymetry_topic) {
         try {
           rclcpp::SerializedMessage serialized_message(*message->message->serialized_data);
@@ -470,6 +495,11 @@ int main(int argc, char *argv[])
         rclcpp::Serialization<marine_acoustic_msgs::msg::SonarDetections>().deserialize_message(
           &serialized_message, &detections);
         auto projection = projector.project(detections, tfBuffer, std::nanf(""));
+        ++proj_pings;
+        proj_soundings += projection.soundings.size();
+        proj_filtered_range += projection.diagnostics.filtered_range;
+        proj_missing_attitude += projection.diagnostics.missing_attitude;
+        proj_missing_heave += projection.diagnostics.missing_heave;
         auto pc_message = soundingsToPointCloud2(projection.soundings, detections.header);
         soundings_buffer.push_back(std::make_pair(pc_message, last_nav));
         check_buffer = true;
@@ -557,6 +587,18 @@ int main(int argc, char *argv[])
   }
 
   std::cout << "\ndone." << std::endl;
+
+  if (!detections_topic.empty()) {
+    std::cout << "Offline projection: " << proj_pings << " pings, " << proj_soundings
+              << " soundings (" << proj_filtered_range << " range-filtered, "
+              << proj_missing_attitude << " missing attitude, "
+              << proj_missing_heave << " missing heave)" << std::endl;
+    if (proj_pings > 0 && proj_soundings == 0) {
+      std::cerr << "WARNING: projected 0 soundings from " << proj_pings
+                << " pings -- check the --*-frame overrides match the bag's namespaced "
+                << "frames (see README 'Configuring frames per platform')." << std::endl;
+    }
+  }
 
   std::cout << "Generating output..." << std::endl;
 

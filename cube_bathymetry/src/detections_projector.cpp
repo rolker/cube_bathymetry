@@ -31,8 +31,10 @@
 #include "tf2/exceptions.h"
 // tf2/utils.hpp's getEulerYPR resolves the quaternion via tf2::fromMsg, whose
 // definition lives in tf2_geometry_msgs (header-only). Include it so the symbol
-// is emitted in this TU. tf2_geometry_msgs does not depend on rclcpp, so the
-// library stays rclcpp-free. Include it BEFORE tf2/utils.hpp.
+// is emitted in this TU, and BEFORE tf2/utils.hpp (ODR for fromMsg). This source
+// stays free of rclcpp/tf2_ros *includes* -- what makes the projector node-free
+// and offline-testable. (The cube_bathymetry .so still links rclcpp transitively
+// via marine_autonomy and tf2_geometry_msgs->tf2_ros; that is unchanged here.)
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2/utils.hpp"
 
