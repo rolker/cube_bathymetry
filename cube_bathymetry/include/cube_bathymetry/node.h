@@ -113,7 +113,8 @@ public:
   ///     backscatter association tracks the depth association (ADR-0007 D2/D3).
   ///   beam_angle: per-beam receive/steering angle (radians, NaN when absent),
   ///     the angle half of the {raw intensity, angle} sufficient-stats pair.
-    bool update(float depth, float variance, const Parameters & parameters,
+    bool update(
+      float depth, float variance, const Parameters & parameters,
       float intensity = std::nan(""), float beam_angle = std::nan(""));
 
   /// Find the closest matching hypothesis in the current linked list.
@@ -163,7 +164,8 @@ public:
   ///   intensity/beam_angle: the {raw intensity, angle} pair for this beam,
   ///     carried on the queue entry bound to its depth so the median sort never
   ///     mismatches a depth with a foreign intensity (ADR-0007 D3).
-    bool queueEstimate(float depth, float variance, const Parameters & parameters,
+    bool queueEstimate(
+      float depth, float variance, const Parameters & parameters,
       float intensity = std::nan(""), float beam_angle = std::nan(""));
 
   /* Routine: cube_node_extract_depth_unct

@@ -35,7 +35,8 @@ bool Node::addHypothesis(float depth, float variance)
 }
 
 
-bool Node::update(float depth, float variance, const Parameters & parameters,
+bool Node::update(
+  float depth, float variance, const Parameters & parameters,
   float intensity, float beam_angle)
 {
   /* Find the best matching hypothesis for the current input sample given
@@ -142,7 +143,8 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
       sounding.intensity, sounding.beam_angle);
 }
 
-bool Node::queueEstimate(float depth, float variance, const Parameters & parameters,
+bool Node::queueEstimate(
+  float depth, float variance, const Parameters & parameters,
   float intensity, float beam_angle)
 {
   if(queue_.size() >= parameters.median_length) {

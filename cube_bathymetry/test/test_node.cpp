@@ -358,13 +358,13 @@ TEST_F(NodeTest, InsertDrivenMedianQueuePreservesIntensityBinding)
   // vertical_error and horizontal_error are small so variance passes IHO limit.
 
   auto make_sounding = [](float depth, float intensity) -> Sounding {
-    Sounding s(depth);
-    s.intensity = intensity;
-    s.beam_angle = 0.0f;
-    s.vertical_error = 0.01f;
-    s.horizontal_error = 0.01f;
-    return s;
-  };
+      Sounding s(depth);
+      s.intensity = intensity;
+      s.beam_angle = 0.0f;
+      s.vertical_error = 0.01f;
+      s.horizontal_error = 0.01f;
+      return s;
+    };
 
   n.insert(0.0, make_sounding(10.0f, -30.0f), p);
   n.insert(0.0, make_sounding(8.0f, -20.0f), p);

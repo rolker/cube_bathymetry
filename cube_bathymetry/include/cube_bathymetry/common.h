@@ -94,7 +94,7 @@ namespace cube
       float uncertainty = std::numeric_limits < float > ::quiet_NaN(),
       float intensity = std::numeric_limits < float > ::quiet_NaN(),
       float beam_angle = std::numeric_limits < float > ::quiet_NaN())
-    : depth(depth), uncertainty(uncertainty), intensity(intensity),
+      : depth(depth), uncertainty(uncertainty), intensity(intensity),
       beam_angle(beam_angle) {
     }
   };
