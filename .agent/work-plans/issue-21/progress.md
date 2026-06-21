@@ -130,3 +130,16 @@ path, and is immediately useful for collision avoidance and coverage.
   before or alongside implementation.
 - [ ] Ensure plan includes atomic-write (temp-then-rename) for each tile so the
   costmap reader never observes a half-written tile (owner comment requirement).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-21 17:00 +00:00
+**By**: Claude Code Agent (claude-sonnet-4-6)
+
+**Plan**: `.agent/work-plans/issue-21/plan.md` at `dafaac2`
+**Branch**: feature/issue-21 at `dafaac2`
+**Phases**: single
+
+### Open questions
+- [ ] `publishGrid()` after migration: publish earth-frame PointCloud2 or continue grid_map with map←earth TF at publish time?
+- [ ] Source index for live tiles: use 0 (no registry) or wire a `SourceRegistry`?
