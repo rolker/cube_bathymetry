@@ -44,7 +44,6 @@ add_library(cube_bathymetry
   src/map_sheet.cpp
   src/node.cpp
   src/parameters.cpp
-  src/store_import.cpp
 )
 
 target_include_directories(cube_bathymetry PUBLIC
@@ -55,8 +54,6 @@ target_include_directories(cube_bathymetry PUBLIC
 target_link_libraries(cube_bathymetry
   ${marine_acoustic_msgs_TARGETS}
   marine_autonomy::marine_autonomy
-  # GeoGrid -> store-tile conversion (store_import.cpp, #57).
-  marine_bathymetry_store::marine_bathymetry_store
   # DetectionsProjector needs tf2::BufferCore::lookupTransform + tf2::getEulerYPR
   # (tf2::tf2, the minimal core target -- no rclcpp in its own interface) and
   # tf2::fromMsg(Quaternion) used by getEulerYPR (tf2_geometry_msgs, header-only).
@@ -78,6 +75,22 @@ install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
 )
 
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
+
+# GeoGrid -> bathymetry-store-tile conversion (#57). Kept in its OWN target so the
+# store dependency does NOT leak into the core cube_bathymetry library, and thus
+# not into the live runtime nodes (cube_bathymetry_node, detections_to_pointcloud)
+# which have no need for the offline data store. Only the offline import_bag tool
+# and its test link this.
+add_library(cube_bathymetry_store_import src/store_import.cpp)
+target_link_libraries(cube_bathymetry_store_import
+  cube_bathymetry
+  marine_bathymetry_store::marine_bathymetry_store
+)
+install(TARGETS cube_bathymetry_store_import EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
 
 
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
@@ -142,10 +155,9 @@ install(TARGETS bag_to_geotiff
 add_executable(import_bag src/import_bag_main.cpp)
 
 target_link_libraries(import_bag
-  cube_bathymetry
+  cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
   ${geometry_msgs_TARGETS}
   ${marine_acoustic_msgs_TARGETS}
-  marine_bathymetry_store::marine_bathymetry_store
   rclcpp::rclcpp
   rosbag2_cpp::rosbag2_cpp
   rosbag2_transport::rosbag2_transport
@@ -191,7 +203,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_detections_projector cube_bathymetry)
 
   ament_add_gtest(test_store_import test/test_store_import.cpp)
-  target_link_libraries(test_store_import cube_bathymetry)
+  target_link_libraries(test_store_import cube_bathymetry_store_import)
 endif()
 
 ament_export_dependencies(rclcpp)

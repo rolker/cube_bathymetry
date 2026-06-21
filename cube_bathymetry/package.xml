@@ -20,6 +20,7 @@
   <depend>nlohmann-json-dev</depend>  <!-- store's unexported link-interface dep (#57) -->
   <depend>geodesy</depend>
   <depend>rclcpp</depend>
+  <depend>rosbag2_cpp</depend>  <!-- bag readers in import_bag / bag_to_geotiff -->
   <depend>rosbag2_transport</depend>
   <depend>rclcpp_lifecycle</depend>
   <depend>sensor_msgs</depend>
