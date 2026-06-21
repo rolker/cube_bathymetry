@@ -74,3 +74,114 @@ This re-plan addresses both `## Plan Review` must-fixes: (1) the offset now reco
 ### Open questions
 - [ ] GeoGrid bilinear geometry has no exact GGGS-cell analog: port nearest-estimated-neighbour prediction for GeoGrid + document the divergence, or require exact parity with the regular Grid before merge?
 - [ ] PR shape: land Part A + Part B(Grid) + Part C as one PR with GeoGrid parity as a stacked follow-on if it balloons, or insist on a single PR covering both grids?
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-21 03:05 -04:00
+**By**: Claude Code Agent (Claude Opus)  <!-- independent fresh-context dispatch (#490); not the plan author's self-review -->
+
+**Plan**: `.agent/work-plans/issue-15/plan.md` at `560b52a`
+**PR**: PR-less (--issue mode)
+**Verdict**: changes-requested
+
+This is the **second** plan review (re-plan after the first was changes-requested). The v2
+plan correctly diagnoses the prior `.z`-vs-slant-range bug and the runtime-inert defect,
+and the **scope-honesty, risk section, and interpolation 4-NN/guard description are good**.
+But independent re-derivation from the original source shows the v2 plan **still has the
+slope-correction geometry wrong** — for a deeper reason than v1 — and **mis-ports the
+prediction pipeline**. Both prior reviewers (v1 author, v1 Opus reviewer) and this plan all
+misread what `snd->range` *is* at the offset site. Verified line-by-line below.
+
+### Findings
+
+- [ ] (must-fix) **`snd->range` is OVERWRITTEN before the offset runs — it is NOT
+  `depth/cos(angle)` at the slope-correction site.** The `range = depth/cos(angle)` value
+  (`sounding.c:1268`, `sounding_gsf.c:481`, `sounding_hips.c:1263`) is only the
+  *error-model* range. In the slope-correction path, `mapsheet_cube.c:2424-2444` explicitly
+  does `data[snd].range = cube_grid_interpolate(... de, dn ...)` — the comment reads
+  *"fill the result into the 'range' element of the sounding [bad! <smack>] for
+  cube_node_insert() to use for slope corrections."* So at `cube_node.c:1847`,
+  `offset = node->pred_depth − snd->range` is **`pred_depth_node − pred_depth_interpolated_at_touchdown`**:
+  the difference of two negative-down predicted-surface depths (node vs touchdown point),
+  i.e. the predicted slope between them. The plan's Part A formula
+  (`range_analog = sounding.depth / cos(angle)`, `plan.md:74-96,102-115`) reconstructs the
+  *error-model* range, which is the wrong quantity. Verified numerically: with the plan's own
+  worked example (rx=60°, depth=−9, pred=−10) the plan queues `−1 m`; the literal original
+  error-model range queues `−37 m`; the *actual* slope-corrected value is a small slope
+  delta near `−9 m`. The plan's "reproduces CUBE off-boresight" claim (`plan.md:87-93`) is
+  not borne out. — `plan.md:74-115`
+
+- [ ] (must-fix) **Part B is not a faithful port — it invents a self-bootstrap path the
+  original does not have, and assigns the interpolation to the wrong point.** The original's
+  insert path (`cube_grid_insert_depths`, `cube_grid.c:1877-1990`) never calls
+  `cube_grid_interpolate` or `set_preddepth`; it only iterates nodes and calls
+  `cube_node_insert`. `pred_depth` is set in exactly two places: the **external-prior**
+  init (`cube_grid_initialise`/`init_unct`, `cube_grid.c:1712,1812`) from a supplied prior
+  bathymetry array, and the per-sounding `range` overwrite in `mapsheet_cube.c` (above).
+  There is **no "interpolate from current running estimates during insert" mechanism** —
+  the plan's claim that `cube_grid_interpolate` "needs no external prior file … is the
+  production-relevant path" (`plan.md:117-120`) is incorrect: that routine interpolates the
+  *prior-surface* `pred_depth`, and is invoked at surface-finalization, interpolated at the
+  **sounding touchdown** `(de,dn)`, not at the node. The plan interpolates at the **node
+  position** from neighbours' running estimates (`plan.md:127-129,140-141`) — wrong source
+  field and wrong location. As written, Part B builds a new, unfaithful estimator and labels
+  it a port. — `plan.md:117-152,194-198`
+
+- [ ] (must-fix) **`predicted_depth_` must be seeded from a prior surface for the original's
+  slope correction to be meaningful at all.** The original applies slope correction only when
+  a prior bathymetry was loaded via `cube_grid_initialise` (which also seeds a base
+  hypothesis, `cube_node_add_null_hypothesis`). The port has `Hypothesis::generateNullHypothesis`
+  (`plan.md:57`) but no prior-load entry point, and `Grid::insert`/`GeoGrid::insert` never
+  set `predicted_depth_` (confirmed: `grid.cpp:122`, `geo_grid.cpp:95` — no pred set). The
+  honest faithful-port options are: (a) port `cube_grid_initialise` (external-prior load +
+  base-hypothesis seed) and the `mapsheet_cube.c` per-sounding touchdown-interpolation
+  `range` overwrite, or (b) explicitly decide the port will *not* support slope correction
+  until a prior-surface subsystem exists, and keep the block disabled with a referenced
+  follow-on. The current plan's middle path (self-bootstrap from estimates) is neither
+  faithful nor clearly-scoped. — `plan.md:32-41,117-145`
+
+- [ ] (suggestion) The Part C tests assert against the plan's own (incorrect) reconstruction
+  `pred − depth/cos(angle)` (`plan.md:156-164`). Like the v1 test, they would lock in the
+  wrong formula. Any test must assert against the *touchdown-vs-node predicted-surface
+  difference* (`pred_node − pred_touchdown`), reconstructed independently in the test from a
+  known synthetic prior surface — otherwise off-boresight passes for the wrong reason. —
+  `plan.md:156-164`
+
+- [ ] (suggestion) `INVALID_DATA`-vs-`no_data_value` sentinel correction (`plan.md:115`) and
+  the `|z|>0` div-guard are fine and worth keeping regardless of the formula rework. The
+  comment-history note (why it was disabled at port time) is good practice. — `plan.md:111-115`
+
+### Open-question recommendations (the two the plan defers)
+
+- **GeoGrid now vs follow-on**: Recommend **defer GeoGrid entirely** to a tracked follow-on
+  regardless — but only *after* the Grid-side geometry is corrected. A Grid-only landing is
+  acceptable *only* if GeoGrid is not a silently-dead path. It currently isn't dead: both
+  grids today run with offset 0 (no correction), which is a defined, safe behaviour. So
+  shipping Grid-only correction + filing a GeoGrid issue leaves GeoGrid working-without-
+  correction (acceptable, tracked), not broken. Do **not** attempt GGGS bilinear in this PR.
+- **PR shape**: Recommend the plan be **re-scoped before any implementation**, not split as-is.
+  The blocking problem is *correctness of the offset and the prediction source*, which Part A
+  and Part B share. A 2-PR stack of a wrong formula is still wrong. Sequence: (1) re-derive
+  the offset as `pred_depth_node − pred_depth_at_touchdown` from a seeded prior surface;
+  (2) decide whether this PR ports the external-prior load path (`cube_grid_initialise`) or
+  defers slope-correction-active behaviour behind a referenced follow-on; (3) only then split
+  GeoGrid off.
+
+### Evaluation summary
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Needs work | Honestly sized and risk-flagged, but built on a wrong correction model; re-scope before implementing. |
+| Issue alignment | Good | Targets the issue's "re-enable slope correction" ask. |
+| File targeting | Good | `sounding.h`/`node.*`/`grid.*`/`geo_grid.*`/tests are the right files. |
+| Consequences | Needs work | Consequences table is complete *for the planned (incorrect) design*; misses the external-prior / touchdown-interpolation dependency. |
+| Principle alignment | Concern | "Never document from assumptions" / "Replicate, don't invent": the `range` semantics and the insert-time interpolation are asserted as verified-from-source but contradict `cube_grid_insert_depths`, `mapsheet_cube.c:2424`, and `cube_grid_initialise`. |
+| ADR compliance | Good | No ADR triggered (algorithmic faithful-port). |
+| ROS conventions | N/A | No topics/params/QoS/lifecycle touched. |
+
+The v2 plan is well-written and improves on v1's disclosure and risk-honesty, but the corrected
+formula does **not** hold up: `snd->range` at the offset site is the interpolated predicted
+depth at touchdown (overwritten in `mapsheet_cube.c`), not `depth/cos(angle)`, so the real
+correction is `pred_depth_node − pred_depth_touchdown`. Part B mis-ports the prediction pipeline
+(self-bootstrap from running estimates ≠ the original's external-prior + touchdown-interpolation).
+Re-derive the offset and the prediction source from `mapsheet_cube.c:2424` + `cube_grid_initialise`
+before implementation; defer GeoGrid to a tracked follow-on once Grid is correct.
