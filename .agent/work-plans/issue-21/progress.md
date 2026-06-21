@@ -143,3 +143,39 @@ path, and is immediately useful for collision avoidance and coverage.
 ### Open questions
 - [ ] `publishGrid()` after migration: publish earth-frame PointCloud2 or continue grid_map with map←earth TF at publish time?
 - [ ] Source index for live tiles: use 0 (no registry) or wire a `SourceRegistry`?
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-21 18:30 +00:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+
+**Plan**: `.agent/work-plans/issue-21/plan.md` at `dafaac2`
+**PR**: PR-less (--issue mode)
+**Verdict**: changes-requested
+
+### Evaluation
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Concern | Bundles a node re-architecture (MapSheet→GeoMapSheet) that changes the live collision-avoidance grid output into a persistence issue. Should be split. |
+| Issue alignment | Needs work | review-issue explicitly recommended Option 1 (output-only) and split the `setPredictedDepth` prime path to a follow-on; the plan re-bundles the risky path AND adds the migration. |
+| File targeting | Needs work | Load/prime path needs new `GeoGrid` API (Node access by CellIndex) not listed in Files-to-Change. |
+| Consequences | Needs work | Migration changes published `grid_map` frame/representation; downstream consumers (costmap/camp/rviz keyed on `map_frame`) not in the consequences table. |
+| Principle alignment | Concern | "Only what's needed" + "Improve incrementally" — migration is far more than persistence needs. |
+| ADR compliance | Good | Inline design note proportionate; ADR-0008 param handling sound. |
+| ROS conventions | Needs work | publishGrid fallback "skip publish for that cycle" is unacceptable for a collision-avoidance feed. |
+
+### Findings
+- [ ] (must-fix) Central claim VERIFIED but migration mis-scoped: live `cube_bathymetry_node.cpp` does use Cartesian `cube::MapSheet`, ingests `MapSounding(x,y,z)` in `map_frame_`, and publishes `grid_map::GridMap` in `map_frame_` (`cube_bathymetry_node.cpp:64,97,132,142,288`). Migrating to `GeoMapSheet` re-architects the runtime grid that feeds collision avoidance — out of proportion for a persistence issue. Split the migration into its own issue. — `plan.md:44`
+- [ ] (must-fix) `loadEpochIntoSheet`/prime path needs new `GeoGrid` API not in the plan: `GeoGrid::nodes_` (`std::map<CellIndex, shared_ptr<Node>>`) is **private** with no accessor; the only public mutator is `insert(GeoSounding)`. `Node::setPredictedDepth(float,float)` exists (`node.h:269`) but is unreachable from a `GeoGrid`/`GeoMapSheet`. Step 3 cannot "find or create the Node at the matching CellIndex" without a new `GeoGrid::setPredictedDepthAt(CellIndex,...)` (lazy-create) method. Add it to Files-to-Change or the step is unimplementable as written. — `plan.md:78`
+- [ ] (must-fix) Published-grid breaking change not captured in consequences: after migration `publishGrid()` must do per-cell `map←earth` TF and the cells become geographic. The open question even proposes "fall back to skipping publish for that cycle" — that silently starves the collision-avoidance grid. Consumers keyed on `map_frame` (costmap, camp, rviz; `map_frame` is a launch contract, `cube_bathymetry_in_namespace_launch.py:36`) are not in the consequences table. — `plan.md:59,243`
+- [ ] (suggestion) Recommended lighter path = alternative (b): run a parallel `GeoMapSheet` fed the same earth-frame soundings purely for persistence, leaving the existing `MapSheet` and its published grid untouched. Zero risk to the live grid; cost is extra memory + double accumulation. The earth→ECEF→lat/lon→`GeoSounding` ingestion already has precedent in `bag_to_geotiff.cpp:553-572`. This delivers issue #21 (output-only persistence) without re-architecting the runtime node. — `plan.md:44`
+- [ ] (suggestion) Alternative (a) (save-time convert the Cartesian `MapSheet` grids to GGGS tiles) is NOT lighter — `BathymetryTile`/`tile_io` are GGGS-`GridIndex`-keyed (`tile_io.hpp:68,78`) and `cube::Grid` has only a Cartesian `origin()`; converting would be a lossy resample/re-bin. Reject (a); prefer (b). — `plan.md:9`
+- [ ] (suggestion) Periodic `geoGridToTile` calls `GeoGrid::values()`, which flushes the median pre-filter (per `store_import.h` and the plan's own consequences row). The plan acknowledges this but should add a test asserting periodic-save output equals a single end-of-session export, since it now happens every `save_interval`. — `plan.md:237`
+
+### Summary
+The crux claim is correct: the live node really is Cartesian `MapSheet`-based. But the proposed `MapSheet→GeoMapSheet` migration is mis-scoped for issue #21 — it re-architects the runtime grid that feeds collision avoidance, contradicting review-issue's explicit Option-1 (output-only) recommendation. A genuinely lighter path exists (parallel `GeoMapSheet` for persistence only) that leaves the published grid untouched. The plan is not ready for implementation as written.
+
+### Recommended Actions
+- [ ] Re-scope #21 to output-only persistence via a **parallel** `GeoMapSheet` (alternative b); do not migrate the runtime node in this issue.
+- [ ] Split the `MapSheet→GeoMapSheet` runtime migration (changes the published `grid_map` representation/frame) into its OWN issue with its own consequences analysis and consumer regression plan.
+- [ ] If the `setPredictedDepth` prime path stays in #21, add the missing `GeoGrid` Node-access API to Files-to-Change; otherwise defer warm-start to a follow-on per review-issue.
