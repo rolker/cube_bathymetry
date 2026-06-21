@@ -15,10 +15,6 @@ find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
-# marine_bathymetry_store's exported link interface references
-# nlohmann_json::nlohmann_json (its registry JSON I/O) but does not export the
-# dependency, so the IMPORTED target must be resolved here before consuming it.
-find_package(nlohmann_json REQUIRED)
 find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
 find_package(geodesy REQUIRED)  # WGS84 Vincenty inverse (geo_grid distance)
 find_package(rclcpp REQUIRED)
