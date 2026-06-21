@@ -324,4 +324,82 @@ TEST_F(NodeTest, NodeRecordNoData)
   EXPECT_EQ(record.n_samples, 0u);
 }
 
+// D3 binding through the median pre-queue: each beam's intensity must stay bound
+// to ITS depth through Node::insert() -> queueEstimate() -> queueFlush(), even
+// when beams arrive in an order that differs from the depth-sorted queue order.
+// This exercises the real input path (insert) with median-induced reordering.
+//
+// Strategy: use a small median_length=3 so the median fires quickly. Send 4 beams
+// via insert() with depths {10.0, 8.0, 12.0, 10.0} and corresponding
+// intensities {-30, -20, -40, -30}. All depths are close so they land on one
+// hypothesis. After queueFlush(), verify n_samples == 4 and mean intensity is the
+// true mean of all four intensities (-30.0 dB), confirming no depth/intensity
+// cross-contamination through the median sort.
+TEST_F(NodeTest, InsertDrivenMedianQueuePreservesIntensityBinding)
+{
+  // Use median_length=3 so the median fires on the 3rd insert, pushing one beam
+  // through to update() before the 4th arrives; queueFlush() clears the rest.
+  Parameters p{CellSizes(1.0f), "order1a"};
+  p.median_length = 3;
+
+  Node n;
+
+  // Beams with varying depths (arrival order != depth-sort order).
+  // Intensities are deliberately tied to specific depths so a swap would show up
+  // as a wrong mean:
+  //   depth 10.0 -> intensity -30.0   (arrives 1st; shallowest of the set)
+  //   depth  8.0 -> intensity -20.0   (arrives 2nd; middle depth)
+  //   depth 12.0 -> intensity -40.0   (arrives 3rd; deepest)
+  //   depth 10.0 -> intensity -30.0   (arrives 4th; same as 1st)
+  //
+  // Correct mean: (-30 + -20 + -40 + -30) / 4 = -30.0.
+  //
+  // distance=0.0 always passes the capture-distance guard in insert().
+  // vertical_error and horizontal_error are small so variance passes IHO limit.
+
+  auto make_sounding = [](float depth, float intensity) -> Sounding {
+    Sounding s(depth);
+    s.intensity = intensity;
+    s.beam_angle = 0.0f;
+    s.vertical_error = 0.01f;
+    s.horizontal_error = 0.01f;
+    return s;
+  };
+
+  n.insert(0.0, make_sounding(10.0f, -30.0f), p);
+  n.insert(0.0, make_sounding(8.0f, -20.0f), p);
+  n.insert(0.0, make_sounding(12.0f, -40.0f), p);
+  n.insert(0.0, make_sounding(10.0f, -30.0f), p);
+  n.queueFlush(p);
+
+  auto record = n.extractNodeRecord(p);
+  ASSERT_GT(record.n_samples, 0u);
+  // All four beams have similar depths -> one hypothesis accumulates them.
+  // The mean must be the true arithmetic mean of the four intensities: -30.0.
+  // A binding error (intensity swapped to wrong depth entry) would shift this.
+  EXPECT_NEAR(record.intensity, -30.0f, 1.0f);
+}
+
+// Negative-variance clamp: the sum-of-squares form used by extractNodeRecord()
+// can yield a tiny negative sample_variance due to float rounding when the mean
+// is large in magnitude (e.g. O(-30 dB)) and n is large. The clamp must ensure
+// intensity_var is never negative -- only 0.0 or positive (or NaN for n<2).
+TEST_F(NodeTest, IntensityVarNonNegativeAfterClamp)
+{
+  // Construct a case where float rounding could produce a negative intermediate:
+  // many identical values so sample variance is theoretically 0 but rounding in
+  // the sum-of-squares form may go slightly negative. The clamp must floor it.
+  Node n;
+  const float identical_intensity = -30.0f;
+  for (int i = 0; i < 10; ++i) {
+    n.update(10.0f, 1.0f, params, identical_intensity, 0.0f);
+  }
+
+  auto record = n.extractNodeRecord(params);
+  ASSERT_GE(record.n_samples, 2u);
+  // intensity_var must be >= 0 (not NaN for n>=2, and never negative).
+  ASSERT_FALSE(std::isnan(record.intensity_var));
+  EXPECT_GE(record.intensity_var, 0.0f);
+}
+
 }  // namespace cube

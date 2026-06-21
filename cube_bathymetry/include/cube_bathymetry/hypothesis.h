@@ -162,6 +162,13 @@ namespace cube
   /// The radiometric correction (D3 GeoCoder) is applied per element at
   /// node-output (Node::extractNodeRecord); these raw pairs are retained so the
   /// node value stays re-derivable when slope (cube_bathymetry#15) lands.
+  ///
+  /// Memory budget: sizeof(BeamIntensitySample) == 8 bytes (two floats). Growth
+  /// class is identical to number_of_samples (one entry per accepted beam, for
+  /// the survey lifetime of the hypothesis). Worst-case is ~8 bytes/beam/node.
+  /// Once cube_bathymetry#15's correction model settles this can be reduced to
+  /// pure sufficient statistics (mean, M2, count) if the per-beam retention is
+  /// no longer needed for re-derivation.
     std::vector < BeamIntensitySample > intensity_samples;
   };
 

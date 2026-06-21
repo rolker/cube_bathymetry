@@ -82,6 +82,12 @@ namespace cube
   /// (the detections.rx_angles convention). This is the beam/incidence angle
   /// relative to nadir, the per-beam geometry retained for the deferred
   /// node-output backscatter correction (ADR-0007 D3). NaN when not reported.
+  ///
+  /// SIGN-CONVENTION VERIFICATION REQUIRED (cube_bathymetry#15): before the
+  /// deferred GeoCoder grazing-angle reconstruction consumes this field, the
+  /// sign/zero convention of rx_angles[i] (e.g., "+= to starboard") MUST be
+  /// cross-checked against the marine_acoustic_msgs producer. A sign error
+  /// would bias the incidence correction and corrupt the settled backscatter.
     float beam_angle = std::nan("");
 
   // Position relative to the sonar head, in meters.

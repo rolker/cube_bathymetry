@@ -261,7 +261,10 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
       // Sample variance (unbiased), then divide by n to get the variance of the
       // MEAN -- the estimate variance that shrinks with n (ADR-0007 D4), NOT the
       // raw sample variance. Mirrors the bathy store's depth uncertainty.
-      const double sample_variance = (sum_sq - sum * sum / n) / (n - 1);
+      // Clamp to 0: float rounding on the sum-of-squares form can produce a
+      // tiny negative sample_variance at low-dB means over many beams.
+      const double sample_variance = std::max(
+        0.0, (sum_sq - sum * sum / n) / (n - 1));
       record.intensity_var = static_cast<float>(sample_variance / n);
     }
     // n == 1: intensity set, intensity_var stays NaN (no spread from one beam).
