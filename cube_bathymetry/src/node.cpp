@@ -265,9 +265,10 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
   //
   // TODO(#54-B / cube_bathymetry#15): apply the GeoCoder incidence/Lambert
   // correction per beam HERE, using the winning hypothesis's settled depth and
-  // the local seabed slope (ADR-0007 D3). Slope is gated on cube_bathymetry#15
-  // (disabled today in Node::insert). Until #15 lands this is the identity
-  // (flat-geometry) correction: the corrected value equals the raw value and
+  // the local seabed slope (ADR-0007 D3). The slope correction (cube_bathymetry#15)
+  // has landed in Node::insert but is inert (offset 0) until its predicted-surface
+  // producer (cube_bathymetry#59) is wired. Until that producer lands this is the
+  // identity (flat-geometry) correction: the corrected value equals the raw value and
   // intensity is emitted UNCORRECTED. The per-beam {raw_intensity, grazing_angle}
   // set is retained on the hypothesis (Hypothesis::intensity_samples) so the
   // node value is fully re-derivable when #15 provides slope -- no information
