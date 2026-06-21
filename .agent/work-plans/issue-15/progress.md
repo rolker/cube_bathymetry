@@ -367,3 +367,45 @@ umbrella follow-on). Ready for implementation.
 - [ ] (suggestion) Prefer a default member initializer for `predicted_depth_at_touchdown` over per-ctor sets — `plan.md:132-137`
 - [ ] (recommendation) Adopt `INVALID_DATA` sentinel (not literal `0.0`); comment-cite `cube_grid.c:2383` — `plan.md:227-231`
 - [ ] (recommendation) One umbrella follow-on for the external-prior + touchdown-interpolation producer — `plan.md:232-234`
+
+## Implementation
+**Status**: complete
+**When**: 2026-06-21 10:30 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-15
+**Commits**: `db05fc3` (production), `f5831d8` (tests), `9dd4df7` (plan sync) — atomic, agent identity, hooks passed, NOT pushed.
+
+### What changed (3 production edits + tests, per the approved v3 plan)
+- **`sounding.h`**: added `float predicted_depth_at_touchdown = INVALID_DATA;` (default member initializer, per review suggestion 2 — no per-ctor edit). Negative-down predicted-surface depth at the sounding touchdown; the port's analog of the *overwritten* `snd->range` (`mapsheet_cube.c:2434`), deliberately NOT named `range`. Doc cites `cube_grid.c:2383` for why the literal-original `0.0` sentinel is port-unsafe (a real shoreline touchdown depth can be `0.0`) and `INVALID_DATA` carries the faithful intent without the value collision (review suggestion 1 applied).
+- **`node.h` / `node.cpp`**: added `setPredictedDepth(float, float)` — a 1:1 port of `cube_node_set_preddepth` (`cube_node.c:1084`) — plus a `predictedDepth()` const accessor for the future producer + tests.
+- **`node.cpp` `Node::insert`**: re-enabled the previously-commented offset block with the corrected formula `offset = predicted_depth_ - sounding.predicted_depth_at_touchdown`, queued as `sounding.depth + offset`. Guard reproduces the original `range != 0.0 && pred_depth != no_data_value`, both sentinels as `INVALID_DATA` (the old comment's `parameters.no_data_value` was `quiet_NaN()` — doubly wrong; corrected). Comment block cites `cube_node.c:1846` + `mapsheet_cube.c:2434`, states why it was disabled at port time (no predicted-surface field), and that no `1/cos^2` obliquity applies.
+- **Producer NOT built** (deferred follow-on): nothing sets `predicted_depth_` or `predicted_depth_at_touchdown` in production, so both stay at `INVALID_DATA` => offset 0 => unchanged correct-but-uncorrected behaviour for both `Grid` and `GeoGrid`.
+
+### Tests (`test_node.cpp`, +4)
+- `SlopeCorrectionSurfaceSlopeDelta` — synthetic-injection end-to-end (seed `setPredictedDepth(-10.0)` + touchdown `-10.6`, raw depth `-10.5`; drive insert→queueFlush→extractDepthAndUncertainty; assert converged `-9.9` reconstructed **independently** from `depth + (pred_node - pred_touchdown)`, and that it does NOT collapse to `pred_node` or raw depth — so an offset-0 regression fails). Review suggestion 1 (independent reconstruction) applied.
+- `SlopeCorrectionZeroOnFlatSurface` — `pred_touchdown == pred_node` => offset 0.
+- `NoSlopeCorrectionWhenTouchdownSentinel` — sounding's touchdown is `INVALID_DATA` => offset 0.
+- `NoSlopeCorrectionWhenPredictedDepthInvalid` — node has no prediction (default `INVALID_DATA`) => offset 0 (the production-unwired path).
+
+### Deviation from plan (recorded in plan.md `9dd4df7`)
+Plan named `test_grid.cpp` for the integration test. `Grid`/`GeoGrid` keep `nodes_` private with **no per-node seed API**, so `predicted_depth_` cannot be set through the grid public surface. The end-to-end synthetic-injection test therefore lives at the **`Node`** level — the shared integration point both `Grid::insert` and `GeoGrid::insert` call (`grid.cpp:122`, `geo_grid.cpp:95`) — driving the identical pipeline. Adding a node-seed grid accessor is the deferred producer's concern, not this PR's. No `test_grid.cpp` change.
+
+### Build + test results
+- Build: **clean** (`cube_bathymetry` built; the only stderr is pre-existing GDAL `-Wunused-result` warnings in `bag_to_geotiff.cpp`, unrelated to this change).
+- gtest: **269 tests, 0 errors, 0 failures, 38 skipped** across the package. `test_node.gtest.xml`: **16 tests (was 12, +4 new slope tests), 0 failures, 0 errors** — all 4 new slope tests `result="completed"`. `test_grid.gtest.xml`: 9, 0/0. No uncrustify local-drift noise this run (uncrustify.xunit.xml: 38, 0 failures). Judged green by gtest XML.
+
+### Suggested producer follow-on issue (for the host to file at the publish checkpoint)
+**Title**: Port the CUBE predicted-surface producer (external-prior load + per-sounding touchdown interpolation) to make slope correction active
+
+**Body** (suggested):
+> Part of #15. Issue #15 ported the node-level slope-correction math (`Node::setPredictedDepth` + the corrected offset in `Node::insert`) but explicitly deferred the predicted-surface *producer* that drives it. With no producer, `predicted_depth_`/`Sounding::predicted_depth_at_touchdown` stay at `INVALID_DATA` so the offset is 0 (correct-but-uncorrected) in production.
+>
+> This issue ports the producer subsystem the port wholly lacks, as one umbrella (the two pieces only deliver value together):
+> 1. **External-prior load** (`cube_grid_initialise` analog, `cube_grid.c:1665,1712,1730`): load a prior bathymetry array, seed each node's `predicted_depth_`/variance via `setPredictedDepth`, and seed a base null hypothesis.
+> 2. **Per-sounding touchdown interpolation** (`cube_grid_interpolate` + the `mapsheet_cube.c:2434` `range` overwrite): bilinearly blend the 4 surrounding nodes' `predicted_depth_` at each sounding's touchdown `(de,dn)` and set `Sounding::predicted_depth_at_touchdown` (returns no-correction sentinel if any corner is no-data).
+>
+> The Grid-vs-GeoGrid interpolation geometry decision (regular bilinear vs the GGGS-cell analog) belongs here, with a per-node seed API on `Grid`/`GeoGrid`. Once landed, slope correction is active end-to-end; until then, deployed behaviour remains uncorrected (#15 is honest about this).
+
+**Status**: complete
+**By**: Claude Code Agent (Claude Opus)
