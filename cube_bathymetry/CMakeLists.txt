@@ -22,12 +22,14 @@ find_package(rosbag2_cpp REQUIRED)
 find_package(rosbag2_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 
 find_package(GDAL CONFIG REQUIRED)
 
 add_library(cube_bathymetry
+  src/detections_projector.cpp
   src/error_model.cpp
   src/geo_grid.cpp
   src/geo_map_sheet.cpp
@@ -46,6 +48,12 @@ target_include_directories(cube_bathymetry PUBLIC
 target_link_libraries(cube_bathymetry
   ${marine_acoustic_msgs_TARGETS}
   marine_autonomy::marine_autonomy
+  # DetectionsProjector needs tf2::BufferCore::lookupTransform + tf2::getEulerYPR.
+  # tf2_ros::tf2_ros provides the tf2 core (BufferCore, utils) WITHOUT rclcpp;
+  # tf2_geometry_msgs provides tf2::fromMsg(Quaternion) used by getEulerYPR.
+  # Neither pulls rclcpp, so the library header stays rclcpp-free.
+  tf2_geometry_msgs::tf2_geometry_msgs
+  tf2_ros::tf2_ros
 )
 # geodesy (geographic_info) exports via ament, not a namespaced target.
 ament_target_dependencies(cube_bathymetry geodesy)
@@ -146,6 +154,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_geo_grid test/test_geo_grid.cpp)
   target_link_libraries(test_geo_grid cube_bathymetry)
+
+  ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
+  target_link_libraries(test_detections_projector cube_bathymetry)
 endif()
 
 ament_export_dependencies(rclcpp)
