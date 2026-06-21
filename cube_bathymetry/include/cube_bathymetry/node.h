@@ -183,6 +183,31 @@ public:
  */
     void queueFlush(const Parameters & parameters);
 
+  /* Routine:  cube_node_set_preddepth
+  * Purpose:  Set the node's notion of a 'predicted depth'
+  * Inputs:  depth  Depth to set (meter), negative-down
+  *          variance  Variance of depth to set (meter^2)
+  * Comment: 1:1 port of `cube_node_set_preddepth` (`cube_node.c:1084`). This is
+  *          simply a predicted-depth setter made available to the outside world
+  *          on the basis that the Node code should be doing this, rather than
+  *          some other part of the module. The following conventions apply in
+  *          the integration code:
+  *            pred_depth == NaN     => Do not incorporate any data into node
+  *            pred_depth == INVALID => No prediction of depth available (so the
+  *                                     node has to guess, and does NOT make
+  *                                     slope corrections).
+  *          No producer wires this in production yet; it exists so the future
+  *          external-prior load path (and the tests) can seed a predicted
+  *          surface that drives the slope correction in Node::insert.
+  */
+    void setPredictedDepth(float depth, float variance);
+
+  /// Current predicted-surface depth at this node (negative-down), or
+  /// `INVALID_DATA` when no prediction is available. Accessor for the
+  /// predicted-surface producer and tests; the running best-estimate of the
+  /// seabed is extracted separately via extractDepthAndUncertainty().
+    float predictedDepth() const {return predicted_depth_;}
+
 private:
   /// Queued points in pre-filter
     std::list < DepthAndUncertainty > queue_;

@@ -67,6 +67,34 @@ namespace cube
   /// Per-beam acoustic intensity / backscatter (NaN when not reported).
     float intensity = std::nan("");
 
+  /// Predicted-seabed-surface depth interpolated at this sounding's touchdown
+  /// point, negative-down (same convention as `depth` and `Node`'s
+  /// `predicted_depth_`). This is the port's analog of the original CUBE
+  /// sounding's *overwritten* `range` element: in `mapsheet_cube.c:2434` the
+  /// integration code fills `snd->range` with
+  /// `cube_grid_interpolate(... de, dn ...)` — the bilinear blend of the four
+  /// surrounding nodes' `pred_depth` at the touchdown `(de,dn)` — purely so
+  /// that `cube_node_insert` (`cube_node.c:1846`) can use it for the
+  /// slope correction `offset = node->pred_depth - snd->range`.
+  ///
+  /// It is deliberately NOT named `range` to avoid resurrecting the prior
+  /// misread that equated it with the error-model slant range
+  /// `depth/cos(angle)` (`sounding.c:1268`); that is a different quantity that
+  /// is overwritten before the offset runs and is irrelevant here.
+  ///
+  /// Defaults to the no-correction sentinel `INVALID_DATA`. The original uses
+  /// `range == 0.0` as its "no interpolation result" sentinel only because
+  /// `cube_grid_interpolate` *returns* `0.0f` on a no-data corner
+  /// (`cube_grid.c:2383`); `0.0` is an artifact of that return convention, not
+  /// a deliberate semantic, and is safe there only because a real seabed
+  /// `pred_depth` is never exactly `0.0` m. In this port a legitimately
+  /// interpolated touchdown depth at the shoreline could be `0.0`, so we use
+  /// `INVALID_DATA` to carry the same intent ("no interpolation result =>
+  /// skip") without the value collision. No producer sets this yet (the
+  /// external-prior + touchdown-interpolation subsystem is a deferred
+  /// follow-on), so it stays at the sentinel and the offset is 0.
+    float predicted_depth_at_touchdown = INVALID_DATA;
+
   // Position relative to the sonar head, in meters.
   // For a typical down looking sonar, x is along the heading, y is to starboard, and z is down.
     geometry_msgs::msg::Point sonar_relative_position;

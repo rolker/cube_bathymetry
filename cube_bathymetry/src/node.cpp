@@ -115,13 +115,41 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
       parameters.distance_exponent));
 
 
-  // if (sounding.range != 0.0 && predicted_depth_  != parameters.no_data_value)
-  // {
-  //   offset = predicted_depth_ - sounding.range;
-  //   /* Refered variance is boresight variance multiplied by dilution factor,
-  //    * a function of distance and a user scale parameter.
-  //    */
-  // }
+  /* Slope correction. Projects a sounding that touched down off this node onto
+   * the node along the predicted seabed surface (not along the acoustic beam):
+   *
+   *   offset = predicted_depth_(node) - predicted_depth_at_touchdown
+   *   queued = sounding.depth + offset
+   *
+   * Both terms are negative-down predicted-surface depths in the same
+   * convention, so the offset is purely the predicted slope between the node
+   * and the sounding's touchdown point. This is the original CUBE
+   * `offset = node->pred_depth - snd->range` (`cube_node.c:1846`) once you
+   * account for `snd->range` being OVERWRITTEN at `mapsheet_cube.c:2434` with
+   * `cube_grid_interpolate(... de, dn ...)` (the bilinear blend of the four
+   * surrounding nodes' pred_depth at the touchdown). There is no 1/cos^2
+   * obliquity factor: the error-model slant range `depth/cos(angle)`
+   * (`sounding.c:1268`) is a different quantity that is overwritten before the
+   * offset runs and is irrelevant here.
+   *
+   * Disabled at port time because the port had no `range`/predicted-surface
+   * field to drive it. Re-enabled here using the new
+   * `Sounding::predicted_depth_at_touchdown` field; the guard reproduces the
+   * original's `range != 0.0 && pred_depth != no_data_value` exactly, with both
+   * sentinels expressed as `INVALID_DATA` (the live blunder check above uses
+   * `INVALID_DATA`; the original commented-out guard referenced
+   * `parameters.no_data_value`, which is `quiet_NaN()` here — doubly wrong, so
+   * it is deliberately corrected). With no producer wired yet (the
+   * external-prior load + touchdown-interpolation subsystem is a deferred
+   * follow-on), `predicted_depth_at_touchdown` stays at its `INVALID_DATA`
+   * sentinel => offset 0 => the defined, safe, correct-but-uncorrected behaviour
+   * the grids have today.
+   */
+  if (sounding.predicted_depth_at_touchdown != INVALID_DATA &&
+    predicted_depth_ != INVALID_DATA)
+  {
+    offset = predicted_depth_ - sounding.predicted_depth_at_touchdown;
+  }
 
   /* Adding data removes any nomination in effect */
   nominated_hypothesis_.reset();
@@ -229,6 +257,16 @@ void Node::truncate(const Parameters & parameters)
       ++i;
     }
   }
+}
+
+
+void Node::setPredictedDepth(float depth, float variance)
+{
+  // 1:1 port of cube_node_set_preddepth (cube_node.c:1084): a trivial setter.
+  // pred_depth == NaN     => do not incorporate any data into the node
+  // pred_depth == INVALID => no prediction available (no slope correction)
+  predicted_depth_ = depth;
+  predicted_depth_variance_ = variance;
 }
 
 
