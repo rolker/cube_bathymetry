@@ -30,15 +30,21 @@
 #include "lifecycle_msgs/msg/state.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
-#include "cube_bathymetry/map_sheet.h"
+#include "cube_bathymetry/geo_map_sheet.h"
+#include "cube_bathymetry/grid_projection.h"
+#include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "tf2_ros/message_filter.h"
 #include "message_filters/subscriber.h"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
+#include "tf2_eigen/tf2_eigen.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "grid_map_ros/grid_map_ros.hpp"
 #include "grid_map_msgs/msg/grid_map.hpp"
 #include "std_srvs/srv/trigger.hpp"
+
+#include "marine_autonomy/gz4d_geo.h"
 
 
 class CubeBathymetry : public rclcpp_lifecycle::LifecycleNode
@@ -58,11 +64,21 @@ public:
     declare_parameter("cell_size", 1.0);
     cell_size_ = get_parameter("cell_size").as_double();
 
+    // grid_cell_count governed the Cartesian MapSheet's per-grid extent. The
+    // node now accumulates into a GeoMapSheet whose GGGS grids are a fixed
+    // 960x960 cells, so this parameter is ignored post-migration (#21). Kept
+    // declared (with a deprecation WARN) so existing launch files that set it
+    // still configure cleanly.
     declare_parameter("grid_cell_count", 25);
     grid_cell_count_ = get_parameter("grid_cell_count").as_int();
+    if (grid_cell_count_ != 25) {
+      RCLCPP_WARN(get_logger(),
+        "grid_cell_count=%d is ignored: GeoMapSheet GGGS grids are fixed at "
+        "960x960 cells (#21). Remove it from the launch config.", grid_cell_count_);
+    }
 
-    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(grid_cell_count_),
-      cube::CellSizes(cell_size_));
+    geo_map_sheet_ =
+      std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
@@ -94,7 +110,7 @@ public:
   }
 
 private:
-  std::shared_ptr<cube::MapSheet> map_sheet_;
+  std::shared_ptr<cube::GeoMapSheet> geo_map_sheet_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -104,63 +120,69 @@ private:
   double cell_size_ = 1.0;
   int grid_cell_count_ = 25;
   rclcpp::Time last_grid_publish_time_;
+
+  // Last good map<-earth transform, cached so a publish-time TF miss reuses the
+  // last alignment rather than starving the collision-avoidance grid (#21).
+  geometry_msgs::msg::TransformStamped last_publish_tf_;
+  bool have_publish_tf_ = false;
   rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr grid_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_grid_service_;
 
   void publishGrid()
   {
-    grid_map::GridMap map;
-
-    auto bounds = map_sheet_->gridBounds();
-    if(isnan(bounds.maximum.x)) {
+    if(geo_map_sheet_->grids().empty()) {
       // No tiles populated yet (no soundings have been added). pingCallback
       // emits the actionable diagnostics for why soundings aren't arriving.
       return;
     }
-    auto cell_counts = map_sheet_->totalCellCounts();
-    auto cell_sizes = map_sheet_->cellSizes();
 
-    auto width = bounds.maximum.x - bounds.minimum.x;
-    auto height = bounds.maximum.y - bounds.minimum.y;
+    // Look up the map<-earth transform ONCE per publish; the projection helper
+    // applies it as a single batched affine to every GGGS cell center (no
+    // per-cell TF lookup). On a TF miss reuse the last good transform so a TF
+    // outage degrades gracefully rather than starving the collision-avoidance
+    // grid; skip publish only on the very first cycle, before any cache exists.
+    geometry_msgs::msg::TransformStamped map_from_earth;
+    if(lookupAtOrLatest(map_frame_, "earth", get_clock()->now(), map_from_earth)) {
+      last_publish_tf_ = map_from_earth;
+      have_publish_tf_ = true;
+    } else {
+      if(!have_publish_tf_) {
+        RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+          "No transform " << map_frame_ << " <- earth at publish time and no "
+          "cached transform yet; skipping this publish cycle");
+        return;
+      }
+      map_from_earth = last_publish_tf_;
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "No transform " << map_frame_ << " <- earth at publish time; reusing the "
+        "last good map<-earth transform (grid placement may be slightly stale)");
+    }
 
-    map.setGeometry(grid_map::Length(width, height), cell_sizes.x);
+    const Eigen::Isometry3d map_from_earth_eigen =
+      tf2::transformToEigen(map_from_earth);
 
-    grid_map::Position center(bounds.minimum.x + width / 2.0, bounds.minimum.y + height / 2.0);
+    grid_map::GridMap map = cube::geoMapSheetToGridMap(
+      *geo_map_sheet_, map_frame_, cell_size_, map_from_earth_eigen);
 
-    map.setPosition(center);
-    map.setFrameId(map_frame_);
+    if(!map.exists("elevation")) {
+      // No finite cells projected (e.g. every grid still queued in the
+      // pre-filter). Nothing to publish this cycle.
+      return;
+    }
 
     auto epoch = std::chrono::time_point<std::chrono::steady_clock>{};
     map.setTimestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        (map_sheet_->lastUpdateTime() - epoch)).count());
-
-    map.add("elevation");
-    map.add("uncertainty");
+        (geo_map_sheet_->lastUpdateTime() - epoch)).count());
 
     size_t populated = 0;
-    for (auto grid  :  map_sheet_->grids()) {
-      auto origin = grid->origin();
-      auto counts = grid->cellCounts();
-      auto sizes = grid->cellSizes();
-      auto values = grid->values();
-
-      for(int j = 0; j < counts.y; j++) {
-        for(int i = 0; i < counts.x; i++) {
-          auto grid_index = j * counts.x + i;
-          auto depth_uncertainty = values[grid_index];
-          if(!std::isnan(depth_uncertainty.depth)) {
-            grid_map::Position p(origin.x + i * sizes.x, origin.y + j * sizes.y);
-            grid_map::Index index;
-            if(map.getIndex(p, index)) {
-              map.at("elevation", index) = depth_uncertainty.depth;
-              map.at("uncertainty", index) = depth_uncertainty.uncertainty;
-              ++populated;
-            }
-          }
-        }
+    const grid_map::Matrix & elevation = map["elevation"];
+    for(grid_map::GridMapIterator it(map); !it.isPastEnd(); ++it) {
+      if(std::isfinite(elevation((*it)(0), (*it)(1)))) {
+        ++populated;
       }
     }
+
     auto message = grid_map::GridMapRosConverter::toMessage(map);
     grid_publisher_->publish(*message);
 
@@ -169,7 +191,7 @@ private:
     // but never resolve into the grid).
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
       "Published grid: " << populated << " populated cells over " <<
-      map_sheet_->grids().size() << " tiles");
+      geo_map_sheet_->grids().size() << " tiles");
   }
 
   // Replace the accumulated surface with a fresh, empty sheet of the same
@@ -180,8 +202,8 @@ private:
   // pingCallback's use of map_sheet_.
   void clearGrid()
   {
-    map_sheet_ = std::make_shared<cube::MapSheet>(cube::CellCounts(grid_cell_count_),
-      cube::CellSizes(cell_size_));
+    geo_map_sheet_ =
+      std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
     // Force the next ping to republish immediately (a zero-nanosecond time is
     // the same first-publish trigger used at startup) so the cleared surface
     // propagates without waiting out the ~5 s publish interval.
@@ -231,32 +253,33 @@ private:
       return;
     }
 
+    // Migrated to geographic accumulation (#21): look up the EARTH-frame
+    // transform (instead of map_frame_) and convert each sounding to lat/lon,
+    // mirroring bag_to_geotiff.cpp:553-559. The published grid_map stays in
+    // map_frame_ -- publishGrid() projects the GeoMapSheet back at publish time.
     geometry_msgs::msg::TransformStamped transform;
-    if(!lookupAtOrLatest(map_frame_, msg->header.frame_id,
+    if(!lookupAtOrLatest("earth", msg->header.frame_id,
         rclcpp::Time(msg->header.stamp), transform))
     {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
-        "No transform " << map_frame_ << " <- " << msg->header.frame_id <<
+        "No transform earth <- " << msg->header.frame_id <<
         " (at ping time or latest); dropping ping -- grid will not update");
       return;
     }
 
-    sensor_msgs::msg::PointCloud2 soundings_in_map_frame;
-    tf2::doTransform(*msg, soundings_in_map_frame, transform);
-
     // PointCloud2 point count is width * height (height > 1 for organized clouds).
     const size_t point_count = static_cast<size_t>(msg->width) * msg->height;
-    std::vector<cube::MapSounding> soundings;
+    std::vector<cube::GeoSounding> soundings;
     soundings.reserve(point_count);
 
     try {
-      sensor_msgs::PointCloud2ConstIterator<float> iter_x(soundings_in_map_frame, "x");
-      sensor_msgs::PointCloud2ConstIterator<float> iter_y(soundings_in_map_frame, "y");
-      sensor_msgs::PointCloud2ConstIterator<float> iter_z(soundings_in_map_frame, "z");
-      sensor_msgs::PointCloud2ConstIterator<float> iter_vertical_uncertainty(soundings_in_map_frame,
+      sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
+      sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
+      sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+      sensor_msgs::PointCloud2ConstIterator<float> iter_vertical_uncertainty(*msg,
         "vertical_uncertainty");
       sensor_msgs::PointCloud2ConstIterator<float> iter_horizontal_uncertainty(
-        soundings_in_map_frame, "horizontal_uncertainty");
+        *msg, "horizontal_uncertainty");
 
       size_t dropped = 0;
       for (; (iter_x != iter_x.end()) &&
@@ -285,7 +308,21 @@ private:
           continue;
         }
 
-        cube::MapSounding s(x, y, z);
+        // Sensor-frame point -> earth (ECEF) -> lat/lon, the same chain
+        // bag_to_geotiff / import_bag use for native-GGGS accumulation.
+        geometry_msgs::msg::PointStamped point_re_sensor;
+        point_re_sensor.point.x = x;
+        point_re_sensor.point.y = y;
+        point_re_sensor.point.z = z;
+        point_re_sensor.header = msg->header;
+
+        geometry_msgs::msg::PointStamped point_ecef;
+        tf2::doTransform(point_re_sensor, point_ecef, transform);
+
+        gz4d::GeoPointECEF ecef(
+          point_ecef.point.x, point_ecef.point.y, point_ecef.point.z);
+        gz4d::GeoPointLatLongDegrees ll(ecef);
+        cube::GeoSounding s(ll);
         s.sounding.vertical_error = vu;
         s.sounding.horizontal_error = hu;
         soundings.push_back(s);
@@ -308,7 +345,7 @@ private:
     auto timestamp = epoch + std::chrono::seconds(msg->header.stamp.sec) +
       std::chrono::nanoseconds(msg->header.stamp.nanosec);
 
-    map_sheet_->addSoundings(soundings, timestamp);
+    geo_map_sheet_->addSoundings(soundings, timestamp);
 
     if(last_grid_publish_time_.nanoseconds() == 0 ||
       rclcpp::Time(msg->header.stamp) - last_grid_publish_time_ >
