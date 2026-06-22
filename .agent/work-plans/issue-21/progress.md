@@ -256,3 +256,72 @@ is safe to implement.
 - [ ] Re-specify the publish projection as a batched map←earth affine applied to cell positions (mirror `bag_to_geotiff.cpp:605-693`), state polar-stretch handling or scope to non-polar, and keep the sim profile gate as a confirmation rather than the sole mitigation.
 - [ ] Add a store-level `save()`→`load()` round-trip test (not just `saveTile`/`loadTile`) and confirm `layerDirName(Draft) == "draft"` so the live-write/load layout round-trips.
 - [ ] Tighten the CA-starvation wording to the ingestion-succeeded / publish-TF-missed window; fix the `tile.dirty()` comment.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-22
+**By**: Claude Code Agent (Claude Opus 4.8)
+
+**Scope**: 12-commit diff `origin/jazzy..feature/issue-21` (HEAD `0580123`),
+2376 insertions / 61 deletions across 18 files. Reviewed against the issue (#21
+persist GeoMapSheet draft tiles), the owner-mandated full migration
+(Cartesian `MapSheet` → geographic `GeoMapSheet`), and the Quality Standard.
+**PR**: PR-less (pre-push, `--issue` mode).
+**Verdict**: ready-to-push (sim-verification gate still required before merge).
+
+### Plan-review must-fix resolutions — verified in source
+- [x] **Cell-center API gap** — `geoMapSheetToGridMap` derives the center from
+  `CellIndex::position()` (SW corner) + half `latitudinalSpan()/cellRowCount()`
+  and half `longitudinalSpan()/cellColumnCount()`
+  (`grid_projection.cpp:90-118`). No fictitious `gggs::Level::cellCenter`. The
+  per-grid `longitudinalSpan()` already encodes the GGGS 1×/3×/9× polar
+  column-stretch, so centers are correct at any in-envelope latitude with no
+  interpolation pass. Confirmed against `cell_index.h` (`position()` = SW corner).
+- [x] **Per-cell ECEF+TF loop / latency** — the `map←earth` transform is looked
+  up ONCE per publish and converted to a single `Eigen::Isometry3d`; every cell
+  reuses that one affine (`grid_projection.cpp:53-66`). No per-cell
+  `tf2::doTransform`, no per-cell buffer lookup. Two-pass design caches each
+  projected cell once (`ProjectedCell`) so the lat/lon→ECEF→affine work runs
+  exactly once per finite cell. Scoped/asserted to non-polar survey latitudes
+  (|lat| < 72°), matching the store envelope.
+- [x] **Round-trip layout** — persistence verified by `test_persistence.cpp`
+  (233 lines) exercising save→load through the store layout.
+- [x] **Wording/comment fixes** — CA-starvation scope and `tile.dirty()` comment
+  corrected per the plan-review recommendations.
+
+### Evaluation
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Published contract | Good | Topic `grid`, frame `map_frame`, layers `elevation`+`uncertainty` unchanged. Geometry derived from projected-cell bounds + half-cell pad (mirrors legacy Cartesian extent). |
+| Correctness | Good | `ProjectionPlacesCellCentersExactly` asserts cell-center placement to ~mm; `GeoProjectionMatchesLegacyMapSheet` compares a multi-cell survey patch against the legacy `MapSheet` path with a half-cell-shift negative control (`shift_frac < true_frac − 0.2`). |
+| Robustness | Good | Last-good-TF fallback (`last_publish_tf_`/`have_publish_tf_`) degrades gracefully on a publish-time `map←earth` miss; skips publish only on the first cycle before any TF is cached. |
+| Persistence/lifecycle | Good | Save timer gated to `on_activate`/`on_deactivate`; epoch recomputed per save; `clearGrid()` flushes the median accumulator before swap; `draft_dir=""` disables persistence (opt-in, human-control). |
+| Tests | Good | 332 tests, 0 failures, 46 skipped. New: publish-equivalence (485 lines), persistence (233), geo_grid/geo_map_sheet/store_import units. |
+| Lint | Good | cpplint + uncrustify clean. |
+
+### Residual risks (deferred to follow-up issues, NOT blockers)
+- [ ] **Stale-TF staleness bound** — the publish fallback reuses the last good
+  `map←earth` with no age bound; during a long TF outage it could misplace cells
+  on the live CA grid. No worse than today's drop-on-miss behavior for *new*
+  data, but worth an explicit staleness ceiling. → follow-up issue.
+- [ ] **Full-grid `values()` densification perf** — each publish allocates a
+  dense `vector<DepthAndUncertainty>` per grid (up to 960×960) and the residual
+  per-cell ECEF trig runs over the dense set; sparse iteration would cut both. →
+  follow-up issue.
+
+### Required before merge (not a code change)
+- [ ] **Sim-verification gate** — run the migrated node in sim and confirm
+  `/grid` still populates with depths equivalent to the legacy path and that
+  `draft_dir` writes round-trippable tiles. This touches the live
+  collision-avoidance feed; unit tests (publish-equivalence) are necessary but
+  not sufficient. Operator/owner-driven.
+
+### Summary
+The migration is implemented faithfully to the re-authored plan: both
+publish-projection must-fixes are genuinely resolved in `grid_projection.cpp`
+(single cached affine + real cell-center derivation, polar-stretch handled by
+construction), the published `map_frame` grid contract is preserved and pinned
+by a strengthened equivalence test with a negative control, persistence is
+opt-in and lifecycle-gated, and the suite is green and lint-clean. Two residual
+risks (stale-TF bound, densification perf) are real but non-blocking and are
+being filed as follow-ups. Safe to push; merge remains gated on the sim run.
