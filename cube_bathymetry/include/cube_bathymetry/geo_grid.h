@@ -73,6 +73,27 @@ public:
     bool insert(const GeoSounding & sounding);
     bool insert(const std::vector < GeoSounding > &soundings);
 
+  /// @brief Seed the predicted depth at @p cell, lazy-creating the Node if absent.
+  ///
+  /// Warm-starts CUBE's slope-correction prior from a persisted draft tile on the
+  /// on-startup load path (issue #21): the running session continues accumulating
+  /// CUBE hypotheses from scratch on top of this predicted surface. It does NOT
+  /// restore hypothesis/queue state -- full Node deserialization is out of scope.
+  /// @param cell      Cell within this grid; must belong to `index()`.
+  /// @param depth     Predicted depth (negative-down), or NaN / INVALID_DATA per
+  ///                  Node::setPredictedDepth conventions.
+  /// @param variance  Variance of the predicted depth (meter^2); a real depth
+  ///                  requires a finite positive variance (see Node).
+    void setPredictedDepthAt(const gggs::CellIndex & cell, float depth, float variance);
+
+  /// @brief Predicted-surface depth at @p cell, or `INVALID_DATA` if no node
+  ///        (or no prediction) exists there.
+  ///
+  /// Read accessor for the warm-start prime path and its tests; mirrors
+  /// `Node::predictedDepth()`. The running best-estimate of the seabed is
+  /// extracted separately via @ref values().
+    float predictedDepthAt(const gggs::CellIndex & cell) const;
+
   /// Returns the lower left grid position
     const gggs::GridIndex & index() const;
 

@@ -32,7 +32,9 @@
 #include "cube_bathymetry/store_import.h"
 #include "marine_autonomy/gggs.h"
 #include "marine_bathymetry_store/bathy_cell.hpp"
+#include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
+#include "marine_bathymetry_store/epoch.hpp"
 
 namespace cube
 {
@@ -152,6 +154,102 @@ TEST(StoreImport, EmptyMapSheetYieldsNoTiles)
   GeoMapSheet ms(1.0f);
   auto tiles = mapSheetToEpochTiles(ms, kStamp, kSource);
   EXPECT_TRUE(tiles.empty());
+}
+
+// Priming a fresh sheet from a tile must seed the predicted depth at every
+// finite cell, matching the tile's stored depth.
+TEST(StoreImport, PrimeFromTileSeedsFiniteCells)
+{
+  // Build a source sheet, convert one grid to a tile.
+  GeoMapSheet source(1.0f);
+  source.addSoundings(makeSoundings());
+  auto grids = source.grids();
+  ASSERT_FALSE(grids.empty());
+
+  const std::vector<DepthAndUncertainty> values = grids.front()->values();
+  const marine_bathymetry_store::BathymetryTile tile =
+    geoGridToTile(*grids.front(), kStamp, kSource);
+
+  // Prime a fresh sheet from that tile.
+  GeoMapSheet primed(1.0f);
+  primeFromTile(tile, primed);
+
+  auto primed_grid = primed.gridAt(tile.index());
+  ASSERT_NE(primed_grid, nullptr);
+
+  // Every finite tile cell must have a matching primed predicted depth.
+  gggs::CellAreaIterator it(tile.index());
+  std::size_t k = 0;
+  std::size_t checked = 0;
+  for (; it.valid() && k < values.size(); it.next(), ++k) {
+    if (std::isnan(values[k].depth)) {
+      continue;
+    }
+    EXPECT_FLOAT_EQ(primed_grid->predictedDepthAt(*it), values[k].depth);
+    ++checked;
+  }
+  EXPECT_GT(checked, 0u) << "tile should carry some finite cells to prime";
+
+  // Priming reproduces persisted data -- it must not mark the sheet dirty.
+  EXPECT_TRUE(primed.dirtyGrids().empty());
+}
+
+// loadEpochIntoSheet primes a fresh sheet from a store epoch round-trip:
+// build a sheet -> tiles -> store epoch -> load into a fresh sheet -> predicted
+// depths match.
+TEST(StoreImport, LoadEpochIntoSheetRoundTrip)
+{
+  GeoMapSheet source(1.0f);
+  source.addSoundings(makeSoundings());
+
+  auto tiles = mapSheetToEpochTiles(source, kStamp, kSource);
+  ASSERT_FALSE(tiles.empty());
+
+  // Reference predicted depths per cell, taken straight from the tiles.
+  const marine_bathymetry_store::Epoch epoch = "2026-06-21";
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+
+  // Copy the tile map (importEpoch consumes it) but keep a reference set.
+  std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles_copy = tiles;
+  store.importEpoch(
+    marine_bathymetry_store::SourceLayer::Draft, epoch, std::move(tiles),
+    marine_bathymetry_store::Provenance::LiveFused);
+
+  GeoMapSheet loaded(1.0f);
+  loadEpochIntoSheet(
+    store, marine_bathymetry_store::SourceLayer::Draft, epoch, loaded);
+
+  std::size_t checked = 0;
+  for (const auto & grid_tile : tiles_copy) {
+    const auto & tile = grid_tile.second;
+    auto loaded_grid = loaded.gridAt(tile.index());
+    ASSERT_NE(loaded_grid, nullptr);
+
+    const std::vector<double> & depth = tile.depthBand();
+    gggs::CellAreaIterator it(tile.index());
+    std::size_t k = 0;
+    for (; it.valid() && k < depth.size(); it.next(), ++k) {
+      if (std::isnan(depth[k])) {
+        continue;
+      }
+      EXPECT_FLOAT_EQ(
+        loaded_grid->predictedDepthAt(*it), static_cast<float>(depth[k]));
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 0u);
+}
+
+// A missing epoch is a no-op (no crash, no priming).
+TEST(StoreImport, LoadEpochIntoSheetMissingEpochIsNoOp)
+{
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  GeoMapSheet loaded(1.0f);
+  loadEpochIntoSheet(
+    store, marine_bathymetry_store::SourceLayer::Draft, "2026-06-21", loaded);
+  EXPECT_TRUE(loaded.grids().empty());
 }
 
 }  // namespace cube

@@ -9,8 +9,11 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(grid_map_core REQUIRED)
 find_package(grid_map_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
 find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
@@ -72,11 +75,12 @@ install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
 
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 
-# GeoGrid -> bathymetry-store-tile conversion (#57). Kept in its OWN target so the
-# store dependency does NOT leak into the core cube_bathymetry library, and thus
-# not into the live runtime nodes (cube_bathymetry_node, detections_to_pointcloud)
-# which have no need for the offline data store. Only the offline import_bag tool
-# and its test link this.
+# GeoGrid -> bathymetry-store-tile conversion (#57, #21). Kept in its OWN target
+# so the store dependency does NOT leak into the core cube_bathymetry library
+# (and thus not into detections_to_pointcloud, which has no need for the data
+# store). Linked by the offline import_bag tool and its test, AND -- since the
+# draft-tile persistence work (#21) -- by the runtime cube_bathymetry_node, which
+# uses geoGridToTile / loadEpochIntoSheet to save and warm-start draft tiles.
 add_library(cube_bathymetry_store_import src/store_import.cpp)
 target_link_libraries(cube_bathymetry_store_import
   cube_bathymetry
@@ -89,17 +93,39 @@ install(TARGETS cube_bathymetry_store_import EXPORT export_${PROJECT_NAME}
 )
 
 
+# GeoMapSheet -> map-frame grid_map projection (#21). In its own target so the
+# live publish path is unit-testable (publish-equivalence regression test) with
+# only grid_map_core -- no ROS node, no message conversion.
+add_library(cube_bathymetry_grid_projection src/grid_projection.cpp)
+target_link_libraries(cube_bathymetry_grid_projection
+  cube_bathymetry
+)
+# grid_map_core ships an Eigen-plugin header that must be on the include path and
+# its -DEIGEN_*_PLUGIN definitions in scope; ament_target_dependencies wires both
+# (plus Eigen3) onto the target, which raw ${grid_map_core_LIBRARIES} does not.
+ament_target_dependencies(cube_bathymetry_grid_projection grid_map_core)
+install(TARGETS cube_bathymetry_grid_projection EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
 target_include_directories(cube_bathymetry_node PUBLIC
   ${grid_map_ros_INCLUDE_DIRS}
 )
 target_link_libraries(cube_bathymetry_node
   cube_bathymetry
+  cube_bathymetry_grid_projection
+  cube_bathymetry_store_import   # geoGridToTile / loadEpochIntoSheet + store (#21)
+  marine_bathymetry_store::marine_bathymetry_store  # saveTile / load / store API
   ${geometry_msgs_TARGETS}
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
   ${std_srvs_TARGETS}
+  tf2_eigen::tf2_eigen
+  tf2_geometry_msgs::tf2_geometry_msgs
   tf2_sensor_msgs::tf2_sensor_msgs
 )
 
@@ -200,6 +226,17 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_store_import test/test_store_import.cpp)
   target_link_libraries(test_store_import cube_bathymetry_store_import)
+
+  # Publish-equivalence safety net for the MapSheet->GeoMapSheet migration (#21).
+  ament_add_gtest(test_publish_equivalence test/test_publish_equivalence.cpp)
+  target_link_libraries(test_publish_equivalence cube_bathymetry_grid_projection)
+
+  # Draft-tile persistence round-trip (#21): save -> store load() -> values match.
+  ament_add_gtest(test_persistence test/test_persistence.cpp)
+  target_link_libraries(test_persistence
+    cube_bathymetry_store_import
+    marine_bathymetry_store::marine_bathymetry_store
+  )
 endif()
 
 ament_export_dependencies(rclcpp)

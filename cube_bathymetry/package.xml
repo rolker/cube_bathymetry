@@ -9,8 +9,11 @@
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake_ros</buildtool_depend>
+  <depend>eigen</depend>
   <depend>geometry_msgs</depend>
+  <depend>grid_map_core</depend>
   <depend>grid_map_ros</depend>
+  <depend>tf2_eigen</depend>
   <build_depend>libgdal-dev</build_depend>
   <depend>lifecycle_msgs</depend>
   <depend>marine_acoustic_msgs</depend>
