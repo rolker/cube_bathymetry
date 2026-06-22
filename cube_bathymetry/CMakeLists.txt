@@ -75,11 +75,12 @@ install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
 
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 
-# GeoGrid -> bathymetry-store-tile conversion (#57). Kept in its OWN target so the
-# store dependency does NOT leak into the core cube_bathymetry library, and thus
-# not into the live runtime nodes (cube_bathymetry_node, detections_to_pointcloud)
-# which have no need for the offline data store. Only the offline import_bag tool
-# and its test link this.
+# GeoGrid -> bathymetry-store-tile conversion (#57, #21). Kept in its OWN target
+# so the store dependency does NOT leak into the core cube_bathymetry library
+# (and thus not into detections_to_pointcloud, which has no need for the data
+# store). Linked by the offline import_bag tool and its test, AND -- since the
+# draft-tile persistence work (#21) -- by the runtime cube_bathymetry_node, which
+# uses geoGridToTile / loadEpochIntoSheet to save and warm-start draft tiles.
 add_library(cube_bathymetry_store_import src/store_import.cpp)
 target_link_libraries(cube_bathymetry_store_import
   cube_bathymetry

@@ -95,7 +95,6 @@ public:
     // (#77) read exactly what CUBE writes.
     draft_dir_ = declare_parameter("draft_dir", std::string(""));
     save_interval_s_ = declare_parameter("save_interval", 30.0);
-    epoch_ = currentUtcDateString();
 
     if (!draft_dir_.empty()) {
       // On startup, prime the fresh GeoMapSheet from the newest persisted draft
@@ -124,12 +123,14 @@ public:
           draft_dir_.c_str(), e.what());
       }
 
-      save_timer_ = create_wall_timer(
-        std::chrono::duration<double>(save_interval_s_),
-        std::bind(&CubeBathymetry::saveDirtyTiles, this));
+      // The periodic save timer is created on_activate and cancelled
+      // on_deactivate (below) so draft tiles are written only while the node is
+      // ACTIVE (surveying) -- a deactivated node must not keep touching disk.
+      // The on-load prime above stays in on_configure.
       RCLCPP_INFO(get_logger(),
-        "Draft-tile persistence enabled: dir=%s epoch=%s interval=%.1fs",
-        draft_dir_.c_str(), epoch_.c_str(), save_interval_s_);
+        "Draft-tile persistence enabled: dir=%s interval=%.1fs "
+        "(saves run while ACTIVE; epoch = UTC date at each save)",
+        draft_dir_.c_str(), save_interval_s_);
     }
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
@@ -152,14 +153,39 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_activate(const rclcpp_lifecycle::State & state)
   {
+    // Start periodic draft-tile saves only while ACTIVE (surveying). A
+    // deactivated node accumulates no new soundings (pingCallback gates on the
+    // ACTIVE state) and must not keep writing to disk. The on-load prime stays
+    // in on_configure; the on_cleanup final flush stays a final flush.
+    if (!draft_dir_.empty() && !save_timer_) {
+      save_timer_ = create_wall_timer(
+        std::chrono::duration<double>(save_interval_s_),
+        std::bind(&CubeBathymetry::saveDirtyTiles, this));
+      RCLCPP_INFO(get_logger(),
+        "Draft-tile save timer started (interval=%.1fs)", save_interval_s_);
+    }
     return LifecycleNode::on_activate(state);
+  }
+
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
+  on_deactivate(const rclcpp_lifecycle::State & state)
+  {
+    // Stop disk writes while deactivated. Flush first so accumulation since the
+    // last periodic save is not stranded across the deactivate.
+    saveDirtyTiles();
+    if (save_timer_) {
+      save_timer_->cancel();
+      save_timer_.reset();
+    }
+    return LifecycleNode::on_deactivate(state);
   }
 
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_cleanup(const rclcpp_lifecycle::State & state)
   {
     // Final flush so the last accumulation since the previous periodic save is
-    // not lost on shutdown.
+    // not lost on shutdown. The save timer is normally cancelled on_deactivate,
+    // but guard here too in case cleanup is reached by another path.
     saveDirtyTiles();
     if (save_timer_) {
       save_timer_->cancel();
@@ -188,10 +214,11 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_grid_service_;
 
-  // Draft-tile persistence (#21). draft_dir_ empty = disabled.
+  // Draft-tile persistence (#21). draft_dir_ empty = disabled. The epoch label
+  // (UTC date) is recomputed at each save in saveDirtyTiles() so a survey
+  // crossing UTC midnight rolls into the next day's draft/<epoch>/ dir.
   std::string draft_dir_;
   double save_interval_s_ = 30.0;
-  std::string epoch_;
   rclcpp::TimerBase::SharedPtr save_timer_;
 
   void publishGrid()
@@ -292,10 +319,15 @@ private:
     }
 
     const int64_t ts_ns = get_clock()->now().nanoseconds();
+    // Recompute the UTC date STRING at each save so a survey crossing UTC
+    // midnight writes into the correct day's draft/<epoch>/ dir (the label is
+    // not pinned to on_configure time). Priming on load still reads the newest
+    // persisted epoch, so a rollover during a session resumes seamlessly.
+    const std::string epoch = currentUtcDateString();
     const std::string dir =
       draft_dir_ + "/" +
       marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Draft) + "/" + epoch_;
+      marine_bathymetry_store::SourceLayer::Draft) + "/" + epoch;
 
     std::size_t written = 0;
     try {
@@ -342,6 +374,11 @@ private:
   // pingCallback's use of map_sheet_.
   void clearGrid()
   {
+    // Flush any draft data accumulated since the last periodic save BEFORE
+    // discarding the sheet, mirroring on_cleanup -- otherwise an operator reset
+    // would silently drop unsaved-since-last-interval soundings. A no-op when
+    // persistence is disabled or nothing is dirty.
+    saveDirtyTiles();
     geo_map_sheet_ =
       std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
     // Force the next ping to republish immediately (a zero-nanosecond time is
