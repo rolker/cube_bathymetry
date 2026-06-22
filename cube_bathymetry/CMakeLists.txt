@@ -116,6 +116,8 @@ target_include_directories(cube_bathymetry_node PUBLIC
 target_link_libraries(cube_bathymetry_node
   cube_bathymetry
   cube_bathymetry_grid_projection
+  cube_bathymetry_store_import   # geoGridToTile / loadEpochIntoSheet + store (#21)
+  marine_bathymetry_store::marine_bathymetry_store  # saveTile / load / store API
   ${geometry_msgs_TARGETS}
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp
@@ -227,6 +229,13 @@ if(BUILD_TESTING)
   # Publish-equivalence safety net for the MapSheet->GeoMapSheet migration (#21).
   ament_add_gtest(test_publish_equivalence test/test_publish_equivalence.cpp)
   target_link_libraries(test_publish_equivalence cube_bathymetry_grid_projection)
+
+  # Draft-tile persistence round-trip (#21): save -> store load() -> values match.
+  ament_add_gtest(test_persistence test/test_persistence.cpp)
+  target_link_libraries(test_persistence
+    cube_bathymetry_store_import
+    marine_bathymetry_store::marine_bathymetry_store
+  )
 endif()
 
 ament_export_dependencies(rclcpp)

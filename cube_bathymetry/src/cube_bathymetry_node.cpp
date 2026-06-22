@@ -20,7 +20,11 @@
 // THE SOFTWARE.
 
 
+#include <chrono>
 #include <cmath>
+#include <ctime>
+#include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,6 +49,11 @@
 #include "std_srvs/srv/trigger.hpp"
 
 #include "marine_autonomy/gz4d_geo.h"
+#include "cube_bathymetry/store_import.h"
+#include "marine_bathymetry_store/bathymetry_store.hpp"
+#include "marine_bathymetry_store/bathymetry_tile.hpp"
+#include "marine_bathymetry_store/epoch.hpp"
+#include "marine_bathymetry_store/tile_io.hpp"
 
 
 class CubeBathymetry : public rclcpp_lifecycle::LifecycleNode
@@ -80,6 +89,49 @@ public:
     geo_map_sheet_ =
       std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
 
+    // Draft-tile persistence (#21). draft_dir empty (default) disables it; set
+    // it per deployment to opt in. Tiles are written as marine_bathymetry_store
+    // `draft/<epoch>/` GeoTIFFs so the costmap layer (#164) and sim live loop
+    // (#77) read exactly what CUBE writes.
+    draft_dir_ = declare_parameter("draft_dir", std::string(""));
+    save_interval_s_ = declare_parameter("save_interval", 30.0);
+    epoch_ = currentUtcDateString();
+
+    if (!draft_dir_.empty()) {
+      // On startup, prime the fresh GeoMapSheet from the newest persisted draft
+      // epoch so slope correction warm-starts on replayed areas.
+      try {
+        marine_bathymetry_store::BathymetryStore store =
+          marine_bathymetry_store::BathymetryStore::fromCellSize(
+          static_cast<float>(cell_size_));
+        marine_bathymetry_store::load(store, draft_dir_);
+        const auto & draft_epochs =
+          store.epochs(marine_bathymetry_store::SourceLayer::Draft);
+        if (!draft_epochs.empty()) {
+          const auto & newest_epoch = draft_epochs.rbegin()->first;
+          cube::loadEpochIntoSheet(
+            store, marine_bathymetry_store::SourceLayer::Draft, newest_epoch,
+            *geo_map_sheet_);
+          RCLCPP_INFO(get_logger(),
+            "Primed GeoMapSheet from draft epoch '%s' under %s",
+            newest_epoch.c_str(), draft_dir_.c_str());
+        }
+      } catch (const std::exception & e) {
+        // A missing/empty store dir is normal on a first run; a genuine load
+        // error must not block configure -- log and continue with an empty sheet.
+        RCLCPP_WARN(get_logger(),
+          "Could not load existing draft tiles from %s: %s (starting empty)",
+          draft_dir_.c_str(), e.what());
+      }
+
+      save_timer_ = create_wall_timer(
+        std::chrono::duration<double>(save_interval_s_),
+        std::bind(&CubeBathymetry::saveDirtyTiles, this));
+      RCLCPP_INFO(get_logger(),
+        "Draft-tile persistence enabled: dir=%s epoch=%s interval=%.1fs",
+        draft_dir_.c_str(), epoch_.c_str(), save_interval_s_);
+    }
+
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
 
@@ -106,6 +158,13 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_cleanup(const rclcpp_lifecycle::State & state)
   {
+    // Final flush so the last accumulation since the previous periodic save is
+    // not lost on shutdown.
+    saveDirtyTiles();
+    if (save_timer_) {
+      save_timer_->cancel();
+      save_timer_.reset();
+    }
     return LifecycleNode::on_cleanup(state);
   }
 
@@ -128,6 +187,12 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr grid_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_grid_service_;
+
+  // Draft-tile persistence (#21). draft_dir_ empty = disabled.
+  std::string draft_dir_;
+  double save_interval_s_ = 30.0;
+  std::string epoch_;
+  rclcpp::TimerBase::SharedPtr save_timer_;
 
   void publishGrid()
   {
@@ -192,6 +257,81 @@ private:
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
       "Published grid: " << populated << " populated cells over " <<
       geo_map_sheet_->grids().size() << " tiles");
+  }
+
+  // ISO-8601 UTC date (YYYY-MM-DD) -- the epoch label for this session's draft
+  // tiles. Two sessions on the same UTC day share the epoch; the store's
+  // LiveFused set() path accumulates correctly (newest value wins per cell).
+  static std::string currentUtcDateString()
+  {
+    const std::time_t now = std::time(nullptr);
+    std::tm tm_utc{};
+    gmtime_r(&now, &tm_utc);
+    char buf[16] = {0};
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_utc);
+    return std::string(buf);
+  }
+
+  // Persist every grid touched since the last save as a marine_bathymetry_store
+  // draft tile (atomic temp-then-rename via tile_io::saveTile), then clear the
+  // dirty set. A no-op when persistence is disabled or nothing changed.
+  //
+  // NOTE: geoGridToTile() calls GeoGrid::values(), which flushes the median
+  // pre-filter -- the same flush the end-of-session export does, now happening
+  // every save_interval. The queue refills from subsequent pings; the published
+  // grid already triggers the same flush on every publish, so this adds no new
+  // behavior beyond the cadence. (Pinned by the periodic-save test.)
+  void saveDirtyTiles()
+  {
+    if (draft_dir_.empty() || !geo_map_sheet_) {
+      return;
+    }
+    const std::set<gggs::GridIndex> dirty = geo_map_sheet_->dirtyGrids();
+    if (dirty.empty()) {
+      return;
+    }
+
+    const int64_t ts_ns = get_clock()->now().nanoseconds();
+    const std::string dir =
+      draft_dir_ + "/" +
+      marine_bathymetry_store::layerDirName(
+      marine_bathymetry_store::SourceLayer::Draft) + "/" + epoch_;
+
+    std::size_t written = 0;
+    try {
+      std::filesystem::create_directories(dir);
+      for (const auto & index : dirty) {
+        auto grid_ptr = geo_map_sheet_->gridAt(index);
+        if (!grid_ptr) {
+          continue;
+        }
+        // source_index 0 = no registry wired yet (#21 scope); follow-on once
+        // marine_control device-control lands.
+        marine_bathymetry_store::BathymetryTile tile =
+          cube::geoGridToTile(*grid_ptr, ts_ns, /*source_index=*/0);
+        if (!tile.dirty()) {
+          // No finite cells (all queued/NaN) -- nothing to write. dirty() is the
+          // value-raster flag geoGridToTile sets iff it wrote a finite cell
+          // (same idiom as mapSheetToEpochTiles).
+          continue;
+        }
+        const std::string path =
+          dir + "/" + marine_bathymetry_store::tileFilename(index);
+        marine_bathymetry_store::saveTile(tile, path);
+        ++written;
+      }
+    } catch (const std::exception & e) {
+      // A write failure must not crash the node -- log and keep the dirty set so
+      // the next save retries (do NOT clear on failure).
+      RCLCPP_ERROR_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "Failed to save draft tiles to " << dir << ": " << e.what() <<
+        " (will retry next interval)");
+      return;
+    }
+
+    geo_map_sheet_->clearDirtyGrids();
+    RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
+      "Saved " << written << " draft tile(s) to " << dir);
   }
 
   // Replace the accumulated surface with a fresh, empty sheet of the same
