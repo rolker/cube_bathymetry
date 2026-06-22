@@ -29,10 +29,28 @@
 #include "cube_bathymetry/geo_grid.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "marine_autonomy/gggs.h"
+#include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
+#include "marine_bathymetry_store/bathy_cell.hpp"
+#include "marine_bathymetry_store/epoch.hpp"
 
 namespace cube
 {
+
+/// @brief Design note (issue #21) — live CUBE draft-tile persistence.
+///
+/// The live `cube_bathymetry_node` accumulates into a geographic
+/// @ref GeoMapSheet (migrated from the Cartesian `MapSheet`, #21) so that
+/// `geoGridToTile` / `mapSheetToEpochTiles` persist live data directly into
+/// `marine_bathymetry_store` `draft/<epoch>/` tiles via `tile_io` (atomic
+/// temp-then-rename, `LiveFused` provenance) with NO lossy Cartesian→geographic
+/// resample. The costmap `bathymetry_layer` (#164) and the sim live loop (#77)
+/// then read exactly what CUBE writes.
+///
+/// Restart recovery primes `Node::setPredictedDepth` from the loaded draft depth
+/// (warm-start for slope correction) -- it does NOT reconstruct CUBE hypothesis,
+/// queue, or pre-filter state (full Node deserialization is out of scope). CUBE
+/// continues accumulating from scratch on top of the seeded prediction surface.
 
 /// @brief Convert one CUBE @ref GeoGrid into a marine_bathymetry_store tile.
 ///
@@ -75,6 +93,31 @@ namespace cube
   std::map < gggs::GridIndex, marine_bathymetry_store::BathymetryTile >
   mapSheetToEpochTiles(
     const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index);
+
+/// @brief Seed predicted depths in @p map_sheet from every finite cell of @p tile.
+///
+/// For each finite-depth cell of @p tile, finds or creates the matching
+/// GeoGrid/Node in @p map_sheet and calls `Node::setPredictedDepth` via
+/// `GeoMapSheet::setPredictedDepthAt`. The seeded variance is the stored 1-sigma
+/// uncertainty squared, floored at a small positive epsilon (Node::setPredictedDepth
+/// requires a finite positive variance; a single-sample CUBE cell can persist a
+/// zero or non-finite uncertainty, so every finite-depth cell is still seeded).
+/// Does NOT insert a CUBE hypothesis and does NOT mark the sheet dirty.
+  void primeFromTile(
+    const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet);
+
+/// @brief Load every tile of one @p epoch from @p layer of @p store into
+///        @p map_sheet, priming predicted depths cell-by-cell.
+///
+/// Iterates the epoch's tiles and calls @ref primeFromTile on each. Only
+/// finite-depth cells are seeded. Warm-starts slope correction from persisted
+/// draft tiles on restart; does not reconstruct CUBE hypothesis state (#21).
+/// A no-op if @p epoch is absent from @p layer.
+  void loadEpochIntoSheet(
+    const marine_bathymetry_store::BathymetryStore & store,
+    marine_bathymetry_store::SourceLayer layer,
+    const marine_bathymetry_store::Epoch & epoch,
+    GeoMapSheet & map_sheet);
 
 }  // namespace cube
 

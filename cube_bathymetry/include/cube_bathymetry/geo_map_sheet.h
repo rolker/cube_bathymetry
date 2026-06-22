@@ -26,6 +26,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 #include "cube_bathymetry/geo_grid.h"
@@ -53,6 +54,32 @@ public:
   /// Return all existing grids
     std::vector < std::shared_ptr < GeoGrid >> grids() const;
 
+  /// @brief Return the grid at @p index, or nullptr if none exists.
+  ///
+  /// Read-only handle (no lazy creation) used by the periodic save loop to
+  /// convert a dirty grid without resurrecting empties.
+    std::shared_ptr < const GeoGrid > gridAt(const gggs::GridIndex & index) const;
+
+  /// @brief Find or create the grid at @p index (no dirty mark).
+  ///
+  /// Used by the warm-start prime path to reach a specific grid by index without
+  /// going through the sounding-driven `addSoundings` path.
+    std::shared_ptr < GeoGrid > getOrCreateGrid(const gggs::GridIndex & index);
+
+  /// @brief Seed the predicted depth at @p cell (lazy-creates the grid + node).
+  ///
+  /// Warm-start prime for slope correction from a persisted draft tile (#21).
+  /// Does NOT mark the grid dirty -- priming reproduces already-persisted data,
+  /// so re-saving it would be redundant churn.
+    void setPredictedDepthAt(const gggs::CellIndex & cell, float depth, float variance);
+
+  /// @brief Grid indices touched (returning true from insert) since the last
+  ///        clearDirtyGrids(). Returned by value -- safe to iterate while saving.
+    std::set < gggs::GridIndex > dirtyGrids() const;
+
+  /// @brief Clear the dirty-grid set (called after a successful save).
+    void clearDirtyGrids();
+
   /// Return gggs::GridIndex bounds of rectangle containing all the grids
     gggs::GridBounds gridBounds() const;
 
@@ -74,6 +101,10 @@ private:
     gggs::Level grid_level_;
 
     std::map < gggs::GridIndex, std::shared_ptr < GeoGrid >> grids_;
+
+  /// Grids that received data (insert() returned true) since the last
+  /// clearDirtyGrids(). Drives the periodic incremental tile save (#21).
+    std::set < gggs::GridIndex > dirty_grids_;
 
     std::chrono::steady_clock::time_point last_update_time_;
   };

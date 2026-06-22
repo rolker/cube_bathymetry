@@ -108,6 +108,33 @@ TEST_F(GeoGridTest, ValuesAfterInsertionsContainsValidDepths)
   EXPECT_TRUE(found_valid);
 }
 
+TEST_F(GeoGridTest, SetPredictedDepthAtLazyCreatesAndStores)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  // The cell at the sounding location has no node yet.
+  gggs::CellIndex cell = level.cellIndex(gggs::geoPoint(43.07, -70.76));
+  EXPECT_EQ(g.predictedDepthAt(cell), INVALID_DATA)
+    << "no node should exist before priming";
+
+  // Prime the predicted depth -- this must lazy-create the node.
+  const float depth = -12.5f;
+  const float variance = 0.25f;
+  g.setPredictedDepthAt(cell, depth, variance);
+
+  EXPECT_FLOAT_EQ(g.predictedDepthAt(cell), depth);
+}
+
+TEST_F(GeoGridTest, PredictedDepthAtAbsentCellReturnsInvalid)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  gggs::CellIndex cell(grid_index, 0, 0);
+  EXPECT_EQ(g.predictedDepthAt(cell), INVALID_DATA);
+}
+
 TEST_F(GeoGridTest, MultipleSoundingsConverge)
 {
   auto grid_index = makeGridIndex(43.07, -70.76);

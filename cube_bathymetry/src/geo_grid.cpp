@@ -100,6 +100,26 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
   return inserted;
 }
 
+void GeoGrid::setPredictedDepthAt(
+  const gggs::CellIndex & cell, float depth, float variance)
+{
+  // Lazy-create the Node so a warm-start prime can seed a cell that the live
+  // session has not yet touched. Mirrors insert()'s nodes_[*i] creation.
+  if(!nodes_[cell]) {
+    nodes_[cell] = std::make_shared<Node>();
+  }
+  nodes_[cell]->setPredictedDepth(depth, variance);
+}
+
+float GeoGrid::predictedDepthAt(const gggs::CellIndex & cell) const
+{
+  auto it = nodes_.find(cell);
+  if(it == nodes_.end() || !it->second) {
+    return INVALID_DATA;
+  }
+  return it->second->predictedDepth();
+}
+
 const gggs::GridIndex & GeoGrid::index() const
 {
   return index_;

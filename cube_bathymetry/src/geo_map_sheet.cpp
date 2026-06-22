@@ -60,6 +60,9 @@ void GeoMapSheet::addSoundings(
   for (auto g  :  grids) {
     if(g->insert(soundings)) {
       last_update_time_ = time;
+      // Record the grid as dirty so the periodic save loop (#21) writes only
+      // grids that actually changed since the last save.
+      dirty_grids_.insert(g->index());
     }
   }
 }
@@ -95,6 +98,40 @@ std::vector<std::shared_ptr<GeoGrid>> GeoMapSheet::grids() const
     }
   }
   return ret;
+}
+
+std::shared_ptr<const GeoGrid> GeoMapSheet::gridAt(const gggs::GridIndex & index) const
+{
+  auto it = grids_.find(index);
+  if(it == grids_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+std::shared_ptr<GeoGrid> GeoMapSheet::getOrCreateGrid(const gggs::GridIndex & index)
+{
+  if(!grids_[index]) {
+    grids_[index] = std::make_shared<GeoGrid>(index, parameters_);
+  }
+  return grids_[index];
+}
+
+void GeoMapSheet::setPredictedDepthAt(
+  const gggs::CellIndex & cell, float depth, float variance)
+{
+  auto grid = getOrCreateGrid(cell.grid());
+  grid->setPredictedDepthAt(cell, depth, variance);
+}
+
+std::set<gggs::GridIndex> GeoMapSheet::dirtyGrids() const
+{
+  return dirty_grids_;
+}
+
+void GeoMapSheet::clearDirtyGrids()
+{
+  dirty_grids_.clear();
 }
 
 double GeoMapSheet::cellSizeDegrees() const

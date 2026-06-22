@@ -22,14 +22,26 @@
 
 #include "cube_bathymetry/store_import.h"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 #include <vector>
 
 #include "cube_bathymetry/common.h"
+#include "marine_autonomy/gggs.h"
 
 namespace cube
 {
+
+namespace
+{
+// Lower bound on the predicted-depth variance (meter^2) seeded by primeFromTile.
+// A single-sample CUBE cell can persist an exactly-zero or non-finite 1-sigma
+// uncertainty; Node::setPredictedDepth rejects a non-positive variance, so we
+// floor it. 1e-4 m^2 == 1 cm 1-sigma: small enough to act as a confident prior,
+// large enough to keep the blunder-limit sqrt() well-defined.
+constexpr double kPrimeVarianceFloor = 1e-4;
+}  // namespace
 
 marine_bathymetry_store::BathymetryTile geoGridToTile(
   const GeoGrid & grid, int64_t timestamp_ns, uint16_t source_index)
@@ -84,6 +96,54 @@ mapSheetToEpochTiles(
   }
 
   return tiles;
+}
+
+void primeFromTile(
+  const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet)
+{
+  const gggs::GridIndex & grid = tile.index();
+  const std::vector<double> & depth = tile.depthBand();
+  const std::vector<double> & uncertainty = tile.uncertaintyBand();
+
+  // Walk the tile in GGGS cell order (row 0 = south, row-major) -- the same order
+  // BathymetryTile's bands use -- and prime every finite-depth cell.
+  gggs::CellAreaIterator it(grid);
+  std::size_t k = 0;
+  for (; it.valid() && k < depth.size(); it.next(), ++k) {
+    const double d = depth[k];
+    if (std::isnan(d)) {
+      continue;  // no-data cell -- nothing to prime
+    }
+    // Variance from the stored 1-sigma uncertainty (sigma^2). Node::setPredictedDepth
+    // requires a *finite positive* variance for a real (finite) predicted depth --
+    // its blunder limit takes sqrt(depth - variance), so a zero or sentinel variance
+    // would mis-scale (or silently neutralize) blunder rejection. A single-sample
+    // CUBE cell can have an exactly-zero or non-finite uncertainty, so floor the
+    // variance at a small positive epsilon rather than skip the cell: the depth
+    // prior is still worth seeding for slope correction even when the persisted
+    // confidence is unusable.
+    const double u = uncertainty[k];
+    double variance = (std::isfinite(u) && u > 0.0) ? (u * u) : 0.0;
+    variance = std::max(variance, kPrimeVarianceFloor);
+    map_sheet.setPredictedDepthAt(
+      *it, static_cast<float>(d), static_cast<float>(variance));
+  }
+}
+
+void loadEpochIntoSheet(
+  const marine_bathymetry_store::BathymetryStore & store,
+  marine_bathymetry_store::SourceLayer layer,
+  const marine_bathymetry_store::Epoch & epoch,
+  GeoMapSheet & map_sheet)
+{
+  const auto & epochs = store.epochs(layer);
+  auto it = epochs.find(epoch);
+  if (it == epochs.end()) {
+    return;  // epoch absent -- nothing to load
+  }
+  for (const auto & grid_tile : it->second.tiles) {
+    primeFromTile(grid_tile.second, map_sheet);
+  }
 }
 
 }  // namespace cube

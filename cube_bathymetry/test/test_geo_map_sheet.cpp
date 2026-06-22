@@ -25,6 +25,7 @@
 #include <cmath>
 #include <vector>
 #include "cube_bathymetry/geo_map_sheet.h"
+#include "marine_autonomy/gggs.h"
 
 namespace cube
 {
@@ -117,6 +118,65 @@ TEST_F(GeoMapSheetTest, TimestampNotUpdatedWhenNoInsert)
   ms.addSoundings(empty_soundings, time2);
 
   EXPECT_EQ(ms.lastUpdateTime(), baseline_time);
+}
+
+TEST_F(GeoMapSheetTest, DirtyTrackingSetOnInsertClearedOnDemand)
+{
+  GeoMapSheet ms(cell_size);
+
+  EXPECT_TRUE(ms.dirtyGrids().empty()) << "fresh sheet has no dirty grids";
+
+  std::vector<GeoSounding> soundings;
+  gz4d::GeoPointLatLongDegrees point(43.0, -70.0, -10.0);
+  GeoSounding s(point);
+  s.sounding.vertical_error = 0.5f;
+  s.sounding.horizontal_error = 0.1f;
+  soundings.push_back(s);
+
+  ms.addSoundings(soundings);
+  EXPECT_FALSE(ms.dirtyGrids().empty()) << "insert should mark grids dirty";
+
+  // Every dirty index must correspond to an existing grid.
+  for (const auto & idx : ms.dirtyGrids()) {
+    EXPECT_NE(ms.gridAt(idx), nullptr);
+  }
+
+  ms.clearDirtyGrids();
+  EXPECT_TRUE(ms.dirtyGrids().empty()) << "clearDirtyGrids should empty the set";
+}
+
+TEST_F(GeoMapSheetTest, EmptyInsertDoesNotMarkDirty)
+{
+  GeoMapSheet ms(cell_size);
+  std::vector<GeoSounding> empty;
+  ms.addSoundings(empty);
+  EXPECT_TRUE(ms.dirtyGrids().empty());
+}
+
+TEST_F(GeoMapSheetTest, GridAtReturnsNullForAbsentIndex)
+{
+  GeoMapSheet ms(cell_size);
+  gggs::Level level = gggs::Level::fromCellSize(cell_size);
+  auto absent = level.gridIndex(10.0, 10.0);
+  EXPECT_EQ(ms.gridAt(absent), nullptr);
+}
+
+TEST_F(GeoMapSheetTest, SetPredictedDepthAtSeedsCellWithoutDirtying)
+{
+  GeoMapSheet ms(cell_size);
+  gggs::Level level = gggs::Level::fromCellSize(cell_size);
+
+  gggs::CellIndex cell = level.cellIndex(gggs::geoPoint(43.07, -70.76));
+  const float depth = -8.0f;
+  ms.setPredictedDepthAt(cell, depth, 0.25f);
+
+  // The grid is created but priming must not mark it dirty (it reproduces
+  // already-persisted data; re-saving would be redundant churn).
+  EXPECT_TRUE(ms.dirtyGrids().empty());
+
+  auto grid = ms.gridAt(cell.grid());
+  ASSERT_NE(grid, nullptr);
+  EXPECT_FLOAT_EQ(grid->predictedDepthAt(cell), depth);
 }
 
 }  // namespace cube
