@@ -66,6 +66,30 @@ per-point form avoids repacking the whole cloud.
 The `lookupAtOrLatest` helper is already in the node and handles
 `ExtrapolationException` → `TimePointZero` fallback.
 
+### Plan-review must-fix resolutions (implemented)
+
+The 2026-06-21 plan-review (Opus) raised two publish-projection must-fixes; both
+are resolved in `src/grid_projection.cpp` (`geoMapSheetToGridMap`):
+
+1. **Cell center has no GGGS accessor** — derived in `geoMapSheetToGridMap` as
+   `CellIndex::position()` (SW corner) `+` half the cell's latitudinal span
+   (`GridIndex::latitudinalSpan()/960`) and half its longitudinal span
+   (`GridIndex::longitudinalSpan()/960`). No GGGS API change needed.
+2. **Per-cell ECEF+TF loop / polar stretch** — the publish path looks up
+   `map←earth` ONCE per publish, converts it to an `Eigen::Isometry3d`
+   (`tf2::transformToEigen`), and applies that single affine to every cell's
+   ECEF coords (no per-cell `tf2::doTransform`, no per-cell buffer lookup). The
+   GGGS polar column-stretch is handled by construction: the per-grid
+   `longitudinalSpan()` already encodes the 1×/3×/9× scaling, so projecting cell
+   centers is correct at any latitude with no interpolation pass (unlike the
+   uniform-raster GeoTIFF path). Scoped/validated for non-polar survey latitudes
+   (|lat| < 72°), matching the store's documented envelope (`tile_io.hpp`).
+
+The last-good-TF fallback (`last_publish_tf_`/`have_publish_tf_`) caches the
+map←earth transform and reuses it on a publish-time miss, skipping publish only
+on the first cycle. The publish-equivalence test (`test_publish_equivalence.cpp`)
+is the CA-grid safety net.
+
 ### Step 2 — Publish path: GeoMapSheet → map_frame grid_map (the crux)
 
 `publishGrid()` today iterates `map_sheet_->grids()`, reads Cartesian `origin()` + cell
@@ -399,6 +423,26 @@ No changes to `marine_bathymetry_store` (it is a dependency, not modified here).
   `marine_control` device-control is in place.
 
 ---
+
+## Implementation notes (as built)
+
+- `primeFromTile` / `loadEpochIntoSheet` are **free functions in `store_import`**
+  (not `GeoMapSheet` methods) so the core `cube_bathymetry` library stays free of
+  the `marine_bathymetry_store` dependency (the same separation the existing
+  `cube_bathymetry_store_import` target enforces). `GeoMapSheet` gained only
+  store-free building blocks: `getOrCreateGrid`, `setPredictedDepthAt`, `gridAt`,
+  `dirtyGrids`/`clearDirtyGrids`. The node links `cube_bathymetry_store_import`.
+- The publish projection lives in a **new `cube_bathymetry_grid_projection`
+  target** (`grid_projection.{h,cpp}`) that links only `grid_map_core`, so the
+  publish path is unit-testable (the publish-equivalence regression) without a
+  ROS node or message conversion.
+- `primeFromTile` floors the seeded predicted-depth variance at a small positive
+  epsilon (1e-4 m²): a single-sample CUBE cell can persist a zero/non-finite
+  uncertainty and `Node::setPredictedDepth` rejects a non-positive variance, so
+  the floor keeps every finite-depth cell seeded.
+- Persistence steps 3+4 landed as **one commit** (the `saveDirtyTiles` loop and
+  its lifecycle wiring are inseparable; an intermediate commit would carry an
+  unused method).
 
 ## Estimated Scope
 
