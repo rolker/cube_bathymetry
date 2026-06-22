@@ -179,3 +179,26 @@ The crux claim is correct: the live node really is Cartesian `MapSheet`-based. B
 - [ ] Re-scope #21 to output-only persistence via a **parallel** `GeoMapSheet` (alternative b); do not migrate the runtime node in this issue.
 - [ ] Split the `MapSheet→GeoMapSheet` runtime migration (changes the published `grid_map` representation/frame) into its OWN issue with its own consequences analysis and consumer regression plan.
 - [ ] If the `setPredictedDepth` prime path stays in #21, add the missing `GeoGrid` Node-access API to Files-to-Change; otherwise defer warm-start to a follow-on per review-issue.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-21 00:00 +00:00
+**By**: Claude Code Agent (claude-sonnet-4-6)
+
+**Plan**: `.agent/work-plans/issue-21/plan.md` at `904b2e0`
+**Branch**: feature/issue-21 at `904b2e0`
+**Phases**: single (4-commit sequence within the PR)
+
+**Re-author note**: Prior plan (dafaac2) returned `changes-requested` from plan-review.
+Owner decision (handoff brief) confirms the migration IS in scope — it is not mis-scoped
+but rather the necessary prerequisite for native-GGGS persistence. The re-authored plan
+addresses all three must-fixes:
+1. Migration scope confirmed by owner; safety constraint on published contract now
+   explicit (Step 2: cached `map←earth` TF, never starvation).
+2. `GeoGrid::setPredictedDepthAt` + `GeoMapSheet::primeFromTile` added to Files-to-Change
+   (Step 4).
+3. Consumer regression table and publish-equivalence test added (Steps 3 + 8).
+
+### Open questions
+- [ ] `grid_cell_count_` param: retire silently (no-op + deprecation WARN) or keep as declared no-op for backward compat?
+- [ ] Source index for live tiles: use 0 (no registry) or wire a `SourceRegistry`? (Recommendation: 0 for this issue.)
