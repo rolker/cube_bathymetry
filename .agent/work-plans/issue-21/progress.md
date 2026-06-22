@@ -202,3 +202,57 @@ addresses all three must-fixes:
 ### Open questions
 - [ ] `grid_cell_count_` param: retire silently (no-op + deprecation WARN) or keep as declared no-op for backward compat?
 - [ ] Source index for live tiles: use 0 (no registry) or wire a `SourceRegistry`? (Recommendation: 0 for this issue.)
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-21 22:25 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8 (1M context))
+
+**Plan**: `.agent/work-plans/issue-21/plan.md` at `904b2e0`
+**PR**: PR-less (--issue mode)
+**Verdict**: changes-requested
+
+**Re-review note**: Owner overrode the prior review's "avoid the migration" recommendation.
+This re-review accepts the migration as in-scope and verifies it is planned SAFELY. The
+prior review's mis-scoping finding is NOT re-litigated. Two NEW must-fixes surfaced that
+are independent of the scope question — both are concrete API gaps in the migration's
+publish path, the same class of gap the prior review caught for the prime path.
+
+### Evaluation
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | Migration accepted per owner; the parts (ingestion + publish + load/prime + persistence) are genuinely inseparable for native-GGGS persistence. Single PR with a 4-commit sequence is reasonable. |
+| Issue alignment | Good | Addresses #21 (persist draft tiles) plus the owner-mandated migration + warm-start prime. |
+| File targeting | Needs work | Publish-projection step relies on a cell-center API that does not exist (see must-fix 1). Otherwise Files-to-Change is complete and accurate. |
+| Consequences | Good | Published-grid contract, consumers, cached-TF, pre-filter-flush, dirty-snapshot all enumerated. The flush-per-save row is correct and now de-risked (flush is already status-quo on publish — see finding 4). |
+| Principle alignment | Good | Robustness (cached TF), test-what-breaks (publish-equivalence + round-trip), human-control (`draft_dir` opt-in) all addressed. |
+| ADR compliance | Good | ADR-0008 param handling sound; inline design note proportionate (ADR-0001 watch). |
+| ROS conventions | Needs work | Per-cell ECEF+TF projection loop on the publish path is a latency risk at GGGS scale (960×960/grid); "profile in sim" is necessary but the plan should commit to a batch/raster approach matching the `bag_to_geotiff` precedent rather than per-cell `tf2::doTransform`. |
+
+### Findings
+- [ ] (must-fix) Publish projection names a non-existent API. Step 2 (`plan.md:91`) says "Get the cell's center lat/lon from `gggs::CellAreaIterator` / `gggs::Level::cellCenter(CellIndex)`." There is **no `gggs::Level::cellCenter`**. The only per-cell geographic accessor is `CellIndex::position()`, which returns the **south-west corner**, not the center (`cell_index.h:109-111`). The plan's publish path is unimplementable as written. Either add a cell-center helper to the GGGS API (out-of-repo: `unh_marine_autonomy`, a separate PR/issue) or derive the center from `position()` + half a `cellAngularSpan()` and document the half-cell offset. Add the chosen approach to Files-to-Change. — `plan.md:91`
+- [ ] (must-fix) Publish projection ignores the established `bag_to_geotiff` precedent and is a real latency risk. The offline tool (`bag_to_geotiff.cpp:605-693`) does NOT project per-cell through ECEF — it builds a lat/lon raster keyed by GGGS `row()`/`column()` with a uniform `cellSizeDegrees()` geotransform, and must explicitly handle GGGS **polar column-stretch (1×/3×/9×)** with per-row interpolation. The plan's "convert each cell center lat/lon→ECEF→`PointStamped`→`tf2::doTransform`→`map.getIndex`" runs that per-cell for up to 960×960 cells per grid on the ~5 s publish cycle — orders of magnitude heavier than today's Cartesian copy and heavier than the offline batch raster. "Profile in sim" (Step 2) is insufficient as the sole mitigation for the live CA feed. The plan must (a) commit to a batched projection (compute the `map←earth` affine once and apply it to cell positions in bulk, mirroring the offline geotransform approach) and (b) state the polar-stretch handling, or explicitly scope to non-polar (lake/coastal) and assert it. — `plan.md:93-102`
+- [ ] (suggestion) `saveDirtyTiles()` writes tiles via the low-level `saveTile(tile, path)` free function into a hand-built `draft_dir_/draft/<epoch>/` path, but the load path uses the store-level `marine_bathymetry_store::load(store, draft_dir_)`. These must round-trip: `load()` scans `<dir>/<layer>/<epoch>/<level>_<row>_<col>.tif` and defaults provenance to `live-fused` when the per-epoch `provenance` marker is absent (`tile_io.hpp:131-133`), and `saveTile` does not write that marker or `registry.json`. The combination is workable (load tolerates the missing marker), but the plan should (a) confirm `layerDirName(SourceLayer::Draft) == "draft"` so the hand-built path matches what `load()` scans, and (b) add a save→load round-trip test through the **store** `save()`/`load()` functions, not just `saveTile`/`loadTile`, to pin the layout contract. Prefer calling the store-level `save(store, draft_dir_)` over hand-rolling `saveTile` paths if a transient store is acceptable. — `plan.md:248-269`
+- [ ] (suggestion) The `if (!tile.dirty()) continue;` "all-NaN skip" in `saveDirtyTiles()` (`plan.md:262`) is correct but the inline comment's reasoning ("all NaN — skip") is imprecise: `dirty()` is the value-raster dirty flag set by `set()`, not an all-NaN test. It works only because `geoGridToTile` marks dirty iff it wrote a finite cell — which is exactly the established `mapSheetToEpochTiles` precedent (`store_import.cpp:80`). Keep the idiom; fix the comment to reference the precedent. — `plan.md:262`
+- [ ] (suggestion) CA-starvation claim is sound but narrower than stated. The cached `map←earth` publish-TF fallback (Step 2) only helps when ingestion **succeeded** (a ping was accumulated) but the publish-time `map←earth` lookup failed. Publish is purely ping-driven (`cube_bathymetry_node.cpp:313-319`; no standalone publish timer), and ingestion still drops the ping on an `earth←sensor` TF miss (Step 1, matching current behavior). So a total TF outage still yields no new publishes — but that is no worse than today, and the cached transform genuinely prevents the *new* failure mode (geographic cells un-projectable at publish). State this scope precisely so the "never starves" claim isn't over-read. — `plan.md:83-91`
+
+### Summary
+The migration is now planned much more carefully than the prior (rejected) draft: the
+published `grid_map`/`map_frame` contract is explicitly preserved, the prime-path API
+(`setPredictedDepthAt`/`primeFromTile`/`loadEpochIntoSheet`) is coherent and in
+Files-to-Change, `Node::setPredictedDepth` is verified (`node.h:269`), the ECEF→lat/lon
+ingestion matches the `bag_to_geotiff` precedent (`bag_to_geotiff.cpp:553-559`), the
+4-commit sequence is buildable-at-each-step, and the pre-filter-flush concern is real but
+de-risked (per-publish flush is already status-quo via `Grid::values()`/`GeoGrid::values()`).
+However, the **publish projection** — the explicit crux of the migration — has two concrete
+defects: it calls a non-existent `gggs::Level::cellCenter` API, and it specifies a per-cell
+ECEF+TF loop that ignores the batch-raster precedent and poses a genuine latency risk on the
+live CA publish path. These are the same class of unimplementable-as-written API gap the prior
+review caught for the prime path. Fix the publish-projection API + approach and the migration
+is safe to implement.
+
+### Recommended Actions
+- [ ] Replace `gggs::Level::cellCenter` with a real cell-center derivation (`CellIndex::position()` SW-corner + half `cellAngularSpan()`, or a new GGGS helper in a separate `unh_marine_autonomy` PR); add to Files-to-Change.
+- [ ] Re-specify the publish projection as a batched map←earth affine applied to cell positions (mirror `bag_to_geotiff.cpp:605-693`), state polar-stretch handling or scope to non-polar, and keep the sim profile gate as a confirmation rather than the sole mitigation.
+- [ ] Add a store-level `save()`→`load()` round-trip test (not just `saveTile`/`loadTile`) and confirm `layerDirName(Draft) == "draft"` so the live-write/load layout round-trips.
+- [ ] Tighten the CA-starvation wording to the ingestion-succeeded / publish-TF-missed window; fix the `tile.dirty()` comment.
