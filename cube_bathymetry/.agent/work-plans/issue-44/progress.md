@@ -56,3 +56,26 @@ issue: 44
 - Row order mirrors `marine_tiled_raster_store::saveTile`'s north-up flip inverse (GGGS row r ← GDAL row edge-1-r); verified by byte-identical geotransform round-trip vs input tiles.
 - GridIndex from the GeoTIFF's real geotransform via `Level::gridIndex(center)` (not the private filename-nudge helper).
 - Smoke test vs real prior (`chart/2026-06-12`): 142/142 tiles, 0 skipped, ~69.2M cells, depths 41.26–48.88 m ellipsoidal; split value/_time/_source tiles written.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-23 11:33 +0000
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-44 at `ae035a4`
+**Mode**: pre-push
+**Depth**: Deep (reason: 843 added lines ≥ 200; new cross-layer importer linking core_ws + platforms_ws)
+**Must-fix**: 1 | **Suggestions**: 6
+**Round**: 1 | **Ship**: continue — one mechanical must-fix (trailing-slash epoch abort) plus a re-import data-correctness suggestion worth resolving before push.
+
+Static analysis: ament_cpplint + ament_uncrustify clean on all 4 changed C++ files. Claude Adversarial: 2 disjoint-lens passes (Lens A logic, Lens B systemic). API usage verified against real dependency headers (BathyCell, BathymetryStore::set/save, resolve_datum 6-arg, GGGS CellIndex row-from-south, validateEpochLabel); GGGS row-flip and conversion arithmetic correct; fixture YAML schema matches load_datum_config.
+
+### Findings
+- [ ] (must-fix) Trailing slash on `--contour-dir` derives an empty/`.` epoch → tool aborts with a misleading "not a usable epoch label" error; the `has_filename() ? dir : dir+"/.."` ternary handles trailing slashes backwards (verified empirically; the plan's own documented path form has a trailing slash) — `src/import_chart_prior.cpp:141-143`
+- [ ] (suggestion) Per-cell `set()` live path never sets `supersedes_disk`, so `save()` won't clear a pre-existing `chart/<epoch>/`; a re-import with a smaller footprint resurrects stale tiles → silently wrong store. Use `importEpoch(Replayed)` or require an empty output epoch dir. Promote to must-fix if re-imports into a populated store are expected — `src/import_chart_prior.cpp:303,322`
+- [ ] (suggestion) Band-1 no-data assumes NaN only; ignores `GDALRasterBand::GetNoDataValue()`. Real Massabesic tiles use NaN (smoke test skipped ~47% of cells, so not broken today) but a legacy generator using a numeric sentinel would import garbage — `src/chart_import.cpp` / `src/import_chart_prior.cpp:~298`
+- [ ] (suggestion) `std::stoi(--level)` uncaught → `std::terminate` on `--level abc` instead of the clean usage message every other parse error emits — `src/import_chart_prior.cpp:116`
+- [ ] (suggestion) Mid-tile `RasterIO` error sets `tile_cells=0` and breaks, but cells already `set()` in earlier rows stay in the store and are saved; tile is then counted as skipped (counters under-report, partial tile reaches disk) — `src/import_chart_prior.cpp:285-290`
+- [ ] (suggestion) `save()` is non-atomic: a GDAL failure mid-save leaves a partial `chart/<epoch>/` indistinguishable from a complete epoch on `load()`; note that the operator must clear the dir on failure — `src/import_chart_prior.cpp:319-326`
+- [ ] (suggestion) Tests cover only the pure core; the GDAL/filesystem path (epoch derivation, no-data, filename parse) is untested — exactly where the above findings live. No negative `chart_datum_z` case either — `test/test_chart_import.cpp`
