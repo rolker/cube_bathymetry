@@ -114,6 +114,36 @@ TEST_F(ErrorModelTest, ErrorsAreNonNegative)
   }
 }
 
+// Regression for #16: vessel speed enters every horizontal-latency term squared,
+// so the horizontal error is identical for +v and -v. This documents why no
+// negative-speed guard is needed in horizontal_latency() (the removed dead code
+// claimed to "avoid negative speed" but the squaring already neutralizes sign).
+TEST_F(ErrorModelTest, HorizontalErrorIsInsensitiveToVesselSpeedSign)
+{
+  ErrorModel em(vessel, device);
+  auto det = makeDetections({0.0f}, 0.02f);  // nadir → cos_pitch term maximal
+
+  auto p_pos = makePlatform();
+  p_pos.vessel_speed = 5.0f;
+  auto p_neg = makePlatform();
+  p_neg.vessel_speed = -5.0f;
+  auto p_zero = makePlatform();
+  p_zero.vessel_speed = 0.0f;
+
+  auto s_pos = em.compute(det, p_pos);
+  auto s_neg = em.compute(det, p_neg);
+  auto s_zero = em.compute(det, p_zero);
+  ASSERT_EQ(s_pos.size(), 1u);
+  ASSERT_EQ(s_neg.size(), 1u);
+  ASSERT_EQ(s_zero.size(), 1u);
+
+  // Sign-insensitive: +v and -v give the same horizontal error.
+  EXPECT_FLOAT_EQ(s_pos[0].horizontal_error, s_neg[0].horizontal_error);
+  // And the speed path is genuinely exercised: nonzero speed adds latency error
+  // on top of the zero-speed baseline (otherwise the equality above is vacuous).
+  EXPECT_GT(s_pos[0].horizontal_error, s_zero[0].horizontal_error);
+}
+
 TEST_F(ErrorModelTest, VerticalErrorIncreasesWithBeamAngle)
 {
   ErrorModel em(vessel, device);
