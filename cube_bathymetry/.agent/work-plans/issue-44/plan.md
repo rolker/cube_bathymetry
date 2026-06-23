@@ -46,9 +46,16 @@ tracker). No new mru_transform config file and no invented polygon vertices.
 2. **Pure conversion core** (`src/chart_import.{hpp,cpp}` or in-lib, ROS-free): given
    a `BathymetryTile` (raw, depth-below-surface) + a resolved `chart_datum_z`,
    produce the ellipsoidal tile — so the arithmetic is unit-testable without GDAL.
-3. **Importer flow:** `load_datum_config(path)`; for each `*.tif` in the contour dir
-   `BathymetryTile raw = loadTile(path, level)` (reads by path — epoch subdir is
-   fine); per data cell compute lat/lon from its `CellIndex`,
+3. **Importer flow:** `load_datum_config(path)`; for each `<lvl>_<x>_<y>.tif` in the
+   contour dir read it with **GDAL directly** — band1 = depth-below-surface (Float64),
+   band2 = uncertainty, band3 = legacy timestamp (sec) — **not** store `loadTile`:
+   verified on disk the raw contour tiles are the **legacy single-file 3-band Float64**
+   format (960×960, GGGS-tiled, named by GridIndex), which post-#178 `loadTile`
+   deliberately **rejects** (the store now uses split value/`_time`/`_source` tiles). Parse
+   the `GridIndex` from the filename (mirror `gridIndexFromTileFilename`/
+   `levelFromTileFilename` in `tile_io`); the GDAL band→GGGS-cell row order must match
+   the store's convention (row 0 = south — mirror `saveTile` in `tile_io.cpp`). Per data
+   cell compute lat/lon from its `CellIndex`,
    `resolve_datum(lat, lon, /*lake_datum=*/nullopt, /*lake_datum_mhhw=*/nullopt,
    /*vdatum=*/nullopt, entries)` → `chart_datum_z` (the `override:true` polygon entry
    wins; warn+skip cells outside any polygon), set
@@ -85,7 +92,7 @@ tracker). No new mru_transform config file and no invented polygon vertices.
 ## Principles Self-Check
 | Principle | Consideration |
 |---|---|
-| Reuse over duplication | Reuses `loadTile`/`save` (store) + `resolve_datum` (mru_transform); no new tile or datum code. |
+| Reuse over duplication | Reuses `save` (store, writes the #178 split-tile format) + `resolve_datum` (mru_transform). Raw read is GDAL-direct (legacy 3-band → `loadTile` rejects it) but mirrors `tile_io`'s GridIndex-filename parse + row order; no new datum code. |
 | Layering | cube (sensors_ws) legitimately links core + platforms below it; store core stays datum-agnostic. |
 | Do it right | Pure conversion core with gtests; single source of truth for 48.88 (datum config, not hardcoded). |
 
