@@ -22,8 +22,6 @@
 
 #include "cube_bathymetry/geo_grid.h"
 #include <cmath>
-#include "geodesy/geodesics.h"
-#include "geodesy/wgs84_ellipsoid.h"
 #include "marine_autonomy/gz4d_geo.h"
 
 namespace cube
@@ -79,15 +77,24 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
     gggs::geoPoint(bounds.minimum().latitude, bounds.minimum().longitude),
     gggs::geoPoint(bounds.maximum().latitude, bounds.maximum().longitude));
 
-  // CellIndex::position() returns a GeoPoint; distance to the sounding now
-  // comes from geodesy's WGS84 Vincenty inverse (replacing the gz4d
-  // Position::distanceFrom() the GeoPoint type doesn't provide).
-  const auto sounding_point =
-    gggs::geoPoint(geo_sounding.latitude, geo_sounding.longitude);
+  // Local-planar (equirectangular) cell->sounding distance in metres. This runs
+  // per cell x per sounding x per ping; the #144 gz4d->GeoPoint refactor had put
+  // a WGS84 Vincenty inverse here -- a full iterative ellipsoidal solver -- for
+  // what is a sub-metre cell-to-sounding distance. At these radii (a few metres)
+  // the equirectangular distance matches the geodesic to well under a millimetre,
+  // so the iterative solver was pure overhead in both the offline import and the
+  // live node (cube_bathymetry#63). Latitude scale is fixed at the sounding (the
+  // cells span only metres around it).
+  static constexpr double kDeg2Rad = M_PI / 180.0;
+  static constexpr double kEarthRadiusM = 6378137.0;  // WGS84 semi-major axis
+  const double cos_lat = std::cos(geo_sounding.latitude * kDeg2Rad);
 
   bool inserted = false;
   while(i.valid()) {
-    auto distance = geodesy::wgs84::inverse(i->position(), sounding_point).distance;
+    const auto cell = i->position();
+    const double dlat = (cell.latitude - geo_sounding.latitude) * kDeg2Rad;
+    const double dlon = (cell.longitude - geo_sounding.longitude) * kDeg2Rad * cos_lat;
+    const double distance = std::hypot(dlat, dlon) * kEarthRadiusM;
     if(distance < radius) {
       if(!nodes_[*i]) {
         nodes_[*i] = std::make_shared<Node>();

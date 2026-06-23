@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.14.4)
 project(cube_bathymetry)
 
+# This package carries the compute-heavy CUBE estimator + the offline importers
+# (import_bag / bag_to_geotiff). colcon supplies no CMAKE_BUILD_TYPE by default,
+# which builds at -O0 and makes import_bag ~10-50x slower (an hours-long offline
+# import instead of minutes). Default to an optimized build when the workspace
+# didn't pick one (cube_bathymetry#63).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Default optimized build" FORCE)
+  message(STATUS "cube_bathymetry: defaulting CMAKE_BUILD_TYPE to RelWithDebInfo")
+endif()
+
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
@@ -19,7 +29,6 @@ find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
 find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
-find_package(geodesy REQUIRED)  # WGS84 Vincenty inverse (geo_grid distance)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -64,8 +73,6 @@ target_link_libraries(cube_bathymetry
   tf2::tf2
   tf2_geometry_msgs::tf2_geometry_msgs
 )
-# geodesy (geographic_info) exports via ament, not a namespaced target.
-ament_target_dependencies(cube_bathymetry geodesy)
 
 install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
@@ -180,6 +187,7 @@ target_link_libraries(import_bag
   cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
   ${geometry_msgs_TARGETS}
   ${marine_acoustic_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
   rclcpp::rclcpp
   rosbag2_cpp::rosbag2_cpp
   rosbag2_transport::rosbag2_transport

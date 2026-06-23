@@ -122,7 +122,13 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
     return false;
   }
 
-  distance += CONF_95PC * std::sqrt(sounding.horizontal_error);
+  // Defensive: a non-finite horizontal_error (e.g. an upstream TPU gap) must not
+  // poison `distance` -> the depth `variance` below -> the whole estimate -> an
+  // empty epoch (cube_bathymetry#63). Skip the horizontal term if it isn't finite
+  // rather than NaN-propagating into the depth solution.
+  if (std::isfinite(sounding.horizontal_error)) {
+    distance += CONF_95PC * std::sqrt(sounding.horizontal_error);
+  }
 
   float offset = 0.0;
   double variance = sounding.vertical_error * (1.0 + parameters.variance_scale * pow(distance,

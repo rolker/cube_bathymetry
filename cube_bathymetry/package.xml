@@ -26,7 +26,6 @@
        the need for an explicit find_package(nlohmann_json) (the store now exports it),
        but not the build-time install dependency. -->
   <depend>nlohmann-json-dev</depend>
-  <depend>geodesy</depend>
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>  <!-- bag readers in import_bag / bag_to_geotiff -->
   <depend>rosbag2_transport</depend>
