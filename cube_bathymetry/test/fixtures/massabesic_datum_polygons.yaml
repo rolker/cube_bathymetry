@@ -1,0 +1,21 @@
+# Self-contained datum config for cube_bathymetry chart-import gtests.
+#
+# Mirrors the schema mru_transform::load_datum_config expects (top-level
+# `datum_polygons:` sequence; each entry has `name`, optional `override`,
+# `chart_datum_z`, optional `mhhw_z`, and a `ring` of [lat, lon] vertices).
+#
+# This is a TEST fixture only — a single override:true entry with the
+# full-pool Lake Massabesic datum (48.88 m WGS84 ellipsoidal; see
+# unh_marine_autonomy#170, echoboats#278) and a coarse ring covering the lake.
+# Real importer runs point --datum-config at the merged deployment config
+# (bizzyboat_project11/config/massabesic_datum_polygons.yaml), not this file.
+
+datum_polygons:
+  - name: "Lake Massabesic (test fixture)"
+    override: true            # win over VDatum inside this ring
+    chart_datum_z: 48.88      # full-pool lake surface, m above WGS84 ellipsoid
+    ring:                     # [latitude, longitude] vertices, degrees
+      - [43.0178, -71.4029]
+      - [43.0178, -71.3358]
+      - [42.9474, -71.3358]
+      - [42.9474, -71.4029]

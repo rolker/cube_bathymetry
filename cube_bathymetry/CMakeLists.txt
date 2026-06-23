@@ -15,6 +15,8 @@ find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
+find_package(marine_bathymetry_store REQUIRED)  # Chart-prior store (import_chart_prior)
+find_package(mru_transform REQUIRED)  # resolve_datum / load_datum_config (datum offset at import)
 find_package(geodesy REQUIRED)  # WGS84 Vincenty inverse (geo_grid distance)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -117,6 +119,36 @@ install(TARGETS bag_to_geotiff
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Chart-prior importer (#44): legacy 3-band contour tiles (depth below lake
+# surface) -> ellipsoidal Chart tiles for marine_bathymetry_store. The pure
+# conversion core (chart_import) is GDAL/ROS-free so the gtests can link it
+# without GDAL or the store.
+add_library(chart_import src/chart_import.cpp)
+target_link_libraries(chart_import
+  marine_bathymetry_store::marine_bathymetry_store
+)
+
+add_executable(import_chart_prior
+  src/import_chart_prior.cpp
+)
+target_link_libraries(import_chart_prior
+  chart_import
+  GDAL::GDAL
+  marine_autonomy::marine_autonomy
+  marine_bathymetry_store::marine_bathymetry_store
+  mru_transform::datum_config
+)
+
+install(TARGETS chart_import
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(TARGETS import_chart_prior
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
@@ -146,6 +178,10 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_geo_grid test/test_geo_grid.cpp)
   target_link_libraries(test_geo_grid cube_bathymetry)
+
+  # Pure conversion-core gtests (#44): link only chart_import (no GDAL needed).
+  ament_add_gtest(test_chart_import test/test_chart_import.cpp)
+  target_link_libraries(test_chart_import chart_import)
 endif()
 
 ament_export_dependencies(rclcpp)
