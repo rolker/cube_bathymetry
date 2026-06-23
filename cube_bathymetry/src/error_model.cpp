@@ -171,19 +171,28 @@ double ErrorModel::horizontal_latency(
   double sog_error = vessel_.gps_latency * vessel_.gps_latency * vessel_.sog_sdev *
     vessel_.sog_sdev * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch;
 
-  double jitter_error = platform.vessel_speed * platform.vessel_speed *
+  // Floor a non-finite speed (offline replay supplies NaN; a corrupt odom twist
+  // could yield +/-inf) to 0 so the speed-dependent terms below stay finite. A
+  // non-finite value here propagates through horizontal TPU and, via the
+  // Node::insert capture-distance term (sqrt(horizontal_error)), poisons the
+  // depth variance and zeroes the whole epoch (cube_bathymetry#63); Node::insert
+  // mirrors this isfinite defense on the same quantity downstream. A finite
+  // speed's sign is left untouched: it enters every latency term squared
+  // (jitter/head/pitch), so the sign is irrelevant and Calder's errmod_iho
+  // applies no abs/clamp here either (#16).
+  const double vessel_speed =
+    std::isfinite(platform.vessel_speed) ? platform.vessel_speed : 0.0;
+
+  double jitter_error = vessel_speed * vessel_speed *
   // Eqn. 3.97
     static_error_sources_.total_latency_variance * per_ping_sources.cos_pitch *
     per_ping_sources.cos_pitch;
-  // Speed enters every latency term squared (jitter/head/pitch), so the sign of
-  // vessel_speed is irrelevant and no negative-speed guard is required; this
-  // matches Calder's errmod_iho, which applies no abs/clamp here either.
-  double head_error = platform.vessel_speed * platform.vessel_speed *
+  double head_error = vessel_speed * vessel_speed *
     vessel_.gps_latency * vessel_.gps_latency * (M_PI / 180.0) * (M_PI / 180.0) *
   // Eqn. 3.98
     vessel_.gyro_sdev * vessel_.gyro_sdev * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch;
 
-  double pitch_error = platform.vessel_speed * platform.vessel_speed *
+  double pitch_error = vessel_speed * vessel_speed *
     vessel_.gps_latency * vessel_.gps_latency * static_error_sources_.total_pitch_variance *
     per_ping_sources.sin_pitch * per_ping_sources.sin_pitch;
 
