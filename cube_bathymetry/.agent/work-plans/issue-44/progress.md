@@ -79,3 +79,12 @@ Static analysis: ament_cpplint + ament_uncrustify clean on all 4 changed C++ fil
 - [ ] (suggestion) Mid-tile `RasterIO` error sets `tile_cells=0` and breaks, but cells already `set()` in earlier rows stay in the store and are saved; tile is then counted as skipped (counters under-report, partial tile reaches disk) — `src/import_chart_prior.cpp:285-290`
 - [ ] (suggestion) `save()` is non-atomic: a GDAL failure mid-save leaves a partial `chart/<epoch>/` indistinguishable from a complete epoch on `load()`; note that the operator must clear the dir on failure — `src/import_chart_prior.cpp:319-326`
 - [ ] (suggestion) Tests cover only the pure core; the GDAL/filesystem path (epoch derivation, no-data, filename parse) is untested — exactly where the above findings live. No negative `chart_datum_z` case either — `test/test_chart_import.cpp`
+
+### Host scope note for address-findings (Roland 2026-06-23: full robustness pass)
+Fix scope for this round (operator-approved):
+- **MF (trailing slash)** — fix; normalize `--contour-dir` so a trailing slash still yields the `<date>` epoch. Add a test.
+- **#1 (re-import resurrects stale tiles) — PROMOTED to must-fix.** Fix by switching the executable from the per-cell `set()` live path to the **wholesale import path**: build one fully-populated `BathymetryTile` per input file into a `std::map<gggs::GridIndex, BathymetryTile>`, then call `store.importEpoch(SourceLayer::Chart, epoch, std::move(tiles), Provenance::Replayed)`. This wholesale-replaces the epoch (no stale tile resurrection) AND means a mid-tile `RasterIO` error drops that whole tile rather than leaving a partial one in the store — so **#4 is fixed by the same change**. Verify importEpoch honors chart_writable for the Chart layer.
+- **#2 (no-data)** — also honor `GDALRasterBand::GetNoDataValue()` in addition to NaN.
+- **#3 (stoi)** — wrap `--level` parse; clean usage error, not std::terminate.
+- **#6 (tests)** — add tests for epoch derivation (incl. trailing slash) + GridIndex-from-filename/geotransform parse + a negative `chart_datum_z` core case.
+- **#5 (save() non-atomicity) — DEFER to UMA#189 (atomic writes, already open).** Do NOT implement atomic save here; add an in-code comment citing #189 and note in --help/log that a failed save leaves a partial epoch the operator must clear.
