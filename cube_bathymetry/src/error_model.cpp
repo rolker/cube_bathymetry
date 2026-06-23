@@ -175,10 +175,9 @@ double ErrorModel::horizontal_latency(
   // Eqn. 3.97
     static_error_sources_.total_latency_variance * per_ping_sources.cos_pitch *
     per_ping_sources.cos_pitch;
-  auto vessel_speed = platform.vessel_speed;
-  if(!std::isnan(platform.vessel_speed)) {
-    vessel_speed = platform.vessel_speed;  // Avoid negative speed
-  }
+  // Speed enters every latency term squared (jitter/head/pitch), so the sign of
+  // vessel_speed is irrelevant and no negative-speed guard is required; this
+  // matches Calder's errmod_iho, which applies no abs/clamp here either.
   double head_error = platform.vessel_speed * platform.vessel_speed *
     vessel_.gps_latency * vessel_.gps_latency * (M_PI / 180.0) * (M_PI / 180.0) *
   // Eqn. 3.98
