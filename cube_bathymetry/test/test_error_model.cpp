@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include "cube_bathymetry/error_model.h"
 #include "cube_bathymetry/parameters.h"
@@ -142,6 +143,39 @@ TEST_F(ErrorModelTest, HorizontalErrorIsInsensitiveToVesselSpeedSign)
   // And the speed path is genuinely exercised: nonzero speed adds latency error
   // on top of the zero-speed baseline (otherwise the equality above is vacuous).
   EXPECT_GT(s_pos[0].horizontal_error, s_zero[0].horizontal_error);
+}
+
+// Regression for the offline-import empty-epoch bug (cube_bathymetry#63): a
+// non-finite vessel_speed (offline replay supplies NaN; a corrupt odom twist
+// could yield +/-inf) must floor to 0 rather than NaN/inf-poisoning
+// horizontal_error -- which propagates through Node::insert into the depth
+// variance and zeroes the whole epoch. The floored result is finite and equals
+// the zero-speed baseline.
+TEST_F(ErrorModelTest, HorizontalErrorFloorsNonFiniteVesselSpeed)
+{
+  ErrorModel em(vessel, device);
+  auto det = makeDetections({0.0f}, 0.02f);  // nadir → speed terms maximal
+
+  auto p_nan = makePlatform();
+  p_nan.vessel_speed = std::numeric_limits<float>::quiet_NaN();
+  auto p_inf = makePlatform();
+  p_inf.vessel_speed = std::numeric_limits<float>::infinity();
+  auto p_zero = makePlatform();
+  p_zero.vessel_speed = 0.0f;
+
+  auto s_nan = em.compute(det, p_nan);
+  auto s_inf = em.compute(det, p_inf);
+  auto s_zero = em.compute(det, p_zero);
+  ASSERT_EQ(s_nan.size(), 1u);
+  ASSERT_EQ(s_inf.size(), 1u);
+  ASSERT_EQ(s_zero.size(), 1u);
+
+  // Non-finite speed floors to 0: finite horizontal_error equal to the zero-speed
+  // baseline (not NaN/inf, which would zero the epoch downstream).
+  EXPECT_TRUE(std::isfinite(s_nan[0].horizontal_error));
+  EXPECT_TRUE(std::isfinite(s_inf[0].horizontal_error));
+  EXPECT_FLOAT_EQ(s_nan[0].horizontal_error, s_zero[0].horizontal_error);
+  EXPECT_FLOAT_EQ(s_inf[0].horizontal_error, s_zero[0].horizontal_error);
 }
 
 TEST_F(ErrorModelTest, VerticalErrorIncreasesWithBeamAngle)
