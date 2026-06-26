@@ -87,3 +87,19 @@ correctly scoped to `sensors_ws/src/cube_bathymetry`.
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-26 22:56 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-70/plan.md` at `bf81a78`
+**PR**: PR-less (`--issue 70`, layer worktree)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (must-fix) New project ADR numbered `0008` collides with workspace ADR-0008 (ROS 2 conventions), which the plan's own ADR Compliance table cites — and it is the project's *first* ADR (`docs/decisions/` is empty). Renumber to `0001` (or the intended project start) before writing it. — `plan.md:24`, `plan.md:79`, `plan.md:104`
+- [ ] (suggestion) Eviction is driven from `saveDirtyTiles()`, which early-returns when `draft_dir_` is empty (persistence disabled). In that mode no save runs, so `evictColdTiles()` never fires and `grids_` stays unbounded — the original bug survives. Make the persistence-disabled behavior explicit (evict anyway with data loss, or document that bounding requires persistence). — `plan.md:38`
+- [ ] (suggestion) The plan does not tie `max_resident_tiles` (default 64) to `ca_window_radius_m`. If the budget is smaller than the tile span of the CA window, evicted-but-on-disk tiles render as NaN/lethal *inside* the avoidance window (safe direction, but spurious over-lethality degrades the live CA view). State the coherence constraint: resident budget ≥ tiles spanning the window. — `plan.md:46`, `plan.md:33`
+- [ ] (suggestion) Lazy warm-start reload on tile revisit is asserted but the revisit-detection / per-tile on-demand reload mechanism is not designed (`loadIntoSheet` runs once at on_configure for the whole draft). Plan marks it "optional" and eviction correctness does not depend on it, so this is fine to defer — but say so explicitly rather than implying a path that exists. — `plan.md:38`
+- [ ] (suggestion) ADR path is written two ways — `docs/decisions/0008-…` (step 1) vs `cube_bathymetry/docs/decisions/0008-…` (Files table). Both resolve to the package `docs/decisions/`; unify for clarity. — `plan.md:24`, `plan.md:79`
