@@ -125,3 +125,27 @@ without this migration. Implementation can proceed immediately.
 ### Verification performed
 - Confirmed against checked-out store headers: `epoch.hpp` absent; `BathymetryStore::epochs()` removed; `importTiles(SourceLayer, std::map<GridIndex,BathymetryTile>)` and `tiles(SourceLayer)` present; `layerDirName`/`saveTile`/`tileFilename` present in `tile_io.hpp`.
 - Verified all 5 plan-named files contain the cited epoch sites; grep across the package found no epoch API usage outside them.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-26 10:09 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-69 at `bd9d50a`
+**Mode**: pre-push
+**Depth**: Standard (reason: medium refactor across 6 files touching persistence layout / ADR-0002)
+**Must-fix**: 1 | **Suggestions**: 2
+**Round**: 1 | **Ship**: continue — one CI-gating ament_uncrustify failure must be fixed before push; both adversarial passes clean, GTest unit tests pass.
+
+### Findings
+- [ ] (must-fix) ament_uncrustify failure (test suite red): single-line `if` condition now needs `) {` on one line, brace is on its own line — `import_bag_main.cpp:333-334`
+- [ ] (suggestion) Stale comments name renamed `loadEpochIntoSheet` (now `loadIntoSheet`) — `CMakeLists.txt:90,127`
+- [ ] (suggestion) Comment "store epoch import (#57)" now inaccurate (flat-tile import) — `package.xml:22`
+
+### Verification performed
+- New store API verified against checked-out headers: `importTiles(SourceLayer, map)`, `tiles(SourceLayer)`, flat `layerDirName`, `epoch.hpp` absent. Diff uses all correctly.
+- Ran package test suite (`test.sh cube_bathymetry`): 334 tests, GTest unit cases (test_persistence, test_store_import) all pass; the only failures are the one ament_uncrustify divergence above (counted twice in the xunit aggregation).
+- Full compile could not run in this worktree: lower-layer `marine_autonomy` not installed (`core_ws/install` absent from `AMENT_PREFIX_PATH`) — environment limitation, not a code defect.
+- Two fresh-context adversarial passes (Lens A logic, Lens B systemic) found no logic, lifecycle, or data-migration issues. Old on-disk `draft/<epoch>/` stores are warned-and-ignored by upstream `tile_io::load()` per #221 (acceptable, no data to migrate).
+- Residual-usage grep: no remaining `importEpoch`/`loadEpochIntoSheet`/`mapSheetToEpochTiles`/`currentUtcDateString`/`validateEpochLabel`/`epoch.hpp` in package code; surviving `epoch` tokens are legitimate (Unix/steady_clock epoch, unrelated #63 test).
