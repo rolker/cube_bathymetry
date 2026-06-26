@@ -99,3 +99,29 @@ without this migration. Implementation can proceed immediately.
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-26 02:32 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independence: the `## Plan Authored` agent-name "Claude Code Agent" matches
+     $AGENT_NAME, but this is a fresh-context dispatch on a different model
+     (Sonnet authored, Opus reviewing). Treated as independent — the name-only
+     heuristic false-positives under the workspace's uniform agent identity, so
+     the `(in-context — author self-review)` annotation is deliberately omitted. -->
+
+**Plan**: `.agent/work-plans/issue-69/plan.md` at `2447c31`
+**PR**: PR-less (--issue / file path mode; gh unauthenticated in this environment)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (suggestion) Test names still carry "Epoch"; re-purpose `LoadEpochIntoSheetMissingEpochIsNoOp` as an empty-store no-op — `test_store_import.cpp:200,245` (plan.md:50-54)
+- [ ] (suggestion) `Provenance::LiveFused` arg is dropped, not just renamed — new `importTiles` is 2-arg, `Provenance` gone from store headers — `test_store_import.cpp:215-217` (plan.md:50-54)
+- [ ] (suggestion) Extend stale-comment sweep to test files (`<epoch>` paths) — `test_persistence.cpp:23-24,73-74` (plan.md:56-58)
+- [ ] (note) Do not touch unrelated `steady_clock` `epoch` locals during the rename — `cube_bathymetry_node.cpp:266,521`
+- [ ] (note) review-issue item 4 (SourceRegistry) moot: `saveTile` takes no registry, `load` defaults `registry=nullptr` — no build-break, plan correctly omits it
+- [ ] (note) review-issue item 5 satisfied: planned `loadIntoSheet(store, Draft, sheet)` loads Draft only
+
+### Verification performed
+- Confirmed against checked-out store headers: `epoch.hpp` absent; `BathymetryStore::epochs()` removed; `importTiles(SourceLayer, std::map<GridIndex,BathymetryTile>)` and `tiles(SourceLayer)` present; `layerDirName`/`saveTile`/`tileFilename` present in `tile_io.hpp`.
+- Verified all 5 plan-named files contain the cited epoch sites; grep across the package found no epoch API usage outside them.
