@@ -52,7 +52,6 @@
 #include "cube_bathymetry/store_import.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
-#include "marine_bathymetry_store/epoch.hpp"
 #include "marine_bathymetry_store/tile_io.hpp"
 
 
@@ -91,29 +90,28 @@ public:
 
     // Draft-tile persistence (#21). draft_dir empty (default) disables it; set
     // it per deployment to opt in. Tiles are written as marine_bathymetry_store
-    // `draft/<epoch>/` GeoTIFFs so the costmap layer (#164) and sim live loop
+    // `draft/` GeoTIFFs (single fused grid, no per-day epochs,
+    // unh_marine_autonomy#221) so the costmap layer (#164) and sim live loop
     // (#77) read exactly what CUBE writes.
     draft_dir_ = declare_parameter("draft_dir", std::string(""));
     save_interval_s_ = declare_parameter("save_interval", 30.0);
 
     if (!draft_dir_.empty()) {
-      // On startup, prime the fresh GeoMapSheet from the newest persisted draft
-      // epoch so slope correction warm-starts on replayed areas.
+      // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
+      // slope correction warm-starts on previously-surveyed areas.
       try {
         marine_bathymetry_store::BathymetryStore store =
           marine_bathymetry_store::BathymetryStore::fromCellSize(
           static_cast<float>(cell_size_));
         marine_bathymetry_store::load(store, draft_dir_);
-        const auto & draft_epochs =
-          store.epochs(marine_bathymetry_store::SourceLayer::Draft);
-        if (!draft_epochs.empty()) {
-          const auto & newest_epoch = draft_epochs.rbegin()->first;
-          cube::loadEpochIntoSheet(
-            store, marine_bathymetry_store::SourceLayer::Draft, newest_epoch,
-            *geo_map_sheet_);
+        const auto & draft_tiles =
+          store.tiles(marine_bathymetry_store::SourceLayer::Draft);
+        if (!draft_tiles.empty()) {
+          cube::loadIntoSheet(
+            store, marine_bathymetry_store::SourceLayer::Draft, *geo_map_sheet_);
           RCLCPP_INFO(get_logger(),
-            "Primed GeoMapSheet from draft epoch '%s' under %s",
-            newest_epoch.c_str(), draft_dir_.c_str());
+            "Primed GeoMapSheet from %zu draft tiles under %s",
+            draft_tiles.size(), draft_dir_.c_str());
         }
       } catch (const std::exception & e) {
         // A missing/empty store dir is normal on a first run; a genuine load
@@ -129,7 +127,7 @@ public:
       // The on-load prime above stays in on_configure.
       RCLCPP_INFO(get_logger(),
         "Draft-tile persistence enabled: dir=%s interval=%.1fs "
-        "(saves run while ACTIVE; epoch = UTC date at each save)",
+        "(saves run while ACTIVE; single fused draft grid)",
         draft_dir_.c_str(), save_interval_s_);
     }
 
@@ -214,9 +212,9 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_grid_service_;
 
-  // Draft-tile persistence (#21). draft_dir_ empty = disabled. The epoch label
-  // (UTC date) is recomputed at each save in saveDirtyTiles() so a survey
-  // crossing UTC midnight rolls into the next day's draft/<epoch>/ dir.
+  // Draft-tile persistence (#21). draft_dir_ empty = disabled. Tiles are written
+  // to a single fused `draft/` grid (no per-day epochs, unh_marine_autonomy#221);
+  // newest value wins per cell across saves and sessions.
   std::string draft_dir_;
   double save_interval_s_ = 30.0;
   rclcpp::TimerBase::SharedPtr save_timer_;
@@ -286,19 +284,6 @@ private:
       geo_map_sheet_->grids().size() << " tiles");
   }
 
-  // ISO-8601 UTC date (YYYY-MM-DD) -- the epoch label for this session's draft
-  // tiles. Two sessions on the same UTC day share the epoch; the store's
-  // LiveFused set() path accumulates correctly (newest value wins per cell).
-  static std::string currentUtcDateString()
-  {
-    const std::time_t now = std::time(nullptr);
-    std::tm tm_utc{};
-    gmtime_r(&now, &tm_utc);
-    char buf[16] = {0};
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_utc);
-    return std::string(buf);
-  }
-
   // Persist every grid touched since the last save as a marine_bathymetry_store
   // draft tile (atomic temp-then-rename via tile_io::saveTile), then clear the
   // dirty set. A no-op when persistence is disabled or nothing changed.
@@ -319,15 +304,13 @@ private:
     }
 
     const int64_t ts_ns = get_clock()->now().nanoseconds();
-    // Recompute the UTC date STRING at each save so a survey crossing UTC
-    // midnight writes into the correct day's draft/<epoch>/ dir (the label is
-    // not pinned to on_configure time). Priming on load still reads the newest
-    // persisted epoch, so a rollover during a session resumes seamlessly.
-    const std::string epoch = currentUtcDateString();
+    // Single fused draft grid (unh_marine_autonomy#221): tiles go directly under
+    // <draft_dir>/draft/ with no per-day epoch segment. Newest value wins per
+    // cell, so successive saves and sessions accumulate into one grid.
     const std::string dir =
       draft_dir_ + "/" +
       marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Draft) + "/" + epoch;
+      marine_bathymetry_store::SourceLayer::Draft);
 
     std::size_t written = 0;
     try {
@@ -344,7 +327,7 @@ private:
         if (!tile.dirty()) {
           // No finite cells (all queued/NaN) -- nothing to write. dirty() is the
           // value-raster flag geoGridToTile sets iff it wrote a finite cell
-          // (same idiom as mapSheetToEpochTiles).
+          // (same idiom as mapSheetToTiles).
           continue;
         }
         const std::string path =

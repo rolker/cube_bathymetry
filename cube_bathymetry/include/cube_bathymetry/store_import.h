@@ -32,7 +32,6 @@
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
 #include "marine_bathymetry_store/bathy_cell.hpp"
-#include "marine_bathymetry_store/epoch.hpp"
 
 namespace cube
 {
@@ -41,11 +40,12 @@ namespace cube
 ///
 /// The live `cube_bathymetry_node` accumulates into a geographic
 /// @ref GeoMapSheet (migrated from the Cartesian `MapSheet`, #21) so that
-/// `geoGridToTile` / `mapSheetToEpochTiles` persist live data directly into
-/// `marine_bathymetry_store` `draft/<epoch>/` tiles via `tile_io` (atomic
-/// temp-then-rename, `LiveFused` provenance) with NO lossy Cartesian→geographic
-/// resample. The costmap `bathymetry_layer` (#164) and the sim live loop (#77)
-/// then read exactly what CUBE writes.
+/// `geoGridToTile` / `mapSheetToTiles` persist live data directly into the
+/// `marine_bathymetry_store` `draft/` layer tiles via `tile_io` (atomic
+/// temp-then-rename) with NO lossy Cartesian→geographic resample. The single
+/// fused `draft` grid (no per-day epochs, unh_marine_autonomy#221) accumulates
+/// newest-value-wins per cell. The costmap `bathymetry_layer` (#164) and the sim
+/// live loop (#77) then read exactly what CUBE writes.
 ///
 /// Restart recovery primes `Node::setPredictedDepth` from the loaded draft depth
 /// (warm-start for slope correction) -- it does NOT reconstruct CUBE hypothesis,
@@ -82,7 +82,7 @@ namespace cube
 /// A grid that produces **no** finite cells is omitted (an empty tile would
 /// just persist as an all-no-data file). The result is keyed by
 /// `gggs::GridIndex` and is suitable to pass straight to
-/// `marine_bathymetry_store::BathymetryStore::importEpoch`.
+/// `marine_bathymetry_store::BathymetryStore::importTiles`.
 ///
 /// Deterministic for a fixed map sheet: `grids()` returns grids in
 /// `gggs::GridIndex` map order, and each grid converts deterministically.
@@ -91,7 +91,7 @@ namespace cube
 /// @param timestamp_ns  Acquisition/import time for every finite cell.
 /// @param source_index  Registry source index for every finite cell.
   std::map < gggs::GridIndex, marine_bathymetry_store::BathymetryTile >
-  mapSheetToEpochTiles(
+  mapSheetToTiles(
     const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index);
 
 /// @brief Seed predicted depths in @p map_sheet from every finite cell of @p tile.
@@ -106,17 +106,17 @@ namespace cube
   void primeFromTile(
     const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet);
 
-/// @brief Load every tile of one @p epoch from @p layer of @p store into
-///        @p map_sheet, priming predicted depths cell-by-cell.
+/// @brief Load every tile of @p layer from @p store into @p map_sheet,
+///        priming predicted depths cell-by-cell.
 ///
-/// Iterates the epoch's tiles and calls @ref primeFromTile on each. Only
-/// finite-depth cells are seeded. Warm-starts slope correction from persisted
-/// draft tiles on restart; does not reconstruct CUBE hypothesis state (#21).
-/// A no-op if @p epoch is absent from @p layer.
-  void loadEpochIntoSheet(
+/// Iterates the layer's single fused tile set (unh_marine_autonomy#221, no
+/// per-day epochs) and calls @ref primeFromTile on each. Only finite-depth cells
+/// are seeded. Warm-starts slope correction from persisted draft tiles on
+/// restart; does not reconstruct CUBE hypothesis state (#21). A no-op if @p layer
+/// holds no tiles.
+  void loadIntoSheet(
     const marine_bathymetry_store::BathymetryStore & store,
     marine_bathymetry_store::SourceLayer layer,
-    const marine_bathymetry_store::Epoch & epoch,
     GeoMapSheet & map_sheet);
 
 }  // namespace cube

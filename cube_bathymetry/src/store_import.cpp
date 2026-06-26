@@ -76,7 +76,7 @@ marine_bathymetry_store::BathymetryTile geoGridToTile(
 }
 
 std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile>
-mapSheetToEpochTiles(
+mapSheetToTiles(
   const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index)
 {
   std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
@@ -130,18 +130,14 @@ void primeFromTile(
   }
 }
 
-void loadEpochIntoSheet(
+void loadIntoSheet(
   const marine_bathymetry_store::BathymetryStore & store,
   marine_bathymetry_store::SourceLayer layer,
-  const marine_bathymetry_store::Epoch & epoch,
   GeoMapSheet & map_sheet)
 {
-  const auto & epochs = store.epochs(layer);
-  auto it = epochs.find(epoch);
-  if (it == epochs.end()) {
-    return;  // epoch absent -- nothing to load
-  }
-  for (const auto & grid_tile : it->second.tiles) {
+  // Single fused grid per layer (unh_marine_autonomy#221): iterate the layer's
+  // tiles directly. Empty map -> no-op.
+  for (const auto & grid_tile : store.tiles(layer)) {
     primeFromTile(grid_tile.second, map_sheet);
   }
 }
