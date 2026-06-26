@@ -75,3 +75,15 @@ correctly scoped to `sensors_ws/src/cube_bathymetry`.
   visualization) — or explicitly scope out-of-scope subscribers and note them
 - [ ] Update `test_publish_equivalence.cpp` (or replace/extend it) to cover the
   new per-tile path as part of the same PR
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-26 15:30 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-70/plan.md` at `bf81a78`
+**Branch**: feature/issue-70 at `bf81a78`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
