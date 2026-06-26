@@ -34,7 +34,6 @@
 #include "marine_bathymetry_store/bathy_cell.hpp"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
-#include "marine_bathymetry_store/epoch.hpp"
 
 namespace cube
 {
@@ -114,8 +113,8 @@ TEST(StoreImport, ConversionIsDeterministic)
   GeoMapSheet ms(1.0f);
   ms.addSoundings(makeSoundings());
 
-  auto tiles_a = mapSheetToEpochTiles(ms, kStamp, kSource);
-  auto tiles_b = mapSheetToEpochTiles(ms, kStamp, kSource);
+  auto tiles_a = mapSheetToTiles(ms, kStamp, kSource);
+  auto tiles_b = mapSheetToTiles(ms, kStamp, kSource);
 
   ASSERT_FALSE(tiles_a.empty());
   ASSERT_EQ(tiles_a.size(), tiles_b.size());
@@ -152,7 +151,7 @@ TEST(StoreImport, ConversionIsDeterministic)
 TEST(StoreImport, EmptyMapSheetYieldsNoTiles)
 {
   GeoMapSheet ms(1.0f);
-  auto tiles = mapSheetToEpochTiles(ms, kStamp, kSource);
+  auto tiles = mapSheetToTiles(ms, kStamp, kSource);
   EXPECT_TRUE(tiles.empty());
 }
 
@@ -194,31 +193,28 @@ TEST(StoreImport, PrimeFromTileSeedsFiniteCells)
   EXPECT_TRUE(primed.dirtyGrids().empty());
 }
 
-// loadEpochIntoSheet primes a fresh sheet from a store epoch round-trip:
-// build a sheet -> tiles -> store epoch -> load into a fresh sheet -> predicted
-// depths match.
-TEST(StoreImport, LoadEpochIntoSheetRoundTrip)
+// loadIntoSheet primes a fresh sheet from a store round-trip:
+// build a sheet -> tiles -> store draft layer -> load into a fresh sheet ->
+// predicted depths match.
+TEST(StoreImport, LoadIntoSheetRoundTrip)
 {
   GeoMapSheet source(1.0f);
   source.addSoundings(makeSoundings());
 
-  auto tiles = mapSheetToEpochTiles(source, kStamp, kSource);
+  auto tiles = mapSheetToTiles(source, kStamp, kSource);
   ASSERT_FALSE(tiles.empty());
 
-  // Reference predicted depths per cell, taken straight from the tiles.
-  const marine_bathymetry_store::Epoch epoch = "2026-06-21";
   marine_bathymetry_store::BathymetryStore store =
     marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
 
-  // Copy the tile map (importEpoch consumes it) but keep a reference set.
+  // Copy the tile map (importTiles consumes it) but keep a reference set.
   std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles_copy = tiles;
-  store.importEpoch(
-    marine_bathymetry_store::SourceLayer::Draft, epoch, std::move(tiles),
-    marine_bathymetry_store::Provenance::LiveFused);
+  store.importTiles(
+    marine_bathymetry_store::SourceLayer::Draft, std::move(tiles));
 
   GeoMapSheet loaded(1.0f);
-  loadEpochIntoSheet(
-    store, marine_bathymetry_store::SourceLayer::Draft, epoch, loaded);
+  loadIntoSheet(
+    store, marine_bathymetry_store::SourceLayer::Draft, loaded);
 
   std::size_t checked = 0;
   for (const auto & grid_tile : tiles_copy) {
@@ -241,14 +237,14 @@ TEST(StoreImport, LoadEpochIntoSheetRoundTrip)
   EXPECT_GT(checked, 0u);
 }
 
-// A missing epoch is a no-op (no crash, no priming).
-TEST(StoreImport, LoadEpochIntoSheetMissingEpochIsNoOp)
+// Loading from a layer with no tiles is a no-op (no crash, no priming).
+TEST(StoreImport, LoadIntoSheetEmptyLayerIsNoOp)
 {
   marine_bathymetry_store::BathymetryStore store =
     marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
   GeoMapSheet loaded(1.0f);
-  loadEpochIntoSheet(
-    store, marine_bathymetry_store::SourceLayer::Draft, "2026-06-21", loaded);
+  loadIntoSheet(
+    store, marine_bathymetry_store::SourceLayer::Draft, loaded);
   EXPECT_TRUE(loaded.grids().empty());
 }
 

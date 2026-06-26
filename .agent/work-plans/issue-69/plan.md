@@ -57,6 +57,17 @@ access, `epoch.hpp`, `currentUtcDateString()`, and per-epoch dir construction in
    block comments in `store_import.h` and `cube_bathymetry_node.cpp` that describe
    the old epoch-based provenance model.
 
+7. **Update `import_bag` offline CLI** (`src/import_bag_main.cpp`) — *added during
+   implementation; the review-issue/plan missed it.* This built executable also
+   used the removed epoch API and would not compile. Per the host checkpoint
+   ("Adapt in #69, drop -e"): remove the `-e <epoch>` argument, the
+   `epoch_label` variable, the `validateEpochLabel` fail-fast, and the
+   `Provenance::Replayed` argument; rename `mapSheetToEpochTiles` →
+   `mapSheetToTiles`; replace `store.importEpoch(Draft, epoch, tiles, prov)` with
+   `store.importTiles(Draft, std::move(tiles))`; drop the epoch from the usage
+   string and the "Saved … (epoch …)" line. **Interface change**: callers must no
+   longer pass `-e DATE`.
+
 ## Files to Change
 
 | File | Change |
@@ -65,7 +76,8 @@ access, `epoch.hpp`, `currentUtcDateString()`, and per-epoch dir construction in
 | `cube_bathymetry/src/store_import.cpp` | Update function bodies: `loadIntoSheet` iterates `store.tiles(layer)` directly; rename `mapSheetToEpochTiles` → `mapSheetToTiles` |
 | `cube_bathymetry/src/cube_bathymetry_node.cpp` | Remove `epoch.hpp`; remove `currentUtcDateString()`; update `on_configure` prime to call `loadIntoSheet`; update `saveDirtyTiles()` save path |
 | `cube_bathymetry/test/test_persistence.cpp` | Remove `epoch.hpp`; update `saveDirty()` helper, `mapSheetToEpochTiles` calls, and both epoch-using tests |
-| `cube_bathymetry/test/test_store_import.cpp` | Remove `epoch.hpp`; rename `mapSheetToEpochTiles` → `mapSheetToTiles`; update `importEpoch` → `importTiles`; update `loadEpochIntoSheet` → `loadIntoSheet` |
+| `cube_bathymetry/test/test_store_import.cpp` | Remove `epoch.hpp`; rename `mapSheetToEpochTiles` → `mapSheetToTiles`; update `importEpoch` → `importTiles`; update `loadEpochIntoSheet` → `loadIntoSheet`; re-purpose `LoadEpochIntoSheetMissingEpochIsNoOp` → `LoadIntoSheetEmptyLayerIsNoOp` |
+| `cube_bathymetry/src/import_bag_main.cpp` | *(added during impl)* Remove `epoch.hpp`, `-e <epoch>` arg, `validateEpochLabel`, `Provenance::Replayed`; `importEpoch` → `importTiles`; `mapSheetToEpochTiles` → `mapSheetToTiles`; flat-grid usage text |
 
 ## Principles Self-Check
 

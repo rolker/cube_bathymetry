@@ -21,9 +21,10 @@
 
 // Draft-tile persistence round-trip (#21). Exercises the same save path the live
 // node's saveDirtyTiles() uses: dirty grids -> geoGridToTile -> saveTile into
-// <dir>/<layerDirName(Draft)>/<epoch>/, then store-level load() reads them back.
-// Pins (a) the on-disk layout contract (the hand-built save path must match what
-// load() scans) and (b) periodic-save == end-of-session export equivalence.
+// <dir>/<layerDirName(Draft)>/ (flat single fused grid, unh_marine_autonomy#221),
+// then store-level load() reads them back. Pins (a) the on-disk layout contract
+// (the hand-built save path must match what load() scans) and (b) periodic-save
+// == end-of-session export equivalence.
 
 #include <gtest/gtest.h>
 
@@ -42,7 +43,6 @@
 #include "marine_autonomy/gggs.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
-#include "marine_bathymetry_store/epoch.hpp"
 #include "marine_bathymetry_store/tile_io.hpp"
 
 namespace cube
@@ -71,16 +71,15 @@ std::vector<GeoSounding> makeSoundings()
 constexpr int64_t kStamp = 1234567890123456789LL;
 
 // Mirror cube_bathymetry_node::saveDirtyTiles() at library level: write each
-// dirty grid as a draft tile under <dir>/draft/<epoch>/.
+// dirty grid as a draft tile under <dir>/draft/ (flat, no epoch segment).
 std::size_t saveDirty(
-  GeoMapSheet & sheet, const std::string & dir,
-  const marine_bathymetry_store::Epoch & epoch, int64_t ts_ns)
+  GeoMapSheet & sheet, const std::string & dir, int64_t ts_ns)
 {
   const std::set<gggs::GridIndex> dirty = sheet.dirtyGrids();
   const std::string out =
     dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Draft) + "/" + epoch;
+    marine_bathymetry_store::SourceLayer::Draft);
   std::filesystem::create_directories(out);
   std::size_t written = 0;
   for (const auto & index : dirty) {
@@ -126,18 +125,17 @@ TEST(Persistence, DraftLayerDirNameIsDraft)
 TEST(Persistence, SaveDirtyThenStoreLoadRoundTrips)
 {
   const std::string dir = makeTempDir("roundtrip");
-  const marine_bathymetry_store::Epoch epoch = "2026-06-22";
 
   GeoMapSheet sheet(1.0f);
   sheet.addSoundings(makeSoundings());
   ASSERT_FALSE(sheet.dirtyGrids().empty());
 
-  const std::size_t written = saveDirty(sheet, dir, epoch, kStamp);
+  const std::size_t written = saveDirty(sheet, dir, kStamp);
   ASSERT_GT(written, 0u);
   EXPECT_TRUE(sheet.dirtyGrids().empty()) << "save must clear the dirty set";
 
   // Reference: convert the same sheet to tiles directly (end-of-session export).
-  auto reference = mapSheetToEpochTiles(sheet, kStamp, 0);
+  auto reference = mapSheetToTiles(sheet, kStamp, 0);
   ASSERT_FALSE(reference.empty());
 
   // Load the store back through the public store-level load().
@@ -146,17 +144,16 @@ TEST(Persistence, SaveDirtyThenStoreLoadRoundTrips)
   const std::size_t loaded_count = marine_bathymetry_store::load(loaded, dir);
   EXPECT_EQ(loaded_count, written);
 
-  const auto & epochs =
-    loaded.epochs(marine_bathymetry_store::SourceLayer::Draft);
-  auto ep_it = epochs.find(epoch);
-  ASSERT_NE(ep_it, epochs.end()) << "draft epoch must be present after load";
+  const auto & draft_tiles =
+    loaded.tiles(marine_bathymetry_store::SourceLayer::Draft);
+  ASSERT_FALSE(draft_tiles.empty()) << "draft tiles must be present after load";
 
   // Every finite reference cell must match a loaded cell (depth + uncertainty).
   std::size_t checked = 0;
   for (const auto & grid_tile : reference) {
     const auto & ref_tile = grid_tile.second;
-    auto loaded_tile_it = ep_it->second.tiles.find(grid_tile.first);
-    ASSERT_NE(loaded_tile_it, ep_it->second.tiles.end());
+    auto loaded_tile_it = draft_tiles.find(grid_tile.first);
+    ASSERT_NE(loaded_tile_it, draft_tiles.end());
     const auto & loaded_tile = loaded_tile_it->second;
 
     const std::vector<double> & rd = ref_tile.depthBand();
@@ -186,7 +183,6 @@ TEST(Persistence, SaveDirtyThenStoreLoadRoundTrips)
 TEST(Persistence, PeriodicSaveEqualsEndOfSessionExport)
 {
   const std::string dir_periodic = makeTempDir("periodic");
-  const marine_bathymetry_store::Epoch epoch = "2026-06-22";
 
   GeoMapSheet sheet(1.0f);
   sheet.addSoundings(makeSoundings());
@@ -196,25 +192,24 @@ TEST(Persistence, PeriodicSaveEqualsEndOfSessionExport)
   // and saving wholesale).
   GeoMapSheet sheet_ref(1.0f);
   sheet_ref.addSoundings(makeSoundings());
-  auto ref_tiles = mapSheetToEpochTiles(sheet_ref, kStamp, 0);
+  auto ref_tiles = mapSheetToTiles(sheet_ref, kStamp, 0);
 
   // Periodic-style save of every dirty grid.
-  const std::size_t written = saveDirty(sheet, dir_periodic, epoch, kStamp);
+  const std::size_t written = saveDirty(sheet, dir_periodic, kStamp);
   ASSERT_EQ(written, ref_tiles.size());
 
   // Load the periodic store and compare to the reference tiles.
   marine_bathymetry_store::BathymetryStore loaded =
     marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
   marine_bathymetry_store::load(loaded, dir_periodic);
-  const auto & epochs =
-    loaded.epochs(marine_bathymetry_store::SourceLayer::Draft);
-  auto ep_it = epochs.find(epoch);
-  ASSERT_NE(ep_it, epochs.end());
+  const auto & draft_tiles =
+    loaded.tiles(marine_bathymetry_store::SourceLayer::Draft);
+  ASSERT_FALSE(draft_tiles.empty());
 
-  EXPECT_EQ(ep_it->second.tiles.size(), ref_tiles.size());
+  EXPECT_EQ(draft_tiles.size(), ref_tiles.size());
   for (const auto & grid_tile : ref_tiles) {
-    auto loaded_it = ep_it->second.tiles.find(grid_tile.first);
-    ASSERT_NE(loaded_it, ep_it->second.tiles.end());
+    auto loaded_it = draft_tiles.find(grid_tile.first);
+    ASSERT_NE(loaded_it, draft_tiles.end());
     const std::vector<double> & rd = grid_tile.second.depthBand();
     const std::vector<double> & ld = loaded_it->second.depthBand();
     ASSERT_EQ(rd.size(), ld.size());
