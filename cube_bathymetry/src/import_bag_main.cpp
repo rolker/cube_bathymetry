@@ -325,6 +325,17 @@ int main(int argc, char * argv[])
     } else if (*arg == "--maximum-range") {
       arg++;
       projector_params.maximum_range = std::stod(*arg);
+    } else if (!arg->empty() && (*arg)[0] == '-' && *arg != "-") {
+      // An unrecognized flag would otherwise be silently treated as a bag path
+      // and fail later with a confusing "cannot open bag". Reject it up front.
+      std::cerr << "error: unknown option '" << *arg << "'";
+      if (*arg == "-e") {
+        std::cerr << " -- the -e <epoch> argument was removed in "
+          "cube_bathymetry#69; the store no longer uses per-day epochs, so the "
+          "bag now imports into a single fused draft grid with no date label";
+      }
+      std::cerr << "\n";
+      usage();
     } else {
       bagfile_names.push_back(*arg);
     }
