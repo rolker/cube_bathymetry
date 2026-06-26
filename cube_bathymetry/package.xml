@@ -19,7 +19,7 @@
   <depend>marine_acoustic_msgs</depend>
   <depend>nav_msgs</depend>  <!-- odometry for speed-over-ground -->
   <depend>marine_autonomy</depend>
-  <depend>marine_bathymetry_store</depend>  <!-- store epoch import (#57) -->
+  <depend>marine_bathymetry_store</depend>  <!-- store tile import (#57, flat grid #69) -->
   <!-- The store is a static lib that propagates nlohmann_json::nlohmann_json as a
        LINK_ONLY interface dep, so a consumer's CMake still needs its config present
        at configure time. rosdep installs it from this declaration; UMA#203 removed

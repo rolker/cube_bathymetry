@@ -20,12 +20,13 @@
 // THE SOFTWARE.
 
 // import_bag: offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store
-// epoch importer (PR-B of unh_marine_autonomy#147, cube_bathymetry#57).
+// importer (PR-B of unh_marine_autonomy#147, cube_bathymetry#57; adapted to the
+// single fused draft grid in unh_marine_autonomy#221).
 //
 // Mirrors the bag_to_geotiff `-d` offline-projection chain (rosbag2
 // SequentialReader -> tf2::BufferCore from /tf + /tf_static -> DetectionsProjector
 // -> per-sounding lookupTransform("earth", frame_id, stamp) -> GeoSounding ->
-// GeoMapSheet) but writes a marine_bathymetry_store epoch instead of a GeoTIFF.
+// GeoMapSheet) but writes marine_bathymetry_store draft tiles instead of a GeoTIFF.
 
 #include <algorithm>
 #include <chrono>
@@ -50,7 +51,6 @@
 #include "marine_autonomy/gz4d_geo.h"
 #include "nav_msgs/msg/odometry.hpp"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
-#include "marine_bathymetry_store/epoch.hpp"
 #include "marine_bathymetry_store/registry.hpp"
 #include "marine_bathymetry_store/tile_io.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -62,12 +62,10 @@
 
 void usage()
 {
-  std::cout << "usage: import_bag [options] -o <store_dir> -e <epoch> "
+  std::cout << "usage: import_bag [options] -o <store_dir> "
     "-d <detections_topic> <bag> [<bag> ...]\n";
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
     "needed)\n";
-  std::cout << "  -e <epoch>: Epoch label (ISO-8601 acquisition date, e.g. "
-    "2026-06-15)\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
     "topic to replay through CUBE (required)\n";
   std::cout << "  --odom-topic <topic>: nav_msgs/Odometry topic for per-ping "
@@ -261,7 +259,6 @@ int main(int argc, char * argv[])
 
   std::vector<std::string> bagfile_names;
   std::string store_dir;
-  std::string epoch_label;
   std::string detections_topic;  // required
   std::string odom_topic;  // optional: nav_msgs/Odometry for per-ping vessel speed
   double resolution = 1.0;
@@ -283,9 +280,6 @@ int main(int argc, char * argv[])
     } else if (*arg == "-o") {
       arg++;
       store_dir = *arg;
-    } else if (*arg == "-e") {
-      arg++;
-      epoch_label = *arg;
     } else if (*arg == "-d") {
       arg++;
       detections_topic = *arg;
@@ -331,37 +325,37 @@ int main(int argc, char * argv[])
     } else if (*arg == "--maximum-range") {
       arg++;
       projector_params.maximum_range = std::stod(*arg);
+    } else if (!arg->empty() && (*arg)[0] == '-' && *arg != "-") {
+      // An unrecognized flag would otherwise be silently treated as a bag path
+      // and fail later with a confusing "cannot open bag". Reject it up front.
+      std::cerr << "error: unknown option '" << *arg << "'";
+      if (*arg == "-e") {
+        std::cerr << " -- the -e <epoch> argument was removed in "
+          "cube_bathymetry#69; the store no longer uses per-day epochs, so the "
+          "bag now imports into a single fused draft grid with no date label";
+      }
+      std::cerr << "\n";
+      usage();
     } else {
       bagfile_names.push_back(*arg);
     }
   }
 
-  if (store_dir.empty() || epoch_label.empty() || detections_topic.empty() ||
-    bagfile_names.empty())
-  {
-    std::cerr << "error: -o <store_dir>, -e <epoch>, -d <detections_topic>, and "
+  if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
+    std::cerr << "error: -o <store_dir>, -d <detections_topic>, and "
       "at least one bag are all required\n";
     usage();
   }
 
-  // Fail fast on a bad epoch label before doing any (potentially long) replay.
-  try {
-    marine_bathymetry_store::validateEpochLabel(epoch_label);
-  } catch (const std::exception & e) {
-    std::cerr << "error: invalid epoch label '" << epoch_label << "': " << e.what()
-              << std::endl;
-    return 1;
-  }
-
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;
-  std::cout << "Store dir: " << store_dir << "  Epoch: " << epoch_label << std::endl;
+  std::cout << "Store dir: " << store_dir << std::endl;
 
   cube::DetectionsProjector projector(projector_params);
 
   // Accumulated offline-projection diagnostics, surfaced at the end so a
   // misconfigured-frames or over-tight-range run is diagnosable rather than a
-  // silently sparse/empty epoch (the failure mode #43 exists to kill).
+  // silently sparse/empty import (the failure mode #43 exists to kill).
   size_t proj_pings = 0;
   size_t proj_soundings = 0;
   size_t proj_filtered_range = 0;
@@ -520,7 +514,7 @@ int main(int argc, char * argv[])
       } catch (const tf2::TransformException & e) {
         // A ping with no earth transform in the (bounded) buffer at its stamp --
         // e.g. before the first earth fix, or a TF gap wider than the cache
-        // window. Counted (not just logged) so an empty or sparse epoch is
+        // window. Counted (not just logged) so an empty or sparse import is
         // diagnosable rather than silently dropped.
         ++proj_dropped_georef;
         if (proj_dropped_georef <= 5) {
@@ -644,10 +638,10 @@ int main(int argc, char * argv[])
               << std::endl;
   }
 
-  std::cout << "Building store epoch..." << std::endl;
+  std::cout << "Building store tiles..." << std::endl;
 
   // The GeoMapSheet picks a GGGS level from the requested cell size; build the
-  // store at the matching default level. importEpoch is multi-level, so the
+  // store at the matching default level. importTiles is multi-level, so the
   // GridIndex on each tile carries the authoritative level regardless.
   marine_bathymetry_store::BathymetryStore store =
     marine_bathymetry_store::BathymetryStore::fromCellSize(
@@ -656,7 +650,7 @@ int main(int argc, char * argv[])
   marine_bathymetry_store::SourceRegistry registry;
   const uint16_t source_index = registry.registerSource(source_record);
 
-  auto tiles = cube::mapSheetToEpochTiles(geo_map_sheet, cell_timestamp_ns, source_index);
+  auto tiles = cube::mapSheetToTiles(geo_map_sheet, cell_timestamp_ns, source_index);
   std::cout << "Tiles with data: " << tiles.size() << " (build: " << phase_secs() << "s)"
             << std::endl;
 
@@ -665,15 +659,15 @@ int main(int argc, char * argv[])
       "the projector frame overrides and the detections topic." << std::endl;
   }
 
-  // Draft layer + Replayed provenance: this is a full-bag CUBE replay, the
-  // authoritative end-of-day compaction product (ADR-0002 A1.2).
-  store.importEpoch(
-    marine_bathymetry_store::SourceLayer::Draft, epoch_label, std::move(tiles),
-    marine_bathymetry_store::Provenance::Replayed);
+  // Draft layer: this full-bag CUBE replay merges into the single fused draft
+  // grid (unh_marine_autonomy#221 — no per-day epochs, newest value wins per
+  // cell). Off-boat regeneration into the authoritative `processed` layer is a
+  // separate step.
+  store.importTiles(
+    marine_bathymetry_store::SourceLayer::Draft, std::move(tiles));
 
   std::size_t written = marine_bathymetry_store::save(store, store_dir, &registry);
-  std::cout << "Saved " << written << " tiles to " << store_dir << " (epoch "
-            << epoch_label << ")." << std::endl;
+  std::cout << "Saved " << written << " tiles to " << store_dir << "." << std::endl;
 
   std::cout << "done!" << std::endl;
   return 0;
