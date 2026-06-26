@@ -149,3 +149,27 @@ without this migration. Implementation can proceed immediately.
 - Full compile could not run in this worktree: lower-layer `marine_autonomy` not installed (`core_ws/install` absent from `AMENT_PREFIX_PATH`) — environment limitation, not a code defect.
 - Two fresh-context adversarial passes (Lens A logic, Lens B systemic) found no logic, lifecycle, or data-migration issues. Old on-disk `draft/<epoch>/` stores are warned-and-ignored by upstream `tile_io::load()` per #221 (acceptable, no data to migrate).
 - Residual-usage grep: no remaining `importEpoch`/`loadEpochIntoSheet`/`mapSheetToEpochTiles`/`currentUtcDateString`/`validateEpochLabel`/`epoch.hpp` in package code; surviving `epoch` tokens are legitimate (Unix/steady_clock epoch, unrelated #63 test).
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-26 10:32 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-69 at `e5ccdb0`
+**Mode**: pre-push
+**Depth**: Standard (reason: medium refactor across persistence layout / ADR-0002 §D5)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 2 | **Ship**: recommended — round-1 must-fix (uncrustify) resolved; no new must-fix; code logic byte-identical to round-1 (GTest pass stands); both adversarial lenses clean.
+
+### Findings
+- [ ] (suggestion) `import_bag` arg parser treats removed `-e`/unknown flags as bag paths — stale `-e DATE` fails with a confusing "cannot open bag" instead of "unknown option"; optional hardening — `src/import_bag_main.cpp:328`
+- [ ] (suggestion) Pre-#221 on-disk `draft/<epoch>/` stores ignored (upstream WARN) on warm-start, dropping prior-session draft priors on in-place upgrade; accepted #221 consequence (draft is regenerable), surfaced for operator awareness — `src/cube_bathymetry_node.cpp:~100`
+
+### Verification performed
+- Round-1 findings all resolved in `e5ccdb0`: ament_uncrustify brace at `import_bag_main.cpp:333` now clean (`ament_uncrustify` EXIT=0); `CMakeLists.txt:90,127` and `package.xml:22` stale-comment fixes landed.
+- Static analysis on all 6 changed C++ files: `ament_uncrustify` ✅, `ament_cpplint` ✅ (cppcheck skipped — v2.13.0 perf guard, not a finding).
+- Store API re-verified against the symlinked `layers/main` headers: `importTiles(SourceLayer, map)` is 2-arg (no `Provenance`), `tiles(SourceLayer)` present, `epochs()`/`epoch.hpp` absent — diff uses all correctly.
+- Two fresh-context adversarial passes (Lens A logic / Lens B systemic). Lens A clean. Lens B's three must-fix candidates adjudicated as **false positives** (Provenance removed by #221 design — not "dropped"; `loadIntoSheet` no-op docstring is present; lifecycle race precluded by single-threaded executor) plus one accepted #221 consequence (above).
+- Round-2 delta vs round-1 sha `bd9d50a` is exactly the cosmetic fix commit `e5ccdb0` (brace + comment refresh) — no logic change.
+- Full `colcon` compile still env-limited (lower-layer `marine_autonomy` install absent from this worktree) — environment limitation, not a code defect.
