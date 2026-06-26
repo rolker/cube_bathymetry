@@ -87,3 +87,15 @@ without this migration. Implementation can proceed immediately.
 - [ ] Update `test_persistence.cpp` and `test_store_import.cpp` to use new flat-layer save/load path and renamed functions.
 - [ ] Verify `SourceRegistry` handling in the node's save path is intentional (pass `nullptr` or wire in a registry).
 - [ ] Confirm restart-recovery loads from `Draft` layer only (not `Processed`/`Chart`).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-26 04:45 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-69/plan.md` at `2447c31`
+**Branch**: feature/issue-69 at `2447c31`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
