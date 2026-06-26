@@ -87,7 +87,7 @@ install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 # (and thus not into detections_to_pointcloud, which has no need for the data
 # store). Linked by the offline import_bag tool and its test, AND -- since the
 # draft-tile persistence work (#21) -- by the runtime cube_bathymetry_node, which
-# uses geoGridToTile / loadEpochIntoSheet to save and warm-start draft tiles.
+# uses geoGridToTile / loadIntoSheet to save and warm-start draft tiles.
 add_library(cube_bathymetry_store_import src/store_import.cpp)
 target_link_libraries(cube_bathymetry_store_import
   cube_bathymetry
@@ -124,7 +124,7 @@ target_include_directories(cube_bathymetry_node PUBLIC
 target_link_libraries(cube_bathymetry_node
   cube_bathymetry
   cube_bathymetry_grid_projection
-  cube_bathymetry_store_import   # geoGridToTile / loadEpochIntoSheet + store (#21)
+  cube_bathymetry_store_import   # geoGridToTile / loadIntoSheet + store (#21)
   marine_bathymetry_store::marine_bathymetry_store  # saveTile / load / store API
   ${geometry_msgs_TARGETS}
   ${grid_map_ros_LIBRARIES}

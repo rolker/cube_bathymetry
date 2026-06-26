@@ -330,8 +330,7 @@ int main(int argc, char * argv[])
     }
   }
 
-  if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty())
-  {
+  if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
     std::cerr << "error: -o <store_dir>, -d <detections_topic>, and "
       "at least one bag are all required\n";
     usage();
