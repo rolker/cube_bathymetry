@@ -209,3 +209,50 @@ Host-inline fix pass (the run-issue host ran implementation inline for #70).
 - [ ] (suggestion) `evicted_indices_` is reset only by `clearGrid()`, not across a configure→cleanup→configure cycle; harmless (re-prime/re-trim re-inserts + the set dedups) but inconsistent with the fresh sheet. Clear it in `on_cleanup`/top of `on_configure`. — `src/cube_bathymetry_node.cpp:233-245`, `:68`
 - [ ] (suggestion) Consequence: the windowed `grid` drops previously-surveyed water outside the CA window; under `unsurveyed_is_lethal` a Nav2 GLOBAL costmap relying on the old whole-survey bathy will flip those corridors to lethal. Intended per ADR-0001, but confirm the consumer tolerates it (or reads the durable store / `~/tiles`). — `src/cube_bathymetry_node.cpp:355-394`
 - [ ] (suggestion) Test gap: `EvictionKeepsStillDirtyColdTiles` re-implements the still-dirty guard inline rather than calling the node's `trimResidentToBudget`, so a node-level regression dropping the guard wouldn't be caught; and no test exercises adjacent-tile-seam eviction (the must-fix #1 path is untested). — `test/test_geo_map_sheet.cpp:311-336`
+
+## Implementation
+**Status**: complete
+**When**: 2026-06-27 (host-inline address-findings, round 2)
+**By**: Claude Code Agent (Claude Opus)
+
+Addressed the Round 2 `## Local Review (Pre-Push)` (changes-requested). Round 1's
+must-fixes were verified resolved by that review; these are the two NEW
+data-integrity must-fixes its independent read surfaced.
+
+### Both new must-fixes fixed
+- **Neighbour-tile clobber** — revisit reload was keyed on each sounding's CENTRE
+  tile, but `addSoundings` expands the bounds a cell and spills into neighbour
+  tiles near a GGGS seam, so an evicted neighbour was re-created/dirtied but never
+  reloaded → next save overwrote its full on-disk surface with a thin strip. Fix:
+  key the reload set off the DIRTY set (the grids `insert()` actually touched),
+  computed AFTER `addSoundings`, so seam-spill neighbours are caught. (Reseeding
+  doesn't mark dirty, so the tile stays dirty for the save; a resurveyed cell
+  keeps the new value, others the reloaded value.)
+- **Reload-failure clobber** — `reloadEvictedTile` swallowed load errors (void)
+  while pingCallback erased the evicted marker unconditionally, so a transient
+  reload error → re-accumulate-from-empty → the very next save clobbers the intact
+  on-disk surface. Going further than the review's framing: keeping the marker
+  alone is insufficient because the dirty re-created tile would still be saved this
+  cycle. Fix: `reloadEvictedTile` now returns success; on failure pingCallback
+  **drops the partial re-created grid** (the on-disk surface is the real data) and
+  keeps the marker to retry on the next revisit. The few new soundings for that
+  tile this cycle are discarded (cheap re-survey; disk integrity wins).
+
+### Suggestion addressed
+- `evicted_indices_` is now cleared when the sheet is (re)created in on_configure,
+  so a configure→cleanup→configure cycle can't carry stale markers.
+
+### Round 2 suggestions deferred (rationale)
+- Temporal-LRU vs spatial CA-window coverage (lethal-hole risk): conservative for
+  safety (over-lethal, never under); coherence WARN + budget cover it. Sim-verify.
+- No staleness cap on the cached vessel position: a brief TF gap reusing the last
+  fix is the design case; an indefinite gap means vessel TF is broken (bigger
+  problem). Mirrors the existing map<-earth cache. Follow-up if needed.
+- RAM not bounded under PERSISTENT write failure: explicit tradeoff — keep
+  unsaved data resident (WARN) rather than drop-and-lose. Documented.
+- Synchronous disk I/O on the ping path: pre-existing for saves; reload only on
+  revisit. Off-thread persistence is a larger change — follow-up.
+- Nav2 tolerance of the windowed grid: validation concern for the owed sim-verify
+  gate, not a code defect.
+
+**Build/test**: green — 351 tests, 0 failures, 47 skipped.

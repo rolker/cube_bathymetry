@@ -87,6 +87,9 @@ public:
 
     geo_map_sheet_ =
       std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
+    // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
+    // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
+    evicted_indices_.clear();
 
     // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
     // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
@@ -523,10 +526,16 @@ private:
   // Lossless revisit reload (#70, ADR-0001): window-load just this previously-
   // evicted tile into a scratch store and reseed its settled cells so
   // accumulation continues from the saved state and the next save is complete.
-  void reloadEvictedTile(const gggs::GridIndex & index)
+  //
+  // Returns true when the on-disk state is now consistent with what a save will
+  // write -- either the tile was found and reseeded, or it is genuinely absent on
+  // disk (nothing to preserve). Returns false ONLY on a load error (the file may
+  // exist but be transiently unreadable): the caller must then NOT let the partial
+  // re-created grid be saved over the intact on-disk surface (review #70 round 2).
+  bool reloadEvictedTile(const gggs::GridIndex & index)
   {
     if(draft_dir_.empty()) {
-      return;
+      return true;
     }
     try {
       marine_bathymetry_store::BathymetryStore scratch =
@@ -541,10 +550,13 @@ private:
       if(it != tiles.end()) {
         cube::primeFromTile(it->second, *geo_map_sheet_);
       }
+      return true;
     } catch (const std::exception & e) {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
         "Could not reload evicted tile on revisit: " << e.what() <<
-        " (continuing with re-accumulation)");
+        " (dropping the partial re-created tile to protect the on-disk surface; "
+        "will retry on the next revisit)");
+      return false;
     }
   }
 
@@ -773,27 +785,39 @@ private:
     auto timestamp = epoch + std::chrono::seconds(msg->header.stamp.sec) +
       std::chrono::nanoseconds(msg->header.stamp.nanosec);
 
-    // Lossless revisit reload (#70, ADR-0001): if any of these soundings fall in
-    // a tile evicted earlier this session, reload it from disk BEFORE inserting
-    // so the new pings refine the saved state (not a fresh empty grid) and the
-    // next save carries the full surface. Done before addSoundings so reloaded
-    // cells and new cells share one hypothesis per node.
+    geo_map_sheet_->addSoundings(soundings, timestamp);
+
+    // Lossless revisit reload (#70, ADR-0001). Any tile this batch just
+    // re-created/dirtied that was evicted earlier must be reseeded from disk
+    // before the next save, or that save overwrites the tile's full on-disk
+    // surface with only the freshly-accumulated cells.
+    //
+    // Key off the DIRTY set -- the grids insert() actually touched -- NOT the
+    // sounding centres: addSoundings expands the bounds by a cell and spills into
+    // neighbour tiles near a GGGS seam, so a centre-only check would miss an
+    // evicted neighbour and clobber it (review #70 round 2). Reseeding does not
+    // mark dirty, so the grid stays dirty for the save (reloaded settled cells +
+    // new cells); a resurveyed cell keeps the new value, others the reloaded one.
+    //
+    // On a reload error, DROP the partial re-created grid (the on-disk surface is
+    // the real data and must not be clobbered) and keep the evicted marker so the
+    // next revisit retries -- the few new soundings for that tile this cycle are
+    // discarded (they re-survey cheaply; disk integrity wins).
     if(!draft_dir_.empty() && !evicted_indices_.empty()) {
-      gggs::Level level = gggs::Level::fromCellSize(static_cast<float>(cell_size_));
-      std::set<gggs::GridIndex> revisited;
-      for (const auto & s : soundings) {
-        const gggs::GridIndex idx = level.gridIndex(s.latitude, s.longitude);
+      std::vector<gggs::GridIndex> revisited;
+      for (const auto & idx : geo_map_sheet_->dirtyGrids()) {
         if(evicted_indices_.count(idx)) {
-          revisited.insert(idx);
+          revisited.push_back(idx);
         }
       }
       for (const auto & idx : revisited) {
-        reloadEvictedTile(idx);
-        evicted_indices_.erase(idx);
+        if(reloadEvictedTile(idx)) {
+          evicted_indices_.erase(idx);
+        } else {
+          geo_map_sheet_->dropTile(idx);  // protect the intact on-disk surface
+        }
       }
     }
-
-    geo_map_sheet_->addSoundings(soundings, timestamp);
 
     if(last_grid_publish_time_.nanoseconds() == 0 ||
       rclcpp::Time(msg->header.stamp) - last_grid_publish_time_ >
