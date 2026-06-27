@@ -84,7 +84,10 @@ design:
    keeps its signature and delegates. Per-tile and windowed publishes call the subset
    form.
 10. **Coherence WARN** — at `on_configure`, WARN if `max_resident_tiles` < the CA
-    window's tile span. `clear_grid` service kept (CUBE-state reset semantics).
+    window's tile span. **`clear_grid` service removed** — its manual RAM/downlink
+    shed-purpose is superseded by automatic eviction + the bounded CA window, it
+    had no callers, and it left an inconsistent reset surface (RAM cleared but not
+    the on-disk draft); see ADR-0001 §5.
 
 ### D. Tests (commit: tests)
 
@@ -122,7 +125,7 @@ f. `test_tile_eviction_rss.cpp` (new): long synthetic track; assert `grids_.size
 |---|---|
 | Only what's needed | Fixes confirmed operational failures; eviction/window sizes configurable |
 | Test what breaks | Round-trip, bounded count, LRU order, **lossless revisit**, per-tile projection, long-track growth |
-| A change includes its consequences | Nav2 consumer behavior documented; `clear_grid` kept; latent cross-session loss closed |
+| A change includes its consequences | Nav2 consumer behavior documented; `clear_grid` removed (superseded, no callers); latent cross-session loss closed |
 | Capture decisions | ADR-0001 records reload mechanism, eviction policy, window strategy, per-tile schema |
 | Safety First | Window-boundary unknown cells = NaN (lethal under `unsurveyed_is_lethal`); TF-gap fallback keeps CA grid alive; **no survey-data loss** |
 

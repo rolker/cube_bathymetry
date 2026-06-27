@@ -156,12 +156,20 @@ incremental replacement for the monolithic whole-survey emission and the
 reconstructing a full-survey display from the stream (e.g. in RViz) is out of
 scope here (follow-up).
 
-### 5. `clear_grid` service retained
+### 5. `clear_grid` service removed (superseded by automatic bounding)
 
-`clear_grid` keeps its existing semantics (it resets CUBE state, not merely the
-publish extent). It is no longer the mitigation for an over-large publish — the
-CA grid is now intrinsically bounded — but remains available for explicit
-operator resets.
+`clear_grid` was the *manual* mitigation for the two problems this ADR now solves
+automatically: it reset the whole accumulator to shed RAM and to shrink an
+over-large telemetry publish. With resident RAM bounded by eviction and the `grid`
+publish bounded to the vessel-centered CA window, that rationale is gone. The
+service had **no callers** anywhere in the workspace (no launch file, config, or
+other package referenced it), and a lifecycle restart
+(deactivate→cleanup→configure) still provides a full reset if one is ever needed.
+Keeping it would also leave an inconsistent reset surface — it cleared RAM but not
+the on-disk draft, so a post-reset revisit would clobber on-disk tiles piecemeal
+(the very partial-revisit loss this ADR otherwise closes). It is therefore
+**removed** (service, `clearGrid()`/`clearGridService()`, and the `std_srvs`
+dependency) rather than retained.
 
 ## Consequences
 

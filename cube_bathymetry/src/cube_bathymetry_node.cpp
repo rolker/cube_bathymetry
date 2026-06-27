@@ -46,7 +46,6 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "grid_map_ros/grid_map_ros.hpp"
 #include "grid_map_msgs/msg/grid_map.hpp"
-#include "std_srvs/srv/trigger.hpp"
 
 #include "marine_autonomy/gz4d_geo.h"
 #include "cube_bathymetry/store_import.h"
@@ -196,10 +195,6 @@ public:
       rclcpp::SensorDataQoS(),
       std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
 
-    clear_grid_service_ = create_service<std_srvs::srv::Trigger>("clear_grid",
-      std::bind(&CubeBathymetry::clearGridService, this,
-        std::placeholders::_1, std::placeholders::_2));
-
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
 
@@ -254,7 +249,8 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   std::string map_frame_ = "map";
-  // Cached so clearGrid() can rebuild the sheet with the configured geometry.
+  // Cached so the startup prime and revisit-reload can rebuild a GeoMapSheet /
+  // scratch store with the configured geometry.
   double cell_size_ = 1.0;
   int grid_cell_count_ = 25;
   rclcpp::Time last_grid_publish_time_;
@@ -267,7 +263,6 @@ private:
   // Incremental per-tile coverage stream (~/tiles, #70).
   rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr tiles_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_grid_service_;
 
   // Long-duration bounding parameters (#70, ADR-0001).
   std::size_t max_resident_tiles_ = 64;
@@ -623,41 +618,6 @@ private:
     geo_map_sheet_->clearDirtyGrids();
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
       "Saved " << written << " draft tile(s) to " << dir);
-  }
-
-  // Replace the accumulated surface with a fresh, empty sheet of the same
-  // configured geometry. Lets an operator reset the grid in place -- e.g. to
-  // shed a surface that has grown too large for the telemetry downlink -- with
-  // no process restart and no CONFIGURE/ACTIVATE cycle. Safe from a service
-  // callback: main() runs a SingleThreadedExecutor, so this never overlaps
-  // pingCallback's use of map_sheet_.
-  void clearGrid()
-  {
-    // Flush any draft data accumulated since the last periodic save BEFORE
-    // discarding the sheet, mirroring on_cleanup -- otherwise an operator reset
-    // would silently drop unsaved-since-last-interval soundings. A no-op when
-    // persistence is disabled or nothing is dirty.
-    saveDirtyTiles();
-    geo_map_sheet_ =
-      std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
-    // The fresh sheet has no resident tiles, so there are no pending evictions to
-    // reload on revisit (#70). Drop the set so a stale index can't trigger a
-    // spurious disk reload into the cleared surface.
-    evicted_indices_.clear();
-    // Force the next ping to republish immediately (a zero-nanosecond time is
-    // the same first-publish trigger used at startup) so the cleared surface
-    // propagates without waiting out the ~5 s publish interval.
-    last_grid_publish_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-  }
-
-  void clearGridService(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
-  {
-    clearGrid();
-    response->success = true;
-    response->message = "grid cleared";
-    RCLCPP_INFO(get_logger(), "Grid cleared via clear_grid service");
   }
 
   // Look up target<-source at the exact stamp; on extrapolation (the requested

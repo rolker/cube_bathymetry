@@ -145,10 +145,9 @@ TEST_F(MapSheetTest, SpreadSoundingsCreateMultipleGrids)
 
 TEST_F(MapSheetTest, ReconstructClearsAccumulatedData)
 {
-  // Mirror the node's map_sheet_ lifecycle: a shared_ptr replaced wholesale.
-  // This is the invariant clearGrid() (the clear_grid service) relies on --
-  // rebuilding the sheet drops all accumulated soundings and returns to the
-  // empty initial state.
+  // Mirror the node's sheet lifecycle: a shared_ptr replaced wholesale.
+  // Rebuilding the sheet drops all accumulated soundings and returns to the
+  // empty initial state -- the fresh-sheet-swap the node does at on_configure.
   auto sheet = std::make_shared<MapSheet>(counts, sizes);
 
   std::vector<MapSounding> soundings;
@@ -161,7 +160,7 @@ TEST_F(MapSheetTest, ReconstructClearsAccumulatedData)
   ASSERT_FALSE(sheet->grids().empty());
   ASSERT_TRUE(valid(sheet->gridBounds()));
 
-  // What clearGrid() does: swap in a fresh sheet of the same geometry.
+  // Swap in a fresh sheet of the same geometry.
   sheet = std::make_shared<MapSheet>(counts, sizes);
 
   EXPECT_TRUE(sheet->grids().empty());
