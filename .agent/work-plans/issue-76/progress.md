@@ -51,3 +51,15 @@ The upstream blocker (`rolker/unh_marine_autonomy#228`) merged 2026-06-27 — no
 
 ### Actions
 - [ ] Ensure plan captures A-vs-B decision as an explicit checkpoint with recommendation rationale documented in ci.yml comments — not just in the PR.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-27 15:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-76/plan.md` at `7fc2a36`
+**Branch**: feature/issue-76 at `7fc2a36`
+**Phases**: single
+
+### Open questions
+- [ ] A vs B fork: keep intentional marine_nav pruning (Option B, recommended) or full-resolve by cloning unh_marine_navigation (Option A)? — gate for plan-review confirmation.
