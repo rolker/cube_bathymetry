@@ -7,63 +7,75 @@ on:
     branches: [jazzy]
 
 jobs:
-  build-and-test:
+  industrial_ci:
+    name: ROS 2 Jazzy (industrial_ci)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    container:
-      image: ros:jazzy-ros-core
+      packages: read   # pull the prebaked CI dep image from GHCR
 
     steps:
-      - name: Update apt
-        run: apt-get update
-
-      - name: Install ros dev tools
-        run: DEBIAN_FRONTEND=noninteractive apt-get -y install ros-dev-tools
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Init rosdep
-        run: rosdep init
+      # Authenticate to GHCR so industrial_ci can pull the prebaked dependency
+      # image (DOCKER_IMAGE below). The image is built + pushed by ci-image.yml.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update rosdep
-        run: rosdep update
+      # Persist the ccache across runs so unchanged upstream packages
+      # (unh_marine_autonomy, mru_transform, ...) recompile near-incrementally
+      # instead of from scratch. Keyed per-commit, restored from any prior run.
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-jazzy-${{ github.sha }}
+          restore-keys: |
+            ccache-jazzy-
 
-      - name: Create workspace
-        run: mkdir -p ../ws/src && ln -s $GITHUB_WORKSPACE ../ws/src/cube_bathymetry
-
-      - name: Clone unreleased dependencies
-        run: |
-          git clone --depth 1 -b jazzy https://github.com/rolker/unh_marine_autonomy.git ../ws/src/unh_marine_autonomy
-          git clone --depth 1 -b jazzy https://github.com/rolker/mru_transform.git ../ws/src/mru_transform
-          git clone --depth 1 -b ros2 https://github.com/ros-geographic-info/geographic_info.git ../ws/src/geographic_info
-
-      - name: Install ROS dependencies
-        working-directory: ../ws
-        run: >
-          DEBIAN_FRONTEND=noninteractive
-          rosdep install --from-paths src --ignore-src -r -y
-
-      - name: Build
-        working-directory: ../ws
-        run: >
-          bash -c 'source /opt/ros/jazzy/setup.bash &&
-          colcon build --packages-up-to cube_bathymetry
-          --cmake-args -DBUILD_TESTING=ON'
-
-      - name: Test
-        working-directory: ../ws
-        run: >
-          bash -c 'source /opt/ros/jazzy/setup.bash &&
-          source install/setup.bash &&
-          colcon test --packages-select cube_bathymetry
-          --event-handlers console_direct+
-          --return-code-on-test-failure'
-
-      - name: Test results
-        working-directory: ../ws
-        run: >
-          bash -c 'source /opt/ros/jazzy/setup.bash &&
-          colcon test-result --verbose'
-        if: always()
+      # ros-industrial/industrial_ci runs the full ROS pipeline in a container:
+      # rosdep resolve -> build the upstream workspace + this package -> colcon
+      # test (incl. the ament linters). The same invocation reproduces locally
+      # (`run_ci` / .ci entrypoint), so CI lint versions can be matched on a dev
+      # machine before pushing.
+      - name: industrial_ci
+        uses: ros-industrial/industrial_ci@master
+        env:
+          ROS_DISTRO: jazzy
+          ROS_REPO: main
+          # Prebaked dependency image (Tier C, deps-only): the rosdep system
+          # deps for cube + its upstream workspace are baked in, so this run
+          # skips the apt dependency install. Built + pushed by ci-image.yml;
+          # see .github/ci/Dockerfile. CI still clones + builds the upstream
+          # sources every run (with ccache), so the image never goes stale
+          # w.r.t. source. DOCKER_PULL keeps the baked deps current.
+          DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/cube_bathymetry-ci:jazzy
+          DOCKER_PULL: "true"
+          # Unreleased source deps, cloned by industrial_ci into the upstream
+          # workspace (replaces the manual git-clone step).
+          UPSTREAM_WORKSPACE: upstream.repos
+          # Activates ccache inside industrial_ci's build.
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          # --- Upstream-monorepo workarounds (see #72) ---------------------
+          # industrial_ci resolves + builds the WHOLE unh_marine_autonomy
+          # monorepo, unlike the old `rosdep -r` + `--packages-up-to` flow that
+          # only touched cube's subtree. That surfaces latent packaging gaps in
+          # unh_marine_autonomy which are not cube_bathymetry's concern, tracked
+          # upstream at rolker/unh_marine_autonomy#228:
+          #   * `nlohmann_json` is not a valid rosdep key (should be
+          #     `nlohmann-json-dev`). The CI-time rosdep resolve still hits the
+          #     bad key, so it stays skipped here; the deb itself is baked into
+          #     the prebaked image (no ADDITIONAL_DEBS needed at run time).
+          #   * mission_manager*/integration-tests/backscatter depend on
+          #     marine_nav_* (a repo not in upstream.repos) and are unrelated to
+          #     cube — COLCON_IGNORE them so the upstream build does not pull a
+          #     dependency cube never uses.
+          # Drop the skip-keys + COLCON_IGNORE block once #228 lands and cube's
+          # upstream.repos picks up the fix.
+          ROSDEP_SKIP_KEYS: "nlohmann_json marine_nav_interfaces marine_nav_tasks"
+          AFTER_SETUP_UPSTREAM_WORKSPACE: 'for p in mission_manager mission_manager_interfaces marine_autonomy_integration_tests marine_mbes_backscatter_store; do find /root/upstream_ws/src -type d -name "$p" -exec touch {}/COLCON_IGNORE \; ; done'
