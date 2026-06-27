@@ -78,3 +78,23 @@ Container review-plan verdict **changes-requested**; folded in:
 - [ ] File the separate sign-gated angle-correction issue + adjust cube#80's framing? (ripple from must-fix #1)
 - [ ] Backscatter uint8 range: per-tile auto-range (recommend).
 - [ ] udp_bridge#19 metering: ship v1 without, add later (recommend).
+
+## Implementation (in progress)
+**Status**: 2 of 3 parts done (committed, tested); node endpoints + sim-verify remain
+**When**: 2026-06-27 19:45 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8)
+
+**Branch**: feature/issue-78 (off jazzy `07260a2`)
+
+Done (committed, 366 tests pass, uncrustify clean):
+- `8d430b6` — **backscatter into the live estimator**: beam_angle cloud field; pingCallback reads intensity+beam_angle (optional/robust for old bags). node.cpp untouched.
+- `8a141a2` — **tile quantization core**: `GeoGrid::nodeRecords()` (row-major NodeRecord) + `quantizeTile()` (depth int16/uncertainty uint8/backscatter uint8 per-tile auto-range) + test_quantize_tile (2 tests). Own lib target.
+
+Underlay rebuilt with merged #230 (marine_interfaces + marine_tiled_raster_store).
+
+Remaining:
+- [ ] Node endpoints (cube_bathymetry_node.cpp): `SonarVisualizationTile` publisher (call `quantizeTile` per dirty tile in the publish path), `TileCatalog` publisher (via `TileCatalogBuilder`, transient_local), `TileRequest` service served from the draft store on disk.
+- [ ] End-to-end **sim-verify** against a Massabesic detections bag (absorbs cube#70's owed sim-verify).
+- [ ] Then `/review-code` (container) → push + PR (Closes #78).
+
+Notes: full-tile window v1 (dirty sub-window = later refinement); backscatter surfaced UNCORRECTED (correction = cube#81).
