@@ -32,6 +32,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "cube_bathymetry/geo_map_sheet.h"
@@ -94,7 +95,30 @@ public:
     // unh_marine_autonomy#221) so the costmap layer (#164) and sim live loop
     // (#77) read exactly what CUBE writes.
     draft_dir_ = declare_parameter("draft_dir", std::string(""));
-    save_interval_s_ = declare_parameter("save_interval", 30.0);
+
+    // save_interval is a disk-I/O-frequency / crash-durability knob -- it does
+    // NOT affect the depth estimate. saveDirtyTiles() flushes the CUBE median
+    // pre-filter via GeoGrid::values() (queueFlush per node), but publishGrid()
+    // calls the same values() flush and is throttled to ~5s (see pingCallback),
+    // so for any save_interval >= the 5s publish cadence the estimate is already
+    // governed by publish, not by saving. 30s = ~6x the publish cadence, so each
+    // save coalesces several publish cycles. The tradeoff is purely: a crash
+    // loses <= one interval of un-persisted draft tiles (recoverable offline
+    // from the raw bag -- the draft store is a live convenience, the
+    // authoritative path is offline processing), against per-save disk I/O
+    // (~775KB x dirty-tile count) competing with continuous bag recording.
+    // See #74 for the full rationale.
+    rcl_interfaces::msg::ParameterDescriptor save_interval_desc;
+    save_interval_desc.description =
+      "Draft-tile persistence cadence in seconds (only while ACTIVE and "
+      "draft_dir is set). Disk-I/O-frequency / crash-durability knob; does NOT "
+      "affect the depth estimate (the ~5s publish path already flushes the CUBE "
+      "median pre-filter). A crash loses <= one interval of un-persisted draft "
+      "tiles, which are reconstructable offline from the raw bag. Default 30s "
+      "(~6x the publish cadence) balances restart-loss against disk contention "
+      "with bag recording. See #74.";
+    save_interval_s_ =
+      declare_parameter("save_interval", 30.0, save_interval_desc);
 
     if (!draft_dir_.empty()) {
       // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
