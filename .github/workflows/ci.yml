@@ -12,10 +12,20 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: read   # pull the prebaked CI dep image from GHCR
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Authenticate to GHCR so industrial_ci can pull the prebaked dependency
+      # image (DOCKER_IMAGE below). The image is built + pushed by ci-image.yml.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Persist the ccache across runs so unchanged upstream packages
       # (unh_marine_autonomy, mru_transform, ...) recompile near-incrementally
@@ -38,6 +48,14 @@ jobs:
         env:
           ROS_DISTRO: jazzy
           ROS_REPO: main
+          # Prebaked dependency image (Tier C, deps-only): the rosdep system
+          # deps for cube + its upstream workspace are baked in, so this run
+          # skips the apt dependency install. Built + pushed by ci-image.yml;
+          # see .github/ci/Dockerfile. CI still clones + builds the upstream
+          # sources every run (with ccache), so the image never goes stale
+          # w.r.t. source. DOCKER_PULL keeps the baked deps current.
+          DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/cube_bathymetry-ci:jazzy
+          DOCKER_PULL: "true"
           # Unreleased source deps, cloned by industrial_ci into the upstream
           # workspace (replaces the manual git-clone step).
           UPSTREAM_WORKSPACE: upstream.repos
@@ -47,16 +65,17 @@ jobs:
           # industrial_ci resolves + builds the WHOLE unh_marine_autonomy
           # monorepo, unlike the old `rosdep -r` + `--packages-up-to` flow that
           # only touched cube's subtree. That surfaces latent packaging gaps in
-          # unh_marine_autonomy which are not cube_bathymetry's concern:
+          # unh_marine_autonomy which are not cube_bathymetry's concern, tracked
+          # upstream at rolker/unh_marine_autonomy#228:
           #   * `nlohmann_json` is not a valid rosdep key (should be
-          #     `nlohmann-json-dev`); cube needs it via marine_bathymetry_store,
-          #     so we skip the bad key and install the deb directly.
+          #     `nlohmann-json-dev`). The CI-time rosdep resolve still hits the
+          #     bad key, so it stays skipped here; the deb itself is baked into
+          #     the prebaked image (no ADDITIONAL_DEBS needed at run time).
           #   * mission_manager*/integration-tests/backscatter depend on
           #     marine_nav_* (a repo not in upstream.repos) and are unrelated to
           #     cube — COLCON_IGNORE them so the upstream build does not pull a
           #     dependency cube never uses.
-          # Proper fix belongs upstream (correct rosdep keys + declare marine_nav
-          # deps); tracked separately. Revisit this block when that lands.
+          # Drop the skip-keys + COLCON_IGNORE block once #228 lands and cube's
+          # upstream.repos picks up the fix.
           ROSDEP_SKIP_KEYS: "nlohmann_json marine_nav_interfaces marine_nav_tasks"
-          ADDITIONAL_DEBS: "nlohmann-json3-dev"
           AFTER_SETUP_UPSTREAM_WORKSPACE: 'for p in mission_manager mission_manager_interfaces marine_autonomy_integration_tests marine_mbes_backscatter_store; do find /root/upstream_ws/src -type d -name "$p" -exec touch {}/COLCON_IGNORE \; ; done'
