@@ -179,3 +179,33 @@ Host-inline fix pass (the run-issue host ran implementation inline for #70).
   operator-tunable contract; default pair satisfies it. Kept as WARN.
 
 **Build/test**: green — 351 tests, 0 failures, 47 skipped.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-27 09:20 -0400
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-70 at `284cc9f`
+**Mode**: pre-push
+**Depth**: Deep (reason: safety-relevant — survey-data integrity + CA grid for an autonomous boat)
+**Must-fix**: 2 | **Suggestions**: 7
+**Round**: 2 | **Ship**: continue — Round 1's two must-fixes are correctly resolved, but an INDEPENDENT read surfaced a NEW data-loss path (neighbour-tile clobber) that defeats the same lossless invariant; warrants a fix + one more read.
+**Static analysis**: ament_cpplint clean; cppcheck only style nits (raw-loop push_back, pre-existing const-ref) — dropped.
+**Claude Adversarial**: 2 passes (Lens A logic + Lens B systemic).
+
+### Round 1 must-fixes — verified resolved
+- Save-failure data loss: `trimResidentToBudget()` skips still-dirty cold tiles; a failed `saveDirtyTiles()` keeps `dirty_grids_` so the cold tile is kept resident (transient over-budget + WARN), never dropped. Pinned (at primitive level) by `EvictionKeepsStillDirtyColdTiles`. Sound — clean ⟹ on-disk holds (prime and successful-save are the only ways out of the dirty set besides dropTile).
+- Unbounded startup prime: bounding params now declared before the prime; `trimResidentToBudget()` after `loadIntoSheet` drops clean/on-disk primed cold tiles to budget and records `evicted_indices_` for revisit reload. Mid-configure trim touches only the sheet — no use of tf_buffer_/publishers before init. Sound.
+- Decoupled eviction (pingCallback, after publishBounded), vessel-position cache on TF miss, and the `R + tile_span` coherence WARN are all correct and don't introduce ordering bugs (publishDirtyTiles clears its set before eviction; eviction runs even when publish early-returns on a TF miss).
+
+### Findings
+- [ ] (must-fix) Revisit-reload is keyed on each sounding's CENTRE tile only (`level.gridIndex(s.lat,s.lon)`), but `addSoundings` expands bounds and `GeoGrid::insert` spreads a sounding into neighbour-tile cells within `radius`; a sounding near a tile seam re-creates + dirties an EVICTED neighbour tile that is never reloaded, and the next `saveDirtyTiles()` overwrites that tile's full on-disk surface with the thin boundary strip — permanent durable-data loss, defeating the lossless invariant (this is exactly the negative-control clobber `RevisitAfterEvictPreservesData` demonstrates). Derive the reload set from the grids insertion actually touches (the expanded `getOrCreateGridsIn` candidate set / pre-insert), not sounding centres. — `src/cube_bathymetry_node.cpp:783-794`, `src/geo_map_sheet.cpp:52-71`, `src/geo_grid.cpp:45-108`
+- [ ] (must-fix) `reloadEvictedTile` swallows any `loadWindow` exception and returns void, yet pingCallback does `evicted_indices_.erase(idx)` unconditionally; on a transient reload failure the tile is treated as reloaded, re-accumulates from empty, and the next overwrite-save clobbers the intact on-disk surface — silent data loss on the error path. Return success and erase only on a confirmed reload (else keep the index and retry / don't re-save). — `src/cube_bathymetry_node.cpp:790-792`, `:526-549`
+- [ ] (suggestion) Eviction is temporal-LRU (`coldTiles` by `last_touch_`), not spatial; a tile inside the CA window but surveyed long ago can be evicted → a NaN/lethal hole in the avoidance window until a ping re-triggers reload. Conservative for collision safety, but the configure-time coherence WARN implies a coverage guarantee the LRU policy doesn't strictly provide. Consider distance-aware retention or reload-on-window-entry. — `src/geo_map_sheet.cpp:166-192`, `src/cube_bathymetry_node.cpp:106-126`
+- [ ] (suggestion) No staleness bound on the cached vessel position: a prolonged `base_link` TF outage re-centres the CA window on `last_vessel_lat_/lon_` with no age cap, silently dropping coverage where the boat actually is. Add an age limit (then fall back to full-set/skip). — `src/cube_bathymetry_node.cpp:365-369`
+- [ ] (suggestion) RAM bound is not guaranteed under PERSISTENT write failure: repeated `saveDirtyTiles()` failures keep cold tiles dirty+resident (correctly lossless) but resident count then grows unbounded while every ~5 s cycle retries the full failing save (stall amplification) — the #70 failure inverted. Acceptable vs. data loss; consider backoff/escalation beyond the per-cycle WARN. — `src/cube_bathymetry_node.cpp:425-457`
+- [ ] (suggestion) Synchronous disk I/O on the single-threaded executor's ping path (`evictColdTiles`→`saveDirtyTiles`; `reloadEvictedTile`→`loadWindow`) widens the stall surface for sounding ingest / CA-grid publish. Off-thread persistence (Round-1 deferred). — `src/cube_bathymetry_node.cpp:791,806`
+- [ ] (suggestion) `evicted_indices_` is reset only by `clearGrid()`, not across a configure→cleanup→configure cycle; harmless (re-prime/re-trim re-inserts + the set dedups) but inconsistent with the fresh sheet. Clear it in `on_cleanup`/top of `on_configure`. — `src/cube_bathymetry_node.cpp:233-245`, `:68`
+- [ ] (suggestion) Consequence: the windowed `grid` drops previously-surveyed water outside the CA window; under `unsurveyed_is_lethal` a Nav2 GLOBAL costmap relying on the old whole-survey bathy will flip those corridors to lethal. Intended per ADR-0001, but confirm the consumer tolerates it (or reads the durable store / `~/tiles`). — `src/cube_bathymetry_node.cpp:355-394`
+- [ ] (suggestion) Test gap: `EvictionKeepsStillDirtyColdTiles` re-implements the still-dirty guard inline rather than calling the node's `trimResidentToBudget`, so a node-level regression dropping the guard wouldn't be caught; and no test exercises adjacent-tile-seam eviction (the must-fix #1 path is untested). — `test/test_geo_map_sheet.cpp:311-336`
