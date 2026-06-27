@@ -88,6 +88,43 @@ public:
     geo_map_sheet_ =
       std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
 
+    // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
+    // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
+    // (whole store) re-creates the unbounded-RAM condition #70 exists to prevent.
+    //  - max_resident_tiles: RAM budget; cold tiles beyond it are persisted then
+    //    evicted (lossless). Eviction requires draft persistence -- without a
+    //    draft_dir the node leaves data resident and warns (it never drops data).
+    //  - ca_window_radius_m: half-extent of the vessel-centered window published
+    //    on `grid` (the bounded collision-avoidance view that replaces the old
+    //    whole-survey publish).
+    //  - base_link_frame: vessel frame used to center the CA window.
+    max_resident_tiles_ =
+      static_cast<std::size_t>(declare_parameter("max_resident_tiles", 64));
+    ca_window_radius_m_ = declare_parameter("ca_window_radius_m", 200.0);
+    base_link_frame_ = declare_parameter("base_link_frame", std::string("base_link"));
+
+    // Coherence WARN (ADR-0001): the resident budget must cover the CA window's
+    // tile span, else a window tile could be evicted and render as a NaN/lethal
+    // hole inside the avoidance window. gridsInCaWindow() selects tiles within
+    // R + one tile span (the boundary-straddle margin), so the budget must cover
+    // that same R + span extent -- not just R.
+    const double tile_span_m =
+      geo_map_sheet_->nominalCellSizeMeters() * gggs::GridIndex::cellRowCount();
+    if (tile_span_m > 0.0) {
+      const double per_axis = std::ceil(
+        (2.0 * (ca_window_radius_m_ + tile_span_m)) / tile_span_m) + 1.0;
+      const std::size_t window_tiles =
+        static_cast<std::size_t>(per_axis * per_axis);
+      if (max_resident_tiles_ < window_tiles) {
+        RCLCPP_WARN(get_logger(),
+          "max_resident_tiles=%zu is smaller than the ~%zu tiles spanning the "
+          "%.0fm CA window (tile span ~%.0fm); window tiles may be evicted and "
+          "show as lethal holes. Raise max_resident_tiles or shrink "
+          "ca_window_radius_m.", max_resident_tiles_, window_tiles,
+          ca_window_radius_m_, tile_span_m);
+      }
+    }
+
     // Draft-tile persistence (#21). draft_dir empty (default) disables it; set
     // it per deployment to opt in. Tiles are written as marine_bathymetry_store
     // `draft/` GeoTIFFs (single fused grid, no per-day epochs,
@@ -98,7 +135,8 @@ public:
 
     if (!draft_dir_.empty()) {
       // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
-      // slope correction warm-starts on previously-surveyed areas.
+      // slope correction warm-starts on previously-surveyed areas and the settled
+      // depths round-trip through values() (lossless reload, ADR-0001).
       try {
         marine_bathymetry_store::BathymetryStore store =
           marine_bathymetry_store::BathymetryStore::fromCellSize(
@@ -112,6 +150,14 @@ public:
           RCLCPP_INFO(get_logger(),
             "Primed GeoMapSheet from %zu draft tiles under %s",
             draft_tiles.size(), draft_dir_.c_str());
+          // Bound the prime to the resident budget (must-fix): loadIntoSheet loads
+          // the WHOLE store, so without this a restart mid-long-survey re-creates
+          // the unbounded RAM #70 prevents. Primed tiles are clean and already on
+          // disk, so dropping the cold ones is lossless; they reload on revisit.
+          // (The transient peak during the whole-store load before the trim is a
+          // known limitation -- a windowed prime needs a startup position that is
+          // not available at on_configure; tracked as a follow-up.)
+          trimResidentToBudget();
         }
       } catch (const std::exception & e) {
         // A missing/empty store dir is normal on a first run; a genuine load
@@ -133,41 +179,6 @@ public:
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
-
-    // Long-duration bounding (#70, ADR-0001).
-    //  - max_resident_tiles: RAM budget; cold tiles beyond it are persisted then
-    //    evicted (lossless). Eviction requires draft persistence -- without a
-    //    draft_dir the node leaves data resident and warns (it never drops data).
-    //  - ca_window_radius_m: half-extent of the vessel-centered window published
-    //    on `grid` (the bounded collision-avoidance view that replaces the old
-    //    whole-survey publish).
-    //  - base_link_frame: vessel frame used to center the CA window.
-    max_resident_tiles_ =
-      static_cast<std::size_t>(declare_parameter("max_resident_tiles", 64));
-    ca_window_radius_m_ = declare_parameter("ca_window_radius_m", 200.0);
-    base_link_frame_ = declare_parameter("base_link_frame", std::string("base_link"));
-
-    // Coherence WARN (ADR-0001): the resident budget must cover the CA window's
-    // tile span, else a window tile could be evicted and render as a NaN/lethal
-    // hole inside the avoidance window. A GGGS grid spans ~cellRowCount cells of
-    // ~nominalCellSize m; a window of radius R needs ceil(2R / span)+1 tiles per
-    // axis.
-    const double tile_span_m =
-      geo_map_sheet_->nominalCellSizeMeters() * gggs::GridIndex::cellRowCount();
-    if (tile_span_m > 0.0) {
-      const double per_axis =
-        std::ceil((2.0 * ca_window_radius_m_) / tile_span_m) + 1.0;
-      const std::size_t window_tiles =
-        static_cast<std::size_t>(per_axis * per_axis);
-      if (max_resident_tiles_ < window_tiles) {
-        RCLCPP_WARN(get_logger(),
-          "max_resident_tiles=%zu is smaller than the ~%zu tiles spanning the "
-          "%.0fm CA window (tile span ~%.0fm); window tiles may be evicted and "
-          "show as lethal holes. Raise max_resident_tiles or shrink "
-          "ca_window_radius_m.", max_resident_tiles_, window_tiles,
-          ca_window_radius_m_, tile_span_m);
-      }
-    }
 
     grid_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
 
@@ -260,6 +271,12 @@ private:
   double ca_window_radius_m_ = 200.0;
   std::string base_link_frame_ = "base_link";
 
+  // Last known vessel position, cached so a brief vessel-TF gap keeps the CA
+  // window bounded (reuse the last fix) instead of falling back to the full set.
+  double last_vessel_lat_ = 0.0;
+  double last_vessel_lon_ = 0.0;
+  bool have_vessel_pos_ = false;
+
   // Tiles persisted and evicted from RAM this session, pending lossless reload on
   // revisit. GridIndex is tiny (~level+row+col) so this set is negligible next to
   // the 920k-cell grids it lets us drop; it is the revisit-detection signal.
@@ -310,8 +327,10 @@ private:
   }
 
   // Bounded publish (#70, ADR-0001): a vessel-centered collision-avoidance window
-  // on `grid` PLUS the incremental per-tile coverage stream on `~/tiles`, then
-  // LRU eviction to bound RAM. Replaces the monolithic whole-survey publishGrid().
+  // on `grid` PLUS the incremental per-tile coverage stream on `~/tiles`.
+  // Replaces the monolithic whole-survey publishGrid(). Eviction is NOT done here
+  // -- it runs separately in pingCallback so a publish-time TF miss (which
+  // early-returns below) can never stall RAM bounding while pings keep ingesting.
   void publishBounded()
   {
     if(geo_map_sheet_->grids().empty()) {
@@ -324,26 +343,34 @@ private:
     }
     publishCaGrid(map_from_earth);
     publishDirtyTiles(map_from_earth);
-    evictColdTiles();
   }
 
   // Collision-avoidance grid: project only the resident tiles within
   // ca_window_radius_m of the vessel onto the existing `grid` topic (bounded
   // extent, unchanged contract). Unknown cells in the window are NaN (lethal
-  // under the costmap's unsurveyed_is_lethal). On a vessel-TF miss, fall back to
-  // the full resident set (already bounded by eviction) so the CA grid stays
-  // alive rather than starving avoidance.
+  // under the costmap's unsurveyed_is_lethal). On a vessel-TF miss, reuse the last
+  // known vessel position so the window stays bounded through brief TF gaps; only
+  // before any fix has ever been seen do we fall back to the full resident set
+  // (itself bounded by eviction) so the CA grid stays alive rather than starving.
   void publishCaGrid(const Eigen::Isometry3d & map_from_earth)
   {
     std::vector<std::shared_ptr<const cube::GeoGrid>> window;
     double lat = 0.0;
     double lon = 0.0;
     if(lookupVesselLatLon(lat, lon)) {
+      last_vessel_lat_ = lat;
+      last_vessel_lon_ = lon;
+      have_vessel_pos_ = true;
       window = gridsInCaWindow(lat, lon);
+    } else if(have_vessel_pos_) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "No vessel transform earth <- " << base_link_frame_ << "; reusing the last "
+        "known vessel position to keep the CA window bounded");
+      window = gridsInCaWindow(last_vessel_lat_, last_vessel_lon_);
     } else {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
-        "No vessel transform earth <- " << base_link_frame_ << "; publishing the "
-        "full resident set as the CA grid (bounded by eviction)");
+        "No vessel transform earth <- " << base_link_frame_ << " yet; publishing "
+        "the full resident set as the CA grid (bounded by eviction)");
       for (const auto & g : geo_map_sheet_->grids()) {
         window.push_back(g);
       }
@@ -411,16 +438,41 @@ private:
     // Flush every dirty tile so all resident tiles are durably on disk; only then
     // is dropping a cold tile lossless (it can be reloaded on revisit).
     saveDirtyTiles();
-    const std::vector<gggs::GridIndex> cold =
-      geo_map_sheet_->coldTiles(max_resident_tiles_);
-    for (const auto & index : cold) {
+    const std::size_t before = geo_map_sheet_->residentTileCount();
+    trimResidentToBudget();
+    const std::size_t after = geo_map_sheet_->residentTileCount();
+    if (after < before) {
+      RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Evicted " << (before - after) << " cold tile(s) to disk; " << after <<
+        " resident (budget " << max_resident_tiles_ << ")");
+    }
+    // If a save failed, the still-dirty cold tiles are NOT dropped (see
+    // trimResidentToBudget) -- RAM stays transiently over budget rather than
+    // losing unsaved data. Surface that so a persistent disk failure is visible.
+    if (after > max_resident_tiles_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Could not evict to budget this cycle: %zu resident > %zu budget. Cold "
+        "tiles with unsaved data are kept to avoid loss; check draft_dir writes.",
+        after, max_resident_tiles_);
+    }
+  }
+
+  // Drop clean, already-persisted cold tiles down to the resident budget,
+  // recording them as evicted (a revisit reloads from disk). A cold tile that is
+  // STILL in the dirty set (its save did not succeed) is kept resident -- dropping
+  // it would lose unsaved soundings, breaking the lossless guarantee (must-fix).
+  // Used after the startup prime (every primed tile is clean/on-disk) and by
+  // evictColdTiles after its flush.
+  void trimResidentToBudget()
+  {
+    const std::set<gggs::GridIndex> still_dirty = geo_map_sheet_->dirtyGrids();
+    for (const auto & index : geo_map_sheet_->coldTiles(max_resident_tiles_)) {
+      if (still_dirty.count(index)) {
+        continue;  // unsaved -- never drop (would lose data); retry next cycle
+      }
       geo_map_sheet_->dropTile(index);
       evicted_indices_.insert(index);
     }
-    RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
-      "Evicted " << cold.size() << " cold tile(s) to disk; " <<
-      geo_map_sheet_->residentTileCount() << " resident (budget " <<
-      max_resident_tiles_ << ")");
   }
 
   // Vessel lat/lon from earth <- base_link (translation = the ECEF position of
@@ -748,6 +800,10 @@ private:
       rclcpp::Duration::from_seconds(5.0))
     {
       publishBounded();
+      // Evict OUTSIDE publishBounded so RAM bounding runs even when a publish-time
+      // TF miss makes publishBounded early-return (#70 review): eviction depends
+      // only on the draft store, not on any transform.
+      evictColdTiles();
       last_grid_publish_time_ = msg->header.stamp;
     }
   }

@@ -305,6 +305,36 @@ TEST_F(GeoMapSheetTest, DropTileClearsAllTracking)
   EXPECT_EQ(ms.lastTouchOf(idx), 0u);
 }
 
+// Save-failure safety (#70 review must-fix): the node's eviction drops only cold
+// tiles that are NOT still dirty -- a tile whose save failed stays in the dirty
+// set and must be KEPT, never dropped, or its unsaved soundings are lost. This
+// pins the primitive composition the node relies on (coldTiles + dirtyGrids +
+// dropTile): if a save fails (every tile still dirty), nothing is evicted.
+TEST_F(GeoMapSheetTest, EvictionKeepsStillDirtyColdTiles)
+{
+  GeoMapSheet ms(cell_size);
+  for (int i = 0; i < 8; ++i) {
+    addOneAt(ms, 43.0 + 0.05 * i, -70.0);
+  }
+  const std::size_t budget = 3;
+  ASSERT_GT(ms.residentTileCount(), budget);
+
+  // Simulate a failed save: the dirty set is unchanged (nothing persisted). Every
+  // dirty (unsaved-with-data) tile must survive eviction; only clean tiles may go.
+  const std::set<gggs::GridIndex> still_dirty = ms.dirtyGrids();
+  ASSERT_FALSE(still_dirty.empty());
+  for (const auto & idx : ms.coldTiles(budget)) {
+    if (still_dirty.count(idx)) {
+      continue;  // unsaved -- must not drop (the must-fix behavior)
+    }
+    ms.dropTile(idx);
+  }
+  for (const auto & idx : still_dirty) {
+    EXPECT_NE(ms.gridAt(idx), nullptr)
+      << "an unsaved (still-dirty) tile was evicted -- that would lose data";
+  }
+}
+
 // coldTiles is empty when the resident count is within budget (no spurious
 // eviction), whether the budget equals or exceeds the resident count.
 TEST_F(GeoMapSheetTest, ColdTilesEmptyWithinBudget)

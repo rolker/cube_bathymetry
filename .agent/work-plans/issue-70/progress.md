@@ -128,3 +128,54 @@ correctly scoped to `sensors_ws/src/cube_bathymetry`.
 - [ ] (suggestion) Disk I/O on the single-threaded executor's ping/publish path (`reloadEvictedTile` `loadWindow`; eviction `saveDirtyTiles`) blocks sounding ingest and CA-grid publication; a slow/contended disk stalls collision avoidance. Consider a separate callback group / off-thread persistence. — `src/cube_bathymetry_node.cpp:413,485,729-742`
 - [ ] (suggestion) `publishDirtyTiles` clears the whole publish-dirty set even when a tile projected no finite cells this cycle (`continue`); if no further sounding lands on that tile its emerging value is never streamed on `~/tiles` until re-marked (best-effort coverage only; durable store unaffected). — `src/cube_bathymetry_node.cpp:383-390`
 - [ ] (suggestion) Consider enforcing `max_resident_tiles >= window tile span` (floor) rather than only WARNing, to remove the over-lethal-hole CA degradation entirely. — `src/cube_bathymetry_node.cpp:162-169`
+
+## Implementation
+**Status**: complete
+**When**: 2026-06-27 (host-inline address-findings)
+**By**: Claude Code Agent (Claude Opus)
+
+Addressed the pre-push `## Local Review (Pre-Push)` (Round 1, changes-requested).
+Host-inline fix pass (the run-issue host ran implementation inline for #70).
+
+### Both must-fixes fixed
+- **Save-failure eviction data loss** — eviction no longer drops cold tiles
+  unconditionally. New `trimResidentToBudget()` drops only cold tiles that are
+  NOT still in the dirty set after the flush; a tile whose save failed stays in
+  the dirty set and is kept resident (RAM transiently over budget, with a WARN,
+  rather than losing unsaved soundings). `evictColdTiles` = flush then
+  `trimResidentToBudget`. Pinned by new test `EvictionKeepsStillDirtyColdTiles`.
+- **Unbounded startup prime** — bounding params now declared BEFORE the draft
+  prime; after `loadIntoSheet`, `trimResidentToBudget()` drops the clean,
+  on-disk primed tiles down to `max_resident_tiles` (lossless; they reload on
+  revisit). The transient whole-store load peak before the trim is documented as
+  a known limitation (a windowed prime needs a startup position unavailable at
+  on_configure) — follow-up.
+
+### Suggestions addressed
+- Eviction decoupled from `publishBounded`: `evictColdTiles()` now runs in
+  `pingCallback` independent of the publish path, so a publish-time TF miss
+  cannot stall RAM bounding.
+- CA-grid TF-miss fallback bounded: `publishCaGrid` caches the last vessel
+  lat/lon and reuses it through brief TF gaps; the full-resident-set fallback
+  only fires before any fix has ever been seen.
+- Coherence WARN now uses the `R + tile_span` extent `gridsInCaWindow` actually
+  selects (was modelling R only), so it no longer under-warns the margin band.
+
+### Suggestions deferred (with rationale)
+- Variance floor breaking the exact round-trip for stored CI < ~0.02 m:
+  documented edge; floor keeps the DLM defined. Low impact, kept.
+- `primeFromTile` predicted-prior variance `u*u` vs settled `(u/1.96)^2`
+  (~3.84x): the predicted-depth prior is DORMANT (no #59 producer wired) and
+  sits in the slope-correction path, which is validation-sensitive (prior wrong
+  formulas were caught only in sim). Not changing dormant safety-relevant math
+  without its own validation; noted for the #59 producer work.
+- Single-threaded disk I/O on the ping/publish path: `saveDirtyTiles` already
+  ran there pre-#70; reload only fires on revisit. Off-thread persistence is a
+  larger architectural change — follow-up.
+- `publishDirtyTiles` clears the whole publish-dirty set: a tile with no finite
+  cells has nothing to stream and is re-marked on its next sounding; durable
+  store unaffected (best-effort only). Kept.
+- Enforce floor vs WARN for `max_resident_tiles` >= window span: WARN keeps the
+  operator-tunable contract; default pair satisfies it. Kept as WARN.
+
+**Build/test**: green — 351 tests, 0 failures, 47 skipped.
