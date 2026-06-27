@@ -256,3 +256,26 @@ data-integrity must-fixes its independent read surfaced.
   gate, not a code defect.
 
 **Build/test**: green — 351 tests, 0 failures, 47 skipped.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-27 13:37 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-70 at `12f6b81`
+**Mode**: pre-push
+**Depth**: Deep (reason: safety-relevant — CA grid + survey-data integrity for an autonomous vessel; ADR add; ~470 LoC source)
+**Must-fix**: 0 | **Suggestions**: 4
+**Round**: 3 | **Ship**: recommended — must-fix 0 (down from 2/2, not rising); the lossless-eviction data-loss invariant that drove rounds 1–2 is independently re-confirmed (fresh Lens A read) and test-pinned by `RevisitAfterEvictPreservesData` with a negative control. Remaining items are fail-safe CA-coverage-quality tradeoffs / forward-looking stream gaps, three already deferred in round 2.
+**Static analysis**: ament_cpplint clean (no problems on 10 changed C++ files).
+**Claude Adversarial**: 2 passes (Lens A logic + Lens B systemic). Lens A: no must-fix; the round-2 fixes (seam-neighbour reload keyed off the dirty set; reload-failure drop) verified correct. Lens B raised 2 "must-fix" CA-coverage items, both downgraded here to suggestions (re-raised round-2 deferrals; fail-safe direction). Lens B's sigma-convention "inconsistency" dismissed — `scale=1.96`, header (1.96-σ CI) and cpp floor comment (recovered 1-σ) describe different quantities; round-trip math is correct.
+
+### Round 1+2 must-fixes — verified resolved
+- Save-failure eviction loss, unbounded startup prime (r1) and neighbour-tile clobber, reload-failure clobber (r2) all confirmed fixed; the lossless invariant holds (independent re-trace + test with negative control).
+
+### Findings
+- [ ] (suggestion) Eviction is global temporal-LRU, not window-aware: an in-window tile can be evicted → NaN/lethal hole in the CA window until revisit-reload (fail-safe; coherence WARN over-implies coverage). Carried from round 2 (deferred). — `src/geo_map_sheet.cpp:148-179`, `src/cube_bathymetry_node.cpp:401`
+- [ ] (suggestion) No age bound on the cached vessel position; a frozen `earth<-base_link` keeps the CA window centred on a stale fix while the boat moves out of coverage (fail-safe; downstream of a deeper localization failure). Carried from round 2 (deferred). — `src/cube_bathymetry_node.cpp:538`, `:411-415`
+- [ ] (suggestion) A tile dirtied then evicted at the same publish cadence loses its final `~/tiles` increment (`dropTile` clears `publish_dirty_grids_`); reload-reseed doesn't re-mark dirty. Best-effort topic, no in-tree consumer yet — forward-looking gap before #86/#250. — `src/cube_bathymetry_node.cpp:450-468`
+- [ ] (suggestion) `clear_grid` resets RAM + `evicted_indices_` but not the on-disk draft → inconsistent reset surface (some on-disk tiles survive, a revisited area's next save clobbers its tile). Intended semantics; document or clear the draft. — `src/cube_bathymetry_node.cpp:634-651`
