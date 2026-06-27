@@ -37,9 +37,9 @@ What already exists (verified):
    **sign-convention verification (cube#15)** before any `rx_angle` correction —
    applying it here, in the estimator `store_import` also runs, would corrupt the
    durable/offline path. So **`node.cpp` is untouched by #78**; the nadir-stripe
-   correction is a **separate sign-gated issue** that benefits live + offline once
-   it lands. `beam_angle` is still carried (step 2) so the surfaced value stays
-   angle-tagged and re-derivable.
+   correction is a **separate sign-gated issue (cube#81)** that benefits live +
+   offline once it lands. `beam_angle` is still carried (step 2) so the surfaced
+   value stays angle-tagged and re-derivable.
 2. **`beam_angle` on the soundings cloud** — `detections_to_pointcloud`: add a 7th
    `FLOAT32 beam_angle` field (`point_step` 24→28, `fields.resize(7)`,
    `data_ptr[6]=sounding.beam_angle`, `+= 7`). Consumers read by name, so order
@@ -101,13 +101,12 @@ What already exists (verified):
 
 ## Open Questions
 
-- [ ] **Deferred angle-correction → separate issue (ripple to cube#80).** Plan
-  review (must-fix #1) confirmed #78 must **not** correct backscatter in `node.cpp`
-  (sign-convention gate, `sounding.h`; corrupts the offline path). #78 surfaces the
-  **uncorrected** co-estimated value (still useful — relative brightness for target
-  detection). The nadir-stripe correction belongs in its **own sign-gated issue**
-  (benefits live + offline once it lands). **cube#80's "first-cut beam-angle"
-  framing should defer to it too.** → File the correction issue + tweak cube#80?
+- [x] **Deferred angle-correction → separate issue (ripple to cube#80).** RESOLVED:
+  filed **cube#81** (M3 backscatter angle-correction in the shared estimator, gated
+  on sign-convention verification); commented on cube#80 to drop its "first-cut
+  beam-angle" framing and surface the uncorrected value instead. #78 surfaces the
+  **uncorrected** co-estimated value (relative brightness, still useful); correction
+  lands once in the shared estimator via cube#81.
 - [ ] **Backscatter quantization range** — uint8 `backscatter` band: per-tile
   auto-range with `scale`/`offset` carried in `VisualizationBand` (it provides
   them). Recommend per-tile auto-range; confirm.
