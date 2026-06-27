@@ -127,6 +127,14 @@ void primeFromTile(
     variance = std::max(variance, kPrimeVarianceFloor);
     map_sheet.setPredictedDepthAt(
       *it, static_cast<float>(d), static_cast<float>(variance));
+
+    // Lossless reload (ADR-0001): also reseed the SETTLED depth as a CUBE
+    // hypothesis so the primed cell round-trips through values() and survives the
+    // next whole-tile save. Without this, a tile primed at startup, partially
+    // resurveyed, then re-saved would lose its un-resurveyed cells (the latent
+    // cross-session loss #70 closes). `u` is the stored 1.96-sigma confidence
+    // interval, exactly what seedSettledDepth() expects.
+    map_sheet.setSettledDepthAt(*it, static_cast<float>(d), static_cast<float>(u));
   }
 }
 

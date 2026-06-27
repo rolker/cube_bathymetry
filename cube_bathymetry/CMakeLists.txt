@@ -34,7 +34,6 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rosbag2_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -130,7 +129,6 @@ target_link_libraries(cube_bathymetry_node
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
-  ${std_srvs_TARGETS}
   tf2_eigen::tf2_eigen
   tf2_geometry_msgs::tf2_geometry_msgs
   tf2_sensor_msgs::tf2_sensor_msgs
@@ -242,6 +240,14 @@ if(BUILD_TESTING)
   # Draft-tile persistence round-trip (#21): save -> store load() -> values match.
   ament_add_gtest(test_persistence test/test_persistence.cpp)
   target_link_libraries(test_persistence
+    cube_bathymetry_store_import
+    marine_bathymetry_store::marine_bathymetry_store
+  )
+
+  # Long-duration bounding (#70): resident tile count stays bounded under a long
+  # track while the on-disk store keeps growing (bounded-RSS proxy).
+  ament_add_gtest(test_tile_eviction_rss test/test_tile_eviction_rss.cpp)
+  target_link_libraries(test_tile_eviction_rss
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
   )

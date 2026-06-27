@@ -78,6 +78,53 @@ TEST_F(NodeTest, UpdateCreatesHypothesisWhenEmpty)
   EXPECT_NEAR(h->current_estimate, 10.0, 1e-6);
 }
 
+// Lossless reload (ADR-0001): a seeded settled value must round-trip EXACTLY
+// through extractDepthAndUncertainty -- this is the property that lets an evicted
+// (or primed) tile survive the next whole-tile save instead of being wiped.
+TEST_F(NodeTest, SeedSettledDepthRoundTripsThroughExtract)
+{
+  Node n;
+  const float depth = -12.5f;
+  const float uncertainty = 0.42f;  // stored 1.96-sigma confidence interval
+  n.seedSettledDepth(depth, uncertainty, params);
+
+  const DepthAndUncertainty out = n.extractDepthAndUncertainty(params);
+  EXPECT_NEAR(out.depth, depth, 1e-4) << "seeded depth must re-emit unchanged";
+  EXPECT_NEAR(out.uncertainty, uncertainty, 1e-4)
+    << "seeded uncertainty must re-emit unchanged (variance round-trip)";
+}
+
+// The seeded value is a Bayesian prior: a consistent new sounding refines the
+// SAME hypothesis (it does not spawn a competitor), so the cell stays valid and
+// the estimate stays near the agreed depth.
+TEST_F(NodeTest, SeedSettledDepthActsAsPriorForNewData)
+{
+  Node n;
+  n.seedSettledDepth(-12.5f, 0.42f, params);
+
+  // A new sounding consistent with the prior updates the seeded hypothesis.
+  EXPECT_TRUE(n.update(-12.4f, 0.25f, params));
+  auto h = n.chooseHypothesis();
+  ASSERT_NE(h, nullptr);
+  EXPECT_NEAR(h->current_estimate, -12.5, 0.5)
+    << "estimate stays near the seeded prior after one consistent sample";
+  EXPECT_GT(h->number_of_samples, 1u)
+    << "the new sample accreted onto the seeded hypothesis";
+}
+
+// A non-finite / non-positive stored uncertainty (a single-sample CUBE cell can
+// persist one) must not poison the reload: variance floors to a small positive
+// epsilon so the depth still round-trips and the DLM stays defined.
+TEST_F(NodeTest, SeedSettledDepthFloorsDegenerateUncertainty)
+{
+  Node n;
+  n.seedSettledDepth(-8.0f, 0.0f, params);
+  const DepthAndUncertainty out = n.extractDepthAndUncertainty(params);
+  EXPECT_NEAR(out.depth, -8.0, 1e-4);
+  EXPECT_TRUE(std::isfinite(out.uncertainty));
+  EXPECT_GE(out.uncertainty, 0.0f);
+}
+
 TEST_F(NodeTest, UpdateWithOutlierCreatesNewHypothesis)
 {
   Node n;

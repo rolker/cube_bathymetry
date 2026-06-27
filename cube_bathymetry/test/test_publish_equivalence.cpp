@@ -482,4 +482,67 @@ TEST(PublishEquivalence, GeoProjectionMatchesLegacyMapSheet)
     "not catch a half-cell projection offset";
 }
 
+// Per-tile projection equivalence (#70): geoGridsToGridMap over a SINGLE tile
+// must place that tile's cells at the SAME projected centers and depths the
+// independent per-cell reference computes (the contract pinned by
+// ProjectionPlacesCellCentersExactly, here exercised through the subset path the
+// incremental ~/tiles publish uses). Matching is by nearest reference cell within
+// a half-cell-plus-margin epsilon, since the per-tile lattice is anchored
+// independently of the reference points (up to half a cell offset) -- the same
+// quantization the whole-sheet equivalence check accounts for.
+TEST(PublishEquivalence, PerTileProjectionMatchesReference)
+{
+  const Eigen::Isometry3d map_from_earth = makeMapFromEarth();
+  const double cell_size = 1.0;
+
+  // A survey patch spanning more than one GGGS grid (see makeSoundings()).
+  GeoMapSheet geo_sheet(static_cast<float>(cell_size));
+  for (const auto & s : makeSoundings()) {
+    gz4d::GeoPointLatLongDegrees ll(s.lat, s.lon, s.depth);
+    GeoSounding gs(ll);
+    gs.sounding.vertical_error = 0.5f;
+    gs.sounding.horizontal_error = 0.1f;
+    geo_sheet.addSoundings({gs});
+  }
+
+  // Independent per-cell reference (exact projected centers + depths).
+  const std::vector<ReferenceCell> reference =
+    referenceCells(geo_sheet, map_from_earth);
+  ASSERT_FALSE(reference.empty());
+
+  const auto grids = geo_sheet.grids();
+  ASSERT_FALSE(grids.empty());
+
+  // Each finite cell of each single-tile projection must coincide with a
+  // reference cell (the SAME GGGS cell -- the nearest within < a cell, since
+  // neighbours are a full cell away) carrying the same depth.
+  const double eps = 0.75;  // > half-cell diagonal (0.707 m) at 1 m cells
+  std::size_t checked = 0;
+  for (const auto & grid : grids) {
+    std::vector<std::shared_ptr<const GeoGrid>> one{grid};
+    const grid_map::GridMap tile_map =
+      geoGridsToGridMap(one, "map", cell_size, map_from_earth);
+    if (!tile_map.exists("elevation")) {
+      continue;  // a tile whose cells are all still queued projects nothing
+    }
+    for (const auto & c : collectFiniteCells(tile_map)) {
+      double best_d = eps;
+      const ReferenceCell * best = nullptr;
+      for (const auto & ref : reference) {
+        const double d = std::hypot(ref.x - c.x, ref.y - c.y);
+        if (d <= best_d) {
+          best_d = d;
+          best = &ref;
+        }
+      }
+      ASSERT_NE(best, nullptr)
+        << "a per-tile cell has no matching reference cell within " << eps << " m";
+      EXPECT_NEAR(best->depth, c.depth, 1e-3)
+        << "per-tile depth disagrees with the independent reference";
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 0u) << "no finite per-tile cells were checked";
+}
+
 }  // namespace cube

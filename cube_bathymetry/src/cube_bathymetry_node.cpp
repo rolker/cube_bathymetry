@@ -47,7 +47,6 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "grid_map_ros/grid_map_ros.hpp"
 #include "grid_map_msgs/msg/grid_map.hpp"
-#include "std_srvs/srv/trigger.hpp"
 
 #include "marine_autonomy/gz4d_geo.h"
 #include "cube_bathymetry/store_import.h"
@@ -88,6 +87,46 @@ public:
 
     geo_map_sheet_ =
       std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
+    // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
+    // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
+    evicted_indices_.clear();
+
+    // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
+    // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
+    // (whole store) re-creates the unbounded-RAM condition #70 exists to prevent.
+    //  - max_resident_tiles: RAM budget; cold tiles beyond it are persisted then
+    //    evicted (lossless). Eviction requires draft persistence -- without a
+    //    draft_dir the node leaves data resident and warns (it never drops data).
+    //  - ca_window_radius_m: half-extent of the vessel-centered window published
+    //    on `grid` (the bounded collision-avoidance view that replaces the old
+    //    whole-survey publish).
+    //  - base_link_frame: vessel frame used to center the CA window.
+    max_resident_tiles_ =
+      static_cast<std::size_t>(declare_parameter("max_resident_tiles", 64));
+    ca_window_radius_m_ = declare_parameter("ca_window_radius_m", 200.0);
+    base_link_frame_ = declare_parameter("base_link_frame", std::string("base_link"));
+
+    // Coherence WARN (ADR-0001): the resident budget must cover the CA window's
+    // tile span, else a window tile could be evicted and render as a NaN/lethal
+    // hole inside the avoidance window. gridsInCaWindow() selects tiles within
+    // R + one tile span (the boundary-straddle margin), so the budget must cover
+    // that same R + span extent -- not just R.
+    const double tile_span_m =
+      geo_map_sheet_->nominalCellSizeMeters() * gggs::GridIndex::cellRowCount();
+    if (tile_span_m > 0.0) {
+      const double per_axis = std::ceil(
+        (2.0 * (ca_window_radius_m_ + tile_span_m)) / tile_span_m) + 1.0;
+      const std::size_t window_tiles =
+        static_cast<std::size_t>(per_axis * per_axis);
+      if (max_resident_tiles_ < window_tiles) {
+        RCLCPP_WARN(get_logger(),
+          "max_resident_tiles=%zu is smaller than the ~%zu tiles spanning the "
+          "%.0fm CA window (tile span ~%.0fm); window tiles may be evicted and "
+          "show as lethal holes. Raise max_resident_tiles or shrink "
+          "ca_window_radius_m.", max_resident_tiles_, window_tiles,
+          ca_window_radius_m_, tile_span_m);
+      }
+    }
 
     // Draft-tile persistence (#21). draft_dir empty (default) disables it; set
     // it per deployment to opt in. Tiles are written as marine_bathymetry_store
@@ -122,7 +161,8 @@ public:
 
     if (!draft_dir_.empty()) {
       // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
-      // slope correction warm-starts on previously-surveyed areas.
+      // slope correction warm-starts on previously-surveyed areas and the settled
+      // depths round-trip through values() (lossless reload, ADR-0001).
       try {
         marine_bathymetry_store::BathymetryStore store =
           marine_bathymetry_store::BathymetryStore::fromCellSize(
@@ -136,6 +176,14 @@ public:
           RCLCPP_INFO(get_logger(),
             "Primed GeoMapSheet from %zu draft tiles under %s",
             draft_tiles.size(), draft_dir_.c_str());
+          // Bound the prime to the resident budget (must-fix): loadIntoSheet loads
+          // the WHOLE store, so without this a restart mid-long-survey re-creates
+          // the unbounded RAM #70 prevents. Primed tiles are clean and already on
+          // disk, so dropping the cold ones is lossless; they reload on revisit.
+          // (The transient peak during the whole-store load before the trim is a
+          // known limitation -- a windowed prime needs a startup position that is
+          // not available at on_configure; tracked as a follow-up.)
+          trimResidentToBudget();
         }
       } catch (const std::exception & e) {
         // A missing/empty store dir is normal on a first run; a genuine load
@@ -158,16 +206,18 @@ public:
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
 
-
     grid_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
+
+    // Incremental per-tile coverage stream (#70): one GridMap per changed tile
+    // per publish cycle, BEST_EFFORT (high-rate, loss-tolerant -- the durable
+    // record is the draft store). Interface contract for the boat->CAMP live
+    // coverage view (unh_marine_autonomy#86/#250); no in-tree consumer yet.
+    tiles_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>(
+      "~/tiles", rclcpp::QoS(10).best_effort());
 
     ping_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>("soundings",
       rclcpp::SensorDataQoS(),
       std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
-
-    clear_grid_service_ = create_service<std_srvs::srv::Trigger>("clear_grid",
-      std::bind(&CubeBathymetry::clearGridService, this,
-        std::placeholders::_1, std::placeholders::_2));
 
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
@@ -223,7 +273,8 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   std::string map_frame_ = "map";
-  // Cached so clearGrid() can rebuild the sheet with the configured geometry.
+  // Cached so the startup prime and revisit-reload can rebuild a GeoMapSheet /
+  // scratch store with the configured geometry.
   double cell_size_ = 1.0;
   int grid_cell_count_ = 25;
   rclcpp::Time last_grid_publish_time_;
@@ -233,8 +284,25 @@ private:
   geometry_msgs::msg::TransformStamped last_publish_tf_;
   bool have_publish_tf_ = false;
   rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr grid_publisher_;
+  // Incremental per-tile coverage stream (~/tiles, #70).
+  rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr tiles_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr clear_grid_service_;
+
+  // Long-duration bounding parameters (#70, ADR-0001).
+  std::size_t max_resident_tiles_ = 64;
+  double ca_window_radius_m_ = 200.0;
+  std::string base_link_frame_ = "base_link";
+
+  // Last known vessel position, cached so a brief vessel-TF gap keeps the CA
+  // window bounded (reuse the last fix) instead of falling back to the full set.
+  double last_vessel_lat_ = 0.0;
+  double last_vessel_lon_ = 0.0;
+  bool have_vessel_pos_ = false;
+
+  // Tiles persisted and evicted from RAM this session, pending lossless reload on
+  // revisit. GridIndex is tiny (~level+row+col) so this set is negligible next to
+  // the 920k-cell grids it lets us drop; it is the revisit-detection signal.
+  std::set<gggs::GridIndex> evicted_indices_;
 
   // Draft-tile persistence (#21). draft_dir_ empty = disabled. Tiles are written
   // to a single fused `draft/` grid (no per-day epochs, unh_marine_autonomy#221);
@@ -243,19 +311,14 @@ private:
   double save_interval_s_ = 30.0;
   rclcpp::TimerBase::SharedPtr save_timer_;
 
-  void publishGrid()
-  {
-    if(geo_map_sheet_->grids().empty()) {
-      // No tiles populated yet (no soundings have been added). pingCallback
-      // emits the actionable diagnostics for why soundings aren't arriving.
-      return;
-    }
+  // Degrees->radians (avoid relying on M_PI being defined).
+  static constexpr double kDegToRad = 0.017453292519943295;
 
-    // Look up the map<-earth transform ONCE per publish; the projection helper
-    // applies it as a single batched affine to every GGGS cell center (no
-    // per-cell TF lookup). On a TF miss reuse the last good transform so a TF
-    // outage degrades gracefully rather than starving the collision-avoidance
-    // grid; skip publish only on the very first cycle, before any cache exists.
+  // Look up the map<-earth transform ONCE per publish and return it as a batched
+  // affine. On a TF miss reuse the last good transform so a TF outage degrades
+  // gracefully; fail only on the very first cycle, before any cache exists.
+  bool currentMapFromEarth(Eigen::Isometry3d & out)
+  {
     geometry_msgs::msg::TransformStamped map_from_earth;
     if(lookupAtOrLatest(map_frame_, "earth", get_clock()->now(), map_from_earth)) {
       last_publish_tf_ = map_from_earth;
@@ -265,47 +328,255 @@ private:
         RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
           "No transform " << map_frame_ << " <- earth at publish time and no "
           "cached transform yet; skipping this publish cycle");
-        return;
+        return false;
       }
       map_from_earth = last_publish_tf_;
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
         "No transform " << map_frame_ << " <- earth at publish time; reusing the "
         "last good map<-earth transform (grid placement may be slightly stale)");
     }
+    out = tf2::transformToEigen(map_from_earth);
+    return true;
+  }
 
-    const Eigen::Isometry3d map_from_earth_eigen =
-      tf2::transformToEigen(map_from_earth);
-
-    grid_map::GridMap map = cube::geoMapSheetToGridMap(
-      *geo_map_sheet_, map_frame_, cell_size_, map_from_earth_eigen);
-
-    if(!map.exists("elevation")) {
-      // No finite cells projected (e.g. every grid still queued in the
-      // pre-filter). Nothing to publish this cycle.
-      return;
-    }
-
+  // Stamp the grid with the sheet's last-update time (steady-clock ns), matching
+  // the pre-#70 publish.
+  void stampGrid(grid_map::GridMap & map)
+  {
     auto epoch = std::chrono::time_point<std::chrono::steady_clock>{};
     map.setTimestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(
         (geo_map_sheet_->lastUpdateTime() - epoch)).count());
+  }
 
-    size_t populated = 0;
-    const grid_map::Matrix & elevation = map["elevation"];
-    for(grid_map::GridMapIterator it(map); !it.isPastEnd(); ++it) {
-      if(std::isfinite(elevation((*it)(0), (*it)(1)))) {
-        ++populated;
+  // Bounded publish (#70, ADR-0001): a vessel-centered collision-avoidance window
+  // on `grid` PLUS the incremental per-tile coverage stream on `~/tiles`.
+  // Replaces the monolithic whole-survey publishGrid(). Eviction is NOT done here
+  // -- it runs separately in pingCallback so a publish-time TF miss (which
+  // early-returns below) can never stall RAM bounding while pings keep ingesting.
+  void publishBounded()
+  {
+    if(geo_map_sheet_->grids().empty()) {
+      // No tiles populated yet. pingCallback emits the actionable diagnostics.
+      return;
+    }
+    Eigen::Isometry3d map_from_earth;
+    if(!currentMapFromEarth(map_from_earth)) {
+      return;
+    }
+    publishCaGrid(map_from_earth);
+    publishDirtyTiles(map_from_earth);
+  }
+
+  // Collision-avoidance grid: project only the resident tiles within
+  // ca_window_radius_m of the vessel onto the existing `grid` topic (bounded
+  // extent, unchanged contract). Unknown cells in the window are NaN (lethal
+  // under the costmap's unsurveyed_is_lethal). On a vessel-TF miss, reuse the last
+  // known vessel position so the window stays bounded through brief TF gaps; only
+  // before any fix has ever been seen do we fall back to the full resident set
+  // (itself bounded by eviction) so the CA grid stays alive rather than starving.
+  void publishCaGrid(const Eigen::Isometry3d & map_from_earth)
+  {
+    std::vector<std::shared_ptr<const cube::GeoGrid>> window;
+    double lat = 0.0;
+    double lon = 0.0;
+    if(lookupVesselLatLon(lat, lon)) {
+      last_vessel_lat_ = lat;
+      last_vessel_lon_ = lon;
+      have_vessel_pos_ = true;
+      window = gridsInCaWindow(lat, lon);
+    } else if(have_vessel_pos_) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "No vessel transform earth <- " << base_link_frame_ << "; reusing the last "
+        "known vessel position to keep the CA window bounded");
+      window = gridsInCaWindow(last_vessel_lat_, last_vessel_lon_);
+    } else {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "No vessel transform earth <- " << base_link_frame_ << " yet; publishing "
+        "the full resident set as the CA grid (bounded by eviction)");
+      for (const auto & g : geo_map_sheet_->grids()) {
+        window.push_back(g);
       }
     }
-
+    if(window.empty()) {
+      return;
+    }
+    grid_map::GridMap map = cube::geoGridsToGridMap(
+      window, map_frame_, cell_size_, map_from_earth);
+    if(!map.exists("elevation")) {
+      // No finite cells projected this cycle. Nothing to publish.
+      return;
+    }
+    stampGrid(map);
     auto message = grid_map::GridMapRosConverter::toMessage(map);
     grid_publisher_->publish(*message);
-
-    // Liveness heartbeat: confirms the grid is being emitted and how many cells
-    // carry a depth estimate (a persistently-zero count means soundings arrive
-    // but never resolve into the grid).
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
-      "Published grid: " << populated << " populated cells over " <<
-      geo_map_sheet_->grids().size() << " tiles");
+      "Published CA grid: " << window.size() << " of " <<
+      geo_map_sheet_->grids().size() << " resident tiles in the " <<
+      ca_window_radius_m_ << "m window");
+  }
+
+  // Incremental coverage: emit each changed tile as its own GridMap on ~/tiles,
+  // then clear the publish-dirty set. Bounds per-message size to one tile and
+  // per-cycle cost to the tiles that actually changed.
+  void publishDirtyTiles(const Eigen::Isometry3d & map_from_earth)
+  {
+    const std::set<gggs::GridIndex> dirty = geo_map_sheet_->publishDirtyGrids();
+    for (const auto & index : dirty) {
+      auto grid = geo_map_sheet_->gridAt(index);
+      if(!grid) {
+        continue;
+      }
+      std::vector<std::shared_ptr<const cube::GeoGrid>> one{grid};
+      grid_map::GridMap map = cube::geoGridsToGridMap(
+        one, map_frame_, cell_size_, map_from_earth);
+      if(!map.exists("elevation")) {
+        continue;
+      }
+      stampGrid(map);
+      auto message = grid_map::GridMapRosConverter::toMessage(map);
+      tiles_publisher_->publish(*message);
+    }
+    geo_map_sheet_->clearPublishDirtyGrids();
+  }
+
+  // LRU eviction (#70, ADR-0001): bound resident RAM losslessly. Persist all
+  // pending tiles first so every resident tile is on disk, then drop the coldest
+  // beyond budget (reloadable on revisit). Without a draft_dir there is nowhere
+  // to persist, so do NOT evict -- leave the data resident and warn (dropping it
+  // would be data loss).
+  void evictColdTiles()
+  {
+    if(geo_map_sheet_->residentTileCount() <= max_resident_tiles_) {
+      return;
+    }
+    if(draft_dir_.empty()) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Resident tiles (%zu) exceed max_resident_tiles (%zu) but draft_dir is "
+        "unset: not evicting (eviction needs persistence to stay lossless). Set "
+        "draft_dir to bound RAM.",
+        geo_map_sheet_->residentTileCount(), max_resident_tiles_);
+      return;
+    }
+    // Flush every dirty tile so all resident tiles are durably on disk; only then
+    // is dropping a cold tile lossless (it can be reloaded on revisit).
+    saveDirtyTiles();
+    const std::size_t before = geo_map_sheet_->residentTileCount();
+    trimResidentToBudget();
+    const std::size_t after = geo_map_sheet_->residentTileCount();
+    if (after < before) {
+      RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Evicted " << (before - after) << " cold tile(s) to disk; " << after <<
+        " resident (budget " << max_resident_tiles_ << ")");
+    }
+    // If a save failed, the still-dirty cold tiles are NOT dropped (see
+    // trimResidentToBudget) -- RAM stays transiently over budget rather than
+    // losing unsaved data. Surface that so a persistent disk failure is visible.
+    if (after > max_resident_tiles_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Could not evict to budget this cycle: %zu resident > %zu budget. Cold "
+        "tiles with unsaved data are kept to avoid loss; check draft_dir writes.",
+        after, max_resident_tiles_);
+    }
+  }
+
+  // Drop clean, already-persisted cold tiles down to the resident budget,
+  // recording them as evicted (a revisit reloads from disk). A cold tile that is
+  // STILL in the dirty set (its save did not succeed) is kept resident -- dropping
+  // it would lose unsaved soundings, breaking the lossless guarantee (must-fix).
+  // Used after the startup prime (every primed tile is clean/on-disk) and by
+  // evictColdTiles after its flush.
+  void trimResidentToBudget()
+  {
+    const std::set<gggs::GridIndex> still_dirty = geo_map_sheet_->dirtyGrids();
+    for (const auto & index : geo_map_sheet_->coldTiles(max_resident_tiles_)) {
+      if (still_dirty.count(index)) {
+        continue;  // unsaved -- never drop (would lose data); retry next cycle
+      }
+      geo_map_sheet_->dropTile(index);
+      evicted_indices_.insert(index);
+    }
+  }
+
+  // Vessel lat/lon from earth <- base_link (translation = the ECEF position of
+  // the base_link origin).
+  bool lookupVesselLatLon(double & lat, double & lon)
+  {
+    geometry_msgs::msg::TransformStamped t;
+    if(!lookupAtOrLatest("earth", base_link_frame_, get_clock()->now(), t)) {
+      return false;
+    }
+    gz4d::GeoPointECEF ecef(
+      t.transform.translation.x, t.transform.translation.y,
+      t.transform.translation.z);
+    gz4d::GeoPointLatLongDegrees ll(ecef);
+    lat = ll.latitude();
+    lon = ll.longitude();
+    return true;
+  }
+
+  // Resident tiles whose center is within ca_window_radius_m (plus one tile of
+  // margin so a tile straddling the boundary is included) of (lat, lon). An
+  // equirectangular metric is ample for a few-hundred-metre window.
+  std::vector<std::shared_ptr<const cube::GeoGrid>> gridsInCaWindow(
+    double lat, double lon)
+  {
+    std::vector<std::shared_ptr<const cube::GeoGrid>> ret;
+    const double tile_span_m =
+      geo_map_sheet_->nominalCellSizeMeters() * gggs::GridIndex::cellRowCount();
+    const double max_dist = ca_window_radius_m_ + tile_span_m;
+    const double m_per_deg = 111320.0;
+    const double cos_lat = std::cos(lat * kDegToRad);
+    for (const auto & g : geo_map_sheet_->grids()) {
+      if(!g) {
+        continue;
+      }
+      const gggs::GridIndex & idx = g->index();
+      const double center_lat = 0.5 * (idx.southLatitude() + idx.northLatitude());
+      const double center_lon = 0.5 * (idx.westLongitude() + idx.eastLongitude());
+      const double dy = (center_lat - lat) * m_per_deg;
+      const double dx = (center_lon - lon) * m_per_deg * cos_lat;
+      if(std::sqrt(dx * dx + dy * dy) <= max_dist) {
+        ret.push_back(g);
+      }
+    }
+    return ret;
+  }
+
+  // Lossless revisit reload (#70, ADR-0001): window-load just this previously-
+  // evicted tile into a scratch store and reseed its settled cells so
+  // accumulation continues from the saved state and the next save is complete.
+  //
+  // Returns true when the on-disk state is now consistent with what a save will
+  // write -- either the tile was found and reseeded, or it is genuinely absent on
+  // disk (nothing to preserve). Returns false ONLY on a load error (the file may
+  // exist but be transiently unreadable): the caller must then NOT let the partial
+  // re-created grid be saved over the intact on-disk surface (review #70 round 2).
+  bool reloadEvictedTile(const gggs::GridIndex & index)
+  {
+    if(draft_dir_.empty()) {
+      return true;
+    }
+    try {
+      marine_bathymetry_store::BathymetryStore scratch =
+        marine_bathymetry_store::BathymetryStore::fromCellSize(
+        static_cast<float>(cell_size_));
+      const auto sw = index.southWestPosition();
+      const auto ne = index.northEastPosition();
+      marine_bathymetry_store::loadWindow(scratch, draft_dir_, sw, ne, nullptr);
+      const auto & tiles =
+        scratch.tiles(marine_bathymetry_store::SourceLayer::Draft);
+      auto it = tiles.find(index);
+      if(it != tiles.end()) {
+        cube::primeFromTile(it->second, *geo_map_sheet_);
+      }
+      return true;
+    } catch (const std::exception & e) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+        "Could not reload evicted tile on revisit: " << e.what() <<
+        " (dropping the partial re-created tile to protect the on-disk surface; "
+        "will retry on the next revisit)");
+      return false;
+    }
   }
 
   // Persist every grid touched since the last save as a marine_bathymetry_store
@@ -371,37 +642,6 @@ private:
     geo_map_sheet_->clearDirtyGrids();
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
       "Saved " << written << " draft tile(s) to " << dir);
-  }
-
-  // Replace the accumulated surface with a fresh, empty sheet of the same
-  // configured geometry. Lets an operator reset the grid in place -- e.g. to
-  // shed a surface that has grown too large for the telemetry downlink -- with
-  // no process restart and no CONFIGURE/ACTIVATE cycle. Safe from a service
-  // callback: main() runs a SingleThreadedExecutor, so this never overlaps
-  // pingCallback's use of map_sheet_.
-  void clearGrid()
-  {
-    // Flush any draft data accumulated since the last periodic save BEFORE
-    // discarding the sheet, mirroring on_cleanup -- otherwise an operator reset
-    // would silently drop unsaved-since-last-interval soundings. A no-op when
-    // persistence is disabled or nothing is dirty.
-    saveDirtyTiles();
-    geo_map_sheet_ =
-      std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
-    // Force the next ping to republish immediately (a zero-nanosecond time is
-    // the same first-publish trigger used at startup) so the cleared surface
-    // propagates without waiting out the ~5 s publish interval.
-    last_grid_publish_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-  }
-
-  void clearGridService(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
-  {
-    clearGrid();
-    response->success = true;
-    response->message = "grid cleared";
-    RCLCPP_INFO(get_logger(), "Grid cleared via clear_grid service");
   }
 
   // Look up target<-source at the exact stamp; on extrapolation (the requested
@@ -531,11 +771,47 @@ private:
 
     geo_map_sheet_->addSoundings(soundings, timestamp);
 
+    // Lossless revisit reload (#70, ADR-0001). Any tile this batch just
+    // re-created/dirtied that was evicted earlier must be reseeded from disk
+    // before the next save, or that save overwrites the tile's full on-disk
+    // surface with only the freshly-accumulated cells.
+    //
+    // Key off the DIRTY set -- the grids insert() actually touched -- NOT the
+    // sounding centres: addSoundings expands the bounds by a cell and spills into
+    // neighbour tiles near a GGGS seam, so a centre-only check would miss an
+    // evicted neighbour and clobber it (review #70 round 2). Reseeding does not
+    // mark dirty, so the grid stays dirty for the save (reloaded settled cells +
+    // new cells); a resurveyed cell keeps the new value, others the reloaded one.
+    //
+    // On a reload error, DROP the partial re-created grid (the on-disk surface is
+    // the real data and must not be clobbered) and keep the evicted marker so the
+    // next revisit retries -- the few new soundings for that tile this cycle are
+    // discarded (they re-survey cheaply; disk integrity wins).
+    if(!draft_dir_.empty() && !evicted_indices_.empty()) {
+      std::vector<gggs::GridIndex> revisited;
+      for (const auto & idx : geo_map_sheet_->dirtyGrids()) {
+        if(evicted_indices_.count(idx)) {
+          revisited.push_back(idx);
+        }
+      }
+      for (const auto & idx : revisited) {
+        if(reloadEvictedTile(idx)) {
+          evicted_indices_.erase(idx);
+        } else {
+          geo_map_sheet_->dropTile(idx);  // protect the intact on-disk surface
+        }
+      }
+    }
+
     if(last_grid_publish_time_.nanoseconds() == 0 ||
       rclcpp::Time(msg->header.stamp) - last_grid_publish_time_ >
       rclcpp::Duration::from_seconds(5.0))
     {
-      publishGrid();
+      publishBounded();
+      // Evict OUTSIDE publishBounded so RAM bounding runs even when a publish-time
+      // TF miss makes publishBounded early-return (#70 review): eviction depends
+      // only on the draft store, not on any transform.
+      evictColdTiles();
       last_grid_publish_time_ = msg->header.stamp;
     }
   }

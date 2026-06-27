@@ -118,6 +118,17 @@ void GeoGrid::setPredictedDepthAt(
   nodes_[cell]->setPredictedDepth(depth, variance);
 }
 
+void GeoGrid::setSettledDepthAt(
+  const gggs::CellIndex & cell, float depth, float uncertainty)
+{
+  // Lazy-create the Node (mirrors setPredictedDepthAt) so the reload can seed a
+  // cell the live session has not yet touched this run.
+  if(!nodes_[cell]) {
+    nodes_[cell] = std::make_shared<Node>();
+  }
+  nodes_[cell]->seedSettledDepth(depth, uncertainty, parameters_);
+}
+
 float GeoGrid::predictedDepthAt(const gggs::CellIndex & cell) const
 {
   auto it = nodes_.find(cell);

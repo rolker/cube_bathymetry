@@ -35,6 +35,36 @@ bool Node::addHypothesis(float depth, float variance)
   return true;
 }
 
+void Node::seedSettledDepth(
+  float depth, float uncertainty, const Parameters & parameters)
+{
+  // Recover the DLM variance from the stored 1-sigma confidence interval:
+  // extractDepthAndUncertainty() reports scale * sqrt(input_sample_variance),
+  // so input_sample_variance = (uncertainty / scale)^2 makes the reload
+  // round-trip exactly (ADR-0001). A single-sample CUBE cell can persist a
+  // zero / non-finite uncertainty; floor the variance at a small positive
+  // epsilon (1 cm 1-sigma) so the West-Harrison update stays well-defined.
+  constexpr float kSeedVarianceFloor = 1e-4F;  // m^2 (== 1 cm 1-sigma)
+  const float scale = parameters.stddev_to_confidence_interval_scale;
+  float variance = kSeedVarianceFloor;
+  if (std::isfinite(uncertainty) && uncertainty > 0.0F && scale > 0.0F) {
+    const float sigma = uncertainty / scale;
+    const float v = sigma * sigma;
+    if (v > variance) {
+      variance = v;
+    }
+  }
+
+  // The Hypothesis ctor sets current/predicted_estimate = depth,
+  // current/predicted_variance = variance, number_of_samples = 1. It does NOT
+  // set input_sample_variance (which drives the extracted uncertainty), so set
+  // it here to the same recovered variance for an exact uncertainty round-trip.
+  auto hypothesis = std::make_shared<Hypothesis>(depth, variance);
+  hypothesis->hypothesis_number = depth_hypotheses_.size();
+  hypothesis->input_sample_variance = variance;
+  depth_hypotheses_.push_back(hypothesis);
+}
+
 
 bool Node::update(
   float depth, float variance, const Parameters & parameters,

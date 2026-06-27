@@ -25,14 +25,38 @@
 
 #include <Eigen/Geometry>
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "grid_map_core/GridMap.hpp"
 
+#include "cube_bathymetry/geo_grid.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 
 namespace cube
 {
+
+/// @brief Project an explicit set of @ref GeoGrid tiles into a `map`-frame
+///        `grid_map::GridMap` (the bounded-publish path, issue #70).
+///
+/// The projection core shared by @ref geoMapSheetToGridMap and the bounded
+/// publishes added in #70: the windowed collision-avoidance grid (a vessel-centered
+/// subset of resident tiles) and the per-tile incremental `~/tiles` stream (a
+/// single-tile vector). Geometry, layers, and the batched `map <- earth` affine
+/// behave exactly as the whole-sheet path; only the set of tiles differs. An
+/// empty set (or no finite cells) yields a default-constructed GridMap (no
+/// geometry); the caller should skip publishing.
+///
+/// @param grids           Tiles to project (nullptrs skipped).
+/// @param map_frame       Frame id stamped on the returned grid.
+/// @param cell_size_m     Grid resolution in meters (the published contract).
+/// @param map_from_earth  Single `map <- earth` affine applied to every cell.
+  grid_map::GridMap geoGridsToGridMap(
+    const std::vector < std::shared_ptr < const GeoGrid >> &grids,
+    const std::string & map_frame,
+    double cell_size_m,
+    const Eigen::Isometry3d & map_from_earth);
 
 /// @brief Project a geographic @ref GeoMapSheet into a Cartesian `map`-frame
 ///        `grid_map::GridMap` (live-node publish path, issue #21).
