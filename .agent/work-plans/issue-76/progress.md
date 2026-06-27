@@ -76,3 +76,20 @@ The upstream blocker (`rolker/unh_marine_autonomy#228`) merged 2026-06-27 — no
 ### Findings
 - [ ] (suggestion) Dockerfile comment update scope is narrower than ci.yml: the `marine_nav_*` handling in the Dockerfile is fully automatic via the dynamic `rosdep check` → `--skip-keys` pattern (no explicit skip-key list in the Dockerfile). Step 3's Dockerfile comment update only needs to remove the `nlohmann_json` / `#228-pending` language; it does not need to add an "intentional pruning" narrative the way ci.yml does. Implementer: update the Dockerfile's bake-step comment to just remove the `nlohmann_json` bullet and `#228-pending` wording — the auto-skip mechanism already handles `marine_nav_*` transparently. — `plan.md:43-50`
 - [ ] (suggestion) **A-vs-B decision checkpoint for operator**: Option B (keep intentional pruning) is clearly sound — building `mission_manager*` / `marine_mbes_backscatter_store` / integration tests in cube CI adds noise and coupling without improving cube's correctness signal. Confirm Option B before implementation proceeds. — `plan.md:53-76`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-27 16:36 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-76 at `244c190`
+**Mode**: pre-push
+**Depth**: Deep (reason: 242 lines changed ≥200, doc-inflated; ci.yml enforcement override-trigger)
+**Must-fix**: 0 | **Suggestions**: 3
+**Round**: 1 | **Ship**: recommended — no must-fix; Lens A verified #228 landed via live upstream clone, so the resolve is correct
+
+### Findings
+- [ ] (suggestion) ci.yml comment overstates #228 — claims it fixed the "marine_nav source-dep manifest", but marine_nav was never a bug (intentional pruning per plan); drop that clause — `.github/workflows/ci.yml:75-76`
+- [ ] (suggestion) "backscatter" grouped under marine_nav-skip rationale but has no marine_nav dep; it's pruned for scope only — clarify — `.github/workflows/ci.yml:67-71`
+- [ ] (suggestion, optional) `upstream.repos` pins moving `jazzy` branch (not SHA), so a future #228 revert would re-break the resolve with no skip-key fallback; verified-fine today, consistent with existing convention — `upstream.repos`
