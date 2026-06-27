@@ -112,6 +112,15 @@ public:
 
     std::vector < DepthAndUncertainty > values() const;
 
+  /// @brief Per-cell full node records (depth, uncertainty, **backscatter**) in
+  ///        GGGS `CellAreaIterator` order, parallel to @ref values().
+  ///
+  /// Mirrors @ref values() but emits `NodeRecord` (which additionally carries the
+  /// co-estimated `intensity`/`intensity_var`, #54) for the live display-tile
+  /// producer (#78). Empty cells yield a default (all-NaN) record. Like
+  /// `values()`, this flushes each node's median pre-filter (`queueFlush`).
+    std::vector < NodeRecord > nodeRecords() const;
+
 private:
     gggs::GridIndex index_;
 

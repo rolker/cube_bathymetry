@@ -29,6 +29,8 @@ find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
 find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
+find_package(marine_interfaces REQUIRED)  # SonarVisualizationTile transport (#230)
+find_package(marine_tiled_raster_store REQUIRED)  # TileCatalogBuilder (#230)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -111,6 +113,21 @@ target_link_libraries(cube_bathymetry_grid_projection
 # (plus Eigen3) onto the target, which raw ${grid_map_core_LIBRARIES} does not.
 ament_target_dependencies(cube_bathymetry_grid_projection grid_map_core)
 install(TARGETS cube_bathymetry_grid_projection EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# GeoGrid -> quantized SonarVisualizationTile (#78, ADR-0008). Own target so the
+# marine_interfaces message dependency stays out of the core cube_bathymetry
+# library (mirrors grid_projection's isolation) and the quantization is
+# unit-testable without a ROS node.
+add_library(cube_bathymetry_quantize_tile src/quantize_tile.cpp)
+target_link_libraries(cube_bathymetry_quantize_tile
+  cube_bathymetry
+  ${marine_interfaces_TARGETS}
+)
+install(TARGETS cube_bathymetry_quantize_tile EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -226,6 +243,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_geo_grid test/test_geo_grid.cpp)
   target_link_libraries(test_geo_grid cube_bathymetry)
+
+  ament_add_gtest(test_quantize_tile test/test_quantize_tile.cpp)
+  target_link_libraries(test_quantize_tile cube_bathymetry_quantize_tile)
 
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
