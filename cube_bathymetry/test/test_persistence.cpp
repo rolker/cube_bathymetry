@@ -225,4 +225,100 @@ TEST(Persistence, PeriodicSaveEqualsEndOfSessionExport)
   std::filesystem::remove_all(dir_periodic);
 }
 
+namespace
+{
+// Count finite (surveyed) cells in a loaded draft tile's depth band.
+std::size_t finiteCellCount(
+  const marine_bathymetry_store::BathymetryStore & store,
+  const gggs::GridIndex & index)
+{
+  const auto & tiles = store.tiles(marine_bathymetry_store::SourceLayer::Draft);
+  auto it = tiles.find(index);
+  if (it == tiles.end()) {
+    return 0;
+  }
+  std::size_t n = 0;
+  for (double d : it->second.depthBand()) {
+    if (!std::isnan(d)) {
+      ++n;
+    }
+  }
+  return n;
+}
+
+marine_bathymetry_store::BathymetryStore loadDraft(const std::string & dir)
+{
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  marine_bathymetry_store::load(store, dir);
+  return store;
+}
+
+// A sparse resurvey: a few soundings on ONE cell of the surveyed tile -- the
+// pathological case that an overwrite-on-save would use to wipe the rest.
+std::vector<GeoSounding> makeSparseResurvey()
+{
+  std::vector<GeoSounding> soundings;
+  for (int rep = 0; rep < 20; ++rep) {
+    gz4d::GeoPointLatLongDegrees point(43.07, -70.76, -10.5);
+    GeoSounding s(point);
+    s.sounding.vertical_error = 0.5f;
+    s.sounding.horizontal_error = 0.1f;
+    soundings.push_back(s);
+  }
+  return soundings;
+}
+}  // namespace
+
+// THE lossless-eviction guarantee (#70, ADR-0001): survey a tile, save it, evict
+// it (drop from RAM), then revisit and SPARSELY resurvey one cell. Because
+// saveTile overwrites the whole tile file, the only thing that keeps the
+// un-resurveyed cells alive across the re-save is the settled-state reload
+// (primeFromTile -> setSettledDepthAt). With the reload, the re-saved tile
+// retains every original cell; the negative control (no reload) proves the test
+// discriminates -- without it, the re-save wipes everything but the one cell.
+TEST(Persistence, RevisitAfterEvictPreservesData)
+{
+  const std::string dir = makeTempDir("lossless");
+  const gggs::Level level = gggs::Level::fromCellSize(1.0f);
+  const gggs::GridIndex index = level.gridIndex(43.07, -70.76);
+
+  // 1. Survey the tile fully and save it (the pre-eviction durable state).
+  GeoMapSheet surveyed(1.0f);
+  surveyed.addSoundings(makeSoundings());
+  ASSERT_GT(saveDirty(surveyed, dir, kStamp), 0u);
+  const std::size_t original_finite = finiteCellCount(loadDraft(dir), index);
+  ASSERT_GT(original_finite, 1u) << "the survey must populate more than one cell";
+
+  // 2. WITH reload (the fix): a fresh sheet reseeds settled state from disk
+  //    (mimicking evict -> revisit-reload), then sparsely resurveys and re-saves.
+  GeoMapSheet reloaded(1.0f);
+  {
+    marine_bathymetry_store::BathymetryStore store = loadDraft(dir);
+    loadIntoSheet(store, marine_bathymetry_store::SourceLayer::Draft, reloaded);
+  }
+  reloaded.addSoundings(makeSparseResurvey());  // touches ~one cell
+  ASSERT_GT(saveDirty(reloaded, dir, kStamp + 1), 0u);
+  const std::size_t after_reload_finite = finiteCellCount(loadDraft(dir), index);
+  EXPECT_GE(after_reload_finite, original_finite)
+    << "reload+resurvey+save must NOT lose any previously-surveyed cell";
+
+  // 3. NEGATIVE CONTROL: the same sparse resurvey on a FRESH (un-reloaded) sheet,
+  //    re-saved over the tile, wipes everything but the resurveyed cell.
+  const std::string dir_ctrl = makeTempDir("lossless_ctrl");
+  GeoMapSheet seeded(1.0f);
+  seeded.addSoundings(makeSoundings());
+  ASSERT_GT(saveDirty(seeded, dir_ctrl, kStamp), 0u);
+  GeoMapSheet no_reload(1.0f);
+  no_reload.addSoundings(makeSparseResurvey());
+  ASSERT_GT(saveDirty(no_reload, dir_ctrl, kStamp + 1), 0u);
+  const std::size_t no_reload_finite = finiteCellCount(loadDraft(dir_ctrl), index);
+  EXPECT_LT(no_reload_finite, original_finite)
+    << "without reload the overwrite-on-save DOES lose cells -- "
+       "this is what the reload prevents";
+
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(dir_ctrl);
+}
+
 }  // namespace cube

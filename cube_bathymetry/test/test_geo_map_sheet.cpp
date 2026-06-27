@@ -179,4 +179,143 @@ TEST_F(GeoMapSheetTest, SetPredictedDepthAtSeedsCellWithoutDirtying)
   EXPECT_FLOAT_EQ(grid->predictedDepthAt(cell), depth);
 }
 
+namespace
+{
+// Add one sounding at (lat, lon) so a single addSoundings touches exactly one
+// grid -- used to build a synthetic multi-tile track with a known touch order.
+void addOneAt(GeoMapSheet & ms, double lat, double lon)
+{
+  std::vector<GeoSounding> soundings;
+  gz4d::GeoPointLatLongDegrees point(lat, lon, -10.0);
+  GeoSounding s(point);
+  s.sounding.vertical_error = 0.5f;
+  s.sounding.horizontal_error = 0.1f;
+  soundings.push_back(s);
+  ms.addSoundings(soundings);
+}
+}  // namespace
+
+// Lossless reload at the sheet level (#70, ADR-0001): setSettledDepthAt must make
+// the seeded value re-emit through values() (so the cell survives the next save),
+// without marking the grid dirty (it reproduces persisted data).
+TEST_F(GeoMapSheetTest, SetSettledDepthAtRoundTripsThroughValues)
+{
+  GeoMapSheet ms(cell_size);
+  gggs::Level level = gggs::Level::fromCellSize(cell_size);
+  gggs::CellIndex cell = level.cellIndex(gggs::geoPoint(43.07, -70.76));
+
+  ms.setSettledDepthAt(cell, -8.0f, 0.42f);
+  EXPECT_TRUE(ms.dirtyGrids().empty()) << "reload must not dirty the grid";
+
+  auto grid = ms.gridAt(cell.grid());
+  ASSERT_NE(grid, nullptr);
+  std::size_t finite = 0;
+  for (const auto & v : grid->values()) {
+    if (!std::isnan(v.depth)) {
+      ++finite;
+      EXPECT_NEAR(v.depth, -8.0f, 1e-4) << "seeded depth re-emits through values()";
+      EXPECT_NEAR(v.uncertainty, 0.42f, 1e-4) << "seeded uncertainty re-emits";
+    }
+  }
+  EXPECT_EQ(finite, 1u) << "exactly the one seeded cell is finite";
+}
+
+// Index of the currently most-recently-touched resident grid.
+gggs::GridIndex hottestIndex(const GeoMapSheet & ms)
+{
+  gggs::GridIndex hottest;
+  uint64_t best = 0;
+  for (const auto & g : ms.grids()) {
+    const uint64_t t = ms.lastTouchOf(g->index());
+    if (t >= best) {
+      best = t;
+      hottest = g->index();
+    }
+  }
+  return hottest;
+}
+
+// LRU eviction bounds the resident tile count: a track over many tiles, trimmed
+// to budget via coldTiles()+dropTile(), leaves exactly `budget` resident. (A
+// single sounding's bounds can straddle GGGS edges, so the exact tile count per
+// step is incidental -- the invariant is the post-eviction bound.)
+TEST_F(GeoMapSheetTest, EvictionBoundsTileCount)
+{
+  GeoMapSheet ms(cell_size);
+  const std::size_t budget = 3;
+  for (int i = 0; i < 8; ++i) {
+    addOneAt(ms, 43.0 + 0.05 * i, -70.0);  // ~0.05 deg >> one ~960m grid span
+  }
+  ASSERT_GT(ms.residentTileCount(), budget) << "need more tiles than the budget";
+
+  for (const auto & idx : ms.coldTiles(budget)) {
+    ms.dropTile(idx);
+  }
+  EXPECT_EQ(ms.residentTileCount(), budget);
+}
+
+// Eviction is LRU: coldTiles() returns indices in ascending last-touch order, and
+// the single most-recently-touched grid survives eviction to budget 1.
+TEST_F(GeoMapSheetTest, EvictionLeavesLruTilesResident)
+{
+  GeoMapSheet ms(cell_size);
+  for (int i = 0; i < 6; ++i) {
+    addOneAt(ms, 43.0 + 0.05 * i, -70.0);
+  }
+  ASSERT_GT(ms.residentTileCount(), 1u);
+
+  // coldTiles must be ordered coldest-first (ascending last-touch).
+  const auto cold_all = ms.coldTiles(1);
+  for (std::size_t i = 1; i < cold_all.size(); ++i) {
+    EXPECT_LE(ms.lastTouchOf(cold_all[i - 1]), ms.lastTouchOf(cold_all[i]))
+      << "coldTiles must be sorted ascending by last-touch";
+  }
+
+  // Evicting to budget 1 leaves exactly the hottest grid resident.
+  const gggs::GridIndex hottest = hottestIndex(ms);
+  for (const auto & idx : cold_all) {
+    ms.dropTile(idx);
+  }
+  EXPECT_EQ(ms.residentTileCount(), 1u);
+  EXPECT_NE(ms.gridAt(hottest), nullptr)
+    << "the most-recently-touched grid must survive LRU eviction";
+}
+
+// dropTile clears the grid from every tracking structure (grids, last-touch, and
+// BOTH dirty sets) so a dropped index can't linger as a phantom save/publish.
+TEST_F(GeoMapSheetTest, DropTileClearsAllTracking)
+{
+  GeoMapSheet ms(cell_size);
+  addOneAt(ms, 43.0, -70.0);
+  // Pick a grid that actually received data (a single sounding's expanded bounds
+  // can create neighbour grids that were never inserted into, hence not dirty).
+  ASSERT_FALSE(ms.dirtyGrids().empty());
+  const gggs::GridIndex idx = *ms.dirtyGrids().begin();
+
+  ASSERT_NE(ms.gridAt(idx), nullptr);
+  ASSERT_TRUE(ms.dirtyGrids().count(idx));
+  ASSERT_TRUE(ms.publishDirtyGrids().count(idx));
+  ASSERT_GT(ms.lastTouchOf(idx), 0u);
+
+  ms.dropTile(idx);
+
+  EXPECT_EQ(ms.gridAt(idx), nullptr);
+  EXPECT_FALSE(ms.dirtyGrids().count(idx));
+  EXPECT_FALSE(ms.publishDirtyGrids().count(idx));
+  EXPECT_EQ(ms.lastTouchOf(idx), 0u);
+}
+
+// coldTiles is empty when the resident count is within budget (no spurious
+// eviction), whether the budget equals or exceeds the resident count.
+TEST_F(GeoMapSheetTest, ColdTilesEmptyWithinBudget)
+{
+  GeoMapSheet ms(cell_size);
+  for (int i = 0; i < 3; ++i) {
+    addOneAt(ms, 43.0 + 0.05 * i, -70.0);
+  }
+  const std::size_t resident = ms.residentTileCount();
+  EXPECT_TRUE(ms.coldTiles(resident).empty()) << "budget == resident: nothing cold";
+  EXPECT_TRUE(ms.coldTiles(resident + 5).empty()) << "budget > resident: nothing cold";
+}
+
 }  // namespace cube

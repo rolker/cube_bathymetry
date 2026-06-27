@@ -245,6 +245,14 @@ if(BUILD_TESTING)
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
   )
+
+  # Long-duration bounding (#70): resident tile count stays bounded under a long
+  # track while the on-disk store keeps growing (bounded-RSS proxy).
+  ament_add_gtest(test_tile_eviction_rss test/test_tile_eviction_rss.cpp)
+  target_link_libraries(test_tile_eviction_rss
+    cube_bathymetry_store_import
+    marine_bathymetry_store::marine_bathymetry_store
+  )
 endif()
 
 ament_export_dependencies(rclcpp)
