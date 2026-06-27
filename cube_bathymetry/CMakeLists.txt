@@ -140,8 +140,11 @@ target_include_directories(cube_bathymetry_node PUBLIC
 target_link_libraries(cube_bathymetry_node
   cube_bathymetry
   cube_bathymetry_grid_projection
+  cube_bathymetry_quantize_tile   # GeoGrid -> SonarVisualizationTile (#78)
   cube_bathymetry_store_import   # geoGridToTile / loadIntoSheet + store (#21)
   marine_bathymetry_store::marine_bathymetry_store  # saveTile / load / store API
+  marine_tiled_raster_store::marine_tiled_raster_store  # TileCatalogBuilder (#230)
+  ${marine_interfaces_TARGETS}  # SonarVisualizationTile / TileCatalog / TileRequest
   ${geometry_msgs_TARGETS}
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp

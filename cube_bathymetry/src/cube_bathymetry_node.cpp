@@ -51,9 +51,14 @@
 
 #include "marine_autonomy/gz4d_geo.h"
 #include "cube_bathymetry/store_import.h"
+#include "cube_bathymetry/quantize_tile.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
 #include "marine_bathymetry_store/tile_io.hpp"
+#include "marine_tiled_raster_store/tile_catalog.hpp"
+#include "marine_interfaces/msg/sonar_visualization_tile.hpp"
+#include "marine_interfaces/msg/tile_catalog.hpp"
+#include "marine_interfaces/msg/tile_request.hpp"
 
 
 class CubeBathymetry : public rclcpp_lifecycle::LifecycleNode
@@ -216,6 +221,23 @@ public:
     tiles_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>(
       "~/tiles", rclcpp::QoS(10).best_effort());
 
+    // Quantized display-tile transport (#78, ADR-0008): the boat->operator/CAMP
+    // live coverage view. `~/coverage_tiles` is the live PUSH of changed tiles
+    // (best-effort, loss-tolerant -- durable record is the draft store). The
+    // periodic `~/coverage_catalog` (transient_local for late joiners) is the
+    // COMPLETE snapshot that drives anti-entropy reconciliation, and
+    // `~/coverage_requests` lets a consumer ask for tiles it is missing/stale on.
+    catalog_interval_s_ = declare_parameter("catalog_interval", 5.0);
+    sonar_tile_publisher_ =
+      create_publisher<marine_interfaces::msg::SonarVisualizationTile>(
+      "~/coverage_tiles", rclcpp::QoS(10).best_effort());
+    tile_catalog_publisher_ = create_publisher<marine_interfaces::msg::TileCatalog>(
+      "~/coverage_catalog", rclcpp::QoS(1).transient_local().reliable());
+    tile_request_subscription_ =
+      create_subscription<marine_interfaces::msg::TileRequest>(
+      "~/coverage_requests", rclcpp::QoS(10).reliable(),
+      std::bind(&CubeBathymetry::tileRequestCallback, this, std::placeholders::_1));
+
     ping_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>("soundings",
       rclcpp::SensorDataQoS(),
       std::bind(&CubeBathymetry::pingCallback, this, std::placeholders::_1));
@@ -237,6 +259,12 @@ public:
       RCLCPP_INFO(get_logger(),
         "Draft-tile save timer started (interval=%.1fs)", save_interval_s_);
     }
+    // Periodic complete catalog for anti-entropy reconciliation (#78/#230).
+    if (!catalog_timer_) {
+      catalog_timer_ = create_wall_timer(
+        std::chrono::duration<double>(catalog_interval_s_),
+        std::bind(&CubeBathymetry::publishCatalog, this));
+    }
     return LifecycleNode::on_activate(state);
   }
 
@@ -249,6 +277,10 @@ public:
     if (save_timer_) {
       save_timer_->cancel();
       save_timer_.reset();
+    }
+    if (catalog_timer_) {
+      catalog_timer_->cancel();
+      catalog_timer_.reset();
     }
     return LifecycleNode::on_deactivate(state);
   }
@@ -263,6 +295,10 @@ public:
     if (save_timer_) {
       save_timer_->cancel();
       save_timer_.reset();
+    }
+    if (catalog_timer_) {
+      catalog_timer_->cancel();
+      catalog_timer_.reset();
     }
     return LifecycleNode::on_cleanup(state);
   }
@@ -288,6 +324,19 @@ private:
   // Incremental per-tile coverage stream (~/tiles, #70).
   rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr tiles_publisher_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr ping_subscription_;
+
+  // Quantized display-tile transport (#78, ADR-0008).
+  rclcpp_lifecycle::LifecyclePublisher<marine_interfaces::msg::SonarVisualizationTile>::SharedPtr
+    sonar_tile_publisher_;
+  rclcpp_lifecycle::LifecyclePublisher<marine_interfaces::msg::TileCatalog>::SharedPtr
+    tile_catalog_publisher_;
+  rclcpp::Subscription<marine_interfaces::msg::TileRequest>::SharedPtr
+    tile_request_subscription_;
+  rclcpp::TimerBase::SharedPtr catalog_timer_;
+  double catalog_interval_s_ = 5.0;
+  // Source-side tile->version registry (#230) backing the periodic complete
+  // catalog; updated whenever a tile is pushed.
+  marine_tiled_raster_store::TileCatalogBuilder catalog_builder_;
 
   // Long-duration bounding parameters (#70, ADR-0001).
   std::size_t max_resident_tiles_ = 64;
@@ -421,6 +470,13 @@ private:
   // per-cycle cost to the tiles that actually changed.
   void publishDirtyTiles(const Eigen::Isometry3d & map_from_earth)
   {
+    // One publish time stamps every tile this cycle: it is both the tile's
+    // version (newest-wins, ADR-0008 D3) and its catalog version, so the two
+    // always agree.
+    const rclcpp::Time pub_time = now();
+    const builtin_interfaces::msg::Time stamp = pub_time;
+    const std::int64_t version = pub_time.nanoseconds();
+
     const std::set<gggs::GridIndex> dirty = geo_map_sheet_->publishDirtyGrids();
     for (const auto & index : dirty) {
       auto grid = geo_map_sheet_->gridAt(index);
@@ -436,8 +492,69 @@ private:
       stampGrid(map);
       auto message = grid_map::GridMapRosConverter::toMessage(map);
       tiles_publisher_->publish(*message);
+
+      // Quantized display tile (#78): push the changed tile and register its
+      // version in the catalog. quantizeTile returns nullopt for an all-empty
+      // tile, which the GridMap path already skipped above.
+      if (auto vt = cube::quantizeTile(*grid, stamp)) {
+        sonar_tile_publisher_->publish(*vt);
+        catalog_builder_.update(index, version);
+      }
     }
     geo_map_sheet_->clearPublishDirtyGrids();
+  }
+
+  // Publish the COMPLETE tile catalog (anti-entropy basis, #78/#230): the
+  // consumer converges its cache to exactly this set. generation_time stamps
+  // "now" so the consumer's prune gate is well-defined.
+  void publishCatalog()
+  {
+    const rclcpp::Time gen = now();
+    const marine_tiled_raster_store::TileCatalog catalog =
+      catalog_builder_.buildCatalog(gen.nanoseconds());
+
+    marine_interfaces::msg::TileCatalog msg;
+    msg.header.stamp = gen;
+    msg.header.frame_id = "gggs";
+    msg.entries.reserve(catalog.entries.size());
+    for (const auto & e : catalog.entries) {
+      marine_interfaces::msg::TileCatalogEntry entry;
+      entry.index.level = e.index.level();
+      entry.index.row = e.index.row();
+      entry.index.col = e.index.column();
+      entry.version.sec = static_cast<std::int32_t>(e.version / 1000000000LL);
+      entry.version.nanosec = static_cast<std::uint32_t>(e.version % 1000000000LL);
+      msg.entries.push_back(entry);
+    }
+    tile_catalog_publisher_->publish(msg);
+  }
+
+  // Serve a consumer's TileRequest (#78/#230). v1 serves RESIDENT tiles in full
+  // (3-band, via quantizeTile). A requested tile that has been evicted to disk is
+  // not re-served here -- from-disk catch-up for evicted tiles is a follow-up; the
+  // live push + periodic catalog already cover the common (resident) case.
+  void tileRequestCallback(const marine_interfaces::msg::TileRequest::SharedPtr msg)
+  {
+    const builtin_interfaces::msg::Time stamp = now();
+    std::size_t served = 0;
+    for (const auto & ti : msg->tiles) {
+      for (const auto & grid : geo_map_sheet_->grids()) {
+        if (grid && grid->index().level() == ti.level &&
+          grid->index().row() == ti.row && grid->index().column() == ti.col)
+        {
+          if (auto vt = cube::quantizeTile(*grid, stamp)) {
+            sonar_tile_publisher_->publish(*vt);
+            ++served;
+          }
+          break;
+        }
+      }
+    }
+    if (served < msg->tiles.size()) {
+      RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 5000,
+        "TileRequest: served %zu of %zu (the rest are not resident; "
+        "from-disk catch-up is a follow-up)", served, msg->tiles.size());
+    }
   }
 
   // LRU eviction (#70, ADR-0001): bound resident RAM losslessly. Persist all
