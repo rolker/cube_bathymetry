@@ -88,3 +88,18 @@ The following should be part of the implementation or flagged as follow-up:
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-27 23:05 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-80/plan.md` at `05f281f`
+**PR**: PR-less (`--issue` mode)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (must-fix) Backscatter conversion omits timestamp + provenance — the bathy mirror `geoGridToTile(grid, timestamp_ns, source_index)` threads both into every `BathyCell` and `import_bag_main.cpp` feeds a `SourceRegistry` into `save()`; `MbesCell` has identical `timestamp`/`source_index` fields and mbes `save()` takes a `SourceRegistry*`. As written the Processed product ships timestamp=0/source_index=0/empty registry.json. Give `geoGridToBackscatterTile`/`mapSheetToBackscatterTiles` the same params, register an mbes source, pass the registry to `save()` — `plan.md:54-66`.
+- [ ] (suggestion) State that `NodeRecord::intensity_var` maps to `MbesCell.intensity_variance` (ADR-0007 D6: variance is the quality band) so it isn't left NaN — `plan.md:55-57`.
+- [ ] (suggestion) Document the same-pass layer split as intentional: bathy → Draft (`import_bag_main.cpp:666`), backscatter → Processed — `plan.md:26-29`.
+- [ ] (suggestion) Line drift: threading insertion cited at 507–510; actual `gs.sounding.*` assignments at 508–509 — `plan.md:33-37`.
