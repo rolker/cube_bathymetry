@@ -1,0 +1,95 @@
+---
+issue: 76
+---
+
+# Issue #76 — CI: remove nlohmann_json workaround (unh_marine_autonomy#228 landed); decide marine_nav pruning
+
+## Issue Review
+**Status**: complete
+**When**: 2026-06-27 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Issue**: #76
+**Comment**: (best-effort post follows this entry; not recorded inline)
+**Scope verdict**: well-scoped
+
+### Summary
+
+Issue targets two CI config files in `cube_bathymetry` only:
+- `.github/workflows/ci.yml` — drop `nlohmann_json` from `ROSDEP_SKIP_KEYS`; update comments
+- `.github/ci/Dockerfile` — drop explicit `apt-get install nlohmann-json3-dev`; the auto-skip `rosdep check` pattern now resolves the correctly-named `nlohmann-json-dev` key naturally
+
+The upstream blocker (`rolker/unh_marine_autonomy#228`) merged 2026-06-27 — no pending dependencies. One design fork remains: whether to keep `marine_nav_*` skip-keys + `COLCON_IGNORE` pruning (Option B, recommended) or go full-resolve by cloning `unh_marine_navigation` (Option A). The issue correctly defers that decision to plan-review.
+
+### Principle Alignment
+
+| Principle | Status | Notes |
+|---|---|---|
+| Capture decisions, not just implementations | Watch | The A-vs-B pruning choice should be captured in ci.yml comment block — not just in the PR description. The "Done when" already requires this; plan should make it explicit. |
+| A change includes its consequences | OK | Issue correctly notes Dockerfile change triggers ci-image.yml rebuild; no additional consequences. |
+| Only what's needed | OK | Option B (recommended) keeps CI focused on cube's subtree; Option A would pull in unrelated `mission_manager`/`marine_nav` build scope. |
+| Human control and transparency | OK | Issue explicitly requires updating comments so remaining skips/COLCON_IGNORE reflect *intentional pruning* rather than workaround status. |
+| Improve incrementally | OK | Small, focused CI maintenance change; single PR scope is appropriate. |
+
+### ADR Applicability
+
+| ADR | Triggered | Notes |
+|---|---|---|
+| ADR-0001 (Adopt ADRs) | No | A-vs-B is a CI configuration choice, not an architectural direction change. Rationale belongs in code comments + PR description, not an ADR. |
+| ADR-0002 (Worktree isolation) | OK | Worktree already exists (`feature/issue-76`). |
+| ADR-0013 (progress.md vocabulary) | Yes | This entry fulfills it. |
+| Others | Not triggered | No ROS 2 packages, no Python packaging, no AGENTS.md, no Makefile changes. |
+
+### Consequences
+
+- Dockerfile change triggers a `ci-image.yml` rebuild of `ghcr.io/rolker/cube_bathymetry-ci:jazzy`. The image already exists so there is no bootstrap chicken-egg risk (per the CI ADR lesson in workspace memory). The image rebuild is automatic on merge.
+- No downstream packages affected — CI-only change.
+
+### Open Questions
+
+- **A vs B fork** (flag for plan-review checkpoint): Issue recommends Option B (keep pruning). plan-task should explicitly present both options with recommendation, and the plan-review checkpoint is where Roland confirms the choice. No new dependency repos needed for Option B.
+
+### Actions
+- [ ] Ensure plan captures A-vs-B decision as an explicit checkpoint with recommendation rationale documented in ci.yml comments — not just in the PR.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-27 15:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-76/plan.md` at `7fc2a36`
+**Branch**: feature/issue-76 at `7fc2a36`
+**Phases**: single
+
+### Open questions
+- [ ] A vs B fork: keep intentional marine_nav pruning (Option B, recommended) or full-resolve by cloning unh_marine_navigation (Option A)? — gate for plan-review confirmation.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-27 16:15 +00:00
+**By**: Claude Code Agent (Claude Sonnet) (in-context — author self-review)
+
+**Plan**: `.agent/work-plans/issue-76/plan.md` at `7fc2a36`
+**PR**: PR-less
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (suggestion) Dockerfile comment update scope is narrower than ci.yml: the `marine_nav_*` handling in the Dockerfile is fully automatic via the dynamic `rosdep check` → `--skip-keys` pattern (no explicit skip-key list in the Dockerfile). Step 3's Dockerfile comment update only needs to remove the `nlohmann_json` / `#228-pending` language; it does not need to add an "intentional pruning" narrative the way ci.yml does. Implementer: update the Dockerfile's bake-step comment to just remove the `nlohmann_json` bullet and `#228-pending` wording — the auto-skip mechanism already handles `marine_nav_*` transparently. — `plan.md:43-50`
+- [ ] (suggestion) **A-vs-B decision checkpoint for operator**: Option B (keep intentional pruning) is clearly sound — building `mission_manager*` / `marine_mbes_backscatter_store` / integration tests in cube CI adds noise and coupling without improving cube's correctness signal. Confirm Option B before implementation proceeds. — `plan.md:53-76`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-27 16:36 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-76 at `244c190`
+**Mode**: pre-push
+**Depth**: Deep (reason: 242 lines changed ≥200, doc-inflated; ci.yml enforcement override-trigger)
+**Must-fix**: 0 | **Suggestions**: 3
+**Round**: 1 | **Ship**: recommended — no must-fix; Lens A verified #228 landed via live upstream clone, so the resolve is correct
+
+### Findings
+- [ ] (suggestion) ci.yml comment overstates #228 — claims it fixed the "marine_nav source-dep manifest", but marine_nav was never a bug (intentional pruning per plan); drop that clause — `.github/workflows/ci.yml:75-76`
+- [ ] (suggestion) "backscatter" grouped under marine_nav-skip rationale but has no marine_nav dep; it's pruned for scope only — clarify — `.github/workflows/ci.yml:67-71`
+- [ ] (suggestion, optional) `upstream.repos` pins moving `jazzy` branch (not SHA), so a future #228 revert would re-break the resolve with no skip-key fallback; verified-fine today, consistent with existing convention — `upstream.repos`

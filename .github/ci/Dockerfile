@@ -36,14 +36,14 @@ COPY cube_bathymetry/package.xml ./cube_bathymetry/package.xml
 RUN mkdir -p src && vcs import src < upstream.repos
 
 # `rosdep install` is all-or-nothing on key resolution: a single unresolvable
-# key aborts the whole install. This monorepo carries keys that don't resolve
-# standalone — `nlohmann_json` (an upstream packaging bug,
-# rolker/unh_marine_autonomy#228) and the `marine_nav_*` source deps (no
-# manifest declares where to obtain them). So first compute the unresolvable
-# keys via `rosdep check` and pass them as --skip-keys, so one bad key skips
-# only itself instead of nuking the bake. `nlohmann-json3-dev` is then
-# installed explicitly to cover the skipped (mis-named) `nlohmann_json` key
-# until #228 lands and cube's upstream.repos picks up the fix.
+# key aborts the whole install. This monorepo carries source-dep keys that
+# don't resolve standalone — the `marine_nav_*` keys declared by mission_manager*
+# / integration-tests, which cube does not build (and whose source repo is not
+# in upstream.repos). So first compute the unresolvable keys via `rosdep check`
+# and pass them as --skip-keys, so an unresolvable key skips only itself instead
+# of nuking the bake. The skip set is computed dynamically, so it tracks the
+# cloned upstream automatically (e.g. nlohmann-json-dev now resolves on its own
+# after unh_marine_autonomy#228 — no explicit deb install needed).
 RUN apt-get update \
     && skip_keys="$(rosdep check --from-paths src cube_bathymetry --ignore-src --rosdistro jazzy 2>&1 \
           | sed -n 's/.*Cannot locate rosdep definition for \[\([^]]*\)\].*/\1/p' \
@@ -51,7 +51,6 @@ RUN apt-get update \
     echo "dep bake: skipping unresolvable keys: ${skip_keys:-<none>}" ; \
     rosdep install --from-paths src cube_bathymetry --ignore-src -y --rosdistro jazzy \
         ${skip_keys:+--skip-keys "$skip_keys"} ; \
-    apt-get install -y --no-install-recommends nlohmann-json3-dev ; \
     rm -rf /tmp/dep-bake /var/lib/apt/lists/*
 
 WORKDIR /
