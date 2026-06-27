@@ -12,7 +12,7 @@ already co-estimates backscatter via `Node::extractNodeRecord()` (intensity +
 intensity_var), but the offline import path currently:
 
 1. Does NOT thread `intensity`/`beam_angle` from the projected `Sounding` to
-   `GeoSounding` (lines 507–510 of `import_bag_main.cpp` copy only
+   `GeoSounding` (the `gs.sounding.*` copies at lines 508–509 of `import_bag_main.cpp` set only
    `vertical_error`/`horizontal_error`), so every beam has NaN intensity and CUBE
    accumulates no backscatter.
 2. Has no backscatter tile conversion or output path.

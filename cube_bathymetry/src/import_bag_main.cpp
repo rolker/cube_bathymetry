@@ -34,6 +34,7 @@
 #include <deque>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -62,7 +63,7 @@
 #include "tf2/time.h"
 #include "tf2_ros/buffer.h"
 
-void usage()
+[[noreturn]] void usage()
 {
   std::cout << "usage: import_bag [options] -o <store_dir> "
     "-d <detections_topic> <bag> [<bag> ...]\n";
@@ -280,60 +281,58 @@ int main(int argc, char * argv[])
   // the same way the live node would.
   cube::ProjectorParams projector_params;
 
-  for (auto arg = arguments.begin(); arg != arguments.end(); arg++) {
+  // Consume the value token following a value-taking flag, bounds-checked: a
+  // flag given as the last argument (no value after it) would otherwise advance
+  // `arg` past end() and dereference it (UB). usage() is [[noreturn]], so on the
+  // missing-value error this never falls through to the ++arg/deref. `arg` is
+  // declared before the lambda so the by-reference capture binds the loop cursor.
+  auto arg = arguments.begin();
+  auto next_value = [&](const char * flag) -> const std::string & {
+      if (std::next(arg) == arguments.end()) {
+        std::cerr << "error: option '" << flag << "' requires a value\n";
+        usage();
+      }
+      ++arg;
+      return *arg;
+    };
+
+  for (; arg != arguments.end(); arg++) {
     if (*arg == "-h") {
       usage();
     } else if (*arg == "-o") {
-      arg++;
-      store_dir = *arg;
+      store_dir = next_value("-o");
     } else if (*arg == "--bs-store") {
-      arg++;
-      bs_store_dir = *arg;
+      bs_store_dir = next_value("--bs-store");
     } else if (*arg == "-d") {
-      arg++;
-      detections_topic = *arg;
+      detections_topic = next_value("-d");
     } else if (*arg == "--odom-topic") {
-      arg++;
-      odom_topic = *arg;
+      odom_topic = next_value("--odom-topic");
     } else if (*arg == "-r") {
-      arg++;
-      resolution = std::stod(*arg);
+      resolution = std::stod(next_value("-r"));
     } else if (*arg == "--iho-order") {
-      arg++;
-      iho_order = *arg;
+      iho_order = next_value("--iho-order");
     } else if (*arg == "-l") {
-      arg++;
-      ping_count_limit = std::stoi(*arg);
+      ping_count_limit = std::stoi(next_value("-l"));
     } else if (*arg == "--source-id") {
-      arg++;
-      source_record.source_id = *arg;
+      source_record.source_id = next_value("--source-id");
     } else if (*arg == "--platform") {
-      arg++;
-      source_record.platform = *arg;
+      source_record.platform = next_value("--platform");
     } else if (*arg == "--sensor") {
-      arg++;
-      source_record.sensor = *arg;
+      source_record.sensor = next_value("--sensor");
     } else if (*arg == "--sensor-class") {
-      arg++;
-      source_record.sensor_class = *arg;
+      source_record.sensor_class = next_value("--sensor-class");
     } else if (*arg == "--campaign") {
-      arg++;
-      source_record.campaign = *arg;
+      source_record.campaign = next_value("--campaign");
     } else if (*arg == "--base-link-frame") {
-      arg++;
-      projector_params.base_link_frame = *arg;
+      projector_params.base_link_frame = next_value("--base-link-frame");
     } else if (*arg == "--level-frame") {
-      arg++;
-      projector_params.level_frame = *arg;
+      projector_params.level_frame = next_value("--level-frame");
     } else if (*arg == "--tide-frame") {
-      arg++;
-      projector_params.tide_frame = *arg;
+      projector_params.tide_frame = next_value("--tide-frame");
     } else if (*arg == "--minimum-range") {
-      arg++;
-      projector_params.minimum_range = std::stod(*arg);
+      projector_params.minimum_range = std::stod(next_value("--minimum-range"));
     } else if (*arg == "--maximum-range") {
-      arg++;
-      projector_params.maximum_range = std::stod(*arg);
+      projector_params.maximum_range = std::stod(next_value("--maximum-range"));
     } else if (!arg->empty() && (*arg)[0] == '-' && *arg != "-") {
       // An unrecognized flag would otherwise be silently treated as a bag path
       // and fail later with a confusing "cannot open bag". Reject it up front.
