@@ -98,3 +98,25 @@ Remaining:
 - [ ] Then `/review-code` (container) → push + PR (Closes #78).
 
 Notes: full-tile window v1 (dirty sub-window = later refinement); backscatter surfaced UNCORRECTED (correction = cube#81).
+
+## Implementation complete (pending sim-verify)
+**When**: 2026-06-27 20:15 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8)
+
+All 3 parts done + committed (366 tests pass, uncrustify clean):
+- `8d430b6` — backscatter into the live estimator (cloud field + pingCallback).
+- `8a141a2` — quantization core (`nodeRecords()` + `quantizeTile()` + test).
+- `587703f` — node endpoints: `~/coverage_tiles` (live push), `~/coverage_catalog`
+  (periodic complete, transient_local, via `TileCatalogBuilder`), `~/coverage_requests`
+  (serve resident tiles). Lifecycle-managed catalog timer.
+
+Producer is functionally complete. Remaining:
+- [ ] End-to-end **sim-verify**: launch the node, replay a Massabesic detections bag
+  (`detections_to_pointcloud` → cube node), confirm `~/coverage_tiles` carries
+  depth+uncertainty+backscatter and `~/coverage_catalog` lists the tiles. Absorbs
+  cube#70's owed sim-verify (touches the live CA grid).
+- [ ] `/review-code` (container) on the full diff → push + PR (Closes #78).
+
+Scoped-as-follow-up (documented in code/commits): dirty sub-window (full-tile v1);
+TileRequest from-disk catch-up for evicted tiles (resident-serving v1); backscatter
+angle-correction (cube#81).
