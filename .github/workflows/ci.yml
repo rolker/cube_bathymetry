@@ -64,17 +64,18 @@ jobs:
           # --- Prune cube's subtree out of the monorepo (see #72/#76) ------
           # industrial_ci resolves + builds the WHOLE unh_marine_autonomy
           # monorepo, unlike the old `rosdep -r` + `--packages-up-to` flow that
-          # only touched cube's subtree. mission_manager* / integration-tests /
-          # backscatter are outside cube_bathymetry's build graph, so we prune
-          # them deliberately: COLCON_IGNORE keeps the upstream build from
-          # compiling packages cube never ships, and the marine_nav_* skip-keys
-          # keep those (pruned) packages' source deps from failing the rosdep
-          # resolve. rosdep does not honor COLCON_IGNORE, so it still reads their
-          # package.xml — hence the skip is still needed even though they aren't
-          # built. This is intentional scoping, NOT a pending workaround: the
-          # upstream packaging gaps (nlohmann_json key, marine_nav source-dep
-          # manifest) are fixed in unh_marine_autonomy#228, so the only remaining
-          # entries here are cube's own choice to stay focused on its subtree.
+          # only touched cube's subtree. Several monorepo packages are outside
+          # cube_bathymetry's build graph, so we prune them deliberately with
+          # COLCON_IGNORE (below) — cube CI should not compile packages it never
+          # ships. Two of those, mission_manager* and the integration-tests,
+          # also declare marine_nav_* source deps; rosdep does not honor
+          # COLCON_IGNORE, so it still reads their package.xml and would fail on
+          # those keys — hence marine_nav_* stays in ROSDEP_SKIP_KEYS even though
+          # the packages are never built. (marine_mbes_backscatter_store has no
+          # marine_nav dep; it is COLCON_IGNORE'd purely for scope and needs no
+          # skip-key.) This is intentional scoping, NOT a pending workaround —
+          # the one real upstream bug here, the invalid nlohmann_json rosdep key,
+          # is fixed in unh_marine_autonomy#228, so nothing waits on upstream.
           # (Option A — clone unh_marine_navigation + build the whole monorepo —
           # was considered in #76 and rejected: no benefit to cube correctness.)
           ROSDEP_SKIP_KEYS: "marine_nav_interfaces marine_nav_tasks"
