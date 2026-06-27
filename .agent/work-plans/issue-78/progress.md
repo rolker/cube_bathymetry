@@ -61,3 +61,20 @@ first-cut correction is genuinely wanted, it belongs in its own issue gated on t
 sign-convention check, with `node.cpp` untouched by #78.
 
 Note: review-issue was not run for #78 (optional; not penalized).
+
+## Plan Revised
+**Status**: complete
+**When**: 2026-06-27 18:55 -04:00
+**By**: Claude Code Agent (Claude Opus 4.8)
+
+Container review-plan verdict **changes-requested**; folded in:
+- [x] **(must-fix)** Dropped the `node.cpp` backscatter "correction". #78 now **surfaces** the existing co-estimated value via `extractNodeRecord` (node.cpp:270) — `node.cpp` untouched. The angle-correction is deliberately deferred (sign-convention gate in `sounding.h`, cube#15) and would corrupt the offline path (`store_import` runs the same estimator). → becomes a separate sign-gated issue; **cube#80's "first-cut beam-angle" framing must defer too** (Open Question).
+- [x] (suggestion) Reuse existing `extractNodeRecord` rather than a new "intensity-aware extract".
+- [x] (suggestion) Build deps: `marine_interfaces` + `marine_tiled_raster_store` (merged #230) must be built in `core_ws`; noted.
+- [x] (suggestion) QoS specified — catalog `transient_local`, push best-effort, request reliable.
+- [x] (suggestion) Per-tile auto-range carried via `VisualizationBand` scale/offset (confirmed present).
+
+### Open questions
+- [ ] File the separate sign-gated angle-correction issue + adjust cube#80's framing? (ripple from must-fix #1)
+- [ ] Backscatter uint8 range: per-tile auto-range (recommend).
+- [ ] udp_bridge#19 metering: ship v1 without, add later (recommend).
