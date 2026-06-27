@@ -1,4 +1,4 @@
-# Plan: Tile eviction + incremental publish to bound long-duration growth
+# Plan: Lossless tile eviction + incremental publish to bound long-duration growth
 
 ## Issue
 
@@ -19,104 +19,136 @@ only grows. Each tile is up to 920k cells; RAM scales with surveyed area forever
 ~5 s, emitting a single monolithic `GridMap`. Message size and per-cycle cost grow
 with surveyed area.
 
+**Design record**: `docs/decisions/0001-tile-eviction-and-incremental-publish.md`
+(the project's first ADR; numbering is per-repo, so it is `0001`, NOT workspace
+ADR-0008). Two key operator decisions, settled during implementation, shape the
+design:
+- Eviction must be **lossless**: persist the tile before dropping it, and never
+  evict-and-lose. Without a configured `draft_dir`, do not evict (WARN instead).
+- Lossless reload is achieved by **reseeding settled CUBE state** (not merge-on-save):
+  a revisited/primed tile re-emits its persisted depth/uncertainty through
+  `values()` so the next save is complete.
+
 ## Approach
 
-1. **Write ADR-0008** — Commit `docs/decisions/0008-tile-eviction-and-incremental-publish.md`
-   capturing: eviction policy (LRU-by-last-touch, configurable `max_resident_tiles`
-   budget, lazy warm-start reload on revisit), per-tile output schema (`grid_map_msgs/
-   GridMap`, topic `~/tiles`, BEST_EFFORT QoS, one message per dirty tile per publish
-   cycle), and CA-grid windowing strategy (vessel-centered, `ca_window_radius_m`,
-   unknown cells = NaN, lethal under `unsurveyed_is_lethal`). ADR is the interface
-   contract for the deferred boat→CAMP live coverage view (uma#86, #250).
+### A. Lossless reload of settled CUBE state (commit: reload)
 
-2. **LRU eviction in GeoMapSheet** — Add `last_touch_` tracking (`std::map<gggs::
-   GridIndex, uint64_t>` sequence counter) updated on every insert and
-   getOrCreateGrid call. Add `evictColdTiles(size_t max_resident)` that erases tiles
-   beyond budget in LRU order; returns evicted indices. New ROS parameter
-   `max_resident_tiles` (default 64). The node calls `evictColdTiles()` inside
-   `saveDirtyTiles()` after a successful save (tiles are already on disk). On revisit,
-   a new empty `GeoGrid` is created as usual and optionally warm-start primed from disk
-   (the existing `loadIntoSheet` / `setPredictedDepthAt` path).
+1. **`Node::seedSettledDepth(depth, uncertainty, params)`** — creates one hypothesis
+   with `current_estimate=depth`, `number_of_samples=1`, and
+   `input_sample_variance = current_variance = predicted_variance =
+   (uncertainty / stddev_to_confidence_interval_scale)²`. Round-trips through
+   `extractDepthAndUncertainty` and acts as the prior for continued accumulation
+   (West-Harrison DLM). `number_of_samples=1` so new in-situ data dominates.
+2. **`GeoGrid::setSettledDepthAt(cell, depth, uncertainty)`** and
+   **`GeoMapSheet::setSettledDepthAt(cell, depth, uncertainty)`** — surface the seed
+   up the stack (mirror `setPredictedDepthAt`). Do NOT mark dirty (reproduce
+   persisted data; the next survey ping dirties it).
+3. **`primeFromTile` / `loadIntoSheet`** — in addition to the existing
+   `setPredictedDepthAt` (slope prior, kept), call `setSettledDepthAt` so the
+   startup prime round-trips through `values()`. Closes the latent cross-session
+   partial-revisit data loss.
 
-3. **Replace monolithic publish with incremental per-tile + windowed CA grid** —
-   Split `publishGrid()` into two methods:
-   - `publishDirtyTiles()`: for each dirty tile, call `geoMapSheetToGridMap` on that
-     single tile (pass a 1-tile sheet view or adapt the helper to accept a grid span),
-     publish on new `LifecyclePublisher<grid_map_msgs::msg::GridMap>` at topic
-     `~/tiles`. Called at the same ~5 s cadence, clears dirty set after save.
-   - `publishCaGrid()`: look up vessel position from TF (`base_link` → `map`),
-     extract a `ca_window_radius_m`-radius subgrid of the resident tiles centered on
-     the vessel, publish on the existing `grid` topic. Cells with no data = NaN
-     (unknown/lethal under `unsurveyed_is_lethal`). Removes `clear_grid` as the
-     default mitigation path (the CA grid is already bounded; keep the service for
-     explicit operator resets).
+### B. LRU eviction, persist-then-drop, persistence-required (commit: eviction)
 
-4. **Update consumers** — The existing `grid` topic keeps its name, type, and frame
-   (`map`); only the extent changes (bounded window vs. whole area). Nav2 costmap
-   plugin needs no code change; `unsurveyed_is_lethal` defaults cover window boundary
-   cells. RViz full-survey display: add a note that the full-survey reconstruction
-   from `~/tiles` is out of scope for this PR (follow-up). The `clear_grid` service
-   is kept (its semantics are unchanged — it resets CUBE state, not just publish).
+4. **LRU tracking in GeoMapSheet** — `last_touch_` (`std::map<GridIndex,uint64_t>`)
+   bumped on `getOrCreateGridsIn` insert and `getOrCreateGrid`. Add
+   `coldTiles(size_t max_resident)` (coldest indices beyond budget, LRU order),
+   `dropTile(index)` (erase from `grids_`, `last_touch_`, both dirty sets),
+   `residentTileCount()`, `lastTouchOf(index)`. New ROS param `max_resident_tiles`
+   (default 64).
+5. **Node-orchestrated eviction** on the maintenance tick: if `draft_dir` set and
+   `residentTileCount() > max_resident_tiles`, for each cold tile: save it if dirty
+   (complete state), then `dropTile()` and record in `evicted_indices_`. If
+   `draft_dir` empty: do NOT evict; throttled WARN that RAM is unbounded without
+   persistence.
+6. **Revisit reload** — in `pingCallback`, before `addSoundings`, map each sounding
+   to its grid index; for any index in `evicted_indices_`, load that single tile
+   from disk (`loadWindow` over the tile bounds → scratch store) and reseed via the
+   settled-depth path, then erase from `evicted_indices_`.
 
-5. **Tests** — Four additions:
-   a. `test_geo_map_sheet.cpp`: `EvictionBoundsTileCount` — drive a synthetic track
-      over N > `max_resident_tiles` tiles; assert resident count stays ≤ budget.
-   b. `test_geo_map_sheet.cpp`: `EvictionLeavesLruTilesResident` — verify that the
-      `max_resident_tiles` most-recently-touched tiles survive eviction.
-   c. `test_publish_equivalence.cpp`: extend or replace `GeoProjectionMatchesLegacyMapSheet`
-      to cover the per-tile projection path (feed one tile, project it, assert depth
-      equivalence against the full-sheet projection). Keep
-      `ProjectionPlacesCellCentersExactly` unchanged.
-   d. `test_tile_eviction_rss.cpp` (new): long synthetic track (~200 tiles); assert
-      `grids_.size()` stays bounded; assert on-disk tile count keeps growing beyond the
-      resident budget. No RSS measurement (not portable in unit tests); tile-count
-      bounding is the equivalent assertion.
+### C. Bounded publish: windowed CA grid + incremental tiles (commit: publish)
+
+7. Split `publishGrid()` into:
+   - **`publishCaGrid()`** — vessel position from TF (`earth` ← `base_link`); select
+     resident grids within `ca_window_radius_m` (new param, default 200.0); project
+     only those onto the existing `grid` topic. Unknown cells = NaN (lethal under
+     `unsurveyed_is_lethal`). TF miss → fall back to full resident set (bounded by
+     eviction) rather than dropping the CA grid.
+   - **`publishDirtyTiles()`** — for each publish-dirty tile, project that single
+     tile and publish on a new `~/tiles` `LifecyclePublisher<GridMap>` (BEST_EFFORT).
+8. **GeoMapSheet publish-dirty set** — second set tracked alongside the save-dirty
+   set (`publishDirtyGrids()` / `clearPublishDirtyGrids()`) so publish and save
+   cadences don't interfere and the set clears regardless of persistence.
+9. **Projection subset** — refactor `grid_projection` to expose
+   `geoGridsToGridMap(grids, frame, cell_size, affine)`; `geoMapSheetToGridMap`
+   keeps its signature and delegates. Per-tile and windowed publishes call the subset
+   form.
+10. **Coherence WARN** — at `on_configure`, WARN if `max_resident_tiles` < the CA
+    window's tile span. `clear_grid` service kept (CUBE-state reset semantics).
+
+### D. Tests (commit: tests)
+
+a. `test_node.cpp` / `test_geo_grid.cpp`: `SeedSettledDepthRoundTrips` — seed a value,
+   assert `values()` / `extractDepthAndUncertainty` re-emit the same depth + uncertainty.
+b. `test_geo_map_sheet.cpp`: `EvictionBoundsTileCount` — synthetic track over
+   N > budget tiles; `coldTiles` + `dropTile` keep `residentTileCount() ≤ budget`.
+c. `test_geo_map_sheet.cpp`: `EvictionLeavesLruTilesResident` — the most-recently-touched
+   `max_resident_tiles` tiles survive eviction.
+d. `test_persistence.cpp` (or new): `RevisitAfterEvictPreservesData` — survey a tile,
+   save, drop, reseed from the saved tile, sparsely resurvey, re-save; assert the
+   un-resurveyed cells are intact on disk (the lossless guarantee).
+e. `test_publish_equivalence.cpp`: extend to cover the per-tile (`geoGridsToGridMap`)
+   path; keep `ProjectionPlacesCellCentersExactly` unchanged.
+f. `test_tile_eviction_rss.cpp` (new): long synthetic track; assert `grids_.size()`
+   stays bounded while on-disk tile count keeps growing.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
-| `cube_bathymetry/docs/decisions/0008-…md` | New ADR (created) |
-| `include/cube_bathymetry/geo_map_sheet.h` | Add `last_touch_`, `evictColdTiles()`, `lastTouchOf()` |
-| `src/geo_map_sheet.cpp` | Implement LRU tracking and eviction |
-| `src/cube_bathymetry_node.cpp` | Replace `publishGrid()`, add `publishDirtyTiles()`/`publishCaGrid()`, new params, new publisher |
-| `test/test_geo_map_sheet.cpp` | Add eviction tests |
-| `test/test_publish_equivalence.cpp` | Extend for per-tile path |
-| `test/test_tile_eviction_rss.cpp` | New long-track bounded-count test |
-| `CMakeLists.txt` | Add `test_tile_eviction_rss` target |
+| `cube_bathymetry/docs/decisions/0001-…md` | New ADR (created) |
+| `include/cube_bathymetry/node.h` / `src/node.cpp` | `seedSettledDepth()` |
+| `include/cube_bathymetry/geo_grid.h` / `src/geo_grid.cpp` | `setSettledDepthAt()` |
+| `include/cube_bathymetry/geo_map_sheet.h` / `src/geo_map_sheet.cpp` | `setSettledDepthAt`, last-touch, `coldTiles`, `dropTile`, `residentTileCount`, `lastTouchOf`, publish-dirty set |
+| `include/cube_bathymetry/store_import.h` / `src/store_import.cpp` | `primeFromTile` also seeds settled depth |
+| `include/cube_bathymetry/grid_projection.h` / `src/grid_projection.cpp` | `geoGridsToGridMap` subset projection |
+| `src/cube_bathymetry_node.cpp` | windowed `publishCaGrid`, `publishDirtyTiles`, eviction + revisit reload, new params, `~/tiles` publisher, coherence WARN |
+| `test/test_node.cpp`, `test/test_geo_map_sheet.cpp`, `test/test_persistence.cpp`, `test/test_publish_equivalence.cpp`, `test/test_tile_eviction_rss.cpp` | new + extended tests |
+| `CMakeLists.txt` | add `test_tile_eviction_rss` target |
 
 ## Principles Self-Check
 
 | Principle | Consideration |
 |---|---|
-| Only what's needed | Fixes confirmed operational failures; window size and tile budget are configurable, not over-engineered |
-| Test what breaks | Four targeted tests covering the failure modes (unbounded count, wrong LRU order, per-tile projection regression, long-track growth) |
-| A change includes its consequences | Nav2 consumer behavior documented; `clear_grid` service kept; test_publish_equivalence updated |
-| Capture decisions | ADR-0008 records eviction policy, CA window strategy, and per-tile schema as shared interface contract |
-| Safety First | Unknown cells at window boundary = NaN, lethal under `unsurveyed_is_lethal` — safety guarantee preserved |
+| Only what's needed | Fixes confirmed operational failures; eviction/window sizes configurable |
+| Test what breaks | Round-trip, bounded count, LRU order, **lossless revisit**, per-tile projection, long-track growth |
+| A change includes its consequences | Nav2 consumer behavior documented; `clear_grid` kept; latent cross-session loss closed |
+| Capture decisions | ADR-0001 records reload mechanism, eviction policy, window strategy, per-tile schema |
+| Safety First | Window-boundary unknown cells = NaN (lethal under `unsurveyed_is_lethal`); TF-gap fallback keeps CA grid alive; **no survey-data loss** |
 
 ## ADR Compliance
 
 | ADR | Triggered | How addressed |
 |---|---|---|
-| ADR-0001 (Adopt ADRs) | Yes | ADR-0008 written for this PR |
-| ADR-0002 (Worktree isolation) | Yes (satisfied) | In feature/issue-70 worktree |
-| ADR-0008 (ROS 2 conventions) | Yes | `~/tiles` topic, BEST_EFFORT QoS, GridMap type — all per ROS 2 conventions |
+| Workspace ADR-0001 (Adopt ADRs) | Yes | Project ADR-0001 written |
+| Workspace ADR-0002 (Worktree isolation) | Yes (satisfied) | In feature/issue-70 worktree |
+| Workspace ADR-0008 (ROS 2 conventions) | Yes | `~/tiles` topic, BEST_EFFORT QoS, GridMap type per ROS 2 conventions |
 
 ## Consequences
 
 | If we change… | Also update… | Included? |
 |---|---|---|
-| Retire whole-area `grid` publish | Nav2 costmap consumer | Yes — window boundary NaN/lethal behavior preserved |
+| Retire whole-area `grid` publish | Nav2 costmap consumer | Yes — window boundary NaN/lethal preserved + TF-gap fallback |
 | Add `~/tiles` publisher | RViz full-survey display | Scoped out (noted, follow-up) |
-| Add `max_resident_tiles` param | Launch files, parameter docs | Yes — documented in node on_configure log |
-| `test_publish_equivalence.cpp` | CMakeLists (no new target, same test) | Yes |
+| Add eviction | Reload path (lossless) + startup prime | Yes — settled-depth reseed both places |
+| Add params (`max_resident_tiles`, `ca_window_radius_m`) | Launch/param docs | Yes — on_configure logs + coherence WARN |
 
 ## Open Questions
 
-- None — all design choices captured in ADR-0008; operator decisions from Issue
-  Review checkpoint are binding.
+- None — design choices captured in ADR-0001; operator decisions (lossless
+  persist-then-drop; settled-state reload; both evict + startup scope; `n=1`
+  prior; persistence required for eviction) are binding.
 
 ## Estimated Scope
 
-Single PR, four staged commits: ADR → eviction → incremental publish → tests.
+Single PR, staged commits: ADR → reload → eviction → publish → tests.
