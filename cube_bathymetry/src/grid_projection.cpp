@@ -24,6 +24,8 @@
 
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -65,8 +67,8 @@ inline void projectCellCenter(
 
 }  // namespace
 
-grid_map::GridMap geoMapSheetToGridMap(
-  const GeoMapSheet & map_sheet,
+grid_map::GridMap geoGridsToGridMap(
+  const std::vector<std::shared_ptr<const GeoGrid>> & grids,
   const std::string & map_frame,
   double cell_size_m,
   const Eigen::Isometry3d & map_from_earth)
@@ -84,7 +86,7 @@ grid_map::GridMap geoMapSheetToGridMap(
   double max_x = -std::numeric_limits<double>::infinity();
   double max_y = -std::numeric_limits<double>::infinity();
 
-  for (const auto & grid : map_sheet.grids()) {
+  for (const auto & grid : grids) {
     if (!grid) {
       continue;
     }
@@ -150,6 +152,21 @@ grid_map::GridMap geoMapSheetToGridMap(
   }
 
   return map;
+}
+
+grid_map::GridMap geoMapSheetToGridMap(
+  const GeoMapSheet & map_sheet,
+  const std::string & map_frame,
+  double cell_size_m,
+  const Eigen::Isometry3d & map_from_earth)
+{
+  // Whole-sheet projection delegates to the subset core over every resident
+  // grid. shared_ptr<GeoGrid> -> shared_ptr<const GeoGrid> is an implicit upcast.
+  std::vector<std::shared_ptr<const GeoGrid>> grids;
+  for (const auto & grid : map_sheet.grids()) {
+    grids.push_back(grid);
+  }
+  return geoGridsToGridMap(grids, map_frame, cell_size_m, map_from_earth);
 }
 
 }  // namespace cube
