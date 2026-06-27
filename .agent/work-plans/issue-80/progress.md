@@ -102,4 +102,26 @@ The following should be part of the implementation or flagged as follow-up:
 - [ ] (must-fix) Backscatter conversion omits timestamp + provenance — the bathy mirror `geoGridToTile(grid, timestamp_ns, source_index)` threads both into every `BathyCell` and `import_bag_main.cpp` feeds a `SourceRegistry` into `save()`; `MbesCell` has identical `timestamp`/`source_index` fields and mbes `save()` takes a `SourceRegistry*`. As written the Processed product ships timestamp=0/source_index=0/empty registry.json. Give `geoGridToBackscatterTile`/`mapSheetToBackscatterTiles` the same params, register an mbes source, pass the registry to `save()` — `plan.md:54-66`.
 - [ ] (suggestion) State that `NodeRecord::intensity_var` maps to `MbesCell.intensity_variance` (ADR-0007 D6: variance is the quality band) so it isn't left NaN — `plan.md:55-57`.
 - [ ] (suggestion) Document the same-pass layer split as intentional: bathy → Draft (`import_bag_main.cpp:666`), backscatter → Processed — `plan.md:26-29`.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-27 23:43 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-80 at `afcb106`
+**Mode**: pre-push
+**Depth**: Deep (reason: 10 files / 200+ changed lines; lifecycle-touching CUBE-node flush path)
+**Must-fix**: 0 | **Suggestions**: 3
+**Round**: 1 | **Ship**: recommended — no must-fix; only pre-existing-pattern suggestions, all plan-review findings resolved
+
+### Findings
+- [ ] (suggestion) `ament_export_dependencies` re-exports only `rclcpp`; the installed public header `store_import.h` now `#include`s `marine_mbes_backscatter_store/mbes_cell.hpp` (and `marine_bathymetry_store`). Pre-existing pattern — fix both deps together or leave — `cube_bathymetry/CMakeLists.txt:262`.
+- [ ] (suggestion) `--bs-store` (and `-o`/`-d`/`--odom-topic`) read `*arg` after `arg++` with no bounds check → `vector::end()` deref (UB) if the flag is the last token. Pre-existing loop pattern — harden all or none — `cube_bathymetry/src/import_bag_main.cpp:290`.
+- [ ] (suggestion) `BackscatterCellsMatchGridRecords` re-derives expected cells with the same `nodeRecords()`+`CellAreaIterator` walk as production, so it wouldn't independently catch a shared iterator-alignment bug; mitigated by absolute intensity/timestamp/source assertions. Optional — `cube_bathymetry/test/test_store_import.cpp:268`.
+
+### Notes
+- Deep review: 2 fresh-context Claude Adversarial passes (Lens A logic + Lens B systemic) + Static Analysis (ament_cpplint clean; cppcheck findings only on untouched context lines / GTest-macro false positive). Copilot off (default).
+- Verified correct: `MbesCell` aggregate-init field order matches struct; `nodeRecords()`↔`CellAreaIterator` lockstep; double-flush idempotent (`queueFlush` early-returns + `clear()`s, extract is read-only); both stores share GGGS level via `fromCellSize(nominalCellSizeMeters())`.
+- Plan adherence: full. Prior Plan-Review must-fix (timestamp + source_index provenance) is resolved — cells carry `cell_timestamp_ns` + non-zero `bs_source_index`, `&bs_registry` passed to `save()`.
 - [ ] (suggestion) Line drift: threading insertion cited at 507–510; actual `gs.sounding.*` assignments at 508–509 — `plan.md:33-37`.
