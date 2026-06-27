@@ -32,6 +32,7 @@
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
 #include "marine_bathymetry_store/bathy_cell.hpp"
+#include "marine_mbes_backscatter_store/mbes_cell.hpp"
 
 namespace cube
 {
@@ -92,6 +93,49 @@ namespace cube
 /// @param source_index  Registry source index for every finite cell.
   std::map < gggs::GridIndex, marine_bathymetry_store::BathymetryTile >
   mapSheetToTiles(
+    const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index);
+
+/// @brief Convert one CUBE @ref GeoGrid into its finite-backscatter cells (#80).
+///
+/// The offline backscatter counterpart to @ref geoGridToTile. Walks
+/// `grid.nodeRecords()` (the enriched per-node output, ADR-0007 D5) in lockstep
+/// with a `gggs::CellAreaIterator` over `grid.index()` — the same positional
+/// scheme @ref geoGridToTile uses for the bathy tile — and emits one
+/// `marine_mbes_backscatter_store::MbesCell` per cell whose co-estimated
+/// `intensity` is finite. Cells with NaN intensity (no intensity-bearing beams)
+/// are skipped, mirroring the NaN-depth skip in the bathy path.
+///
+/// The returned map is keyed by `gggs::CellIndex` so the caller can write each
+/// cell with the store's public `set()` (no bulk import API is added to the
+/// separate `marine_mbes_backscatter_store` package; #80 stays within
+/// `cube_bathymetry`). `intensity_var` (NaN with < 2 samples) maps to the cell's
+/// `intensity_variance` quality band (ADR-0007 D6). `timestamp_ns`/`source_index`
+/// are stamped into every emitted cell, exactly as the bathy path does — so the
+/// Processed product carries provenance, not timestamp=0/source_index=0.
+///
+/// `nodeRecords()` flushes the median pre-filter, so it is called once per grid.
+///
+/// @param grid          The CUBE grid to convert.
+/// @param timestamp_ns  Acquisition/import time written into every emitted cell.
+/// @param source_index  Registry source index written into every emitted cell.
+/// @return A `gggs::CellIndex -> MbesCell` map of the finite-intensity cells.
+  std::map < gggs::CellIndex, marine_mbes_backscatter_store::MbesCell >
+  geoGridToBackscatterCells(
+    const GeoGrid & grid, int64_t timestamp_ns, uint16_t source_index);
+
+/// @brief Convert every grid of a @ref GeoMapSheet into one backscatter-cell map.
+///
+/// Iterates `map_sheet.grids()` and merges each grid's
+/// @ref geoGridToBackscatterCells result. Grids cover disjoint GGGS cells, so the
+/// merge never collides. The caller writes the cells into a
+/// `marine_mbes_backscatter_store::MbesBackscatterStore` via `set()` (Processed
+/// layer, #80). Deterministic for a fixed map sheet.
+///
+/// @param map_sheet     The CUBE map sheet to convert.
+/// @param timestamp_ns  Acquisition/import time for every emitted cell.
+/// @param source_index  Registry source index for every emitted cell.
+  std::map < gggs::CellIndex, marine_mbes_backscatter_store::MbesCell >
+  mapSheetToBackscatterCells(
     const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index);
 
 /// @brief Seed predicted depths in @p map_sheet from every finite cell of @p tile.

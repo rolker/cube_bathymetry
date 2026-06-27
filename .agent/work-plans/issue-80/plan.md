@@ -43,26 +43,36 @@ pragmatic reading ("authoritative offline re-run") and the plan documents it.
    intensity, matching the `values()` / `DepthAndUncertainty` sentinel). Declare
    in `geo_grid.h`, implement in `geo_grid.cpp`.
 
-3. **Add `MbesBackscatterStore::importTiles()`** in the
-   `marine_mbes_backscatter_store` package — takes `SourceLayer` + `std::map<
-   gggs::GridIndex, MbesTile>` (move), inserts each tile into the store's layer
-   map directly. Mirrors `BathymetryStore::importTiles()`. Rationale: keeps
-   `store_import.cpp` as a pure CUBE→tile converter and gives the store a clean
-   bulk-import API matching the bathy precedent. Declared in `mbes_store.hpp`,
-   implemented in `mbes_store.cpp` (or inlined — small method).
+3. **~~Add `MbesBackscatterStore::importTiles()`~~ — DROPPED (as-built).** The
+   `marine_mbes_backscatter_store` package lives in `unh_marine_autonomy`
+   (core_ws), a **separate repo** symlinked (main tree) into this cube_bathymetry
+   worktree — editing it would be a cross-repo main-tree change needing its own
+   issue/PR, and would split a "single PR" across two repos. Instead, #80 uses the
+   store's **existing public `set(SourceLayer, CellIndex, MbesCell)`** API
+   (cell-by-cell), which the Issue Review explicitly pre-blessed as the conscious
+   alternative to a bulk API. **No file in `marine_mbes_backscatter_store` is
+   touched** — the entire change stays within `cube_bathymetry` (one repo, one PR).
 
-4. **Add `geoGridToBackscatterTile()` + `mapSheetToBackscatterTiles()`** in
-   `store_import.h`/`.cpp` — mirrors `geoGridToTile`/`mapSheetToTiles` but
-   calls `grid.nodeRecords()`, builds an `MbesTile` from finite-intensity cells,
-   and returns `std::map<gggs::GridIndex, MbesTile>`. Skip NaN-intensity cells.
-   Call `values()` (bathy) then `nodeRecords()` (backscatter) in sequence on the
-   same map sheet — the second `queueFlush()` is a no-op after the first.
+4. **Add `geoGridToBackscatterCells()` + `mapSheetToBackscatterCells()`** in
+   `store_import.h`/`.cpp` (as-built name — *Cells*, not *Tile*, to match the
+   `set()` path) — mirrors `geoGridToTile`/`mapSheetToTiles` but calls
+   `grid.nodeRecords()` and returns `std::map<gggs::CellIndex, MbesCell>` of the
+   finite-intensity cells (NaN-intensity cells skipped, mirroring the NaN-depth
+   skip). `intensity_var` → `MbesCell::intensity_variance` (the ADR-0007 D6 quality
+   band; NaN with < 2 samples). `nodeRecords()` flushes the median pre-filter, so
+   calling it after `values()` (bathy) on the same sheet is a harmless no-op flush.
 
 5. **Add `--bs-store <dir>` CLI flag** in `import_bag_main.cpp` — opt-in; when
-   provided, after `mapSheetToTiles()`, call `mapSheetToBackscatterTiles()`,
-   construct an `MbesBackscatterStore` at the same GGGS level, import the tiles
-   into the `Processed` layer, and call `marine_mbes_backscatter_store::save()`.
-   Log tile count and output path, matching the bathy path's log style.
+   provided, after the bathy `save()`, construct an `MbesBackscatterStore` at the
+   same GGGS level, register a backscatter `SourceRegistry` source (same physical
+   source identity as the bathy record, `sensor_class = "mbes-backscatter"`), call
+   `mapSheetToBackscatterCells(sheet, cell_timestamp_ns, bs_source_index)`, write
+   each cell via `bs_store.set(SourceLayer::Processed, …)`, then
+   `marine_mbes_backscatter_store::save(bs_store, bs_store_dir, &bs_registry)`.
+   **Provenance (plan-review must-fix):** every emitted `MbesCell` carries the
+   import `timestamp_ns` + a registered `source_index`, so the Processed product
+   ships real time/source, not `timestamp=0`/`source_index=0`/empty registry.
+   Log cell count and output path, matching the bathy path's log style.
 
 6. **Update `cube_bathymetry` build files** — `CMakeLists.txt`: add
    `find_package(marine_mbes_backscatter_store REQUIRED)`, link it into
@@ -80,18 +90,19 @@ pragmatic reading ("authoritative offline re-run") and the plan documents it.
 
 ## Files to Change
 
+All files are in `cube_bathymetry` (one repo, one PR) — **no** edits to the
+separate `marine_mbes_backscatter_store` repo (see Approach step 3).
+
 | File | Change |
 |------|--------|
-| `core_ws/src/unh_marine_autonomy/marine_mbes_backscatter_store/include/marine_mbes_backscatter_store/mbes_store.hpp` | Add `importTiles(SourceLayer, std::map<gggs::GridIndex, MbesTile>)` declaration |
-| `core_ws/src/unh_marine_autonomy/marine_mbes_backscatter_store/src/mbes_store.cpp` | Implement `importTiles()` |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/include/cube_bathymetry/geo_grid.h` | Add `nodeRecords()` declaration |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/src/geo_grid.cpp` | Implement `nodeRecords()` |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/include/cube_bathymetry/store_import.h` | Add `geoGridToBackscatterTile()` + `mapSheetToBackscatterTiles()` declarations + `#include` for backscatter store types |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/src/store_import.cpp` | Implement both backscatter conversion functions |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/src/import_bag_main.cpp` | Thread `intensity`/`beam_angle` at lines 507–510; add `--bs-store` flag and backscatter output path |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/CMakeLists.txt` | `find_package` + link `marine_mbes_backscatter_store` into `cube_bathymetry_store_import` and test target |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/package.xml` | Add `<depend>marine_mbes_backscatter_store</depend>` |
-| `sensors_ws/src/cube_bathymetry/cube_bathymetry/test/test_store_import.cpp` | Add two backscatter conversion tests |
+| `cube_bathymetry/include/cube_bathymetry/geo_grid.h` | Add `nodeRecords()` declaration |
+| `cube_bathymetry/src/geo_grid.cpp` | Implement `nodeRecords()` |
+| `cube_bathymetry/include/cube_bathymetry/store_import.h` | Add `geoGridToBackscatterCells()` + `mapSheetToBackscatterCells()` declarations + `#include "marine_mbes_backscatter_store/mbes_cell.hpp"` |
+| `cube_bathymetry/src/store_import.cpp` | Implement both backscatter conversion functions |
+| `cube_bathymetry/src/import_bag_main.cpp` | Thread `intensity`/`beam_angle` at lines 508–509; add `--bs-store` flag + help text and the backscatter output path (registry + provenance + `set()` + `save()`) |
+| `cube_bathymetry/CMakeLists.txt` | `find_package(marine_mbes_backscatter_store)` + link it into `cube_bathymetry_store_import`, `import_bag`, and the `test_store_import` target |
+| `cube_bathymetry/package.xml` | Add `<depend>marine_mbes_backscatter_store</depend>` |
+| `cube_bathymetry/test/test_store_import.cpp` | Add two backscatter conversion tests (`BackscatterCellsMatchGridRecords`, `BackscatterNaNPropagation`) + an intensity-bearing soundings helper |
 
 ## Principles Self-Check
 

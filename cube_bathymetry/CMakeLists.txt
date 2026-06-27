@@ -29,6 +29,7 @@ find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
 find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
+find_package(marine_mbes_backscatter_store REQUIRED)  # backscatter store layer (#80)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -91,6 +92,7 @@ add_library(cube_bathymetry_store_import src/store_import.cpp)
 target_link_libraries(cube_bathymetry_store_import
   cube_bathymetry
   marine_bathymetry_store::marine_bathymetry_store
+  marine_mbes_backscatter_store::marine_mbes_backscatter_store  # MbesCell (#80)
 )
 install(TARGETS cube_bathymetry_store_import EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
@@ -183,6 +185,7 @@ add_executable(import_bag src/import_bag_main.cpp)
 
 target_link_libraries(import_bag
   cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
+  marine_mbes_backscatter_store::marine_mbes_backscatter_store  # --bs-store output (#80)
   ${geometry_msgs_TARGETS}
   ${marine_acoustic_msgs_TARGETS}
   ${nav_msgs_TARGETS}
@@ -231,7 +234,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_detections_projector cube_bathymetry)
 
   ament_add_gtest(test_store_import test/test_store_import.cpp)
-  target_link_libraries(test_store_import cube_bathymetry_store_import)
+  target_link_libraries(test_store_import
+    cube_bathymetry_store_import
+    marine_mbes_backscatter_store::marine_mbes_backscatter_store  # backscatter tests (#80)
+  )
 
   # Publish-equivalence safety net for the MapSheet->GeoMapSheet migration (#21).
   ament_add_gtest(test_publish_equivalence test/test_publish_equivalence.cpp)

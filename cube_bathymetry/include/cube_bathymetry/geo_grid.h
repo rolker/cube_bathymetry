@@ -112,6 +112,20 @@ public:
 
     std::vector < DepthAndUncertainty > values() const;
 
+  /// @brief Per-node enriched records (depth + co-estimated backscatter) for
+  ///        every cell, in `CellAreaIterator` order over `index()`.
+  ///
+  /// Parallel to @ref values() but emits @ref NodeRecord (adds the co-estimated
+  /// `intensity`/`intensity_var`, ADR-0007 D5) so the offline import can surface
+  /// backscatter alongside bathymetry from the same pass (#80). Absent cells push
+  /// a default `NodeRecord` (NaN intensity) — the same positional NaN sentinel
+  /// @ref values() uses — so the result is index-aligned with a second
+  /// `CellAreaIterator` over `index()`. Like @ref values() it flushes the median
+  /// pre-filter (`queueFlush`); calling it after @ref values() on the same grid
+  /// is a harmless no-op flush. The surfaced intensity is UNCORRECTED (the
+  /// beam-angle/GeoCoder correction is deferred to cube#81).
+    std::vector < NodeRecord > nodeRecords() const;
+
 private:
     gggs::GridIndex index_;
 
