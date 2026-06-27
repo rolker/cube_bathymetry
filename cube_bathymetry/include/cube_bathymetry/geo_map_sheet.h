@@ -24,6 +24,8 @@
 #define CUBE_BATHYMETRY__GEO_MAP_SHEET_H_
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
@@ -73,12 +75,54 @@ public:
   /// so re-saving it would be redundant churn.
     void setPredictedDepthAt(const gggs::CellIndex & cell, float depth, float variance);
 
+  /// @brief Reseed a previously-settled depth/uncertainty at @p cell as a CUBE
+  ///        hypothesis (lossless reload; lazy-creates the grid + node).
+  ///
+  /// Unlike @ref setPredictedDepthAt (slope prior only), this restores the cell's
+  /// best estimate so it survives the next whole-tile save and refines under new
+  /// soundings (ADR-0001). Used by the tile-eviction revisit-reload and the
+  /// startup prime. Does NOT mark the grid dirty (reproduces persisted data).
+    void setSettledDepthAt(const gggs::CellIndex & cell, float depth, float uncertainty);
+
   /// @brief Grid indices touched (returning true from insert) since the last
   ///        clearDirtyGrids(). Returned by value -- safe to iterate while saving.
     std::set < gggs::GridIndex > dirtyGrids() const;
 
   /// @brief Clear the dirty-grid set (called after a successful save).
     void clearDirtyGrids();
+
+  /// @brief Grid indices changed since the last clearPublishDirtyGrids().
+  ///
+  /// A SECOND dirty set, tracked alongside the save-dirty set but cleared by the
+  /// incremental publish path instead of the save path (ADR-0001). Decoupling the
+  /// two lets the ~/tiles publish and the draft save run on independent cadences
+  /// and clear independently -- in particular the publish set still clears when
+  /// persistence is disabled (no save to clear it). Returned by value.
+    std::set < gggs::GridIndex > publishDirtyGrids() const;
+
+  /// @brief Clear the publish-dirty set (called after an incremental publish).
+    void clearPublishDirtyGrids();
+
+  /// @brief The least-recently-touched grid indices beyond @p max_resident, in
+  ///        eviction order (coldest first); empty when within budget.
+  ///
+  /// "Touched" = created or received soundings (last_touch_ sequence). The node
+  /// persists each returned tile before calling @ref dropTile, so eviction never
+  /// loses data (ADR-0001).
+    std::vector < gggs::GridIndex > coldTiles(std::size_t max_resident) const;
+
+  /// @brief Erase one grid from RAM (grids_, last-touch, and both dirty sets).
+  ///
+  /// Caller must have persisted the tile first when persistence is enabled --
+  /// dropTile makes no disk write. Safe if @p index is absent (no-op).
+    void dropTile(const gggs::GridIndex & index);
+
+  /// @brief Number of grids currently resident in RAM.
+    std::size_t residentTileCount() const;
+
+  /// @brief Last-touch sequence number of @p index, or 0 if not resident.
+  ///        Monotonic; higher = more recently touched. For tests / diagnostics.
+    uint64_t lastTouchOf(const gggs::GridIndex & index) const;
 
   /// Return gggs::GridIndex bounds of rectangle containing all the grids
     gggs::GridBounds gridBounds() const;
@@ -105,6 +149,20 @@ private:
   /// Grids that received data (insert() returned true) since the last
   /// clearDirtyGrids(). Drives the periodic incremental tile save (#21).
     std::set < gggs::GridIndex > dirty_grids_;
+
+  /// Grids changed since the last clearPublishDirtyGrids(). Drives the
+  /// incremental ~/tiles publish, cleared independently of the save set so the
+  /// publish and save cadences don't interfere (ADR-0001).
+    std::set < gggs::GridIndex > publish_dirty_grids_;
+
+  /// Per-grid last-touch sequence number (created or received soundings),
+  /// assigned from touch_counter_. Drives LRU eviction (coldTiles); higher =
+  /// more recently touched.
+    std::map < gggs::GridIndex, uint64_t > last_touch_;
+
+  /// Monotonic counter sourced for last_touch_ on every touch. Starts at 1 so 0
+  /// reads as "never touched / not resident" (see lastTouchOf).
+    uint64_t touch_counter_ = 0;
 
     std::chrono::steady_clock::time_point last_update_time_;
   };

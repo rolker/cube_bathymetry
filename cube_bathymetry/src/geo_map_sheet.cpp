@@ -21,8 +21,10 @@
 
 
 #include "cube_bathymetry/geo_map_sheet.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <utility>
 #include "marine_autonomy/gz4d_geo.h"
 
 namespace cube
@@ -61,8 +63,10 @@ void GeoMapSheet::addSoundings(
     if(g->insert(soundings)) {
       last_update_time_ = time;
       // Record the grid as dirty so the periodic save loop (#21) writes only
-      // grids that actually changed since the last save.
+      // grids that actually changed since the last save, and in the separate
+      // publish-dirty set so the incremental ~/tiles publish emits it (ADR-0001).
       dirty_grids_.insert(g->index());
+      publish_dirty_grids_.insert(g->index());
     }
   }
 }
@@ -82,6 +86,10 @@ std::vector<std::shared_ptr<GeoGrid>> GeoMapSheet::getOrCreateGridsIn(
     if(!grids_[*i]) {
       grids_[*i] = std::make_shared<GeoGrid>(*i, parameters_);
     }
+    // Every grid in the current sounding bounds is being actively surveyed, so
+    // bump its last-touch recency -- this is the signal LRU eviction uses to keep
+    // near-vessel tiles resident and evict cold far-away ones (ADR-0001).
+    last_touch_[*i] = ++touch_counter_;
     ret.push_back(grids_[*i]);
     i.next();
   }
@@ -113,6 +121,10 @@ std::shared_ptr<GeoGrid> GeoMapSheet::getOrCreateGrid(const gggs::GridIndex & in
 {
   if(!grids_[index]) {
     grids_[index] = std::make_shared<GeoGrid>(index, parameters_);
+    // Seed a last-touch entry on first creation so every resident grid has one
+    // (the prime/reload path lands here). Touched once at load -- relatively cold
+    // versus actively-surveyed tiles, so primed-but-inactive tiles evict first.
+    last_touch_[index] = ++touch_counter_;
   }
   return grids_[index];
 }
@@ -124,6 +136,13 @@ void GeoMapSheet::setPredictedDepthAt(
   grid->setPredictedDepthAt(cell, depth, variance);
 }
 
+void GeoMapSheet::setSettledDepthAt(
+  const gggs::CellIndex & cell, float depth, float uncertainty)
+{
+  auto grid = getOrCreateGrid(cell.grid());
+  grid->setSettledDepthAt(cell, depth, uncertainty);
+}
+
 std::set<gggs::GridIndex> GeoMapSheet::dirtyGrids() const
 {
   return dirty_grids_;
@@ -132,6 +151,63 @@ std::set<gggs::GridIndex> GeoMapSheet::dirtyGrids() const
 void GeoMapSheet::clearDirtyGrids()
 {
   dirty_grids_.clear();
+}
+
+std::set<gggs::GridIndex> GeoMapSheet::publishDirtyGrids() const
+{
+  return publish_dirty_grids_;
+}
+
+void GeoMapSheet::clearPublishDirtyGrids()
+{
+  publish_dirty_grids_.clear();
+}
+
+std::vector<gggs::GridIndex> GeoMapSheet::coldTiles(std::size_t max_resident) const
+{
+  if(grids_.size() <= max_resident) {
+    return {};
+  }
+
+  // Order all resident grids by last-touch ascending (coldest first). A grid
+  // always has a last_touch_ entry (set on creation), but default to 0 if
+  // somehow missing so it sorts as coldest rather than being skipped.
+  std::vector<std::pair<uint64_t, gggs::GridIndex>> by_age;
+  by_age.reserve(grids_.size());
+  for (const auto & g  :  grids_) {
+    auto it = last_touch_.find(g.first);
+    const uint64_t touch = (it == last_touch_.end()) ? 0 : it->second;
+    by_age.emplace_back(touch, g.first);
+  }
+  std::sort(by_age.begin(), by_age.end(),
+    [](const auto & a, const auto & b){return a.first < b.first;});
+
+  const std::size_t evict_count = grids_.size() - max_resident;
+  std::vector<gggs::GridIndex> ret;
+  ret.reserve(evict_count);
+  for (std::size_t k = 0; k < evict_count; ++k) {
+    ret.push_back(by_age[k].second);
+  }
+  return ret;
+}
+
+void GeoMapSheet::dropTile(const gggs::GridIndex & index)
+{
+  grids_.erase(index);
+  last_touch_.erase(index);
+  dirty_grids_.erase(index);
+  publish_dirty_grids_.erase(index);
+}
+
+std::size_t GeoMapSheet::residentTileCount() const
+{
+  return grids_.size();
+}
+
+uint64_t GeoMapSheet::lastTouchOf(const gggs::GridIndex & index) const
+{
+  auto it = last_touch_.find(index);
+  return (it == last_touch_.end()) ? 0 : it->second;
 }
 
 double GeoMapSheet::cellSizeDegrees() const

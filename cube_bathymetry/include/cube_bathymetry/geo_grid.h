@@ -86,6 +86,19 @@ public:
   ///                  requires a finite positive variance (see Node).
     void setPredictedDepthAt(const gggs::CellIndex & cell, float depth, float variance);
 
+  /// @brief Reseed a previously-settled depth/uncertainty at @p cell as a CUBE
+  ///        hypothesis (lossless reload; lazy-creates the Node).
+  ///
+  /// Unlike @ref setPredictedDepthAt (slope prior only), this restores the cell's
+  /// best estimate so @ref values() re-emits it on the next save and subsequent
+  /// soundings refine it as a Bayesian prior (ADR-0001). Used by the tile-eviction
+  /// revisit-reload and the startup prime. Does NOT mark the grid dirty -- it
+  /// reproduces already-persisted data; the next *survey* ping marks it dirty.
+  /// @param cell         Cell within this grid; must belong to `index()`.
+  /// @param depth        Stored best-estimate depth (negative-down, finite).
+  /// @param uncertainty  Stored 1.96-sigma confidence interval (m).
+    void setSettledDepthAt(const gggs::CellIndex & cell, float depth, float uncertainty);
+
   /// @brief Predicted-surface depth at @p cell, or `INVALID_DATA` if no node
   ///        (or no prediction) exists there.
   ///

@@ -268,6 +268,34 @@ public:
   */
     void setPredictedDepth(float depth, float variance);
 
+  /// @brief Reseed a previously-settled cell value as a single-sample hypothesis.
+  ///
+  /// Lossless reload path for tile eviction / startup prime (ADR-0001). Unlike
+  /// setPredictedDepth (which seeds only the slope-correction prior and does NOT
+  /// round-trip through extractDepthAndUncertainty), this creates one depth
+  /// hypothesis carrying the stored estimate so:
+  ///   1. extractDepthAndUncertainty() / values() re-emit the same depth and
+  ///      uncertainty (the cell survives the next whole-tile save), and
+  ///   2. subsequent soundings refine it through the West-Harrison DLM, treating
+  ///      the stored value as a Bayesian prior (cross-epoch self-improvement,
+  ///      cube_bathymetry#15).
+  ///
+  /// The extracted uncertainty is scale * sqrt(input_sample_variance), so the
+  /// variance is recovered as (uncertainty / scale)^2 and applied to BOTH the
+  /// hypothesis state variance (drives how new samples move the estimate) and
+  /// input_sample_variance (drives the extracted uncertainty), giving an exact
+  /// round-trip. number_of_samples is seeded to 1 (a single prior observation):
+  /// consistent new data accretes onto this hypothesis and becomes authoritative
+  /// quickly; the original sample count is not persisted, so a larger value would
+  /// be fabricated.
+  ///
+  /// @param depth        Stored best-estimate depth (negative-down, finite).
+  /// @param uncertainty  Stored 1.96-sigma confidence interval (m); a
+  ///                     non-finite / non-positive value floors the variance to a
+  ///                     small positive epsilon so the DLM update stays defined.
+  /// @param parameters   Provides stddev_to_confidence_interval_scale.
+    void seedSettledDepth(float depth, float uncertainty, const Parameters & parameters);
+
   /// Current predicted-surface depth at this node (negative-down), or
   /// `INVALID_DATA` when no prediction is available. Accessor for the
   /// predicted-surface producer and tests; the running best-estimate of the
