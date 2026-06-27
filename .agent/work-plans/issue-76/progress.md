@@ -63,3 +63,16 @@ The upstream blocker (`rolker/unh_marine_autonomy#228`) merged 2026-06-27 — no
 
 ### Open questions
 - [ ] A vs B fork: keep intentional marine_nav pruning (Option B, recommended) or full-resolve by cloning unh_marine_navigation (Option A)? — gate for plan-review confirmation.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-27 16:15 +00:00
+**By**: Claude Code Agent (Claude Sonnet) (in-context — author self-review)
+
+**Plan**: `.agent/work-plans/issue-76/plan.md` at `7fc2a36`
+**PR**: PR-less
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (suggestion) Dockerfile comment update scope is narrower than ci.yml: the `marine_nav_*` handling in the Dockerfile is fully automatic via the dynamic `rosdep check` → `--skip-keys` pattern (no explicit skip-key list in the Dockerfile). Step 3's Dockerfile comment update only needs to remove the `nlohmann_json` / `#228-pending` language; it does not need to add an "intentional pruning" narrative the way ci.yml does. Implementer: update the Dockerfile's bake-step comment to just remove the `nlohmann_json` bullet and `#228-pending` wording — the auto-skip mechanism already handles `marine_nav_*` transparently. — `plan.md:43-50`
+- [ ] (suggestion) **A-vs-B decision checkpoint for operator**: Option B (keep intentional pruning) is clearly sound — building `mission_manager*` / `marine_mbes_backscatter_store` / integration tests in cube CI adds noise and coupling without improving cube's correctness signal. Confirm Option B before implementation proceeds. — `plan.md:53-76`
