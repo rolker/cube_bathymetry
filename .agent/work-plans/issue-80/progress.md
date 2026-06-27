@@ -76,3 +76,15 @@ The following should be part of the implementation or flagged as follow-up:
 - [ ] Decide draft vs. processed layer for the offline backscatter output. ADR-0007 D7 defines `processed` as "the durable product: the full deferred-settled correction (D3) over the offline CUBE re-run" and `draft` as "the live operator view". The offline importer is closer to `processed` semantically, but the full GeoCoder correction (cube#15) is not yet available, so the first-cut output is not fully durable. Explicitly document the chosen layer and why (matching the bathy store's pattern of using Draft is one defensible option; note it in the commit or issue).
 - [ ] Add a bulk tile-insert path to the `MbesBackscatterStore` (e.g., `importTile()` or `importTiles()`) or explicitly document using cell-by-cell `set()` calls. The current `MbesBackscatterStore` has only `set()` per cell; the bathy import uses `BathymetryStore::importTiles()` for efficiency. The design choice (add bulk API vs. iterate cells) should be made consciously.
 - [ ] Add test coverage for the backscatter conversion (parallel to `test_store_import.cpp`'s bathy conversion tests).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-27 23:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-80/plan.md` at `05f281f`
+**Branch**: feature/issue-80 at `05f281f`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
