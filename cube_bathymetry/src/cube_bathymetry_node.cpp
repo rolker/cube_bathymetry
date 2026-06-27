@@ -24,6 +24,7 @@
 #include <cmath>
 #include <ctime>
 #include <filesystem>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -705,6 +706,23 @@ private:
       sensor_msgs::PointCloud2ConstIterator<float> iter_horizontal_uncertainty(
         *msg, "horizontal_uncertainty");
 
+      // Per-beam backscatter inputs (ADR-0007 D3), both OPTIONAL: intensity has
+      // long been emitted by detections_to_pointcloud, beam_angle is newer, so an
+      // older recorded /soundings bag may carry neither/either. Absent or NaN is
+      // fine -- the estimator's recordBeam() excludes NaN-intensity beams -- so we
+      // tolerate a missing field rather than dropping the ping. Optional iterators
+      // are advanced inside the loop (before any `continue`) to stay aligned.
+      const auto has_field = [&msg](const char * name) {
+          for (const auto & f : msg->fields) {
+            if (f.name == name) {return true;}
+          }
+          return false;
+        };
+      std::optional<sensor_msgs::PointCloud2ConstIterator<float>> iter_intensity;
+      std::optional<sensor_msgs::PointCloud2ConstIterator<float>> iter_beam_angle;
+      if (has_field("intensity")) {iter_intensity.emplace(*msg, "intensity");}
+      if (has_field("beam_angle")) {iter_beam_angle.emplace(*msg, "beam_angle");}
+
       size_t dropped = 0;
       for (; (iter_x != iter_x.end()) &&
         (iter_y != iter_y.end()) &&
@@ -716,6 +734,10 @@ private:
       {
         const float x = *iter_x, y = *iter_y, z = *iter_z;
         const float vu = *iter_vertical_uncertainty, hu = *iter_horizontal_uncertainty;
+        const float intensity = iter_intensity ? **iter_intensity : std::nanf("");
+        const float beam_angle = iter_beam_angle ? **iter_beam_angle : std::nanf("");
+        if (iter_intensity) {++*iter_intensity;}
+        if (iter_beam_angle) {++*iter_beam_angle;}
 
         // Drop soundings the CUBE estimator can't use. A non-finite position or
         // uncertainty -- or a non-positive vertical / negative horizontal
@@ -749,6 +771,8 @@ private:
         cube::GeoSounding s(ll);
         s.sounding.vertical_error = vu;
         s.sounding.horizontal_error = hu;
+        s.sounding.intensity = intensity;    // per-beam backscatter (may be NaN)
+        s.sounding.beam_angle = beam_angle;  // incidence rel. nadir (may be NaN)
         soundings.push_back(s);
       }
 
