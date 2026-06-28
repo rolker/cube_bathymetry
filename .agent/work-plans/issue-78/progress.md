@@ -145,3 +145,28 @@ LifecycleNode needing configure/activate; `--start-offset` skips `tf_static`
 checker topic namespace matched the remapped node name.
 
 Next: `/review-code` (container) on the full diff → push + PR (Closes #78).
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-28 10:28 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-78 at `ef83f3a`
+**Mode**: pre-push
+**Depth**: Deep (reason: 776 lines / 10 files — both Deep thresholds; new wire-protocol transport)
+**Must-fix**: 2 | **Suggestions**: 4
+**Round**: 1 | **Ship**: continue — one cross-confirmed D4 contract defect + one reconfigure state-leak; both bounded/cheap.
+
+Static analysis (ament_uncrustify + ament_cpplint) clean on all 5 changed C++ files.
+Two Deep-tier Claude Adversarial passes (Lens A logic, Lens B systemic) independently
+converged on the catalog-completeness defect (cross-confirmed). SingleThreadedExecutor —
+no data-race surface. `depth_var` "uncertainty" band confirmed unit-correct (CI stddev in m).
+
+### Findings
+- [ ] (must-fix) `TileCatalog` doesn't track the servable set — under-advertises primed/resident tiles (never enter `catalog_builder_`; consumer prunes valid coverage, acute as empty catalog right after activate) and over-advertises evicted tiles (no `remove()` on eviction → unsatisfiable `TileRequest` loop); breaks ADR-0008 D4 completeness. Seed builder from startup prime + `remove()` on eviction — `src/cube_bathymetry_node.cpp:501,181,560-616`
+- [ ] (must-fix) `catalog_builder_` never reset on reconfigure (configure→cleanup→configure advertises phantom prior-session tiles); mirror the line-98 `evicted_indices_.clear()` — `src/cube_bathymetry_node.cpp:94-98,339`
+- [ ] (suggestion) `tileRequestCallback` O(requests × resident) linear scan; use indexed `gridAt()` (cross-confirmed A+B) — `src/cube_bathymetry_node.cpp:540-551`
+- [ ] (suggestion) Reliable `TileRequest` answered on best-effort `~/coverage_tiles`; catch-up reply can be dropped, convergence bounded only by `catalog_interval_s_` — `src/cube_bathymetry_node.cpp:233,238`
+- [ ] (suggestion) `tileRequestCallback` doesn't gate on `PRIMARY_STATE_ACTIVE`; a request while configured-but-inactive publishes on an inactive LifecyclePublisher (log-spam) — `src/cube_bathymetry_node.cpp:536`
+- [ ] (suggestion) No unit test for the populated/auto-range backscatter band (finite intensity → bmin/bmax/bspan, single-value degenerate); plan called for a band-extract test, only sim-verify covers it — `test/test_quantize_tile.cpp`
