@@ -68,6 +68,9 @@
 {
   std::cout << "usage: import_bag [options] -o <store_dir> "
     "-d <detections_topic> <bag> [<bag> ...]\n";
+  std::cout << "  --bathy-layer draft|processed: bathymetry store layer for this "
+    "import (default processed: the off-boat CUBE re-run is authoritative; the live "
+    "node writes draft. #85)\n";
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
     "needed)\n";
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store layer "
@@ -274,6 +277,7 @@ int main(int argc, char * argv[])
   std::vector<std::string> bagfile_names;
   std::string store_dir;
   std::string bs_store_dir;  // optional: MBES backscatter store output (#80)
+  std::string bathy_layer_str = "processed";  // bathy target layer (#85): draft|processed
   std::string detections_topic;  // required
   std::string odom_topic;  // optional: nav_msgs/Odometry for per-ping vessel speed
   double resolution = 1.0;
@@ -312,6 +316,8 @@ int main(int argc, char * argv[])
       usage();
     } else if (*arg == "-o") {
       store_dir = next_value("-o");
+    } else if (*arg == "--bathy-layer") {
+      bathy_layer_str = next_value("--bathy-layer");
     } else if (*arg == "--bs-store") {
       bs_store_dir = next_value("--bs-store");
     } else if (*arg == "-d") {
@@ -367,6 +373,19 @@ int main(int argc, char * argv[])
   if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
     std::cerr << "error: -o <store_dir>, -d <detections_topic>, and "
       "at least one bag are all required\n";
+    usage();
+  }
+
+  // Bathy target layer (#85). The off-boat CUBE re-run is the authoritative product
+  // (the live node writes Draft), so this defaults to Processed; --bathy-layer draft
+  // overrides (e.g. to seed a draft from a bag).
+  marine_bathymetry_store::SourceLayer bathy_layer =
+    marine_bathymetry_store::SourceLayer::Processed;
+  if (bathy_layer_str == "draft") {
+    bathy_layer = marine_bathymetry_store::SourceLayer::Draft;
+  } else if (bathy_layer_str != "processed") {
+    std::cerr << "error: --bathy-layer must be 'draft' or 'processed' (got '"
+              << bathy_layer_str << "')\n";
     usage();
   }
 
@@ -722,24 +741,23 @@ int main(int argc, char * argv[])
       "the projector frame overrides and the detections topic." << std::endl;
   }
 
-  // Draft layer: this full-bag CUBE replay merges into the single fused draft
-  // grid (unh_marine_autonomy#221 — no per-day epochs, newest value wins per
-  // cell). Off-boat regeneration into the authoritative `processed` layer is a
-  // separate step.
-  store.importTiles(
-    marine_bathymetry_store::SourceLayer::Draft, std::move(tiles));
+  // The off-boat full-bag CUBE replay is the authoritative product, so by default it
+  // lands in the `Processed` layer (#85; --bathy-layer overrides). The live node
+  // writes the `Draft` layer instead. Single fused grid per layer
+  // (unh_marine_autonomy#221 — no per-day epochs, newest value wins per cell).
+  store.importTiles(bathy_layer, std::move(tiles));
 
   std::size_t written = marine_bathymetry_store::save(store, store_dir, &registry);
-  std::cout << "Saved " << written << " tiles to " << store_dir << "." << std::endl;
+  std::cout << "Saved " << written << " tiles to " << store_dir << " ("
+            << bathy_layer_str << " layer)." << std::endl;
 
   // Optional: surface the co-estimated backscatter into an MBES backscatter store
-  // layer from the SAME CUBE pass (#80). The value is UNCORRECTED -- node.cpp
-  // emits the identity until the sign-gated angle correction lands (cube#81),
-  // which then updates both this offline layer and the live tile (#78). Written
-  // to the PROCESSED layer (operator decision): the offline CUBE re-run is the
-  // authoritative off-boat product; cube#81 updates corrected values in place.
-  // The bathy layer above is Draft; the backscatter layer is Processed -- the
-  // same-pass split is intentional.
+  // layer from the SAME CUBE pass (#80), written to the Processed layer (the
+  // off-boat CUBE re-run is the authoritative product). By default the value is
+  // UNCORRECTED; --backscatter-correction empirical (with a --backscatter-curve)
+  // applies the per-beam angular-response correction at node-output (cube#81),
+  // which corrects both this offline layer and the live tile (#78). Bathy (above)
+  // defaults to the same Processed layer (#85).
   if (!bs_store_dir.empty()) {
     std::cout << "Building backscatter store tiles..." << std::endl;
 
