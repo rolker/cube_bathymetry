@@ -147,3 +147,33 @@ implementation and test.
 - [ ] (suggestion) `test_store_import.cpp` Step 4 misses a stale comment: lines 64-67 explicitly assert "the surfaced value is uncorrected so the angle does not change it here" — that becomes false once the correction lands. Update the comment regardless of which fix is chosen. Prefer updating the assertion to the corrected value over zeroing `beam_angle` to 0.0f, so a non-nadir beam still exercises the offline-store path — `plan.md:91-97`
 - [ ] (suggestion) The `grazing_angle → beam_angle` rename should also cover the header doc comments that mention the old name — `hypothesis.h:115-116` ("a NaN grazing_angle is retained") and the `BeamIntensitySample` reference at `hypothesis.h:166`; Step 1's file list cites only the field decl, recordBeam sig/impl, node.cpp:308, and tests — `plan.md:64-68`
 - [ ] (suggestion) ADR-0007 transition-note filename `0007-mbes-backscatter-store-phase-b-transition.md` claims the `0007-` slot before the full ADR-0007 doc exists; confirm the planned follow-up's full doc won't collide (or intend it as a sibling addendum) — `plan.md:99-104`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-28 11:20 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independent re-review of the revised plan. Plan authored by a Claude Sonnet
+     sub-agent; this is a fresh-context Claude Opus sub-agent (different model +
+     fresh context → genuine second opinion), so no author-self-review annotation
+     — mirrors the precedent set in the prior Plan Review entry above. -->
+
+**Plan**: `.agent/work-plans/issue-81/plan.md` at `0387a24`
+**PR**: PR-less (--issue mode)
+**Verdict**: approve-with-suggestions
+
+Re-review after the plan was revised (`0387a24`) to address the prior
+`changes-requested` review. All prior findings resolved, verified against live
+source: ✓ formula → cos²θ / `−20·log10(cos θ)` (classic single-term Lambert seabed
+law, replacing the unsound one-way ×10); ✓ near-grazing now a single unambiguous
+rule (identity beyond 80°, no clamp/identity contradiction); ✓ all three broken
+non-nadir assertions enumerated (`test_node.cpp:382`, the `:401` mean,
+`:420`); ✓ `test_store_import` stale comment; ✓ rename covers `hypothesis.h:115-116`
+and `:166`; ✓ addendum filename relabeled. Line numbers checked: no-op site
+`node.cpp:315-318`, `grazing_angle` at `hypothesis.h:49`, `recordBeam` decl `:118`
++ impl `hypothesis.cpp:118/122/127`, both entry points present, ADR-0007 has no
+file yet (only `0001-` exists). Formula has no objections.
+
+### Findings
+- [ ] (suggestion) Step 3's "fix 3 broken non-nadir assertions" is now internally inconsistent with the default-off parameter design: under default `None`, `FirstBeamInitializationRecordsIntensity` (`test_node.cpp:382`), the `NodeRecordMeanAndEstimateVariance` mean (`:401`), and `NodeRecordSkipsNanIntensityBeam` (`:420`) do NOT break (`corrected == raw` when correction is off). They need no change; only the 6 new Lambert-ON tests assert corrected values. The "fix 3 broken" wording is carried over from the pre-parameter review — clarify that those three stay unchanged on the default path — `plan.md:112-121`
+- [ ] (suggestion) Confirm the operator endorsed the **default-off** parameter design before implementing. It expands scope beyond the dispatched SCOPE BOUNDARY (which names no parameter) and changes #81's outcome: by default the no-op identity ships unchanged, so #78/#80 are corrected only when the flag is enabled. The plan attributes default-off to an operator decision (`plan.md:198-201`) but the dispatch's listed operator decisions cover only the gate-PASS and the ADR note. Design is defensible (sonar-agnostic; avoids double-counting a possibly pre-normalized reflectivity) — just verify the endorsement — `plan.md:24-29`, `plan.md:80-92`
+- [ ] (suggestion, optional) Scope at upper bound (10 files). The `grazing_angle → beam_angle` rename is orthogonal to the correction and a clean split candidate if the PR grows large — not required — `plan.md:94-99`
