@@ -115,3 +115,15 @@ implementation and test.
 - [ ] Update `test_node.cpp`: replace any intensity assertions that assume `corrected == raw` with expected Lambert-corrected values; add a test with a non-nadir beam angle confirming `corrected ≠ raw`.
 - [ ] Add symmetric port/starboard test: equal `|beam_angle|` on each side should produce equal corrected intensity.
 - [ ] Write or update project ADR-0007 document in `cube_bathymetry/docs/decisions/` to record the Phase B → first-cut transition (when it happens, what correction, what's still deferred).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-28 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `cube_bathymetry/.agent/work-plans/issue-81/plan.md` at `94938a6`
+**Branch**: feature/issue-81 at `94938a6`
+**Phases**: single
+
+### Open questions
+- [ ] Formula constant: confirm from Kongsberg EM Datagram Formats that `reflectivity_db` is raw backscatter without Lambert normalization in TVG, to avoid double-counting the cos θ correction.
