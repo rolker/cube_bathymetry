@@ -222,3 +222,33 @@ Lifecycle: **Plan Review** → **implement** → **review-code**. Verdict is
 changes-requested: the implementer (or plan author) should add `geo_map_sheet.{h,cpp}`
 plumbing to the plan and address the must-fix before/while implementing; the
 suggestions are minor comment/include hygiene.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-28 13:52 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-81 at `271e52f`
+**Mode**: pre-push
+**Depth**: Deep (reason: 1325 changed lines / 19 files / new ADR addendum)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 1 | **Ship**: recommended — no must-fix; 2 minor suggestions (edge-clamp design + a misleading comment), all plan-review findings resolved
+
+### Findings
+- [ ] (suggestion) `curveRelativeDb` clamp asymmetric: below-first-bin clamps to `curve.front().second` (assumes nadir bin), beyond-last-bin returns 0 (identity) creating a discontinuity at the outermost bin — clamp to `curve.back().second` or assert/doc the nadir-anchored curve — `cube_bathymetry/src/node.cpp:47`
+- [ ] (suggestion) Loader comment overstates the `a_used`/`d_used` guard: `std::stof` parses a numeric prefix, so `"1deg"` is accepted as `1.0`, not rejected — comment-accuracy nit — `cube_bathymetry/src/angular_response_curve.cpp:93`
+
+### Notes
+- Base scope: local `gitcloud/jazzy` mirror is stale (predates merged #80 / PR #82 at `7467e1b`); review scoped to the #81-only diff `7467e1b...HEAD` (19 files, +1325 −39). The bundled #80 portion was already reviewed/integrated.
+- Deep review: 2 fresh-context Claude Adversarial passes (Lens A logic + Lens B systemic) — both clean, no must-fix. Cross-pass confirmation on the curve-edge clamp (suggestion 1). Copilot off (default).
+- Static analysis clean: ament_cpplint, ament_uncrustify, ament_cppcheck (slow-version override), ament_flake8 (Python tool) all "No problems found".
+- Tests **pass** against built binaries: `NodeTest.ARA*` (6/6) and `AngularResponseCurve.*` (4/4).
+- Verified correct: rad→deg units + sign convention (`std::abs(beam_angle)`); interpolation incl. duplicate-angle (`span<=0`) guard; mean + variance-of-mean math (clamped ≥0); Python writer columns (0=center,3=db_rel) match C++ loader reads; correction applied once at `extractNodeRecord` (warm-start/eviction reload reseeds depth only — no double-correction); SingleThreadedExecutor → no param-mutation race.
+- Plan adherence: full. Plan-review must-fix (geo_map_sheet plumbing) resolved; setter ordering verified before any grid processes soundings on both live + offline paths. `<vector>`/`<utility>` includes present.
+- Pre-existing (not a #81 finding): configure→cleanup→configure would throw `ParameterAlreadyDeclaredException` — node-wide pattern, not introduced here.
+
+### Next step
+Lifecycle: **Local Review** → push / open PR → **triage-reviews**. Verdict is
+**approved** with no must-fix — the diff is shippable; the 2 suggestions can be
+applied or tracked. Next phase is dispatched by the host (`/run-issue`).
