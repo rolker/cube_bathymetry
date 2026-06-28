@@ -119,13 +119,13 @@ public:
         "defaulting to none (no correction).", bs_correction_str.c_str());
       bs_mode = cube::BackscatterAngleCorrection::None;
     }
-    std::vector<std::pair<float, float>> bs_curve;
+    cube::AngularResponseCurve bs_curve;
     if (bs_mode == cube::BackscatterAngleCorrection::Empirical &&
       !bs_curve_file.empty())
     {
-      bs_curve = cube::loadAngularResponseCurve(bs_curve_file);
+      bs_curve = cube::loadAngularResponseCurveWithHeader(bs_curve_file);
     }
-    if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.empty()) {
+    if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.points.empty()) {
       // Loud, not silent: the operator asked for the correction but no curve was
       // loaded (empty/missing/unparseable file), so it degrades to a no-op.
       RCLCPP_WARN(get_logger(),
@@ -134,11 +134,23 @@ public:
         "(intensity emitted uncorrected). Provide a valid curve CSV.",
         bs_curve_file.c_str());
     } else if (bs_mode == cube::BackscatterAngleCorrection::Empirical) {
-      RCLCPP_INFO(get_logger(),
-        "Backscatter angular-response correction: empirical, %zu-point curve "
-        "from %s", bs_curve.size(), bs_curve_file.c_str());
+      if (bs_curve.tl_removed) {
+        // tier-2 (cube#87): TL-removed residual; estimator also removes
+        // 40*log10(R) + 2*alpha*R per beam (R from the sensor-frame point norm).
+        RCLCPP_INFO(get_logger(),
+          "Backscatter angular-response correction: empirical, %zu-point curve "
+          "from %s [tier-2: TL-removed, alpha=%g dB/m]", bs_curve.points.size(),
+          bs_curve_file.c_str(),
+          static_cast<double>(bs_curve.absorption_db_per_m));
+      } else {
+        RCLCPP_INFO(get_logger(),
+          "Backscatter angular-response correction: empirical, %zu-point curve "
+          "from %s", bs_curve.points.size(), bs_curve_file.c_str());
+      }
     }
-    geo_map_sheet_->setBackscatterCorrection(bs_mode, std::move(bs_curve));
+    geo_map_sheet_->setBackscatterCorrection(
+      bs_mode, std::move(bs_curve.points),
+      bs_curve.tl_removed, bs_curve.absorption_db_per_m);
 
     // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
     // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
@@ -957,6 +969,10 @@ private:
         s.sounding.horizontal_error = hu;
         s.sounding.intensity = intensity;    // per-beam backscatter (may be NaN)
         s.sounding.beam_angle = beam_angle;  // incidence rel. nadir (may be NaN)
+        // Per-beam slant range for the tier-2 TL correction (cube#87). The
+        // /soundings cloud carries the touchdown in the SENSOR frame, so its
+        // norm IS the slant range from the sonar head -- no extra field needed.
+        s.sounding.slant_range = std::sqrt(x * x + y * y + z * z);
         soundings.push_back(s);
       }
 

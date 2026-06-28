@@ -57,9 +57,18 @@ public:
   /// every owned GeoGrid holds by const reference -- so the setting reaches all
   /// existing and future grids. Call AFTER construction and BEFORE/at processing.
   /// An Empirical mode with an empty curve is a no-op (the caller should warn).
+  ///
+  /// @p tl_removed / @p absorption_db_per_m carry the tier-2 TL provenance
+  /// (cube_bathymetry#87): when @p tl_removed is true the @p curve is a TL-
+  /// removed residual and the estimator removes `40*log10(R) + 2*alpha*R` per
+  /// beam (alpha == @p absorption_db_per_m) before subtracting the residual.
+  /// Both default to the tier-1 values (false / 0), so existing callers are
+  /// unchanged.
     void setBackscatterCorrection(
       BackscatterAngleCorrection mode,
-      std::vector < std::pair < float, float >> curve);
+      std::vector < std::pair < float, float >> curve,
+      bool tl_removed = false,
+      float absorption_db_per_m = 0.0f);
 
   /// Return the grids within the bounds, creating new ones if necessary
     std::vector < std::shared_ptr <

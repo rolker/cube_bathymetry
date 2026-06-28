@@ -92,6 +92,85 @@ TEST(AngularResponseCurve, MissingFileIsEmpty)
   EXPECT_TRUE(loadAngularResponseCurve("/no/such/curve_file_12345.csv").empty());
 }
 
+// Tier-2 (#87): a curve with the self-describing TL header parses tl_removed +
+// absorption_db_per_m; the data columns are unchanged.
+TEST(AngularResponseCurve, ParsesTier2Header)
+{
+  const std::string csv =
+    "# Empirical angular response (tier-2)\n"
+    "# tl_removed: true\n"
+    "# absorption_db_per_m: 0.04897\n"
+    "# water_temp_c: 24\n"
+    "# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)\n"
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n"
+    "1.0,-40.0,100,+0.000\n"
+    "3.0,-41.0,100,-1.000\n";
+  const std::string path = writeTemp(csv);
+
+  auto loaded = loadAngularResponseCurveWithHeader(path);
+  std::remove(path.c_str());
+
+  EXPECT_TRUE(loaded.tl_removed);
+  EXPECT_FLOAT_EQ(loaded.absorption_db_per_m, 0.04897f);
+  ASSERT_EQ(loaded.points.size(), 2u);
+  EXPECT_FLOAT_EQ(loaded.points[0].first, 1.0f);
+  EXPECT_FLOAT_EQ(loaded.points[1].second, -1.0f);
+}
+
+// Absence of the TL header -> tier-1 defaults (tl_removed=false, absorption=0),
+// so a tier-1 curve keeps loading unchanged.
+TEST(AngularResponseCurve, AbsentHeaderDefaultsToTier1)
+{
+  const std::string csv =
+    "# M3 empirical angular response\n"
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n"
+    "1.0,-40.0,100,+0.000\n";
+  const std::string path = writeTemp(csv);
+
+  auto loaded = loadAngularResponseCurveWithHeader(path);
+  std::remove(path.c_str());
+
+  EXPECT_FALSE(loaded.tl_removed);
+  EXPECT_FLOAT_EQ(loaded.absorption_db_per_m, 0.0f);
+  ASSERT_EQ(loaded.points.size(), 1u);
+}
+
+// An explicit "# tl_removed: false" header parses as tier-1 (the derive tool
+// writes this for tier-1 runs).
+TEST(AngularResponseCurve, ExplicitTlRemovedFalse)
+{
+  const std::string csv =
+    "# tl_removed: false\n"
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n"
+    "1.0,-40.0,100,+0.000\n";
+  const std::string path = writeTemp(csv);
+
+  auto loaded = loadAngularResponseCurveWithHeader(path);
+  std::remove(path.c_str());
+
+  EXPECT_FALSE(loaded.tl_removed);
+  EXPECT_FLOAT_EQ(loaded.absorption_db_per_m, 0.0f);
+}
+
+// The backward-compatible loadAngularResponseCurve() still returns just the
+// points (drops the TL provenance) -- existing call sites are unaffected.
+TEST(AngularResponseCurve, BackCompatLoaderReturnsPoints)
+{
+  const std::string csv =
+    "# tl_removed: true\n"
+    "# absorption_db_per_m: 0.05\n"
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n"
+    "1.0,-40.0,100,+0.000\n"
+    "3.0,-41.0,100,-1.000\n";
+  const std::string path = writeTemp(csv);
+
+  auto curve = loadAngularResponseCurve(path);
+  std::remove(path.c_str());
+
+  ASSERT_EQ(curve.size(), 2u);
+  EXPECT_FLOAT_EQ(curve[1].second, -1.0f);
+}
+
 // Mode-string parsing is case-insensitive; unknown values are rejected.
 TEST(AngularResponseCurve, ParsesMode)
 {

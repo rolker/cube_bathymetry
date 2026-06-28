@@ -684,4 +684,127 @@ TEST_F(NodeTest, ARAPortStarboardSymmetry)
   EXPECT_NEAR(record.intensity_var, 0.0f, 1e-4);
 }
 
+// ---- Tier-2: TL-removed angular response (#87) -----------------------------
+
+namespace
+{
+// empiricalParams() + the tier-2 TL provenance: the loaded curve is a TL-removed
+// residual, so the estimator also removes 40*log10(R) + 2*alpha*R per beam.
+Parameters tier2Params(float alpha)
+{
+  Parameters p = empiricalParams();  // Empirical, curve {{0,0},{60,-12}}
+  p.backscatter_tl_removed = true;
+  p.backscatter_absorption_db_per_m = alpha;
+  return p;
+}
+
+// Single-beam nominated hypothesis carrying a per-beam slant range, so the
+// surfaced intensity equals the tier-2 corrected value of exactly that beam.
+std::shared_ptr<Hypothesis> singleBeamNominatedRange(
+  Node & n, float raw_intensity, float beam_angle_rad, float range)
+{
+  auto h = std::make_shared<Hypothesis>(10.0f, 1.0f);
+  h->input_sample_variance = 1.0f;
+  h->recordBeam(raw_intensity, beam_angle_rad, range);
+  NodeNominationTestAccess::nominate(n, h);
+  return h;
+}
+
+// Reference tier-2 correction: corrected = raw - (40log10R + 2*alpha*R) - residual.
+double tier2Expected(double raw, double range, double alpha, double residual_db)
+{
+  const double tl = 40.0 * std::log10(range) + 2.0 * alpha * range;
+  return raw - tl - residual_db;
+}
+}  // namespace
+
+// Tier-2 mid-angle beam with a known range: both the TL term and the residual
+// curve are removed -- corrected = raw - (40log10R + 2*alpha*R) - residual(30deg).
+TEST_F(NodeTest, Tier2RemovesTLAndResidual)
+{
+  const float alpha = 0.05f;
+  const float range = 50.0f;
+  Parameters t2 = tier2Params(alpha);
+  Node n;
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), range);
+
+  auto record = n.extractNodeRecord(t2);
+  ASSERT_EQ(record.n_samples, 1u);
+  // residual(30deg) = -6 dB (interpolated {0,0}..{60,-12}).
+  const double expected = tier2Expected(-30.0, range, alpha, -6.0);
+  EXPECT_NEAR(record.intensity, static_cast<float>(expected), 1e-2);
+}
+
+// Tier-2 nadir beam: residual(0) = 0, only the TL term is removed.
+TEST_F(NodeTest, Tier2NadirRemovesTLOnly)
+{
+  const float alpha = 0.04897f;
+  const float range = 35.0f;
+  Parameters t2 = tier2Params(alpha);
+  Node n;
+  singleBeamNominatedRange(n, -40.0f, 0.0f, range);
+
+  auto record = n.extractNodeRecord(t2);
+  ASSERT_EQ(record.n_samples, 1u);
+  const double expected = tier2Expected(-40.0, range, alpha, 0.0);
+  EXPECT_NEAR(record.intensity, static_cast<float>(expected), 1e-2);
+}
+
+// Tier-2 with a NaN range: the TL term is skipped (no log of a non-positive R),
+// so the beam falls back to tier-1 (residual-only) correction.
+TEST_F(NodeTest, Tier2NaNRangeSkipsTL)
+{
+  Parameters t2 = tier2Params(0.05f);
+  Node n;
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), std::nan(""));
+
+  auto record = n.extractNodeRecord(t2);
+  ASSERT_EQ(record.n_samples, 1u);
+  // No TL -> corrected = raw - residual(30deg) = -30 - (-6) = -24.
+  EXPECT_NEAR(record.intensity, -24.0f, 1e-3);
+}
+
+// Tier-2 with a non-positive range: TL skipped likewise (identity TL term).
+TEST_F(NodeTest, Tier2NonPositiveRangeSkipsTL)
+{
+  Parameters t2 = tier2Params(0.05f);
+  Node n;
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), -5.0f);
+
+  auto record = n.extractNodeRecord(t2);
+  ASSERT_EQ(record.n_samples, 1u);
+  EXPECT_NEAR(record.intensity, -24.0f, 1e-3);
+}
+
+// Regression: tl_removed == false (tier-1) ignores the range entirely, even when
+// a finite range is present -- the TL term must NOT be applied.
+TEST_F(NodeTest, Tier1IgnoresRange)
+{
+  Parameters ara = empiricalParams();  // tl_removed defaults false
+  Node n;
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), 50.0f);
+
+  auto record = n.extractNodeRecord(ara);
+  ASSERT_EQ(record.n_samples, 1u);
+  // Tier-1: corrected = raw - residual(30deg) = -24 (no TL despite range=50).
+  EXPECT_NEAR(record.intensity, -24.0f, 1e-3);
+}
+
+// Threading: a per-beam range survives Node::update() onto the seeding/winning
+// hypothesis, so the tier-2 TL correction sees it at extractNodeRecord().
+TEST_F(NodeTest, Tier2RangeThreadsThroughUpdate)
+{
+  const float alpha = 0.05f;
+  const float range = 50.0f;
+  Parameters t2 = tier2Params(alpha);
+  Node n;
+  // !best path (first beam seeds a new hypothesis) carries the range.
+  ASSERT_TRUE(n.update(10.0f, 1.0f, t2, -30.0f, deg2rad(30.0f), range));
+
+  auto record = n.extractNodeRecord(t2);
+  ASSERT_EQ(record.n_samples, 1u);
+  const double expected = tier2Expected(-30.0, range, alpha, -6.0);
+  EXPECT_NEAR(record.intensity, static_cast<float>(expected), 1e-2);
+}
+
 }  // namespace cube
