@@ -22,10 +22,13 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 
 #include "marine_autonomy/gggs.h"
+#include "marine_autonomy/gz4d_geo.h"
 #include "cube_bathymetry/geo_grid.h"
+#include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/parameters.h"
 #include "cube_bathymetry/quantize_tile.h"
 
@@ -98,6 +101,47 @@ TEST(QuantizeTile, DepthAndUncertaintyBandsQuantizeCorrectly)
   // No intensity was set, so backscatter is entirely nodata.
   EXPECT_EQ(bs.data[idx(0, 0)], 255u);
   EXPECT_EQ(bs.data[idx(1, 2)], 255u);
+}
+
+// Intensity-bearing soundings -> the backscatter band is populated and the
+// per-tile uint8 auto-range (scale/offset) brackets the inserted intensities.
+TEST(QuantizeTile, BackscatterBandAutoRangesOverInsertedIntensities)
+{
+  cube::Parameters params{cube::CellSizes(1.0f), "order1a"};
+  const gggs::Level level{gggs::Level::fromCellSize(1.0f)};
+  const gggs::GridIndex grid_index = level.gridIndex(43.07, -70.76);
+  cube::GeoGrid g(grid_index, params);
+
+  auto insert = [&](double lat, double lon, float depth, float intensity) {
+      gz4d::GeoPointLatLongDegrees p(lat, lon, depth);
+      cube::GeoSounding s(p);
+      s.sounding.vertical_error = 0.05f;
+      s.sounding.horizontal_error = 0.05f;
+      s.sounding.intensity = intensity;
+      s.sounding.beam_angle = 0.0f;
+      g.insert(s);
+    };
+  // Two well-separated spots with distinct backscatter (dB) so the auto-range
+  // spans a real interval, not the single-value degenerate case.
+  insert(43.0700, -70.7600, -30.0f, -40.0f);  // low
+  insert(43.0710, -70.7610, -30.0f, -10.0f);  // high
+
+  builtin_interfaces::msg::Time stamp;
+  const auto maybe = cube::quantizeTile(g, stamp);
+  ASSERT_TRUE(maybe.has_value());
+  const auto & bs = maybe->bands[2];
+  ASSERT_EQ(bs.name, "backscatter");
+
+  // Auto-range: offset is the min intensity (-40 dB); scale is a real span.
+  EXPECT_NEAR(bs.offset, -40.0, 1.0);
+  EXPECT_GT(bs.scale, 0.0);
+
+  std::size_t finite = 0;
+  const int nodata = static_cast<int>(std::lround(bs.nodata));
+  for (auto v : bs.data) {
+    if (v != nodata) {++finite;}
+  }
+  EXPECT_GE(finite, 2u);  // at least the two inserted touchdowns carry backscatter
 }
 
 TEST(QuantizeTile, EmptyGridYieldsNullopt)

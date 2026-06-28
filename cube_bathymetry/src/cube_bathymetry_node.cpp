@@ -96,6 +96,9 @@ public:
     // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
     // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
     evicted_indices_.clear();
+    // Reset the tile-version registry too (#78): a fresh sheet must not advertise
+    // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
+    catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
 
     // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
     // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
@@ -190,6 +193,15 @@ public:
           // known limitation -- a windowed prime needs a startup position that is
           // not available at on_configure; tracked as a follow-up.)
           trimResidentToBudget();
+          // Seed the tile-version registry from the primed (reloaded) grids so
+          // they are advertised in the catalog from the first publish. Without
+          // this the consumer sees an empty catalog right after activate and
+          // prunes valid on-disk coverage (ADR-0008 D4). All primed tiles share
+          // one prime-time version; a resurvey bumps it via publishDirtyTiles.
+          const std::int64_t prime_version = now().nanoseconds();
+          for (const auto & grid : geo_map_sheet_->grids()) {
+            if (grid) {catalog_builder_.update(grid->index(), prime_version);}
+          }
         }
       } catch (const std::exception & e) {
         // A missing/empty store dir is normal on a first run; a genuine load
@@ -510,20 +522,27 @@ private:
   void publishCatalog()
   {
     const rclcpp::Time gen = now();
-    const marine_tiled_raster_store::TileCatalog catalog =
-      catalog_builder_.buildCatalog(gen.nanoseconds());
-
     marine_interfaces::msg::TileCatalog msg;
     msg.header.stamp = gen;
     msg.header.frame_id = "gggs";
-    msg.entries.reserve(catalog.entries.size());
-    for (const auto & e : catalog.entries) {
+
+    // The catalog is the COMPLETE set of tiles the boat can SERVE right now: the
+    // currently-resident grids that carry data (a tracked version). Building from
+    // grids() rather than the version registry keeps it D4-complete against the
+    // resident-serving TileRequest path (ADR-0008 D4): evicted tiles are no
+    // longer resident, so they drop out (a request couldn't be served anyway),
+    // and primed tiles seeded at startup are included. A resident grid with no
+    // tracked version has no servable data yet, so it is skipped.
+    for (const auto & grid : geo_map_sheet_->grids()) {
+      if (!grid) {continue;}
+      const auto version = catalog_builder_.versionOf(grid->index());
+      if (!version) {continue;}
       marine_interfaces::msg::TileCatalogEntry entry;
-      entry.index.level = e.index.level();
-      entry.index.row = e.index.row();
-      entry.index.col = e.index.column();
-      entry.version.sec = static_cast<std::int32_t>(e.version / 1000000000LL);
-      entry.version.nanosec = static_cast<std::uint32_t>(e.version % 1000000000LL);
+      entry.index.level = grid->index().level();
+      entry.index.row = grid->index().row();
+      entry.index.col = grid->index().column();
+      entry.version.sec = static_cast<std::int32_t>(*version / 1000000000LL);
+      entry.version.nanosec = static_cast<std::uint32_t>(*version % 1000000000LL);
       msg.entries.push_back(entry);
     }
     tile_catalog_publisher_->publish(msg);
@@ -535,6 +554,14 @@ private:
   // live push + periodic catalog already cover the common (resident) case.
   void tileRequestCallback(const marine_interfaces::msg::TileRequest::SharedPtr msg)
   {
+    // Serving publishes on the lifecycle tile publisher, which only emits while
+    // ACTIVE; a request that arrives configured-but-inactive would otherwise
+    // log-spam an inactive-publisher warning per tile.
+    if (get_current_state().id() !=
+      lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+    {
+      return;
+    }
     const builtin_interfaces::msg::Time stamp = now();
     std::size_t served = 0;
     for (const auto & ti : msg->tiles) {

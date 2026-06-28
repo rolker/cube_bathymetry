@@ -170,3 +170,22 @@ no data-race surface. `depth_var` "uncertainty" band confirmed unit-correct (CI 
 - [ ] (suggestion) Reliable `TileRequest` answered on best-effort `~/coverage_tiles`; catch-up reply can be dropped, convergence bounded only by `catalog_interval_s_` — `src/cube_bathymetry_node.cpp:233,238`
 - [ ] (suggestion) `tileRequestCallback` doesn't gate on `PRIMARY_STATE_ACTIVE`; a request while configured-but-inactive publishes on an inactive LifecyclePublisher (log-spam) — `src/cube_bathymetry_node.cpp:536`
 - [ ] (suggestion) No unit test for the populated/auto-range backscatter band (finite intensity → bmin/bmax/bspan, single-value degenerate); plan called for a band-extract test, only sim-verify covers it — `test/test_quantize_tile.cpp`
+
+## Review Triage (Pre-Push)
+**When**: 2026-06-28
+**By**: Claude Code Agent (Claude Opus 4.8)
+
+Container review-code (Deep, both adversarial lenses) verdict **changes-requested**:
+2 must-fix + 4 suggestions. Resolved:
+- [x] **(must-fix)** Catalog now tracks the SERVABLE set: `publishCatalog` builds from
+  the resident `grids()` filtered by tracked version — auto-excludes evicted tiles
+  (no over-advertise / unsatisfiable request) and includes primed tiles. Seeded the
+  version registry from the startup prime (no under-advertise / empty-catalog-after-activate).
+- [x] **(must-fix)** Reset `catalog_builder_` on (re)configure (mirrors `evicted_indices_.clear()`)
+  so a fresh sheet can't advertise phantom prior-session tiles.
+- [x] (suggestion) `tileRequestCallback` gates on `PRIMARY_STATE_ACTIVE` (no inactive-publisher spam).
+- [x] (suggestion) Added `BackscatterBandAutoRangesOverInsertedIntensities` test (auto-range offset/scale + populated cells).
+- [ ] (suggestion, ACCEPTED-AS-IS) `tileRequestCallback` O(req×resident) scan: `gridAt()` needs a `gggs::GridIndex`, whose `(level,row,col)` ctor is private — the resident scan (≤ max_resident_tiles) is the available path. Noted.
+- [ ] (suggestion, ACCEPTED-AS-IS) Reliable `TileRequest` → best-effort tile reply: a dropped catch-up reply is re-driven by the next periodic catalog (bounded by `catalog_interval_s_`); acceptable for the live preview.
+
+Rebuilt; **369 tests pass**, uncrustify clean. Re-running sim-verify after the catalog change.
