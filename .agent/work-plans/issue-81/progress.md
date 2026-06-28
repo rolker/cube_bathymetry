@@ -190,3 +190,35 @@ file yet (only `0001-` exists). Formula has no objections.
 ### Open questions
 - [ ] Script install method: `install(PROGRAMS ...)` in CMakeLists.txt vs `ament_python_install_package` for `derive_angular_response.py` — confirm house standard.
 - [ ] Curve file format: CSV chosen (matches host-written seed) — confirm whether YAML is preferred for consistency with ROS parameter files.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-28 12:23 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independent: latest plan authored by a Claude Sonnet sub-agent; this is a
+     fresh-context Claude Opus sub-agent (different model + fresh context →
+     genuine second opinion), so no author-self-review annotation. -->
+
+**Plan**: `.agent/work-plans/issue-81/plan.md` at `d1eacd3`
+**PR**: PR-less (dispatched re-plan review)
+**Verdict**: changes-requested
+
+Re-review of the new empirical-ARA plan (`d1eacd3`) that replaced the superseded
+cos²θ plan. Verified against live source. The plan is thorough and faithful to the
+operator-confirmed re-plan; all prior-review carry-overs are resolved (formula now
+moot under ARA; default-off now operator-confirmed in dispatch; `|beam_angle|` use,
+port/starboard symmetry test, and ADR addendum all present). One structural
+file-targeting gap blocks implementation-readiness: the new correction parameters
+have no plumbing path to the estimator.
+
+### Findings
+- [ ] (must-fix) No API path from the app entry points to the new `Parameters` fields: `Parameters parameters_` is a **private** member of `GeoMapSheet` (`geo_map_sheet.h:102`), built internally from `(cell_size, iho_order)` (`geo_map_sheet.cpp:34`). Live node constructs the sheet with cell-size only (`cube_bathymetry_node.cpp:89`); offline tool with `(resolution, iho_order)` (`import_bag_main.cpp:411`). Step 2 ("load the file into `Parameters::angular_response_curve`") has nothing to write to. Add `geo_map_sheet.{h,cpp}` to Files-to-Change + Consequences with a ctor-arg-or-setter; decide whether the legacy Cartesian `MapSheet` path needs the same. Note: `test_node.cpp` calls `extractNodeRecord(params)` with a directly-built `Parameters` (`test_node.cpp:44,379`), so unit tests bypass this gap — it surfaces only as a no-effect correction in real wiring — `plan.md:60-71`, `plan.md:134-149`
+- [ ] (suggestion) Stale comments beyond the listed ones: `import_bag_main.cpp:72-74` (`--bs-store` help, "UNCORRECTED intensity") and `test_store_import.cpp:271,303` ("uncorrected") should become "...by default" — plan cites only `test_store_import.cpp:64-67` — `plan.md:119-122`
+- [ ] (suggestion) Rename should cover both `grazing_angle` sites in `node.cpp` — the prose at `:299` and `{raw_intensity, grazing_angle}` at `:308` (the only refs; params at `:71/:213` are already `beam_angle`) — `plan.md:40-47`
+- [ ] (suggestion) `parameters.h` needs `<vector>` and `<utility>` added for the new `std::vector<std::pair<float,float>>` field (currently only `<cstdint>`,`<limits>`,`<string>`) — `plan.md:49-58`
+
+### Next step
+Lifecycle: **Plan Review** → **implement** → **review-code**. Verdict is
+changes-requested: the implementer (or plan author) should add `geo_map_sheet.{h,cpp}`
+plumbing to the plan and address the must-fix before/while implementing; the
+suggestions are minor comment/include hygiene.
