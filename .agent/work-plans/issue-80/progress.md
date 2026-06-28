@@ -148,3 +148,29 @@ The following should be part of the implementation or flagged as follow-up:
 - Re-verified: `MbesCell` aggregate-init field order matches struct (`intensity, intensity_variance, timestamp, source_index`); `nodeRecords()`↔`CellAreaIterator` lockstep; double-flush idempotent (`queueFlush` early-returns on empty queue); both stores share GGGS level via `fromCellSize(nominalCellSizeMeters())`.
 - Tests **pass** in the latest build: `StoreImport.BackscatterCellsMatchGridRecords` + `StoreImport.BackscatterNaNPropagation` (test_store_import: 8 tests OK).
 - Plan adherence: full. Prior Plan-Review provenance must-fix remains resolved.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-06-27 20:30 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #82 at `63d180c`
+**Sources**: 2 — Copilot @ `80eb6f3` (quota non-review, non-actionable), Local Review (Pre-Push) R2 @ `fa13f94`; CI rollup
+**Cross-source confirmations**: 0
+**CI**: all-pass (`ROS 2 Jazzy (industrial_ci)` success on `63d180c`)
+
+The only GitHub review is a Copilot quota-limit non-review ("Copilot was unable to
+review … reached their quota limit") with zero inline comments — classified as a
+non-actionable non-review, not a finding. No human or conversation comments. The
+single code-bearing source is the local round-2 pre-push review at `fa13f94`; the
+only commits since (`80eb6f3` progress, `63d180c` ci.yml) touch no package code, so
+both its open suggestions still apply verbatim at head and were re-verified against
+the current files. No must-fix remains; the PR is mergeable with the two optional
+suggestions tracked.
+
+### Findings
+- [ ] (suggestion, Local Review R2 @ `fa13f94`) `ament_export_dependencies(rclcpp)` re-exports only `rclcpp`, but the installed public header `store_import.h` now `#include`s `marine_bathymetry_store/*` and `marine_mbes_backscatter_store/mbes_cell.hpp` (confirmed lines 32–35). Downstream consumers of the exported target rely on transitive propagation via `ament_export_targets`. Pre-existing latent pattern (the `marine_bathymetry_store` include predates this PR) — fix both deps together or leave — `cube_bathymetry/CMakeLists.txt:262`.
+- [ ] (suggestion, Local Review R2 @ `fa13f94`) `BackscatterCellsMatchGridRecords` re-derives expected cells with the same `nodeRecords()`+`CellAreaIterator` walk as production, so it would not independently catch a shared iterator-alignment bug; mitigated by absolute intensity/timestamp/source assertions. Optional test-robustness nit — `cube_bathymetry/test/test_store_import.cpp:281`.
+
+### False positives
+- (Copilot @ `80eb6f3`) No technical finding — the review body is a quota-limit notice with no inline comments, so there is nothing to dismiss; recorded only for source provenance.
