@@ -127,3 +127,23 @@ implementation and test.
 
 ### Open questions
 - [ ] Formula constant: confirm from Kongsberg EM Datagram Formats that `reflectivity_db` is raw backscatter without Lambert normalization in TVG, to avoid double-counting the cos θ correction.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-06-28 10:50 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independent: plan authored by a Claude Sonnet sub-agent; this review is a
+     fresh-context Claude Opus sub-agent. Different model + fresh context →
+     genuine second opinion, so no author-self-review annotation. -->
+
+**Plan**: `.agent/work-plans/issue-81/plan.md` at `9efe563`
+**PR**: PR-less (--issue mode)
+**Verdict**: changes-requested
+
+### Findings
+- [ ] (must-fix) Lambert constant unresolved + physically shaky justification: plan picks one-way `10·log10(cos θ)` arguing "transmit spreading is in TVG, only receive incidence is uncorrected" — but the Lambert `cos²θ` is a single seabed-scattering term (projected area × Lambertian emission), not a transmit/receive split, and TVG compensates range-dependent spreading/absorption, not angular incidence. Classic Lambert backscatter normalization is `20·log10(cos θ)` (=`10·log10(cos²θ)`). Resolve the load-bearing open question (`plan.md:149-153`) BEFORE implementing, not in parallel — `plan.md:31-47`
+- [ ] (must-fix) Near-grazing guard is internally contradictory: derivation says "clamp θ to a maximum of MAX_INCIDENCE_RAD=80° before computing" (→ finite +correction at the cap) while the same bullet and the `LambertCorrectionNearGrazing` test say beams beyond max are "emitted uncorrected (identity)". Clamp-θ vs identity-beyond-max give different values and a discontinuity. Pick one, state it unambiguously, align the test — `plan.md:52-54`, `plan.md:89`
+- [ ] (must-fix) Test-update list under-enumerates broken assertions: Step 3 names only `NodeRecordMeanAndEstimateVariance`, but two more non-nadir (0.1 rad) intensity assertions also break under the correction — `FirstBeamInitializationRecordsIntensity` (`test_node.cpp:382`, `EXPECT_FLOAT_EQ(record.intensity, -30.0f)`) and `NodeRecordSkipsNanIntensityBeam` (`test_node.cpp:420`). At 0.1 rad the shift is ≈0.022 dB, which fails both `FLOAT_EQ` and the `1e-4` `EXPECT_NEAR`. Enumerate all three. (Note: the variance assertion in `NodeRecordMeanAndEstimateVariance` still holds — all four beams share one angle, so the offset cancels; only the mean assertion changes.) — `plan.md:79-82`
+- [ ] (suggestion) `test_store_import.cpp` Step 4 misses a stale comment: lines 64-67 explicitly assert "the surfaced value is uncorrected so the angle does not change it here" — that becomes false once the correction lands. Update the comment regardless of which fix is chosen. Prefer updating the assertion to the corrected value over zeroing `beam_angle` to 0.0f, so a non-nadir beam still exercises the offline-store path — `plan.md:91-97`
+- [ ] (suggestion) The `grazing_angle → beam_angle` rename should also cover the header doc comments that mention the old name — `hypothesis.h:115-116` ("a NaN grazing_angle is retained") and the `BeamIntensitySample` reference at `hypothesis.h:166`; Step 1's file list cites only the field decl, recordBeam sig/impl, node.cpp:308, and tests — `plan.md:64-68`
+- [ ] (suggestion) ADR-0007 transition-note filename `0007-mbes-backscatter-store-phase-b-transition.md` claims the `0007-` slot before the full ADR-0007 doc exists; confirm the planned follow-up's full doc won't collide (or intend it as a sibling addendum) — `plan.md:99-104`
