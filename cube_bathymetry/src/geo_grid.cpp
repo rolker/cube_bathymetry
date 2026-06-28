@@ -164,4 +164,25 @@ std::vector<DepthAndUncertainty> GeoGrid::values() const
   return ret;
 }
 
+std::vector<NodeRecord> GeoGrid::nodeRecords() const
+{
+  std::vector<NodeRecord> ret;
+
+  gggs::CellAreaIterator i(index_);
+
+  while(i.valid()) {
+    auto node = nodes_.find(*i);
+
+    if(node == nodes_.end() || !node->second) {
+      // empty node, so default record (NaN depth + NaN intensity)
+      ret.push_back(NodeRecord());
+    } else {
+      node->second->queueFlush(parameters_);
+      ret.push_back(node->second->extractNodeRecord(parameters_));
+    }
+    i.next();
+  }
+  return ret;
+}
+
 }  // namespace cube

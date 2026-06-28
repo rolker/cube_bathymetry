@@ -34,6 +34,7 @@
 #include <deque>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -53,6 +54,8 @@
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/registry.hpp"
 #include "marine_bathymetry_store/tile_io.hpp"
+#include "marine_mbes_backscatter_store/mbes_store.hpp"
+#include "marine_mbes_backscatter_store/registry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rosbag2_transport/reader_writer_factory.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -60,12 +63,15 @@
 #include "tf2/time.h"
 #include "tf2_ros/buffer.h"
 
-void usage()
+[[noreturn]] void usage()
 {
   std::cout << "usage: import_bag [options] -o <store_dir> "
     "-d <detections_topic> <bag> [<bag> ...]\n";
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
     "needed)\n";
+  std::cout << "  --bs-store <dir>: Also write an MBES backscatter store layer "
+    "(Processed) from the same CUBE pass (optional; surfaces the co-estimated, "
+    "UNCORRECTED intensity -- the angle correction is cube#81)\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
     "topic to replay through CUBE (required)\n";
   std::cout << "  --odom-topic <topic>: nav_msgs/Odometry topic for per-ping "
@@ -259,6 +265,7 @@ int main(int argc, char * argv[])
 
   std::vector<std::string> bagfile_names;
   std::string store_dir;
+  std::string bs_store_dir;  // optional: MBES backscatter store output (#80)
   std::string detections_topic;  // required
   std::string odom_topic;  // optional: nav_msgs/Odometry for per-ping vessel speed
   double resolution = 1.0;
@@ -274,57 +281,58 @@ int main(int argc, char * argv[])
   // the same way the live node would.
   cube::ProjectorParams projector_params;
 
-  for (auto arg = arguments.begin(); arg != arguments.end(); arg++) {
+  // Consume the value token following a value-taking flag, bounds-checked: a
+  // flag given as the last argument (no value after it) would otherwise advance
+  // `arg` past end() and dereference it (UB). usage() is [[noreturn]], so on the
+  // missing-value error this never falls through to the ++arg/deref. `arg` is
+  // declared before the lambda so the by-reference capture binds the loop cursor.
+  auto arg = arguments.begin();
+  auto next_value = [&](const char * flag) -> const std::string & {
+      if (std::next(arg) == arguments.end()) {
+        std::cerr << "error: option '" << flag << "' requires a value\n";
+        usage();
+      }
+      ++arg;
+      return *arg;
+    };
+
+  for (; arg != arguments.end(); arg++) {
     if (*arg == "-h") {
       usage();
     } else if (*arg == "-o") {
-      arg++;
-      store_dir = *arg;
+      store_dir = next_value("-o");
+    } else if (*arg == "--bs-store") {
+      bs_store_dir = next_value("--bs-store");
     } else if (*arg == "-d") {
-      arg++;
-      detections_topic = *arg;
+      detections_topic = next_value("-d");
     } else if (*arg == "--odom-topic") {
-      arg++;
-      odom_topic = *arg;
+      odom_topic = next_value("--odom-topic");
     } else if (*arg == "-r") {
-      arg++;
-      resolution = std::stod(*arg);
+      resolution = std::stod(next_value("-r"));
     } else if (*arg == "--iho-order") {
-      arg++;
-      iho_order = *arg;
+      iho_order = next_value("--iho-order");
     } else if (*arg == "-l") {
-      arg++;
-      ping_count_limit = std::stoi(*arg);
+      ping_count_limit = std::stoi(next_value("-l"));
     } else if (*arg == "--source-id") {
-      arg++;
-      source_record.source_id = *arg;
+      source_record.source_id = next_value("--source-id");
     } else if (*arg == "--platform") {
-      arg++;
-      source_record.platform = *arg;
+      source_record.platform = next_value("--platform");
     } else if (*arg == "--sensor") {
-      arg++;
-      source_record.sensor = *arg;
+      source_record.sensor = next_value("--sensor");
     } else if (*arg == "--sensor-class") {
-      arg++;
-      source_record.sensor_class = *arg;
+      source_record.sensor_class = next_value("--sensor-class");
     } else if (*arg == "--campaign") {
-      arg++;
-      source_record.campaign = *arg;
+      source_record.campaign = next_value("--campaign");
     } else if (*arg == "--base-link-frame") {
-      arg++;
-      projector_params.base_link_frame = *arg;
+      projector_params.base_link_frame = next_value("--base-link-frame");
     } else if (*arg == "--level-frame") {
-      arg++;
-      projector_params.level_frame = *arg;
+      projector_params.level_frame = next_value("--level-frame");
     } else if (*arg == "--tide-frame") {
-      arg++;
-      projector_params.tide_frame = *arg;
+      projector_params.tide_frame = next_value("--tide-frame");
     } else if (*arg == "--minimum-range") {
-      arg++;
-      projector_params.minimum_range = std::stod(*arg);
+      projector_params.minimum_range = std::stod(next_value("--minimum-range"));
     } else if (*arg == "--maximum-range") {
-      arg++;
-      projector_params.maximum_range = std::stod(*arg);
+      projector_params.maximum_range = std::stod(next_value("--maximum-range"));
     } else if (!arg->empty() && (*arg)[0] == '-' && *arg != "-") {
       // An unrecognized flag would otherwise be silently treated as a bag path
       // and fail later with a confusing "cannot open bag". Reject it up front.
@@ -507,6 +515,13 @@ int main(int argc, char * argv[])
           cube::GeoSounding gs(gz4d::GeoPointLatLongDegrees(lat_deg, lon_deg, height));
           gs.sounding.vertical_error = s.vertical_error;
           gs.sounding.horizontal_error = s.horizontal_error;
+          // Carry the {raw intensity, beam angle} sufficient-stats pair so the
+          // CUBE node co-estimates backscatter (#54) on the winning depth
+          // hypothesis -- without this every beam has NaN intensity and the
+          // backscatter store (--bs-store, #80) accumulates nothing. node.cpp
+          // emits the value UNCORRECTED; the angle correction is cube#81.
+          gs.sounding.intensity = s.intensity;
+          gs.sounding.beam_angle = s.beam_angle;
           soundings.push_back(gs);
         }
         geo_map_sheet.addSoundings(soundings);
@@ -668,6 +683,59 @@ int main(int argc, char * argv[])
 
   std::size_t written = marine_bathymetry_store::save(store, store_dir, &registry);
   std::cout << "Saved " << written << " tiles to " << store_dir << "." << std::endl;
+
+  // Optional: surface the co-estimated backscatter into an MBES backscatter store
+  // layer from the SAME CUBE pass (#80). The value is UNCORRECTED -- node.cpp
+  // emits the identity until the sign-gated angle correction lands (cube#81),
+  // which then updates both this offline layer and the live tile (#78). Written
+  // to the PROCESSED layer (operator decision): the offline CUBE re-run is the
+  // authoritative off-boat product; cube#81 updates corrected values in place.
+  // The bathy layer above is Draft; the backscatter layer is Processed -- the
+  // same-pass split is intentional.
+  if (!bs_store_dir.empty()) {
+    std::cout << "Building backscatter store tiles..." << std::endl;
+
+    // Match the bathy store's GGGS level so both products tile identically.
+    marine_mbes_backscatter_store::MbesBackscatterStore bs_store =
+      marine_mbes_backscatter_store::MbesBackscatterStore::fromCellSize(
+      static_cast<float>(geo_map_sheet.nominalCellSizeMeters()));
+
+    // Provenance: register the same physical source in the backscatter registry,
+    // tagged with the backscatter sensor class. Every cell carries this index +
+    // the import timestamp, so the Processed product is not source/time-blank.
+    marine_mbes_backscatter_store::SourceRegistry bs_registry;
+    marine_mbes_backscatter_store::SourceRecord bs_source_record;
+    bs_source_record.source_id = source_record.source_id;
+    bs_source_record.platform = source_record.platform;
+    bs_source_record.sensor = source_record.sensor;
+    bs_source_record.sensor_class = "mbes-backscatter";
+    bs_source_record.campaign = source_record.campaign;
+    const uint16_t bs_source_index = bs_registry.registerSource(bs_source_record);
+
+    // Surface the co-estimated intensity cell-by-cell (no bulk-import API is added
+    // to the separate marine_mbes_backscatter_store package; #80 stays in-repo).
+    const std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell>
+    bs_cells = cube::mapSheetToBackscatterCells(
+      geo_map_sheet, cell_timestamp_ns, bs_source_index);
+    std::cout << "Backscatter cells with data: " << bs_cells.size()
+              << " (build: " << phase_secs() << "s)" << std::endl;
+
+    if (bs_cells.empty()) {
+      std::cerr << "WARNING: no cells had finite backscatter -- nothing written to "
+        "the backscatter store. Check that the detections carry intensities."
+                << std::endl;
+    }
+
+    for (const auto & cell : bs_cells) {
+      bs_store.set(
+        marine_mbes_backscatter_store::SourceLayer::Processed, cell.first, cell.second);
+    }
+
+    std::size_t bs_written =
+      marine_mbes_backscatter_store::save(bs_store, bs_store_dir, &bs_registry);
+    std::cout << "Saved " << bs_written << " backscatter tiles to " << bs_store_dir
+              << "." << std::endl;
+  }
 
   std::cout << "done!" << std::endl;
   return 0;

@@ -34,6 +34,7 @@
 #include "marine_bathymetry_store/bathy_cell.hpp"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
+#include "marine_mbes_backscatter_store/mbes_cell.hpp"
 
 namespace cube
 {
@@ -59,8 +60,24 @@ std::vector<GeoSounding> makeSoundings()
   return soundings;
 }
 
+// Same synthetic soundings as makeSoundings(), but each carries a constant
+// backscatter intensity so the CUBE node co-estimates a finite per-cell
+// intensity (the offline backscatter surface, #80). beam_angle is carried too
+// (it rides the {intensity, angle} pair), though the surfaced value is
+// uncorrected so the angle does not change it here.
+std::vector<GeoSounding> makeSoundingsWithIntensity(float intensity)
+{
+  std::vector<GeoSounding> soundings = makeSoundings();
+  for (auto & s : soundings) {
+    s.sounding.intensity = intensity;
+    s.sounding.beam_angle = 0.1f;
+  }
+  return soundings;
+}
+
 constexpr int64_t kStamp = 1234567890123456789LL;
 constexpr uint16_t kSource = 7;
+constexpr float kIntensity = 42.5f;
 }  // namespace
 
 // The produced tile cells must match the grid's finite values cell-for-cell, in
@@ -246,6 +263,109 @@ TEST(StoreImport, LoadIntoSheetEmptyLayerIsNoOp)
   loadIntoSheet(
     store, marine_bathymetry_store::SourceLayer::Draft, loaded);
   EXPECT_TRUE(loaded.grids().empty());
+}
+
+// Intensity-bearing soundings must produce a non-empty backscatter cell map whose
+// cells match the grid's finite-intensity nodeRecords() entries cell-for-cell,
+// carry the import timestamp/source, and (with a constant input intensity) surface
+// that same constant value (the surfaced backscatter is uncorrected, #80).
+TEST(StoreImport, BackscatterCellsMatchGridRecords)
+{
+  GeoMapSheet ms(1.0f);
+  ms.addSoundings(makeSoundingsWithIntensity(kIntensity));
+
+  auto grids = ms.grids();
+  ASSERT_FALSE(grids.empty());
+
+  const auto cells = mapSheetToBackscatterCells(ms, kStamp, kSource);
+  EXPECT_FALSE(cells.empty())
+    << "intensity-bearing soundings should co-estimate some backscatter cells";
+
+  std::size_t finite_total = 0;
+  for (const auto & grid : grids) {
+    ASSERT_TRUE(static_cast<bool>(grid));
+
+    // nodeRecords() flushes the median pre-filter; cache it and re-derive the
+    // cell mapping the same way geoGridToBackscatterCells does.
+    const std::vector<NodeRecord> records = grid->nodeRecords();
+
+    gggs::CellAreaIterator it(grid->index());
+    std::size_t k = 0;
+    for (; it.valid() && k < records.size(); it.next(), ++k) {
+      const auto found = cells.find(*it);
+      if (std::isnan(records[k].intensity)) {
+        // No co-estimated backscatter -- the cell must be absent from the map.
+        EXPECT_EQ(found, cells.end());
+      } else {
+        ++finite_total;
+        ASSERT_NE(found, cells.end());
+        EXPECT_FLOAT_EQ(found->second.intensity, records[k].intensity);
+        // Constant input intensity, uncorrected surface -> emitted value is that
+        // constant (mean of equal per-beam intensities).
+        EXPECT_FLOAT_EQ(found->second.intensity, kIntensity);
+        EXPECT_EQ(found->second.timestamp, kStamp);
+        EXPECT_EQ(found->second.source_index, kSource);
+        // intensity_variance mirrors intensity_var (NaN with < 2 samples); a
+        // finite value must round-trip exactly.
+        if (std::isnan(records[k].intensity_var)) {
+          EXPECT_TRUE(std::isnan(found->second.intensity_variance));
+        } else {
+          EXPECT_FLOAT_EQ(found->second.intensity_variance, records[k].intensity_var);
+        }
+      }
+    }
+  }
+  EXPECT_GT(finite_total, 0u)
+    << "intensity-bearing soundings should populate some backscatter cells";
+
+  // Independent cross-check: the bathy conversion reaches each cell through a
+  // DIFFERENT production path (values() -> geoGridToTile, not nodeRecords()).
+  // Every winning hypothesis here carries intensity-bearing beams (all soundings
+  // have intensity), so the set of backscatter cells must equal the set of
+  // finite-depth bathy cells. A GGGS-walk / iterator-alignment bug in only one of
+  // the two conversion functions would make the sets diverge and fail here.
+  std::size_t bathy_finite = 0;
+  for (const auto & grid : grids) {
+    const marine_bathymetry_store::BathymetryTile tile =
+      geoGridToTile(*grid, kStamp, kSource);
+    gggs::CellAreaIterator it(grid->index());
+    for (; it.valid(); it.next()) {
+      const marine_bathymetry_store::BathyCell bcell =
+        tile.get((*it).row(), (*it).column());
+      const bool in_backscatter = cells.count(*it) > 0;
+      if (bcell.hasData()) {
+        ++bathy_finite;
+        EXPECT_TRUE(in_backscatter)
+          << "a finite-depth bathy cell must also carry surfaced backscatter";
+      } else {
+        EXPECT_FALSE(in_backscatter)
+          << "a no-data bathy cell must not appear in the backscatter map";
+      }
+    }
+  }
+  EXPECT_EQ(bathy_finite, cells.size())
+    << "backscatter cells must match the bathy finite-depth cells 1:1";
+}
+
+// Soundings with NO intensity (NaN) must produce an EMPTY backscatter cell map
+// even though they DO produce finite depth cells -- a NaN-propagation guard so a
+// future regression in the intensity threading surfaces as a test failure rather
+// than a silently empty Processed product (#80).
+TEST(StoreImport, BackscatterNaNPropagation)
+{
+  GeoMapSheet ms(1.0f);
+  ms.addSoundings(makeSoundings());  // no intensity set -> Sounding::intensity is NaN
+
+  // Sanity: the same soundings DO yield finite bathy tiles, so an empty
+  // backscatter map is about missing intensity, not missing data.
+  auto bathy = mapSheetToTiles(ms, kStamp, kSource);
+  ASSERT_FALSE(bathy.empty());
+
+  GeoMapSheet ms_bs(1.0f);
+  ms_bs.addSoundings(makeSoundings());
+  const auto cells = mapSheetToBackscatterCells(ms_bs, kStamp, kSource);
+  EXPECT_TRUE(cells.empty())
+    << "soundings without intensity must surface no backscatter cells";
 }
 
 }  // namespace cube
