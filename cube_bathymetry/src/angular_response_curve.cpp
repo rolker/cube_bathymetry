@@ -90,9 +90,11 @@ std::vector<std::pair<float, float>> loadAngularResponseCurve(const std::string 
       std::size_t d_used = 0;
       const float angle = std::stof(fields[0], &a_used);
       const float db_rel = std::stof(fields[3], &d_used);
-      // Reject rows where the numeric parse did not consume the field (e.g. the
-      // header's "abs_angle_deg_center" leading char would throw, but a value
-      // like "1deg" would parse a prefix -- guard against that too).
+      // std::stof throws on a field with no leading number (e.g. the header's
+      // "abs_angle_deg_center"), handled by the catch below. The used==0 check is
+      // a belt-and-suspenders guard for an empty parse. Note a value like "1deg"
+      // parses its numeric prefix (1.0) and IS accepted -- the derive tool writes
+      // clean numeric columns, so trailing garbage is tolerated, not rejected.
       if (a_used == 0 || d_used == 0) {
         continue;
       }

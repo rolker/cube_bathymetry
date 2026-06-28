@@ -48,9 +48,12 @@ double curveRelativeDb(
   if (abs_angle_deg <= curve.front().first) {
     return curve.front().second;
   }
-  // Beyond the last bin centre: identity (no extrapolation past measured extent).
+  // Beyond the last bin centre: clamp to the outermost bin's correction rather
+  // than jump to identity. The empirical curve is bounded (unlike a cos/log model
+  // that diverges near grazing), so continuing the edge value keeps the correction
+  // continuous and avoids a swath-edge discontinuity / bright ring (#81 review).
   if (abs_angle_deg > curve.back().first) {
-    return 0.0;
+    return curve.back().second;
   }
   // Find the bracketing pair [lo, hi] and linearly interpolate.
   for (std::size_t i = 1; i < curve.size(); ++i) {

@@ -626,15 +626,18 @@ TEST_F(NodeTest, ARANadirIdentity)
 }
 
 // Beyond the curve's max angle (60 deg): identity (no extrapolation).
-TEST_F(NodeTest, ARABeyondMaxAngleIdentity)
+TEST_F(NodeTest, ARABeyondMaxAngleClampsToEdge)
 {
+  // Beyond the curve's last bin (60 deg) the correction clamps to the outermost
+  // bin value (-12 dB), NOT identity -- continuous, no swath-edge jump (#81 review).
+  // corrected = raw - curveRel = -30 - (-12) = -18.
   Parameters ara = empiricalParams();
   Node n;
   singleBeamNominated(n, -30.0f, deg2rad(70.0f));
 
   auto record = n.extractNodeRecord(ara);
   ASSERT_EQ(record.n_samples, 1u);
-  EXPECT_NEAR(record.intensity, -30.0f, 1e-4);
+  EXPECT_NEAR(record.intensity, -18.0f, 1e-3);
 }
 
 // NaN beam angle: no correction applicable -> identity.
