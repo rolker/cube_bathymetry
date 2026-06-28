@@ -7,152 +7,200 @@ https://github.com/rolker/cube_bathymetry/issues/81
 ## Context
 
 `Node::extractNodeRecord()` (node.cpp:315-318) contains a Phase B no-op where
-`corrected == raw` for every beam. The per-beam `{raw_intensity, grazing_angle}`
+`corrected == raw` for every beam. The per-beam `{raw_intensity, beam_angle}`
 pairs are already stored on each hypothesis (`Hypothesis::intensity_samples`).
-The gate — verifying `rx_angles` sign/zero convention against the M3 producer —
-has been confirmed host-side: `kongsberg_em_bridge` negates the Kongsberg raw
-pointing angle (`+PORT → -PORT`) so `rx_angles` is `+STARBOARD`, nadir=0,
-radians; intensity is `reflectivity_db` in dB. Gate: **PASS**.
 
-The `BeamIntensitySample::grazing_angle` field (hypothesis.h:49) is misnamed:
+**Gate (rx_angles sign/zero convention) — VERIFIED host-side, PASS.**
+`kongsberg_em_bridge/node.py:364-373` negates the Kongsberg raw pointing angle
+(`+PORT → +STARBOARD`, matching `marine_acoustic_msgs`); nadir = 0 (boresight;
+physical mount is in TF), radians. For a flat-bottom Lambert using `|angle|` the
+sign is moot (cos is even); nadir=0 and `|angle|`=incidence-from-nadir both hold.
+
+**Is `reflectivity_db` already angle-normalized? — operator-controlled, NOT
+hardcoded (operator decision).** `em_datagrams.py:120-126` reads `reflectivity_db`
+straight from the EM **"Raw Range and Angle 78"** datagram (signed 16-bit ×0.1 dB)
+with **no angle compensation in the bridge**. Whether the *sonar firmware*
+pre-normalized that reflectivity for incidence is sonar/config-dependent and is
+NOT determinable from workspace code. **This estimator is sonar-agnostic** (it
+also runs Norbit, R2Sonic, sim, …), so whether to apply the Lambert correction
+**must be an operator-set startup parameter**, not an M3 assumption baked into the
+shared estimator. Default is **off (identity = current Phase B behavior)** — safe
+and sonar-agnostic; a platform/config enables `lambert` for a sonar known to
+deliver raw (non-angle-normalized) backscatter.
+
+The `BeamIntensitySample::grazing_angle` field (hypothesis.h:49) is **misnamed**:
 it stores the receive steering / incidence angle from nadir (same semantics as
-`sounding.beam_angle`), NOT a true grazing angle (which would be 90° − θ). The
-field doc already says "receive/steering (beam/incidence) angle" so the comment
-is correct but the name is wrong. Plan renames it to `beam_angle` for consistency.
+`sounding.beam_angle`), NOT a true grazing angle (90° − θ). The field doc already
+says "receive/steering (beam/incidence) angle", so the comment is correct but the
+name is wrong. Plan renames it to `beam_angle`.
 
-ADR-0007 has no document file in `docs/decisions/` yet; this PR adds the Phase B
-transition note and files a follow-up task for the full ADR-0007 doc.
+ADR-0007 has no document file in `docs/decisions/` yet; this PR adds a Phase B
+transition **addendum** (not claiming the `0007-` slot) and files a follow-up
+task for the full ADR-0007 doc.
 
-## Lambert Formula Derivation
+## Lambert Formula (operator-confirmed cos²θ)
 
-`raw_intensity` is M3 `reflectivity_db` (dB), already TVG-compensated. The
-remaining angular dependence is the receive-beam Lambert cosine:
-
-```
-BS(θ) = BS(0) + 10·log10(cos θ)    [one-way, TVG already handled]
-```
-
-where θ = incidence from nadir = `std::abs(sample.beam_angle)`.
-
-To normalize to nadir (remove angular dependence):
+`raw_intensity` is `reflectivity_db` (dB). The angular correction is **additive in
+dB** and applied ONLY when the operator parameter selects `lambert`:
 
 ```
-corrected_dB = raw_dB − 10·log10(cos θ)
+corrected_dB = raw_dB − 20·log10(cos θ)      θ = std::abs(sample.beam_angle)
 ```
 
-**Derivation rationale:**
-- One-way (10·, not 20·): the transmit spreading loss is already in TVG; only
-  the receive-beam incidence factor is uncompensated here.
-- `cos θ` not `cos²θ`: cos²θ applies when both transmit and receive solid angles
-  depend on θ; here only the receive steering angle is being corrected.
-- At nadir (θ=0): `cos(0)=1`, `log10(1)=0` → correction=0 (identity). ✓
-- At θ>0: `cos θ<1`, `log10(cos θ)<0` → correction is positive in dB (boosts
-  off-nadir returns toward their nadir-equivalent). Physically correct for
-  Lambert scattering where off-nadir returns are weaker.
-- `cos θ → 0` as θ→90° guard: clamp `θ` to a maximum of `MAX_INCIDENCE_RAD =
-  80° = 1.3963 rad` before computing. Beams beyond this are emitted uncorrected
-  (identity) — the correction diverges and the Lambert model fails at near-grazing.
-- NaN `beam_angle` → emit uncorrected (identity). Consistent with how `recordBeam`
-  already retains NaN-angle beams as "no angle correction available".
+**Form rationale (cos²θ / factor 20 — the classic seafloor Lambert law,
+operator-confirmed; the reviewer flagged the earlier ×10 justification as
+physically unsound):**
+- Lambert backscatter cross-section per unit area `σ(θ) ∝ cos²θ` — a single
+  seabed-scattering term (insonified-footprint projection cosine × Lambertian
+  re-emission cosine), NOT a transmit/receive split. In dB:
+  `BS(θ) = BS(0) + 20·log10(cos θ)`. TVG handles range spreading/absorption, not
+  this angular factor — so it is not already removed.
+- Normalizing to the nadir-equivalent ⇒ subtract the angular term:
+  `corrected_dB = raw_dB − 20·log10(cos θ)`.
+- Nadir (θ=0): `cos0=1`, `log10(1)=0` → correction 0 (identity). ✓
+- Off-nadir (θ>0): `cos θ<1` → `−20·log10(cos θ) > 0` → boosts the weaker
+  off-nadir return toward its nadir-equivalent.
 
-**This formula is the highest-risk decision in this issue.** The review-plan step
-must scrutinize it. Prior art: the sibling slope-correction (#15) had 2 wrong
-formulas killed across 3 rounds.
+**Near-grazing handling — single unambiguous rule (resolves the prior
+contradiction):** beams with `θ ≥ MAX_INCIDENCE_RAD` (= 80° = 1.39626 rad) are
+emitted **UNCORRECTED (identity)** — there is **no θ-clamping**. Rationale: the
+Lambert model fails and `−20·log10(cos θ)` diverges near grazing; a clamp would
+emit a physically meaningless frozen-at-80° value. Identity-beyond-max is the one
+behavior; the test asserts identity beyond the cap. (The step at the cap is
+accepted: those beams are unreliable either way.)
+- NaN `beam_angle` → identity (consistent with `recordBeam` retaining NaN-angle
+  beams as "no angle correction available").
+
+**This formula was the highest-risk decision; it has been operator-confirmed
+(cos²θ) and independently flagged by review-plan. Re-review the revised plan
+before implementing.**
 
 ## Approach
 
-1. **Rename `BeamIntensitySample::grazing_angle` → `beam_angle`** — update the
-   struct (hypothesis.h:49), `recordBeam` signature/impl (hypothesis.h:118,
-   hypothesis.cpp:118,122,127), all call sites (node.cpp:308 comment), and all
-   test references (test_hypothesis.cpp:216,218,227,230,243). Corrects the
-   misleading name and aligns with `sounding.beam_angle`.
+0. **Add the sonar-agnostic correction parameter** to `Parameters`
+   (`parameters.h`): an enum
+   `enum class BackscatterAngleCorrection { None, Lambert };` and a field
+   `BackscatterAngleCorrection backscatter_angle_correction = BackscatterAngleCorrection::None;`
+   (default None = identity = current behavior). Plumb it as a startup setting on
+   both estimator entry points:
+   - **Live node** (`cube_bathymetry_node.cpp`): declare a ROS parameter
+     `backscatter_angle_correction` (string `"none"`|`"lambert"`, default
+     `"none"`), parse into the enum when building `Parameters`.
+   - **Offline import** (`import_bag_main.cpp`): a `--backscatter-correction
+     none|lambert` flag (default `none`), documented in `usage()`.
+   Both run the same estimator, so one parameter corrects both the live (#78) and
+   offline (#80) paths consistently when enabled.
 
-2. **Replace the Phase B no-op in `node.cpp:315-318`** — replace
-   `const double corrected = sample.raw_intensity;` with the flat-bottom Lambert
-   correction using `std::abs(sample.beam_angle)`. Add the inline comment
-   capturing the rx_angles producer cross-check (Kongsberg +PORT→negate→+STARBOARD;
-   nadir=0; radians; dB). Update/remove the stale `TODO(#54-B / #15)` block at
-   node.cpp:298-312 to reflect Phase B completion; retain the follow-up note
-   for the full GeoCoder correction (#15).
+1. **Rename `BeamIntensitySample::grazing_angle` → `beam_angle`** — struct +
+   field doc (`hypothesis.h:40-50`, **incl. the doc text at `hypothesis.h:115-116`
+   and the `BeamIntensitySample` reference at `hypothesis.h:166`**), `recordBeam`
+   signature/impl (`hypothesis.h:118`, `hypothesis.cpp:118,122,127`), the
+   `node.cpp` call-site comment, and test references
+   (`test_hypothesis.cpp:216,218,227,230,243`).
 
-3. **Update `test_node.cpp` for corrected intensity values** — existing tests that
-   pass `beam_angle = 0.0f` to `recordBeam` (or use nadir beams) continue to
-   satisfy `corrected == raw` (identity at θ=0). Tests that use non-zero
-   `beam_angle` (e.g., `NodeRecordMeanAndEstimateVariance` uses 0.1 rad beams)
-   must now expect Lambert-corrected values. Add:
-   - `LambertCorrectionNonNadir`: a non-nadir beam (e.g. θ=0.5 rad) produces
-     `corrected ≠ raw`, and specifically `corrected = raw − 10·log10(cos(0.5))`.
-   - `LambertCorrectionNadirIdentity`: θ≈0 → `corrected == raw` within float tol.
-   - `LambertCorrectionPortStarboardSymmetry`: equal `|beam_angle|` on each side
-     (e.g., +0.3 and −0.3 rad) produces equal corrected intensity.
-   - `LambertCorrectionNaNAngle`: NaN `beam_angle` → identity (uncorrected).
-   - `LambertCorrectionNearGrazing`: θ ≥ MAX_INCIDENCE_RAD → identity (clamped).
+2. **Replace the Phase B no-op in `node.cpp:315-318`** — when
+   `parameters.backscatter_angle_correction == Lambert`, set
+   `corrected = raw − 20·log10(cos(std::abs(beam_angle)))` with the near-grazing /
+   NaN identity rules above; otherwise `corrected = raw` (identity). Add the inline
+   comment capturing the producer cross-check (Kongsberg +PORT→negate→+STARBOARD;
+   nadir=0; radians; dB) AND that the correction is operator-gated because the
+   sonar-internal normalization state is not knowable here. Update the stale
+   `TODO(#54-B / #15)` block (`node.cpp:298-312`): Phase B done for the flat-bottom
+   case; retain the follow-up note for the full GeoCoder slope-aware correction
+   (#15/#59).
 
-4. **Check `test_store_import.cpp`** — `BackscatterCellsMatchGridRecords` uses
-   `kIntensity = 42.5f` with `beam_angle = 0.1f`. After the correction, the
-   surfaced value will be `42.5 − 10·log10(cos(0.1)) ≈ 42.5 + 0.022 ≈ 42.52`,
-   no longer exactly `kIntensity`. Fix: either change `beam_angle` to 0.0f in
-   `makeSoundingsWithIntensity` (so nadir beams keep the identity), or update the
-   assertion to expect the corrected value. Using 0.0f is simpler and keeps the
-   test self-consistent.
+3. **Update `test_node.cpp`** — enumerate **all three** non-nadir intensity
+   assertions that break under `lambert` (the new tests run with the param ON):
+   - `NodeRecordMeanAndEstimateVariance` — the **mean** assertion changes; the
+     **variance** assertion still holds (all four beams share one angle, so the
+     per-beam offset is constant and cancels in the variance).
+   - `FirstBeamInitializationRecordsIntensity` (`test_node.cpp:382`,
+     `EXPECT_FLOAT_EQ(record.intensity, -30.0f)`).
+   - `NodeRecordSkipsNanIntensityBeam` (`test_node.cpp:420`).
+   These existing tests stay on the **default (None)** path unless they opt into
+   `lambert`; assertions that exercise the correction must set the param ON.
+   Add Lambert tests (param = Lambert):
+   - `LambertCorrectionNonNadir`: θ=0.5 rad ⇒ `corrected = raw − 20·log10(cos 0.5)`,
+     `corrected ≠ raw`.
+   - `LambertCorrectionNadirIdentity`: θ≈0 ⇒ `corrected == raw` (float tol).
+   - `LambertCorrectionPortStarboardSymmetry`: ±0.3 rad ⇒ equal corrected value.
+   - `LambertCorrectionNaNAngle`: NaN angle ⇒ identity.
+   - `LambertCorrectionNearGrazing`: θ ≥ MAX_INCIDENCE_RAD ⇒ identity.
+   - `CorrectionOffIsIdentity`: param = None ⇒ `corrected == raw` for a non-nadir
+     beam (guards the default path).
 
-5. **Add ADR-0007 transition note** — create
-   `docs/decisions/0007-mbes-backscatter-store-phase-b-transition.md` containing:
-   a minimal transition note recording: Phase B ended in this PR, first-cut
-   flat-bottom Lambert applied at `extractNodeRecord()`, what stays deferred (full
-   GeoCoder incidence via #15 + #59). File a separate GitHub issue to author the
-   full ADR-0007 document.
+4. **`test_store_import.cpp` (#80 backscatter test) stays valid by default** —
+   the offline tests build `Parameters` with the default (None), so
+   `BackscatterCellsMatchGridRecords` (uses `beam_angle = 0.1f`, asserts surfaced
+   value == `kIntensity`) **still holds unchanged** (no correction by default).
+   **Update the stale comment** at `test_store_import.cpp:64-67` ("the surfaced
+   value is uncorrected so the angle does not change it here") to say *by default*
+   (None); optionally add a focused case that sets the param to Lambert and
+   asserts the corrected value flows through the offline path. (Preferred over
+   zeroing `beam_angle`, per review-plan — keeps a non-nadir beam exercising it.)
+
+5. **Add ADR-0007 transition addendum** — create
+   `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`
+   (sibling **addendum** name — does NOT claim the canonical `0007-…` slot before
+   the full ADR exists): records Phase B end, the operator-gated flat-bottom
+   Lambert (cos²θ), the sonar-agnostic parameter + default-off rationale, and what
+   stays deferred (full GeoCoder incidence via #15/#59). **File a separate GitHub
+   issue** to author the full ADR-0007 document.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
-| `include/cube_bathymetry/hypothesis.h` | Rename `grazing_angle` → `beam_angle` in struct and `recordBeam` decl |
-| `src/hypothesis.cpp` | Rename `grazing_angle` param in `recordBeam` impl |
-| `src/node.cpp` | Replace no-op with Lambert correction; add producer cross-check comment; update TODO block |
-| `test/test_node.cpp` | Update non-nadir intensity assertions; add 5 Lambert tests |
-| `test/test_hypothesis.cpp` | Update `grazing_angle` field refs → `beam_angle` |
-| `test/test_store_import.cpp` | Fix `makeSoundingsWithIntensity` to use `beam_angle = 0.0f` (nadir) |
-| `docs/decisions/0007-mbes-backscatter-store-phase-b-transition.md` | New: transition note |
+| `include/cube_bathymetry/parameters.h` | Add `BackscatterAngleCorrection` enum + `backscatter_angle_correction` field (default None) |
+| `include/cube_bathymetry/hypothesis.h` | Rename `grazing_angle` → `beam_angle` (struct + `recordBeam` decl + doc comments at 115-116, 166) |
+| `src/hypothesis.cpp` | Rename param in `recordBeam` impl |
+| `src/node.cpp` | Param-gated cos²θ Lambert correction; producer cross-check comment; update TODO block |
+| `src/cube_bathymetry_node.cpp` | Declare/parse `backscatter_angle_correction` ROS param → Parameters |
+| `src/import_bag_main.cpp` | `--backscatter-correction none|lambert` flag + usage() text → Parameters |
+| `test/test_node.cpp` | Fix 3 broken non-nadir assertions; add 6 Lambert/param tests |
+| `test/test_hypothesis.cpp` | `grazing_angle` → `beam_angle` refs |
+| `test/test_store_import.cpp` | Update stale comment; (optional) add a Lambert-on offline case |
+| `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md` | New: transition addendum |
 
 ## Principles Self-Check
 
 | Principle | Consideration |
 |---|---|
-| Enforcement over documentation | Add 5 targeted tests that would catch the wrong formula, wrong sign, and missing NaN/grazing guards — enforcement via test, not just comments |
-| Capture decisions | ADR-0007 transition note records Phase B end date, formula chosen, what's deferred |
-| A change includes its consequences | `test_store_import.cpp` fix included in same PR; both live (#78) and offline (#80) paths automatically corrected via the shared `extractNodeRecord()` |
-| Only what's needed | Full GeoCoder correction (#15, #59) explicitly deferred; no per-path duplication |
-| Improve incrementally | Phase B → first-cut Lambert → full GeoCoder (#15) — keeps each step reviewable |
+| Enforcement over documentation | 6 targeted tests catch wrong formula, wrong sign, missing NaN/grazing guards, and the default-off path |
+| Only what's needed | Flat-bottom Lambert only; full GeoCoder (#15/#59) deferred; one shared site, no per-path duplication |
+| A change includes its consequences | Param plumbed through both estimator entry points; #78 + #80 corrected together; tests + stale comment updated in-PR |
+| Capture decisions | ADR-0007 transition addendum records the formula, the operator-gated design, and the deferral |
+| Robustness / sonar-agnostic | Correction is operator-set per sonar (the estimator cannot know the sonar's internal normalization); safe default off |
 
 ## ADR Compliance
 
 | ADR | Triggered | How addressed |
 |---|---|---|
-| ADR-0007 D3 (incidence correction at node-output) | Yes — primary | Implemented here at `extractNodeRecord()` |
-| ADR-0007 D2/D4 (per-beam mean + estimate variance) | Yes — already in place | No change; `corrected` replaces `raw_intensity` in the sum |
-| ADR-0001 (adopt ADRs) | Yes | Transition note in `docs/decisions/` |
-| ADR-0013 (progress.md vocabulary) | Yes | `## Plan Authored` entry committed with plan |
+| ADR-0007 D3 (incidence correction at node-output) | Yes — primary | Implemented (param-gated) at `extractNodeRecord()` |
+| ADR-0007 D2/D4 (per-beam mean + estimate variance) | Yes — in place | `corrected` replaces `raw` in the sum; unchanged combine |
+| ADR-0008 (ROS 2 conventions) | Yes | New node param declared with default; offline CLI flag documented |
+| ADR-0001 (adopt ADRs) | Yes | Transition addendum in `docs/decisions/` + follow-up to author the full ADR |
 
 ## Consequences
 
-| If we change... | Also update... | Included in plan? |
+| If we change... | Also update... | Included? |
 |---|---|---|
-| `BeamIntensitySample::grazing_angle` name | `hypothesis.cpp`, `test_hypothesis.cpp`, `node.cpp` comment | Yes — Step 1 |
-| `corrected` value in `extractNodeRecord()` | `test_node.cpp` non-nadir assertions | Yes — Step 3 |
-| `corrected` value flows to `test_store_import.cpp` via `nodeRecords()` | `makeSoundingsWithIntensity` beam_angle=0.1 assertion | Yes — Step 4 |
-| Phase B ends | ADR-0007 transition note | Yes — Step 5 |
+| Add correction parameter | node ROS param + import_bag CLI + Parameters | Yes — Step 0 |
+| `grazing_angle` field name | hypothesis.cpp, test_hypothesis.cpp, node.cpp comment, header docs | Yes — Step 1 |
+| `corrected` value when param=Lambert | test_node.cpp (3 broken + 6 new) | Yes — Step 3 |
+| Default None preserves current behavior | test_store_import.cpp default path unchanged; stale comment fixed | Yes — Step 4 |
+| Phase B ends | ADR-0007 transition addendum + follow-up issue | Yes — Step 5 |
 | Full GeoCoder correction | cube#15, cube#59 | No — explicit follow-up |
 
 ## Open Questions
 
-- [ ] Formula constant: this plan uses 10·log10(cos θ) (one-way Lambert, TVG
-  handled). If the M3 `reflectivity_db` already includes the Lambert receive
-  factor in its TVG (i.e., TVG corrects for cos θ), the correction double-counts.
-  Confirm from Kongsberg EM Datagram Formats that `reflectivity_db` is raw
-  backscatter without Lambert normalization before implementing.
+- [x] **Lambert form** — RESOLVED (operator): cos²θ ⇒ `−20·log10(cos θ)`.
+- [x] **Double-counting (is reflectivity_db pre-normalized?)** — RESOLVED
+  (operator): not knowable in the sonar-agnostic estimator → expose as an
+  operator startup parameter (default off). M3's correct setting is the operator's
+  to set per the sonar config; the bridge applies no angle compensation itself.
 
 ## Estimated Scope
 
-Single PR. All changes touch one package (`cube_bathymetry`). ~120 lines changed,
-~80 new test lines.
+Single PR, one package. ~160 lines changed + ~110 new test lines (param plumbing
+adds to the earlier estimate).
