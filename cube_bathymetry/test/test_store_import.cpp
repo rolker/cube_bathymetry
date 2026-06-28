@@ -317,6 +317,34 @@ TEST(StoreImport, BackscatterCellsMatchGridRecords)
   }
   EXPECT_GT(finite_total, 0u)
     << "intensity-bearing soundings should populate some backscatter cells";
+
+  // Independent cross-check: the bathy conversion reaches each cell through a
+  // DIFFERENT production path (values() -> geoGridToTile, not nodeRecords()).
+  // Every winning hypothesis here carries intensity-bearing beams (all soundings
+  // have intensity), so the set of backscatter cells must equal the set of
+  // finite-depth bathy cells. A GGGS-walk / iterator-alignment bug in only one of
+  // the two conversion functions would make the sets diverge and fail here.
+  std::size_t bathy_finite = 0;
+  for (const auto & grid : grids) {
+    const marine_bathymetry_store::BathymetryTile tile =
+      geoGridToTile(*grid, kStamp, kSource);
+    gggs::CellAreaIterator it(grid->index());
+    for (; it.valid(); it.next()) {
+      const marine_bathymetry_store::BathyCell bcell =
+        tile.get((*it).row(), (*it).column());
+      const bool in_backscatter = cells.count(*it) > 0;
+      if (bcell.hasData()) {
+        ++bathy_finite;
+        EXPECT_TRUE(in_backscatter)
+          << "a finite-depth bathy cell must also carry surfaced backscatter";
+      } else {
+        EXPECT_FALSE(in_backscatter)
+          << "a no-data bathy cell must not appear in the backscatter map";
+      }
+    }
+  }
+  EXPECT_EQ(bathy_finite, cells.size())
+    << "backscatter cells must match the bathy finite-depth cells 1:1";
 }
 
 // Soundings with NO intensity (NaN) must produce an EMPTY backscatter cell map

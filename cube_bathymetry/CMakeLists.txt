@@ -259,7 +259,13 @@ if(BUILD_TESTING)
   )
 endif()
 
-ament_export_dependencies(rclcpp)
+# The installed public header store_import.h (#include'd by downstream consumers
+# of the exported cube_bathymetry_store_import target) pulls in both store
+# packages' headers, so re-export them as transitive dependencies — a downstream
+# find_package(cube_bathymetry) then resolves their include paths/targets without
+# its own find_package. (marine_bathymetry_store was a pre-existing gap here;
+# marine_mbes_backscatter_store is new with #80.)
+ament_export_dependencies(rclcpp marine_bathymetry_store marine_mbes_backscatter_store)
 
 # Export old-style CMake variables
 ament_export_include_directories(include/${PROJECT_NAME})
