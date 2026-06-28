@@ -30,6 +30,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 #include "cube_bathymetry/geo_grid.h"
 
@@ -48,6 +49,17 @@ public:
     void addSoundings(
       const std::vector < GeoSounding > &soundings,
       std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
+
+  /// @brief Configure the per-beam backscatter angular-response correction
+  ///        applied at node-output (ADR-0007 D3, cube_bathymetry#81).
+  ///
+  /// Writes @p mode and @p curve into the sheet's private @c parameters_, which
+  /// every owned GeoGrid holds by const reference -- so the setting reaches all
+  /// existing and future grids. Call AFTER construction and BEFORE/at processing.
+  /// An Empirical mode with an empty curve is a no-op (the caller should warn).
+    void setBackscatterCorrection(
+      BackscatterAngleCorrection mode,
+      std::vector < std::pair < float, float >> curve);
 
   /// Return the grids within the bounds, creating new ones if necessary
     std::vector < std::shared_ptr <

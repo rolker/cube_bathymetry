@@ -43,6 +43,7 @@
 #include <utility>
 #include <vector>
 
+#include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
@@ -70,8 +71,9 @@
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
     "needed)\n";
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store layer "
-    "(Processed) from the same CUBE pass (optional; surfaces the co-estimated, "
-    "UNCORRECTED intensity -- the angle correction is cube#81)\n";
+    "(Processed) from the same CUBE pass (optional; surfaces the co-estimated "
+    "intensity -- uncorrected by default, angle-corrected when "
+    "--backscatter-correction empirical is set, cube#81)\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
     "topic to replay through CUBE (required)\n";
   std::cout << "  --odom-topic <topic>: nav_msgs/Odometry topic for per-ping "
@@ -80,6 +82,12 @@
   std::cout << "  -r <meters>: Grid resolution (nominal; snapped to GGGS). "
     "Default 1.0\n";
   std::cout << "  --iho-order <order>: CUBE IHO order (default order1a)\n";
+  std::cout << "  --backscatter-correction none|empirical: per-beam angular-response "
+    "correction at node-output (default none = identity). 'empirical' subtracts the "
+    "per-sonar curve from --backscatter-curve (cube#81)\n";
+  std::cout << "  --backscatter-curve <file>: empirical angular-response curve CSV "
+    "(abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir). Required for "
+    "--backscatter-correction empirical; empty -> correction is a no-op\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  --source-id <id>: Registry source id recorded for every cell "
     "(default cube-replay)\n";
@@ -271,6 +279,9 @@ int main(int argc, char * argv[])
   double resolution = 1.0;
   std::string iho_order = "order1a";
   int ping_count_limit = 0;
+  // Backscatter angular-response correction (cube#81). Default none = identity.
+  std::string backscatter_correction_str = "none";
+  std::string backscatter_curve_file;
 
   // Registry provenance fields for the imported cells.
   marine_bathymetry_store::SourceRecord source_record;
@@ -311,6 +322,10 @@ int main(int argc, char * argv[])
       resolution = std::stod(next_value("-r"));
     } else if (*arg == "--iho-order") {
       iho_order = next_value("--iho-order");
+    } else if (*arg == "--backscatter-correction") {
+      backscatter_correction_str = next_value("--backscatter-correction");
+    } else if (*arg == "--backscatter-curve") {
+      backscatter_curve_file = next_value("--backscatter-curve");
     } else if (*arg == "-l") {
       ping_count_limit = std::stoi(next_value("-l"));
     } else if (*arg == "--source-id") {
@@ -411,6 +426,39 @@ int main(int argc, char * argv[])
   cube::GeoMapSheet geo_map_sheet(resolution, iho_order);
   std::cout << "requested resolution: " << resolution << " nominal used: "
             << geo_map_sheet.nominalCellSizeMeters() << std::endl;
+
+  // Backscatter angular-response correction (cube#81). The setter must run AFTER
+  // the sheet is constructed (its grids hold a const ref to the sheet Parameters).
+  cube::BackscatterAngleCorrection backscatter_mode =
+    cube::BackscatterAngleCorrection::None;
+  if (!cube::parseBackscatterAngleCorrection(
+      backscatter_correction_str, backscatter_mode))
+  {
+    std::cerr << "error: --backscatter-correction must be 'none' or 'empirical' "
+              << "(got '" << backscatter_correction_str << "')\n";
+    usage();
+  }
+  std::vector<std::pair<float, float>> backscatter_curve;
+  if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
+    !backscatter_curve_file.empty())
+  {
+    backscatter_curve = cube::loadAngularResponseCurve(backscatter_curve_file);
+  }
+  if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
+    backscatter_curve.empty())
+  {
+    // Loud, not silent: enabled but no curve loaded -> correction is a no-op.
+    std::cerr << "warning: --backscatter-correction empirical but no curve was "
+      "loaded from --backscatter-curve '" << backscatter_curve_file
+              << "' -- the correction is ENABLED but a NO-OP (intensity emitted "
+      "uncorrected). Provide a valid curve CSV.\n";
+  } else if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical) {
+    std::cout << "Backscatter angular-response correction: empirical, "
+              << backscatter_curve.size() << "-point curve from "
+              << backscatter_curve_file << std::endl;
+  }
+  geo_map_sheet.setBackscatterCorrection(
+    backscatter_mode, std::move(backscatter_curve));
 
   std::cout << "reading messages..." << std::endl;
 

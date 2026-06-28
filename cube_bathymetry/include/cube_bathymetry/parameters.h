@@ -26,10 +26,26 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <utility>
+#include <vector>
 #include "cube_bathymetry/common.h"
 
 namespace cube
 {
+
+/// Per-beam backscatter angular-response correction applied at node-output
+/// (Node::extractNodeRecord, ADR-0007 D3). Default None preserves the Phase B
+/// identity behavior (corrected == raw) on every existing deployment.
+  enum class BackscatterAngleCorrection
+  {
+  /// No correction: the surfaced intensity is the raw per-beam mean.
+    None,
+
+  /// Empirical angular-response (ARA): subtract a per-sonar curve's
+  /// db_relative_to_nadir, linearly interpolated by |beam_angle| in degrees.
+  /// Requires a non-empty angular_response_curve; empty curve -> no-op.
+    Empirical
+  };
 
 /// Extraction method for depth and uncertainty surfaces.  This is used only in
 /// the multiple hypothesis case as a way of choosing which hypothesis to
@@ -162,6 +178,18 @@ namespace cube
   /// hydrography but can be greater for geological mapping
   /// in flat areas with sparse data)
     float capture_distance_scale = 0.05;
+
+  /// Per-beam backscatter angular-response correction mode (ADR-0007 D3).
+  /// Default None = identity (corrected == raw). Set via
+  /// GeoMapSheet::setBackscatterCorrection().
+    BackscatterAngleCorrection backscatter_angle_correction =
+      BackscatterAngleCorrection::None;
+
+  /// Empirical angular-response curve: ascending {abs_angle_deg, db_relative_to_nadir}
+  /// pairs (nadir bin ~0, off-nadir bins <= 0), loaded at startup from a per-sonar
+  /// CSV. Empty -> the Empirical correction is a no-op (logged as a warning at
+  /// configure time). Used only when backscatter_angle_correction == Empirical.
+    std::vector < std::pair < float, float >> angular_response_curve;
   };
 
 }  // namespace cube

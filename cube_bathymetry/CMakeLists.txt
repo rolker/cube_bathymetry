@@ -43,6 +43,7 @@ find_package(tf2_sensor_msgs REQUIRED)
 find_package(GDAL CONFIG REQUIRED)
 
 add_library(cube_bathymetry
+  src/angular_response_curve.cpp
   src/detections_projector.cpp
   src/error_model.cpp
   src/geo_grid.cpp
