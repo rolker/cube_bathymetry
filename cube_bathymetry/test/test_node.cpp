@@ -689,7 +689,8 @@ TEST_F(NodeTest, ARAPortStarboardSymmetry)
 namespace
 {
 // empiricalParams() + the tier-2 TL provenance: the loaded curve is a TL-removed
-// residual, so the estimator also removes 40*log10(R) + 2*alpha*R per beam.
+// residual, so the estimator also compensates (ADDS BACK) 40*log10(R) + 2*alpha*R
+// per beam.
 Parameters tier2Params(float alpha)
 {
   Parameters p = empiricalParams();  // Empirical, curve {{0,0},{60,-12}}
@@ -710,16 +711,18 @@ std::shared_ptr<Hypothesis> singleBeamNominatedRange(
   return h;
 }
 
-// Reference tier-2 correction: corrected = raw - (40log10R + 2*alpha*R) - residual.
+// Reference tier-2 correction: corrected = raw + (40log10R + 2*alpha*R) - residual.
+// TL is ADDED BACK (compensated): a distant return lost more energy, so it is
+// boosted to recover range-independent backscatter (TVG-style, #87 sign fix).
 double tier2Expected(double raw, double range, double alpha, double residual_db)
 {
   const double tl = 40.0 * std::log10(range) + 2.0 * alpha * range;
-  return raw - tl - residual_db;
+  return raw + tl - residual_db;
 }
 }  // namespace
 
-// Tier-2 mid-angle beam with a known range: both the TL term and the residual
-// curve are removed -- corrected = raw - (40log10R + 2*alpha*R) - residual(30deg).
+// Tier-2 mid-angle beam with a known range: the TL term is compensated and the
+// residual curve removed -- corrected = raw + (40log10R + 2*alpha*R) - residual(30deg).
 TEST_F(NodeTest, Tier2RemovesTLAndResidual)
 {
   const float alpha = 0.05f;

@@ -37,8 +37,10 @@ each beam's raw dB. NaN/inf intensities and beams flagged bad are skipped.
 Tier-2 (cube_bathymetry#87): with ``--remove-tl`` the per-beam 2-way
 transmission loss ``TL = 40*log10(R) + 2*alpha*R`` (R = ``twtt*c/2`` per beam,
 alpha = freshwater Francois-Garrison absorption from ``--water-temp-c`` and the
-per-ping frequency) is subtracted from each beam BEFORE binning, so the curve
-becomes a TL-removed residual that is depth/range transferable. The CSV columns
+per-ping frequency) is compensated -- ADDED BACK -- for each beam BEFORE binning
+(a distant return lost more energy, so it is boosted to recover range-independent
+backscatter, TVG-style), so the curve becomes a TL-removed residual that is
+depth/range transferable. The CSV columns
 are unchanged; the header records ``tl_removed``/``absorption_db_per_m`` so the
 C++ estimator applies the identical TL (and never recomputes alpha).
 
@@ -135,9 +137,9 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
     * tier-1 (``remove_tl`` False): ``sum_adjusted`` is the raw dB sum; ``sum_R``
       stays 0 (unused).
     * tier-2 (``remove_tl`` True): the range-INDEPENDENT-of-alpha part of the TL
-      (the spreading term ``40*log10(R)``) is removed inline, so ``sum_adjusted``
-      is ``sum(db - 40*log10(R))`` and ``sum_R`` is ``sum(R)``. The absorption
-      term ``2*alpha*R`` is removed in write_csv once alpha is known from the
+      (the spreading term ``40*log10(R)``) is compensated (added back) inline, so
+      ``sum_adjusted`` is ``sum(db + 40*log10(R))`` and ``sum_R`` is ``sum(R)``. The
+      absorption term ``2*alpha*R`` is added in write_csv once alpha is known from the
       median frequency -- a single pass over the bag.
 
     `freqs` collects each ping's ``ping_info.frequency`` (Hz) for the median.
@@ -191,7 +193,7 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
                 range_m = twtt[i] * sound_speed / 2.0
                 if not math.isfinite(range_m) or range_m <= 0.0:
                     continue
-                adjusted = db - 40.0 * math.log10(range_m)
+                adjusted = db + 40.0 * math.log10(range_m)
             else:
                 adjusted = db
 
@@ -208,10 +210,10 @@ def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
     """
     Write the binned means and db_relative_to_nadir to a curve CSV.
 
-    For tier-2 (`remove_tl`), the absorption term ``2*alpha*R`` is removed here
-    using the per-bin mean range, completing the TL removal started in
-    accumulate. The header records the TL provenance so the C++ estimator applies
-    the identical model.
+    For tier-2 (`remove_tl`), the absorption term ``2*alpha*R`` is added here
+    (compensated) using the per-bin mean range, completing the TL compensation
+    started in accumulate. The header records the TL provenance so the C++
+    estimator applies the identical model.
     """
     if not bins:
         raise SystemExit('error: no finite intensity/angle samples found')
@@ -223,8 +225,8 @@ def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
         center = (idx + 0.5) * bin_width_deg
         mean = s_adj / n
         if remove_tl:
-            # Remove the absorption part of the TL: 2*alpha*mean_R.
-            mean -= 2.0 * alpha * (s_range / n)
+            # Compensate the absorption part of the TL: + 2*alpha*mean_R.
+            mean += 2.0 * alpha * (s_range / n)
         rows.append([center, mean, n])
 
     nadir_mean = rows[0][1]  # lowest-angle (nadir-most) bin

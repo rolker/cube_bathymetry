@@ -93,11 +93,18 @@ sonar. The `rx_angles` sign/zero convention was verified against
 The tier-1 curve above bins backscatter by `|rx_angle|` only, so per-beam range
 (spreading + absorption) is baked into the curve and it is **depth-regime
 specific** (must be re-derived per survey). Tier-2 removes the per-beam **2-way
-transmission loss** before the angular response is characterized and applied, so
-the residual curve becomes **range/depth transferable**:
+transmission loss** by **compensating (adding it back)** before the angular
+response is characterized and applied — a distant return lost more energy, so it
+is boosted to recover range-independent backscatter (TVG-style) — so the residual
+curve becomes **range/depth transferable**:
 
-`corrected = raw − TL(R) − residualCurve(|beam_angle|)`,
+`corrected = raw + TL(R) − residualCurve(|beam_angle|)`,
 `TL(R) = 40·log₁₀(R) + 2·α·R` (R = per-beam slant range `twtt·c/2`, m).
+
+> Sign note: TL is **added back**, not subtracted. An earlier draft subtracted it
+> (making far beams dimmer → steeper curve + larger cross-bag spread); the
+> validated fix compensates the loss, which flattens the curve and shrinks the
+> spread.
 
 Design decisions:
 

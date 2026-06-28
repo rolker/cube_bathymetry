@@ -360,10 +360,12 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
   // of equal magnitude get the same correction.
   //
   // Tier-2 (cube_bathymetry#87): when the loaded curve is a TL-REMOVED residual
-  // (backscatter_tl_removed), first remove each beam's 2-way transmission loss
+  // (backscatter_tl_removed), compensate each beam's 2-way transmission loss by
+  // ADDING IT BACK -- a distant return lost more energy, so it is boosted to
+  // recover range-independent backscatter (TVG-style):
   //   TL(R) = 40*log10(R) + 2*alpha*R      (R = per-beam slant range, m)
   // so the residual curve is depth/range transferable:
-  //   corrected = raw - TL(R) - residualCurve(|beam_angle|).
+  //   corrected = raw + TL(R) - residualCurve(|beam_angle|).
   // alpha is read verbatim from the curve header (backscatter_absorption_db_per_m);
   // the estimator NEVER recomputes the (Francois-Garrison) absorption -- the
   // Python derive tool is the single source of truth, guaranteeing consistency.
@@ -393,7 +395,10 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
       // Skip the TL term for a missing / non-positive range (log10 undefined);
       // the beam is still corrected by the residual angular-response curve below.
       if(std::isfinite(range) && range > 0.0) {
-        corrected -= 40.0 * std::log10(range) + 2.0 * alpha * range;
+        // Compensate (ADD BACK) the 2-way transmission loss: a distant return
+        // lost more energy, so boost it to recover range-independent backscatter
+        // (TVG-style). #87 sign fix.
+        corrected += 40.0 * std::log10(range) + 2.0 * alpha * range;
       }
     }
     if(apply_ara && !std::isnan(sample.beam_angle)) {
