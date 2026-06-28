@@ -125,3 +125,26 @@ The following should be part of the implementation or flagged as follow-up:
 - Verified correct: `MbesCell` aggregate-init field order matches struct; `nodeRecords()`↔`CellAreaIterator` lockstep; double-flush idempotent (`queueFlush` early-returns + `clear()`s, extract is read-only); both stores share GGGS level via `fromCellSize(nominalCellSizeMeters())`.
 - Plan adherence: full. Prior Plan-Review must-fix (timestamp + source_index provenance) is resolved — cells carry `cell_timestamp_ns` + non-zero `bs_source_index`, `&bs_registry` passed to `save()`.
 - [ ] (suggestion) Line drift: threading insertion cited at 507–510; actual `gs.sounding.*` assignments at 508–509 — `plan.md:33-37`.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-28 00:00 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-80 at `fa13f94`
+**Mode**: pre-push
+**Depth**: Deep (reason: 10 files / 200+ changed lines; lifecycle-touching CUBE-node flush path)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 2 | **Ship**: recommended — no must-fix; round-1's CLI bounds-check suggestion resolved in `fa13f94`, only two pre-existing-pattern suggestions remain
+
+### Findings
+- [ ] (suggestion) `ament_export_dependencies` re-exports only `rclcpp`; installed public header `store_import.h` now `#include`s `marine_mbes_backscatter_store/mbes_cell.hpp` (and `marine_bathymetry_store`). Pre-existing latent pattern, propagates transitively via `ament_export_targets` — fix both deps or leave — `cube_bathymetry/CMakeLists.txt:262`.
+- [ ] (suggestion) `BackscatterCellsMatchGridRecords` re-derives expected cells with the same `nodeRecords()`+`CellAreaIterator` walk as production, so it wouldn't independently catch a shared iterator-alignment bug; mitigated by absolute intensity/timestamp/source assertions. Optional — `cube_bathymetry/test/test_store_import.cpp:281`.
+
+### Notes
+- Round-2 re-review. Only code delta since round 1 (`afcb106`→`fa13f94`) is the CLI arg-parsing rewrite to a bounds-checked `next_value()` lambda — **resolves round-1 suggestion #2**: guards `std::next(arg) == end()` before advancing, `usage()` is `[[noreturn]]`, returned `const std::string&` consumed before any vector mutation. Verified correct.
+- Deep review: 2 fresh-context Claude Adversarial passes (Lens A logic + Lens B systemic), both clean. Static Analysis: ament_cpplint clean; cppcheck findings only on untouched context lines / GTest-macro & cross-TU false positives. Copilot off (default).
+- Re-verified: `MbesCell` aggregate-init field order matches struct (`intensity, intensity_variance, timestamp, source_index`); `nodeRecords()`↔`CellAreaIterator` lockstep; double-flush idempotent (`queueFlush` early-returns on empty queue); both stores share GGGS level via `fromCellSize(nominalCellSizeMeters())`.
+- Tests **pass** in the latest build: `StoreImport.BackscatterCellsMatchGridRecords` + `StoreImport.BackscatterNaNPropagation` (test_store_import: 8 tests OK).
+- Plan adherence: full. Prior Plan-Review provenance must-fix remains resolved.
