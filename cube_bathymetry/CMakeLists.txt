@@ -143,6 +143,14 @@ install(TARGETS cube_bathymetry_node
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
+# Offline empirical angular-response curve derivation tool (cube#81). Reads a
+# SonarDetections bag, bins intensities by |rx_angles|, writes the curve CSV the
+# Empirical backscatter correction consumes.
+install(PROGRAMS
+  scripts/derive_angular_response.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 add_executable(detections_to_pointcloud src/detections_to_pointcloud.cpp)
 
 target_link_libraries(detections_to_pointcloud
