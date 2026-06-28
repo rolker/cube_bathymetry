@@ -23,9 +23,57 @@
 #include "cube_bathymetry/node.h"
 #include <cassert>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace cube
 {
+
+namespace
+{
+
+/// Empirical angular-response lookup: the curve's db_relative_to_nadir at
+/// @p abs_angle_deg, linearly interpolated between adjacent bin centres. The
+/// curve is ascending {abs_angle_deg, db_relative_to_nadir} pairs (loaded by
+/// loadAngularResponseCurve). Returns 0 (identity) when the curve is empty or
+/// @p abs_angle_deg lies beyond the curve's max angle; clamps to the first bin
+/// below the curve's min angle (nadir bin ~0 -> ~identity near nadir).
+double curveRelativeDb(
+  const std::vector<std::pair<float, float>> & curve, double abs_angle_deg)
+{
+  if (curve.empty()) {
+    return 0.0;
+  }
+  // Below the first bin centre: clamp to it (the nadir bin's value, ~0).
+  if (abs_angle_deg <= curve.front().first) {
+    return curve.front().second;
+  }
+  // Beyond the last bin centre: clamp to the outermost bin's correction rather
+  // than jump to identity. The empirical curve is bounded (unlike a cos/log model
+  // that diverges near grazing), so continuing the edge value keeps the correction
+  // continuous and avoids a swath-edge discontinuity / bright ring (#81 review).
+  if (abs_angle_deg > curve.back().first) {
+    return curve.back().second;
+  }
+  // Find the bracketing pair [lo, hi] and linearly interpolate.
+  for (std::size_t i = 1; i < curve.size(); ++i) {
+    if (abs_angle_deg <= curve[i].first) {
+      const double a0 = curve[i - 1].first;
+      const double d0 = curve[i - 1].second;
+      const double a1 = curve[i].first;
+      const double d1 = curve[i].second;
+      const double span = a1 - a0;
+      if (span <= 0.0) {
+        return d1;  // duplicate angle: take the upper bin's value
+      }
+      const double t = (abs_angle_deg - a0) / span;
+      return d0 + t * (d1 - d0);
+    }
+  }
+  return 0.0;  // unreachable (guarded by the back() check above)
+}
+
+}  // namespace
 
 bool Node::addHypothesis(float depth, float variance)
 {
@@ -295,27 +343,41 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
     return record;
   }
 
-  // Backscatter half (ADR-0007 D2/D3/D4). Apply the per-beam radiometric
-  // correction to each retained {raw intensity, grazing angle} sample, THEN
-  // combine the corrected values into a mean and an ESTIMATE variance.
+  // Backscatter half (ADR-0007 D2/D3/D4). Apply the per-beam angular-response
+  // correction to each retained {raw_intensity, beam_angle} sample, THEN combine
+  // the corrected values into a mean and an ESTIMATE variance.
   //
-  // TODO(#54-B / cube_bathymetry#15): apply the GeoCoder incidence/Lambert
-  // correction per beam HERE, using the winning hypothesis's settled depth and
-  // the local seabed slope (ADR-0007 D3). The slope correction (cube_bathymetry#15)
-  // has landed in Node::insert but is inert (offset 0) until its predicted-surface
-  // producer (cube_bathymetry#59) is wired. Until that producer lands this is the
-  // identity (flat-geometry) correction: the corrected value equals the raw value and
-  // intensity is emitted UNCORRECTED. The per-beam {raw_intensity, grazing_angle}
-  // set is retained on the hypothesis (Hypothesis::intensity_samples) so the
-  // node value is fully re-derivable when #15 provides slope -- no information
-  // is lost by deferring.
+  // Empirical ARA (cube_bathymetry#81): corrected_dB = raw_dB - curveRel(|beam_angle|),
+  // where curveRel is the per-sonar angular-response curve's db_relative_to_nadir
+  // column, linearly interpolated between bin centres by |beam_angle| in DEGREES.
+  // Nadir -> curveRel ~0 -> identity. Beyond the curve's max angle, a NaN
+  // beam_angle, mode None, or an empty curve all fall back to identity (raw).
+  //
+  // rx_angles sign/zero gate (verified against kongsberg_em_bridge): the producer
+  // negates the Kongsberg pointing angle (+PORT -> +STARBOARD; nadir = 0; radians;
+  // intensity in dB). The curve is keyed on |beam_angle|, so port/starboard beams
+  // of equal magnitude get the same correction.
+  //
+  // Deferred (NOT done here): the full radiometric GeoCoder chain -- insonified
+  // area, beam-pattern, TVG residual, and the depth/slope incidence term
+  // (ADR-0007 D3, cube_bathymetry#15/#59). The empirical curve absorbs the
+  // aggregate angular falloff for a flat bottom; per-beam {raw_intensity,
+  // beam_angle} stay retained so the node value is re-derivable when #15 lands.
+  const bool apply_ara =
+    parameters.backscatter_angle_correction ==
+    BackscatterAngleCorrection::Empirical &&
+    !parameters.angular_response_curve.empty();
   double sum = 0.0;
   double sum_sq = 0.0;
   uint32_t n = 0;
   for(const auto & sample : chosen->intensity_samples) {
-    // Phase B no-op correction: corrected == raw for now. recordBeam() already
-    // excluded NaN-intensity beams, so every retained sample is a real value.
-    const double corrected = sample.raw_intensity;
+    // recordBeam() already excluded NaN-intensity beams, so raw_intensity is real.
+    double corrected = sample.raw_intensity;
+    if(apply_ara && !std::isnan(sample.beam_angle)) {
+      const double abs_angle_deg =
+        std::abs(static_cast<double>(sample.beam_angle)) * 180.0 / M_PI;
+      corrected -= curveRelativeDb(parameters.angular_response_curve, abs_angle_deg);
+    }
     sum += corrected;
     sum_sq += corrected * corrected;
     ++n;

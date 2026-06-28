@@ -33,8 +33,8 @@ namespace cube
 
 /// Per-beam backscatter sufficient statistics retained on a hypothesis
 /// (ADR-0007 D3). Each contributing beam contributes its RAW (uncorrected)
-/// intensity and the per-beam grazing/beam angle, so the radiometric
-/// (GeoCoder incidence/Lambert) correction can be applied later -- at
+/// intensity and the per-beam receive/steering (beam/incidence) angle, so the
+/// radiometric (empirical-ARA / GeoCoder) correction can be applied later -- at
 /// node-output, once depth and local slope have settled -- rather than baking
 /// an angle-corrupted, non-re-correctable average into the hypothesis.
   struct BeamIntensitySample
@@ -42,11 +42,12 @@ namespace cube
   /// Raw, uncorrected per-beam intensity (e.g. M3 reflectivity in dB).
     float raw_intensity;
 
-  /// Per-beam receive/steering (beam/incidence) angle in radians. May be NaN
-  /// when the source did not report an angle for the beam; the deferred output
-  /// correction treats a NaN angle as "no angle correction available" and emits
-  /// that beam uncorrected.
-    float grazing_angle;
+  /// Per-beam receive/steering (beam/incidence) angle from nadir, in radians
+  /// (NOT a true grazing angle of 90 deg - theta; nadir = 0). May be NaN when
+  /// the source did not report an angle for the beam; the output correction
+  /// treats a NaN angle as "no angle correction available" and emits that beam
+  /// uncorrected.
+    float beam_angle;
   };
 
 /// Depth hypothesis structure used to maintain a current track on the depth
@@ -113,9 +114,9 @@ namespace cube
   /// outliers the W&H monitor rejects never enter this set.
   ///
   /// A NaN raw_intensity is skipped (a source that omits intensities must never
-  /// inject a phantom sample); a NaN grazing_angle is retained (the beam is
+  /// inject a phantom sample); a NaN beam_angle is retained (the beam is
   /// still a valid intensity sample, merely uncorrectable for angle).
-    void recordBeam(float raw_intensity, float grazing_angle);
+    void recordBeam(float raw_intensity, float beam_angle);
 
   /// Current depth mean estimate
     double current_estimate;

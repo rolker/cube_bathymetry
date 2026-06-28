@@ -27,6 +27,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "tf2_ros/transform_listener.h"
@@ -50,6 +51,7 @@
 #include "grid_map_msgs/msg/grid_map.hpp"
 
 #include "marine_autonomy/gz4d_geo.h"
+#include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/store_import.h"
 #include "cube_bathymetry/quantize_tile.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
@@ -99,6 +101,44 @@ public:
     // Reset the tile-version registry too (#78): a fresh sheet must not advertise
     // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
+
+    // Backscatter angular-response correction (cube_bathymetry#81). Default
+    // "none" preserves the Phase B identity behavior; "empirical" subtracts a
+    // per-sonar angular-response curve loaded from backscatter_curve_file. The
+    // setter must run AFTER the sheet is constructed (grids hold a const ref to
+    // the sheet's Parameters).
+    const std::string bs_correction_str =
+      declare_parameter("backscatter_angle_correction", std::string("none"));
+    const std::string bs_curve_file =
+      declare_parameter("backscatter_curve_file", std::string(""));
+    cube::BackscatterAngleCorrection bs_mode =
+      cube::BackscatterAngleCorrection::None;
+    if (!cube::parseBackscatterAngleCorrection(bs_correction_str, bs_mode)) {
+      RCLCPP_WARN(get_logger(),
+        "backscatter_angle_correction='%s' is not 'none' or 'empirical'; "
+        "defaulting to none (no correction).", bs_correction_str.c_str());
+      bs_mode = cube::BackscatterAngleCorrection::None;
+    }
+    std::vector<std::pair<float, float>> bs_curve;
+    if (bs_mode == cube::BackscatterAngleCorrection::Empirical &&
+      !bs_curve_file.empty())
+    {
+      bs_curve = cube::loadAngularResponseCurve(bs_curve_file);
+    }
+    if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.empty()) {
+      // Loud, not silent: the operator asked for the correction but no curve was
+      // loaded (empty/missing/unparseable file), so it degrades to a no-op.
+      RCLCPP_WARN(get_logger(),
+        "backscatter_angle_correction=empirical but no curve was loaded from "
+        "backscatter_curve_file='%s' -- the correction is ENABLED but a NO-OP "
+        "(intensity emitted uncorrected). Provide a valid curve CSV.",
+        bs_curve_file.c_str());
+    } else if (bs_mode == cube::BackscatterAngleCorrection::Empirical) {
+      RCLCPP_INFO(get_logger(),
+        "Backscatter angular-response correction: empirical, %zu-point curve "
+        "from %s", bs_curve.size(), bs_curve_file.c_str());
+    }
+    geo_map_sheet_->setBackscatterCorrection(bs_mode, std::move(bs_curve));
 
     // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
     // the prime can be trimmed to the same budget -- otherwise loadIntoSheet

@@ -115,16 +115,16 @@ bool Hypothesis::update(float depth, float variance, const Parameters & paramete
   return true;
 }
 
-void Hypothesis::recordBeam(float raw_intensity, float grazing_angle)
+void Hypothesis::recordBeam(float raw_intensity, float beam_angle)
 {
   // Skip beams with no reported intensity -- a NaN must never be mistaken for a
   // real backscatter sample (ADR-0007: missing intensity != zero backscatter).
-  // A NaN grazing_angle is allowed through: the beam is still a valid intensity
+  // A NaN beam_angle is allowed through: the beam is still a valid intensity
   // measurement, it merely cannot be angle-corrected at output.
   if (std::isnan(raw_intensity)) {
     return;
   }
-  intensity_samples.push_back(BeamIntensitySample{raw_intensity, grazing_angle});
+  intensity_samples.push_back(BeamIntensitySample{raw_intensity, beam_angle});
 }
 
 

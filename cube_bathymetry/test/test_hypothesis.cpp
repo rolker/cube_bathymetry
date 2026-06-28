@@ -213,9 +213,9 @@ TEST_F(HypothesisTest, RecordBeamAppendsRawAndAngle)
 
   ASSERT_EQ(h.intensity_samples.size(), 2u);
   EXPECT_FLOAT_EQ(h.intensity_samples[0].raw_intensity, -30.0f);
-  EXPECT_FLOAT_EQ(h.intensity_samples[0].grazing_angle, 0.1f);
+  EXPECT_FLOAT_EQ(h.intensity_samples[0].beam_angle, 0.1f);
   EXPECT_FLOAT_EQ(h.intensity_samples[1].raw_intensity, -28.0f);
-  EXPECT_FLOAT_EQ(h.intensity_samples[1].grazing_angle, 0.2f);
+  EXPECT_FLOAT_EQ(h.intensity_samples[1].beam_angle, 0.2f);
 }
 
 // A NaN raw intensity (source omitted intensities) must never become a phantom
@@ -231,7 +231,7 @@ TEST_F(HypothesisTest, RecordBeamSkipsNanIntensity)
   EXPECT_EQ(h.intensity_samples.size(), 1u);
 }
 
-// A NaN grazing angle is retained: the beam is still a valid intensity sample,
+// A NaN beam angle is retained: the beam is still a valid intensity sample,
 // it simply cannot be angle-corrected (emitted uncorrected at output).
 TEST_F(HypothesisTest, RecordBeamRetainsNanAngle)
 {
@@ -240,7 +240,7 @@ TEST_F(HypothesisTest, RecordBeamRetainsNanAngle)
   h.recordBeam(-20.0f, std::nan(""));
   ASSERT_EQ(h.intensity_samples.size(), 1u);
   EXPECT_FLOAT_EQ(h.intensity_samples[0].raw_intensity, -20.0f);
-  EXPECT_TRUE(std::isnan(h.intensity_samples[0].grazing_angle));
+  EXPECT_TRUE(std::isnan(h.intensity_samples[0].beam_angle));
 }
 
 }  // namespace cube
