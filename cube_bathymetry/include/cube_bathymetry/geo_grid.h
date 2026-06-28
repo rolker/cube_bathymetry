@@ -116,10 +116,11 @@ public:
   ///        every cell, in `CellAreaIterator` order over `index()`.
   ///
   /// Parallel to @ref values() but emits @ref NodeRecord (adds the co-estimated
-  /// `intensity`/`intensity_var`, ADR-0007 D5) so the offline import can surface
-  /// backscatter alongside bathymetry from the same pass (#80). Absent cells push
-  /// a default `NodeRecord` (NaN intensity) — the same positional NaN sentinel
-  /// @ref values() uses — so the result is index-aligned with a second
+  /// `intensity`/`intensity_var`, ADR-0007 D5) so both the offline import (#80,
+  /// backscatter store layer) and the live display-tile producer (#78,
+  /// `SonarVisualizationTile`) surface backscatter from the same pass. Absent
+  /// cells push a default `NodeRecord` (NaN intensity) — the same positional NaN
+  /// sentinel @ref values() uses — so the result is index-aligned with a second
   /// `CellAreaIterator` over `index()`. Like @ref values() it flushes the median
   /// pre-filter (`queueFlush`); calling it after @ref values() on the same grid
   /// is a harmless no-op flush. The surfaced intensity is UNCORRECTED (the

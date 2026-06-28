@@ -210,15 +210,17 @@ private:
 
     pointcloud.height = 1;
     pointcloud.width = soundings.size();
-    pointcloud.point_step = 24;  // 6 fields * 4 bytes each
+    pointcloud.point_step = 28;  // 7 fields * 4 bytes each
     pointcloud.row_step = pointcloud.point_step * pointcloud.width;
     pointcloud.is_dense = true;
     pointcloud.is_bigendian = false;
 
-    // Field order: x, y, z, intensity, vertical_uncertainty, horizontal_uncertainty.
-    // intensity (per-beam backscatter) sits with the geometry, ahead of the
-    // uncertainty fields. Consumers read by field name, so the order is safe.
-    pointcloud.fields.resize(6);
+    // Field order: x, y, z, intensity, vertical_uncertainty, horizontal_uncertainty,
+    // beam_angle. intensity (per-beam backscatter) sits with the geometry, ahead of
+    // the uncertainty fields; beam_angle (incidence angle rel. nadir, rad) trails so
+    // the live node can pair it with intensity (ADR-0007 D3). Consumers read by field
+    // name, so the order is safe.
+    pointcloud.fields.resize(7);
     pointcloud.fields[0].name = "x";
     pointcloud.fields[0].offset = 0;
     pointcloud.fields[0].datatype = sensor_msgs::msg::PointField::FLOAT32;
@@ -243,6 +245,10 @@ private:
     pointcloud.fields[5].offset = 20;
     pointcloud.fields[5].datatype = sensor_msgs::msg::PointField::FLOAT32;
     pointcloud.fields[5].count = 1;
+    pointcloud.fields[6].name = "beam_angle";
+    pointcloud.fields[6].offset = 24;
+    pointcloud.fields[6].datatype = sensor_msgs::msg::PointField::FLOAT32;
+    pointcloud.fields[6].count = 1;
 
     pointcloud.data.resize(pointcloud.row_step * pointcloud.height);
     float * data_ptr = reinterpret_cast<float *>(pointcloud.data.data());
@@ -254,7 +260,8 @@ private:
       data_ptr[3] = sounding.intensity;
       data_ptr[4] = sounding.vertical_error;
       data_ptr[5] = sounding.horizontal_error;
-      data_ptr += 6;  // Move to the next point
+      data_ptr[6] = sounding.beam_angle;
+      data_ptr += 7;  // Move to the next point
     }
 
     pointcloud_publisher_->publish(pointcloud);
