@@ -120,3 +120,28 @@ Producer is functionally complete. Remaining:
 Scoped-as-follow-up (documented in code/commits): dirty sub-window (full-tile v1);
 TileRequest from-disk catch-up for evicted tiles (resident-serving v1); backscatter
 angle-correction (cube#81).
+
+## Sim-verify PASSED
+**When**: 2026-06-28 (headless, ROS_DOMAIN_ID=88)
+**By**: Claude Code Agent (Claude Opus 4.8)
+
+End-to-end on a real Massabesic M3 detections bag
+(`bizzyboat_sonar/2026-06-19T16-56-37`, 1h offset, 50s slice) through
+`detections_to_pointcloud` → cube node:
+
+```
+VERDICT=PASS tiles=7 bands=[backscatter, depth, uncertainty]
+depth_range=[47.5,47.71] backscatter_finite_cells=129 catalog_max_entries=1
+```
+
+- 3-band `SonarVisualizationTile` published; **backscatter non-empty** (129 cells)
+  — the #54 co-estimate flows through the new beam_angle wiring → quantize → tile.
+- Depths round-trip (~47.5 m ellipsoidal seabed). `TileCatalog` lists the tile.
+- Absorbed cube#70's owed sim-verify (CA grid published + draft tiles saved OK).
+
+Three harness bugs fixed along the way (all harness, not producer): d2p is a
+LifecycleNode needing configure/activate; `--start-offset` skips `tf_static`
+(mount `bizzy/base_link->bizzy/m3`) so it is replayed separately and tf2-cached;
+checker topic namespace matched the remapped node name.
+
+Next: `/review-code` (container) on the full diff → push + PR (Closes #78).
