@@ -221,6 +221,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_node test/test_node.cpp)
   target_link_libraries(test_node cube_bathymetry)
 
+  ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
+  target_link_libraries(test_angular_response_curve cube_bathymetry)
+
   ament_add_gtest(test_parameters test/test_parameters.cpp)
   target_link_libraries(test_parameters cube_bathymetry)
 

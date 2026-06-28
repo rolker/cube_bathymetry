@@ -570,4 +570,115 @@ TEST_F(NodeTest, IntensityVarNonNegativeAfterClamp)
   EXPECT_GE(record.intensity_var, 0.0f);
 }
 
+// ---- Empirical angular-response (ARA) correction (#81) ---------------------
+
+namespace
+{
+// Degrees -> radians, matching how rx_angles are stored on a sample (radians).
+float deg2rad(float deg) {return deg * static_cast<float>(M_PI) / 180.0f;}
+
+// A Parameters with the Empirical ARA mode + a known 2-point curve:
+// nadir bin (0 deg -> 0 dB) and edge bin (60 deg -> -12 dB). At 30 deg the
+// linearly-interpolated db_relative_to_nadir is -6 dB.
+Parameters empiricalParams()
+{
+  Parameters p{CellSizes(1.0f), "order1a"};
+  p.backscatter_angle_correction = BackscatterAngleCorrection::Empirical;
+  p.angular_response_curve = {{0.0f, 0.0f}, {60.0f, -12.0f}};
+  return p;
+}
+
+// Build a single-beam node via a nominated hypothesis so the surfaced intensity
+// equals the corrected value of exactly that beam (no averaging).
+std::shared_ptr<Hypothesis> singleBeamNominated(
+  Node & n, float raw_intensity, float beam_angle_rad)
+{
+  auto h = std::make_shared<Hypothesis>(10.0f, 1.0f);
+  h->input_sample_variance = 1.0f;
+  h->recordBeam(raw_intensity, beam_angle_rad);
+  NodeNominationTestAccess::nominate(n, h);
+  return h;
+}
+}  // namespace
+
+// Mid-angle beam: corrected = raw - curveRel(30 deg) = -30 - (-6) = -24.
+TEST_F(NodeTest, ARAInterpolation)
+{
+  Parameters ara = empiricalParams();
+  Node n;
+  singleBeamNominated(n, -30.0f, deg2rad(30.0f));
+
+  auto record = n.extractNodeRecord(ara);
+  ASSERT_EQ(record.n_samples, 1u);
+  EXPECT_NEAR(record.intensity, -24.0f, 1e-3);
+}
+
+// Nadir beam: curveRel(0) = 0 -> corrected == raw.
+TEST_F(NodeTest, ARANadirIdentity)
+{
+  Parameters ara = empiricalParams();
+  Node n;
+  singleBeamNominated(n, -30.0f, 0.0f);
+
+  auto record = n.extractNodeRecord(ara);
+  ASSERT_EQ(record.n_samples, 1u);
+  EXPECT_NEAR(record.intensity, -30.0f, 1e-4);
+}
+
+// Beyond the curve's max angle (60 deg): identity (no extrapolation).
+TEST_F(NodeTest, ARABeyondMaxAngleIdentity)
+{
+  Parameters ara = empiricalParams();
+  Node n;
+  singleBeamNominated(n, -30.0f, deg2rad(70.0f));
+
+  auto record = n.extractNodeRecord(ara);
+  ASSERT_EQ(record.n_samples, 1u);
+  EXPECT_NEAR(record.intensity, -30.0f, 1e-4);
+}
+
+// NaN beam angle: no correction applicable -> identity.
+TEST_F(NodeTest, ARANaNAngleIdentity)
+{
+  Parameters ara = empiricalParams();
+  Node n;
+  singleBeamNominated(n, -30.0f, std::nan(""));
+
+  auto record = n.extractNodeRecord(ara);
+  ASSERT_EQ(record.n_samples, 1u);
+  EXPECT_NEAR(record.intensity, -30.0f, 1e-4);
+}
+
+// Mode None on a non-nadir beam: the correction never runs -> corrected == raw.
+TEST_F(NodeTest, ARAOffIsIdentity)
+{
+  Node n;
+  singleBeamNominated(n, -30.0f, deg2rad(30.0f));
+
+  auto record = n.extractNodeRecord(params);  // default None
+  ASSERT_EQ(record.n_samples, 1u);
+  EXPECT_NEAR(record.intensity, -30.0f, 1e-4);
+}
+
+// Port/starboard symmetry: +30 deg and -30 deg get the same correction because
+// the curve is keyed on |beam_angle|. Two equal-magnitude beams -> equal
+// corrected values -> mean -24, zero spread.
+TEST_F(NodeTest, ARAPortStarboardSymmetry)
+{
+  Parameters ara = empiricalParams();
+  Node n;
+  auto h = std::make_shared<Hypothesis>(10.0f, 1.0f);
+  h->input_sample_variance = 1.0f;
+  h->recordBeam(-30.0f, deg2rad(30.0f));   // starboard
+  h->recordBeam(-30.0f, deg2rad(-30.0f));  // port
+  NodeNominationTestAccess::nominate(n, h);
+
+  auto record = n.extractNodeRecord(ara);
+  ASSERT_EQ(record.n_samples, 2u);
+  EXPECT_NEAR(record.intensity, -24.0f, 1e-3);
+  // Equal corrected values -> zero estimate variance (clamped).
+  ASSERT_FALSE(std::isnan(record.intensity_var));
+  EXPECT_NEAR(record.intensity_var, 0.0f, 1e-4);
+}
+
 }  // namespace cube

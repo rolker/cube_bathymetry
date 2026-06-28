@@ -63,8 +63,9 @@ std::vector<GeoSounding> makeSoundings()
 // Same synthetic soundings as makeSoundings(), but each carries a constant
 // backscatter intensity so the CUBE node co-estimates a finite per-cell
 // intensity (the offline backscatter surface, #80). beam_angle is carried too
-// (it rides the {intensity, angle} pair), though the surfaced value is
-// uncorrected so the angle does not change it here.
+// (it rides the {intensity, angle} pair), though by default
+// (BackscatterAngleCorrection::None) the surfaced value is uncorrected so the
+// angle does not change it here.
 std::vector<GeoSounding> makeSoundingsWithIntensity(float intensity)
 {
   std::vector<GeoSounding> soundings = makeSoundings();
@@ -268,7 +269,8 @@ TEST(StoreImport, LoadIntoSheetEmptyLayerIsNoOp)
 // Intensity-bearing soundings must produce a non-empty backscatter cell map whose
 // cells match the grid's finite-intensity nodeRecords() entries cell-for-cell,
 // carry the import timestamp/source, and (with a constant input intensity) surface
-// that same constant value (the surfaced backscatter is uncorrected, #80).
+// that same constant value (the surfaced backscatter is uncorrected by default,
+// BackscatterAngleCorrection::None, #80).
 TEST(StoreImport, BackscatterCellsMatchGridRecords)
 {
   GeoMapSheet ms(1.0f);
@@ -300,8 +302,8 @@ TEST(StoreImport, BackscatterCellsMatchGridRecords)
         ++finite_total;
         ASSERT_NE(found, cells.end());
         EXPECT_FLOAT_EQ(found->second.intensity, records[k].intensity);
-        // Constant input intensity, uncorrected surface -> emitted value is that
-        // constant (mean of equal per-beam intensities).
+        // Constant input intensity, uncorrected surface by default (None) ->
+        // emitted value is that constant (mean of equal per-beam intensities).
         EXPECT_FLOAT_EQ(found->second.intensity, kIntensity);
         EXPECT_EQ(found->second.timestamp, kStamp);
         EXPECT_EQ(found->second.source_index, kSource);
