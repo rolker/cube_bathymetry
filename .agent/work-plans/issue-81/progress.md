@@ -177,3 +177,16 @@ file yet (only `0001-` exists). Formula has no objections.
 - [ ] (suggestion) Step 3's "fix 3 broken non-nadir assertions" is now internally inconsistent with the default-off parameter design: under default `None`, `FirstBeamInitializationRecordsIntensity` (`test_node.cpp:382`), the `NodeRecordMeanAndEstimateVariance` mean (`:401`), and `NodeRecordSkipsNanIntensityBeam` (`:420`) do NOT break (`corrected == raw` when correction is off). They need no change; only the 6 new Lambert-ON tests assert corrected values. The "fix 3 broken" wording is carried over from the pre-parameter review — clarify that those three stay unchanged on the default path — `plan.md:112-121`
 - [ ] (suggestion) Confirm the operator endorsed the **default-off** parameter design before implementing. It expands scope beyond the dispatched SCOPE BOUNDARY (which names no parameter) and changes #81's outcome: by default the no-op identity ships unchanged, so #78/#80 are corrected only when the flag is enabled. The plan attributes default-off to an operator decision (`plan.md:198-201`) but the dispatch's listed operator decisions cover only the gate-PASS and the ADR note. Design is defensible (sonar-agnostic; avoids double-counting a possibly pre-normalized reflectivity) — just verify the endorsement — `plan.md:24-29`, `plan.md:80-92`
 - [ ] (suggestion, optional) Scope at upper bound (10 files). The `grazing_angle → beam_angle` rename is orthogonal to the correction and a clean split candidate if the PR grows large — not required — `plan.md:94-99`
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-06-28 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-81/plan.md` at `d1eacd3`
+**Branch**: feature/issue-81 at `d1eacd3`
+**Phases**: single
+
+### Open questions
+- [ ] Script install method: `install(PROGRAMS ...)` in CMakeLists.txt vs `ament_python_install_package` for `derive_angular_response.py` — confirm house standard.
+- [ ] Curve file format: CSV chosen (matches host-written seed) — confirm whether YAML is preferred for consistency with ROS parameter files.
