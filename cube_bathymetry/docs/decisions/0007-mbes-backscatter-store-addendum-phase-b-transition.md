@@ -88,15 +88,64 @@ sonar. The `rx_angles` sign/zero convention was verified against
   symmetry) plus curve-loader/mode-parse tests; the 3 pre-existing default-path
   intensity assertions are unchanged (default `None` ⇒ `corrected == raw`).
 
+## Tier-2 addendum — TL-removed, depth-transferable curve (cube_bathymetry#87)
+
+The tier-1 curve above bins backscatter by `|rx_angle|` only, so per-beam range
+(spreading + absorption) is baked into the curve and it is **depth-regime
+specific** (must be re-derived per survey). Tier-2 removes the per-beam **2-way
+transmission loss** before the angular response is characterized and applied, so
+the residual curve becomes **range/depth transferable**:
+
+`corrected = raw − TL(R) − residualCurve(|beam_angle|)`,
+`TL(R) = 40·log₁₀(R) + 2·α·R` (R = per-beam slant range `twtt·c/2`, m).
+
+Design decisions:
+
+1. **The curve file is self-describing — one correction mode, not two.** The
+   `Empirical` mode is unchanged; the estimator applies TL **iff the loaded curve
+   says so**. The curve CSV header gains `# tl_removed: true` and
+   `# absorption_db_per_m: <α>` (plus `# water_temp_c` / `# tl_model` provenance).
+   Tier-1 curves carry `tl_removed: false` (or omit the lines) and keep working
+   unchanged — fully backward compatible.
+2. **α lives only in Python.** The Francois-Garrison freshwater absorption is
+   computed once by `derive_angular_response.py` (`--remove-tl --water-temp-c`)
+   and written into the header as a scalar. The C++ estimator reads that scalar
+   verbatim and never recomputes α, so Python and C++ apply an **identical** TL by
+   construction (a divergence would silently corrupt the correction). At 500 kHz /
+   24 °C / fresh water α ≈ 0.049 dB/m.
+3. **Per-beam slant range R is a new sufficient statistic**, threaded exactly like
+   `beam_angle`: `Sounding::slant_range` → `DepthAndUncertainty::range` (the
+   pack(1) raster struct grows to 20 bytes; layout-safe because every raster read
+   strides by `sizeof(DepthAndUncertainty)`) → `BeamIntensitySample::range`,
+   recorded on the winning depth hypothesis. The offline importer threads R from
+   the `Sounding` detections ctor; the live node recovers R as the norm of the
+   sensor-frame `/soundings` point (no new cloud field). A NaN / non-positive R
+   skips the TL term (no log of a non-positive range).
+4. **Fresh water only.** The salinity (boric-acid + MgSO₄) seawater absorption
+   terms are out of scope for this issue; `--salinity > 0` is rejected by the tool.
+5. **Multi-bag derivation.** `derive_angular_response.py` now accepts multiple
+   bags (`nargs='+'`) and merges the per-bin sums — a real survey calibration
+   spans many bags.
+
+This still does **not** implement the full GeoCoder (insonified-area +
+beam-pattern), which is the deferred tier-3. The TVG/absorption/frequency state
+ultimately belongs in `SonarInfo` (unh_marine_autonomy#240); α is computed
+locally meanwhile.
+
 ## Deferred (explicit follow-ups)
 
-- **Full radiometric GeoCoder** — insonified-area, beam-pattern, TVG residual,
-  and the depth/slope incidence term (ADR-0007 D3 / cube_bathymetry#15 / #59).
-  The empirical curve absorbs the aggregate angular falloff for a flat bottom;
-  the slope-aware incidence correction remains future work, gated on the
+- **Full radiometric GeoCoder (tier-3)** — insonified-area, beam-pattern, TVG
+  residual, and the depth/slope incidence term (ADR-0007 D3 / cube_bathymetry#15
+  / #59). The empirical curve (tier-1) absorbs the aggregate angular falloff for a
+  flat bottom; tier-2 makes it range/depth transferable; the slope-aware incidence
+  correction and the area/beam-pattern terms remain future work, gated on the
   predicted-surface producer (#59). **Follow-up to file:** author the full,
   canonical `docs/decisions/0007-mbes-backscatter-store.md` document (this
   addendum folds into it).
+- **TVG/absorption/frequency state in SonarInfo** (unh_marine_autonomy#240): the
+  M3's already-applied TVG is the one genuine remaining unknown; the tier-1-vs-2
+  comparison resolves it empirically. Until then α is computed locally from the
+  per-ping frequency + water temperature.
 - **Intensity domain (dB vs linear) as a first-class sonar property.** The
   correction assumes dB (a subtraction). Sonars reporting linear intensity would
   need a divide, or a domain conversion at ingest. **Follow-up to file:** model
