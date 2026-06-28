@@ -174,7 +174,7 @@ std::vector<NodeRecord> GeoGrid::nodeRecords() const
     auto node = nodes_.find(*i);
 
     if(node == nodes_.end() || !node->second) {
-      // empty node, so default all-NaN record
+      // empty node, so default record (NaN depth + NaN intensity)
       ret.push_back(NodeRecord());
     } else {
       node->second->queueFlush(parameters_);

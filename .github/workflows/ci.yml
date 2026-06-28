@@ -71,12 +71,15 @@ jobs:
           # also declare marine_nav_* source deps; rosdep does not honor
           # COLCON_IGNORE, so it still reads their package.xml and would fail on
           # those keys — hence marine_nav_* stays in ROSDEP_SKIP_KEYS even though
-          # the packages are never built. (marine_mbes_backscatter_store has no
-          # marine_nav dep; it is COLCON_IGNORE'd purely for scope and needs no
-          # skip-key.) This is intentional scoping, NOT a pending workaround —
-          # the one real upstream bug here, the invalid nlohmann_json rosdep key,
-          # is fixed in unh_marine_autonomy#228, so nothing waits on upstream.
+          # the packages are never built. (marine_mbes_backscatter_store used to
+          # be pruned here purely for scope; cube#80 added a real
+          # `<depend>marine_mbes_backscatter_store</depend>`, so it is now built
+          # in upstream_ws like marine_bathymetry_store — no skip-key needed, it
+          # has no marine_nav dep.) This is intentional scoping, NOT a pending
+          # workaround — the one real upstream bug here, the invalid nlohmann_json
+          # rosdep key, is fixed in unh_marine_autonomy#228, so nothing waits on
+          # upstream.
           # (Option A — clone unh_marine_navigation + build the whole monorepo —
           # was considered in #76 and rejected: no benefit to cube correctness.)
           ROSDEP_SKIP_KEYS: "marine_nav_interfaces marine_nav_tasks"
-          AFTER_SETUP_UPSTREAM_WORKSPACE: 'for p in mission_manager mission_manager_interfaces marine_autonomy_integration_tests marine_mbes_backscatter_store; do find /root/upstream_ws/src -type d -name "$p" -exec touch {}/COLCON_IGNORE \; ; done'
+          AFTER_SETUP_UPSTREAM_WORKSPACE: 'for p in mission_manager mission_manager_interfaces marine_autonomy_integration_tests; do find /root/upstream_ws/src -type d -name "$p" -exec touch {}/COLCON_IGNORE \; ; done'

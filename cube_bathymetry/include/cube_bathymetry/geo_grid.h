@@ -112,13 +112,19 @@ public:
 
     std::vector < DepthAndUncertainty > values() const;
 
-  /// @brief Per-cell full node records (depth, uncertainty, **backscatter**) in
-  ///        GGGS `CellAreaIterator` order, parallel to @ref values().
+  /// @brief Per-node enriched records (depth + co-estimated backscatter) for
+  ///        every cell, in `CellAreaIterator` order over `index()`.
   ///
-  /// Mirrors @ref values() but emits `NodeRecord` (which additionally carries the
-  /// co-estimated `intensity`/`intensity_var`, #54) for the live display-tile
-  /// producer (#78). Empty cells yield a default (all-NaN) record. Like
-  /// `values()`, this flushes each node's median pre-filter (`queueFlush`).
+  /// Parallel to @ref values() but emits @ref NodeRecord (adds the co-estimated
+  /// `intensity`/`intensity_var`, ADR-0007 D5) so both the offline import (#80,
+  /// backscatter store layer) and the live display-tile producer (#78,
+  /// `SonarVisualizationTile`) surface backscatter from the same pass. Absent
+  /// cells push a default `NodeRecord` (NaN intensity) — the same positional NaN
+  /// sentinel @ref values() uses — so the result is index-aligned with a second
+  /// `CellAreaIterator` over `index()`. Like @ref values() it flushes the median
+  /// pre-filter (`queueFlush`); calling it after @ref values() on the same grid
+  /// is a harmless no-op flush. The surfaced intensity is UNCORRECTED (the
+  /// beam-angle/GeoCoder correction is deferred to cube#81).
     std::vector < NodeRecord > nodeRecords() const;
 
 private:

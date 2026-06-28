@@ -98,6 +98,56 @@ mapSheetToTiles(
   return tiles;
 }
 
+std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell>
+geoGridToBackscatterCells(
+  const GeoGrid & grid, int64_t timestamp_ns, uint16_t source_index)
+{
+  std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell> cells;
+
+  // nodeRecords() mutates node state (flushes the median pre-filter) -- call once
+  // and cache. It is positional in CellAreaIterator order over grid.index(), the
+  // same scheme geoGridToTile uses for the bathy tile.
+  const std::vector<NodeRecord> records = grid.nodeRecords();
+
+  // Walk the SAME iterator the same way nodeRecords() does, so records[k] belongs
+  // to the cell visited on the k-th iteration, and *it IS that cell's CellIndex.
+  gggs::CellAreaIterator it(grid.index());
+  std::size_t k = 0;
+  for (; it.valid() && k < records.size(); it.next(), ++k) {
+    const NodeRecord & r = records[k];
+    if (std::isnan(r.intensity)) {
+      continue;  // no co-estimated backscatter here -- skip (mirrors NaN-depth skip)
+    }
+    // intensity_var is the estimate variance (NaN with < 2 samples); it rides
+    // into the quality band (ADR-0007 D6). timestamp/source stamp provenance.
+    cells.emplace(
+      *it,
+      marine_mbes_backscatter_store::MbesCell{
+        r.intensity, r.intensity_var, timestamp_ns, source_index});
+  }
+
+  return cells;
+}
+
+std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell>
+mapSheetToBackscatterCells(
+  const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index)
+{
+  std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell> cells;
+
+  for (const auto & grid : map_sheet.grids()) {
+    if (!grid) {
+      continue;
+    }
+    std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell> grid_cells =
+      geoGridToBackscatterCells(*grid, timestamp_ns, source_index);
+    // Grids cover disjoint GGGS cells, so merge never collides.
+    cells.merge(grid_cells);
+  }
+
+  return cells;
+}
+
 void primeFromTile(
   const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet)
 {
