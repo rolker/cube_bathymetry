@@ -54,9 +54,10 @@ namespace cube
     float depth_var = std::nan("");
 
   /// Co-estimated backscatter intensity: the mean of the per-beam corrected
-  /// intensities on the winning hypothesis. NaN when no intensity-bearing beams.
-  /// (Phase B: correction is currently the identity -- emitted UNCORRECTED
-  /// pending cube_bathymetry#15; see extractNodeRecord().)
+  /// intensities (streaming Welford) on the winning hypothesis. NaN when no
+  /// intensity-bearing beams. The correction (empirical ARA + tier-2 TL) is
+  /// applied at record time and is the identity only when no curve is configured;
+  /// see extractNodeRecord().
     float intensity = std::nan("");
 
   /// Intensity ESTIMATE variance (variance of the mean, shrinks with n_samples;
@@ -196,13 +197,38 @@ public:
   /// co-estimated backscatter intensity/uncertainty/sample-count of the winning
   /// hypothesis. The depth fields match extractDepthAndUncertainty() exactly,
   /// including the nominated_hypothesis_ priority path, so the two outputs never
-  /// disagree for the same node state. Intensity is computed from the winning
-  /// hypothesis's per-beam {raw, angle} set: each beam is angle-corrected (D3),
-  /// then the corrected values are combined into a mean + ESTIMATE variance
-  /// (D4). The angle correction is currently the identity (no-op) pending
-  /// cube_bathymetry#15 -- intensity is emitted UNCORRECTED, but the per-beam
-  /// raw set is retained so it is re-derivable when #15 provides slope.
+  /// disagree for the same node state. Intensity is the winning hypothesis's
+  /// streaming Welford of the CORRECTED per-beam backscatter: each beam is
+  /// angle-/TL-corrected at RECORD time (recordBeam -> correctBeamIntensity,
+  /// D3/cube_bathymetry#93), so extract just reads the triplet -- mean as the
+  /// intensity and M2/(n-1)/n as the ESTIMATE variance (D4), with no re-correction.
+  /// This O(1) (n, mean, M2) replaces the old per-beam {raw, angle} retention (the
+  /// cube_bathymetry#93 OOM fix): raw samples are no longer kept, so a future
+  /// richer correction (cube_bathymetry#15) requires re-importing the bag rather
+  /// than re-deriving in place.
     NodeRecord extractNodeRecord(const Parameters & parameters);
+
+  /// @brief The corrected-intensity Welford of the WINNING hypothesis
+  ///        (cube_bathymetry#92/#93 lossless eviction spill).
+  ///
+  /// Returns the `(n, mean, M2)` of exactly the hypothesis @ref extractNodeRecord
+  /// would pick (the `nominated_hypothesis_` priority path, else
+  /// @ref chooseHypothesis), so spilling and restoring the triplet reproduces the
+  /// same node-output intensity. A default (n == 0) triplet when there is no valid
+  /// hypothesis or it carries no intensity-bearing beams. Does NOT flush the queue
+  /// -- the caller flushes first (GeoGrid does, via queueFlush).
+    IntensityWelford chosenIntensityWelford();
+
+  /// @brief Restore a corrected-intensity Welford onto the WINNING hypothesis
+  ///        (cube_bathymetry#92/#93 lossless eviction reload).
+  ///
+  /// Sets @p intensity as the Welford of the chosen hypothesis (same selection as
+  /// @ref chosenIntensityWelford / @ref extractNodeRecord). Used by the tile-
+  /// eviction reload, which runs BEFORE the revisit's soundings are added so those
+  /// beams then CONTINUE the Welford on the same hypothesis. Because `(n, mean,
+  /// M2)` is a perfect sufficient statistic, restore-then-continue is bit-identical
+  /// to never-evicting. A no-op when the node has no hypothesis.
+    void setSettledIntensityWelford(const IntensityWelford & intensity);
 
   /* Routine:  cube_node_choose_hypothesis
   * Purpose:  Choose the current best hypothesis for the node in question

@@ -21,6 +21,7 @@
 
 
 #include "cube_bathymetry/node.h"
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <utility>
@@ -28,52 +29,6 @@
 
 namespace cube
 {
-
-namespace
-{
-
-/// Empirical angular-response lookup: the curve's db_relative_to_nadir at
-/// @p abs_angle_deg, linearly interpolated between adjacent bin centres. The
-/// curve is ascending {abs_angle_deg, db_relative_to_nadir} pairs (loaded by
-/// loadAngularResponseCurve). Returns 0 (identity) when the curve is empty or
-/// @p abs_angle_deg lies beyond the curve's max angle; clamps to the first bin
-/// below the curve's min angle (nadir bin ~0 -> ~identity near nadir).
-double curveRelativeDb(
-  const std::vector<std::pair<float, float>> & curve, double abs_angle_deg)
-{
-  if (curve.empty()) {
-    return 0.0;
-  }
-  // Below the first bin centre: clamp to it (the nadir bin's value, ~0).
-  if (abs_angle_deg <= curve.front().first) {
-    return curve.front().second;
-  }
-  // Beyond the last bin centre: clamp to the outermost bin's correction rather
-  // than jump to identity. The empirical curve is bounded (unlike a cos/log model
-  // that diverges near grazing), so continuing the edge value keeps the correction
-  // continuous and avoids a swath-edge discontinuity / bright ring (#81 review).
-  if (abs_angle_deg > curve.back().first) {
-    return curve.back().second;
-  }
-  // Find the bracketing pair [lo, hi] and linearly interpolate.
-  for (std::size_t i = 1; i < curve.size(); ++i) {
-    if (abs_angle_deg <= curve[i].first) {
-      const double a0 = curve[i - 1].first;
-      const double d0 = curve[i - 1].second;
-      const double a1 = curve[i].first;
-      const double d1 = curve[i].second;
-      const double span = a1 - a0;
-      if (span <= 0.0) {
-        return d1;  // duplicate angle: take the upper bin's value
-      }
-      const double t = (abs_angle_deg - a0) / span;
-      return d0 + t * (d1 - d0);
-    }
-  }
-  return 0.0;  // unreachable (guarded by the back() check above)
-}
-
-}  // namespace
 
 bool Node::addHypothesis(float depth, float variance)
 {
@@ -131,14 +86,14 @@ bool Node::update(
     addHypothesis(depth, variance);
     // This beam seeded (and so is a member of) the new hypothesis: record its
     // backscatter on it. Without this the first beam at every node is dropped.
-    depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range);
+    depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range, parameters);
     return true;
   } else {
     /* Update the best hypothesis with the current data */
     if(best->update(depth, variance, parameters)) {
       // Accepted into the winning hypothesis -- accumulate its backscatter on
       // the SAME hypothesis (ADR-0007 D2: intensity rides the winning depth).
-      best->recordBeam(intensity, beam_angle, range);
+      best->recordBeam(intensity, beam_angle, range, parameters);
     } else {
       /* Failed update --- indicates an intervention, so that we need to
                          * start a new hypothesis to capture the outlier/datum shift.
@@ -148,7 +103,7 @@ bool Node::update(
       // The beam was REJECTED from `best` (depth-geometry outlier) and used to
       // seed the new hypothesis, so its backscatter belongs to the new
       // hypothesis, NOT to `best` (exclusion-on-intervention invariant).
-      depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range);
+      depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range, parameters);
     }
   }
   return true;
@@ -344,91 +299,72 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
     return record;
   }
 
-  // Backscatter half (ADR-0007 D2/D3/D4). Apply the per-beam angular-response
-  // correction to each retained {raw_intensity, beam_angle} sample, THEN combine
-  // the corrected values into a mean and an ESTIMATE variance.
-  //
-  // Empirical ARA (cube_bathymetry#81): corrected_dB = raw_dB - curveRel(|beam_angle|),
-  // where curveRel is the per-sonar angular-response curve's db_relative_to_nadir
-  // column, linearly interpolated between bin centres by |beam_angle| in DEGREES.
-  // Nadir -> curveRel ~0 -> identity. Beyond the curve's max angle, a NaN
-  // beam_angle, mode None, or an empty curve all fall back to identity (raw).
-  //
-  // rx_angles sign/zero gate (verified against kongsberg_em_bridge): the producer
-  // negates the Kongsberg pointing angle (+PORT -> +STARBOARD; nadir = 0; radians;
-  // intensity in dB). The curve is keyed on |beam_angle|, so port/starboard beams
-  // of equal magnitude get the same correction.
-  //
-  // Tier-2 (cube_bathymetry#87): when the loaded curve is a TL-REMOVED residual
-  // (backscatter_tl_removed), compensate each beam's 2-way transmission loss by
-  // ADDING IT BACK -- a distant return lost more energy, so it is boosted to
-  // recover range-independent backscatter (TVG-style):
-  //   TL(R) = 40*log10(R) + 2*alpha*R      (R = per-beam slant range, m)
-  // so the residual curve is depth/range transferable:
-  //   corrected = raw + TL(R) - residualCurve(|beam_angle|).
-  // alpha is read verbatim from the curve header (backscatter_absorption_db_per_m);
-  // the estimator NEVER recomputes the (Francois-Garrison) absorption -- the
-  // Python derive tool is the single source of truth, guaranteeing consistency.
-  // A NaN / non-positive R skips the TL term (no log of a non-positive range);
-  // tier-1 (backscatter_tl_removed == false) skips it entirely (unchanged).
-  //
-  // Deferred (NOT done here): the full radiometric GeoCoder chain -- insonified
-  // area, beam-pattern, TVG residual, and the depth/slope incidence term
-  // (ADR-0007 D3, cube_bathymetry#15/#59). The empirical curve absorbs the
-  // aggregate angular falloff for a flat bottom; per-beam {raw_intensity,
-  // beam_angle, range} stay retained so the node value is re-derivable when #15
-  // lands.
-  const bool apply_ara =
-    parameters.backscatter_angle_correction ==
-    BackscatterAngleCorrection::Empirical &&
-    !parameters.angular_response_curve.empty();
-  const bool apply_tl = apply_ara && parameters.backscatter_tl_removed;
-  const double alpha = parameters.backscatter_absorption_db_per_m;
-  double sum = 0.0;
-  double sum_sq = 0.0;
-  uint32_t n = 0;
-  for(const auto & sample : chosen->intensity_samples) {
-    // recordBeam() already excluded NaN-intensity beams, so raw_intensity is real.
-    double corrected = sample.raw_intensity;
-    if(apply_tl) {
-      const double range = static_cast<double>(sample.range);
-      // Skip the TL term for a missing / non-positive range (log10 undefined);
-      // the beam is still corrected by the residual angular-response curve below.
-      if(std::isfinite(range) && range > 0.0) {
-        // Compensate (ADD BACK) the 2-way transmission loss: a distant return
-        // lost more energy, so boost it to recover range-independent backscatter
-        // (TVG-style). #87 sign fix.
-        corrected += 40.0 * std::log10(range) + 2.0 * alpha * range;
-      }
-    }
-    if(apply_ara && !std::isnan(sample.beam_angle)) {
-      const double abs_angle_deg =
-        std::abs(static_cast<double>(sample.beam_angle)) * 180.0 / M_PI;
-      corrected -= curveRelativeDb(parameters.angular_response_curve, abs_angle_deg);
-    }
-    sum += corrected;
-    sum_sq += corrected * corrected;
-    ++n;
-  }
-
-  record.n_samples = n;
-  if(n > 0) {
-    const double mean = sum / n;
-    record.intensity = static_cast<float>(mean);
-    if(n >= 2) {
-      // Sample variance (unbiased), then divide by n to get the variance of the
-      // MEAN -- the estimate variance that shrinks with n (ADR-0007 D4), NOT the
-      // raw sample variance. Mirrors the bathy store's depth uncertainty.
-      // Clamp to 0: float rounding on the sum-of-squares form can produce a
-      // tiny negative sample_variance at low-dB means over many beams.
-      const double sample_variance = std::max(
-        0.0, (sum_sq - sum * sum / n) / (n - 1));
-      record.intensity_var = static_cast<float>(sample_variance / n);
+  // Backscatter half (ADR-0007 D2/D3/D4). The angular-response + tier-2 TL
+  // correction is now applied at RECORD (recordBeam -> correctBeamIntensity,
+  // cube#93), and the winning hypothesis streams a Welford of the CORRECTED
+  // intensity. So extract just reads (n, mean, M2) -- NO re-correction (the curve
+  // params are not consulted here anymore). This produces the SAME node-output
+  // mean + estimate variance as the old retain-and-correct-at-extract path; the
+  // correction math itself is unchanged, only its timing moved (record <- extract).
+  const IntensityWelford & bs = chosen->intensity;
+  record.n_samples = bs.n;
+  if(bs.n > 0) {
+    record.intensity = static_cast<float>(bs.mean);
+    if(bs.n >= 2) {
+      // Unbiased sample variance M2/(n-1), then divided by n to get the variance
+      // of the MEAN -- the estimate variance that shrinks with n (ADR-0007 D4),
+      // matching the bathy store's depth uncertainty. Clamp to 0 defensively (the
+      // Welford M2 is >= 0 by construction, so this is a no-op in practice).
+      const double sample_variance = std::max(0.0, bs.m2 / (bs.n - 1));
+      record.intensity_var = static_cast<float>(sample_variance / bs.n);
     }
     // n == 1: intensity set, intensity_var stays NaN (no spread from one beam).
   }
 
   return record;
+}
+
+IntensityWelford Node::chosenIntensityWelford()
+{
+  // Same hypothesis selection as extractNodeRecord(), so the spilled Welford and
+  // the persisted node-output intensity come from the SAME hypothesis (#92/#93).
+  std::shared_ptr<Hypothesis> chosen;
+  if(nominated_hypothesis_) {
+    chosen = nominated_hypothesis_;
+  } else {
+    auto h = chooseHypothesis();
+    if(h && h->number_of_samples > 0) {
+      chosen = h;
+    }
+  }
+  if(!chosen) {
+    return {};
+  }
+  return chosen->intensity;
+}
+
+void Node::setSettledIntensityWelford(const IntensityWelford & intensity)
+{
+  // Target the same hypothesis chosenIntensityWelford()/extractNodeRecord() read.
+  // On the eviction-reload path the node is freshly reseeded (seedSettledDepth
+  // pushed exactly one hypothesis), so this is that hypothesis; the revisit's
+  // beams then continue the Welford on it via recordBeam(). Because (n, mean, M2)
+  // is a perfect sufficient statistic, restore-then-continue is bit-identical to
+  // never-evicting (#93).
+  std::shared_ptr<Hypothesis> chosen;
+  if(nominated_hypothesis_) {
+    chosen = nominated_hypothesis_;
+  } else {
+    // Same number_of_samples > 0 gate chosenIntensityWelford()/extractNodeRecord()
+    // apply, so the restore targets exactly the hypothesis the spill read from.
+    auto h = chooseHypothesis();
+    if(h && h->number_of_samples > 0) {
+      chosen = h;
+    }
+  }
+  if(chosen) {
+    chosen->intensity = intensity;
+  }
 }
 
 std::shared_ptr<Hypothesis> Node::chooseHypothesis()

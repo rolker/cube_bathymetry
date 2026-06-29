@@ -30,6 +30,32 @@
 namespace cube
 {
 
+namespace
+{
+// Expanded geographic bounds covering a sounding batch: the sounding extent grown
+// by one cell on every side so a sounding near a tile seam still reaches its
+// neighbour tile. Shared by addSoundings (which then creates the grids) and
+// gridIndicesForSoundings (which only enumerates them) so the two never drift.
+gz4d::BoundsDegrees boundsForSoundings(
+  const std::vector<GeoSounding> & soundings, const gggs::Level & grid_level)
+{
+  gz4d::BoundsDegrees bounds;
+  for (const auto & s  :  soundings) {
+    bounds.expand(s);
+  }
+  // quick hack to make sure to go a bit beyond the outer soundings
+  const auto angular_span = grid_level.cellAngularSpan();
+  auto min = bounds.minimum();
+  min = gz4d::PositionDegrees(min.latitude - angular_span, min.longitude - angular_span);
+  bounds.expand(min);
+
+  auto max = bounds.maximum();
+  max = gz4d::PositionDegrees(max.latitude + angular_span, max.longitude + angular_span);
+  bounds.expand(max);
+  return bounds;
+}
+}  // namespace
+
 GeoMapSheet::GeoMapSheet(float cell_size, std::string iho_order)
 :parameters_(CellSizes(cell_size), iho_order), grid_level_(gggs::Level::fromCellSize(cell_size))
 {
@@ -56,22 +82,7 @@ void GeoMapSheet::addSoundings(
     return;
   }
 
-  gz4d::BoundsDegrees bounds;
-  for (const auto & s  :  soundings) {
-    bounds.expand(s);
-  }
-
-  // quick hack to make sure to go a bit beyond the outer soundings
-  auto angular_span = grid_level_.cellAngularSpan();
-  auto min = bounds.minimum();
-  min = gz4d::PositionDegrees(min.latitude - angular_span, min.longitude - angular_span);
-  bounds.expand(min);
-
-  auto max = bounds.maximum();
-  max = gz4d::PositionDegrees(max.latitude + angular_span, max.longitude + angular_span);
-  bounds.expand(max);
-
-  auto grids = getOrCreateGridsIn(bounds);
+  auto grids = getOrCreateGridsIn(boundsForSoundings(soundings, grid_level_));
   for (auto g  :  grids) {
     if(g->insert(soundings)) {
       last_update_time_ = time;
@@ -82,6 +93,38 @@ void GeoMapSheet::addSoundings(
       publish_dirty_grids_.insert(g->index());
     }
   }
+}
+
+std::vector<gggs::GridIndex> GeoMapSheet::gridIndicesForSoundings(
+  const std::vector<GeoSounding> & soundings) const
+{
+  std::vector<gggs::GridIndex> ret;
+  if(soundings.empty()) {
+    return ret;
+  }
+  const gz4d::BoundsDegrees bounds = boundsForSoundings(soundings, grid_level_);
+  gggs::GridAreaIterator i(
+    grid_level_.gridIndex(bounds.minimum().latitude, bounds.minimum().longitude),
+    grid_level_.gridIndex(bounds.maximum().latitude, bounds.maximum().longitude));
+  while(i.valid()) {
+    ret.push_back(*i);
+    i.next();
+  }
+  return ret;
+}
+
+gggs::GridIndex GeoMapSheet::gridIndexForSounding(const GeoSounding & sounding) const
+{
+  return grid_level_.gridIndex(sounding.latitude, sounding.longitude);
+}
+
+void GeoMapSheet::setSettledIntensityWelfordAt(
+  const gggs::CellIndex & cell, const IntensityWelford & intensity)
+{
+  // Lazy-create the grid (mirrors setSettledDepthAt) so the call is safe even if
+  // the grid is absent; GeoGrid::setSettledIntensityWelfordAt is a no-op when the
+  // node was not seeded. Does NOT mark dirty (reproduces persisted data).
+  getOrCreateGrid(cell.grid())->setSettledIntensityWelfordAt(cell, intensity);
 }
 
 std::vector<std::shared_ptr<GeoGrid>> GeoMapSheet::getOrCreateGridsIn(

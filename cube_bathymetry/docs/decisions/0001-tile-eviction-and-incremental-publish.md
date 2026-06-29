@@ -190,6 +190,10 @@ dependency) rather than retained.
   the full multi-hypothesis / pre-filter / backscatter-sample state (out of
   scope; backscatter is re-derivable per cube#15). A revisited cell continues
   from the persisted best estimate, which is the intended behavior.
+  **(Updated by cube#92/#93 — see ADR-0007 § Phase B.2 addendum: the corrected
+  backscatter Welford `(n, mean, M2)` IS now spilled and restored losslessly on
+  eviction rather than dropped/re-derived; raw per-beam samples are no longer
+  kept, so a richer correction requires re-importing the bag.)**
 - A misconfiguration where `max_resident_tiles` < CA-window tile span degrades
   the live view (over-lethal holes). Mitigated by the on_configure WARN and a
   default pair chosen to satisfy the constraint.

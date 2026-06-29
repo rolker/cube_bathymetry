@@ -127,6 +127,29 @@ public:
   /// beam-angle/GeoCoder correction is deferred to cube#81).
     std::vector < NodeRecord > nodeRecords() const;
 
+  /// @brief Corrected-intensity Welford of every cell's winning hypothesis, keyed
+  ///        by `gggs::CellIndex` (cube_bathymetry#92/#93 lossless eviction spill).
+  ///
+  /// Iterates the SPARSE node map (not all 960x960 cells), flushes each node's
+  /// median pre-filter (`queueFlush`, like @ref nodeRecords) and emits the
+  /// @ref Node::chosenIntensityWelford for cells with intensity-bearing beams
+  /// (n > 0). The result is what must be persisted to a scratch spill so a tile
+  /// evicted from RAM can be reloaded with its backscatter accumulator intact
+  /// (the bathy tile stores only the depth summary; the intensity Welford lives
+  /// only here). Three numbers per cell -- O(1), the cube#93 memory fix.
+    std::map < gggs::CellIndex, IntensityWelford > nodeIntensityWelford() const;
+
+  /// @brief Restore a corrected-intensity Welford onto @p cell's winning
+  ///        hypothesis (cube_bathymetry#92/#93 lossless eviction reload).
+  ///
+  /// Forwards to @ref Node::setSettledIntensityWelford on the node at @p cell. A
+  /// no-op if no node exists there (the cell was not reseeded by the depth
+  /// reload). Must run AFTER @ref setSettledDepthAt (which lazy-creates the node)
+  /// and BEFORE the revisit's soundings are added, so those beams then continue
+  /// the Welford on the same reloaded hypothesis (bit-identical to never-evicting).
+    void setSettledIntensityWelfordAt(
+      const gggs::CellIndex & cell, const IntensityWelford & intensity);
+
 private:
     gggs::GridIndex index_;
 

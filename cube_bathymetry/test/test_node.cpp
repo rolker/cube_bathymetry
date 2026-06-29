@@ -22,6 +22,8 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <memory>
+#include <vector>
+#include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/node.h"
 
 namespace cube
@@ -439,13 +441,14 @@ TEST_F(NodeTest, ExclusionOnInterventionLeavesOriginalIntensityUnchanged)
   ASSERT_NE(deep, nullptr);
   ASSERT_NE(shallow, deep);
 
-  // Original (shallow) hypothesis keeps ONLY its own beam's intensity.
-  ASSERT_EQ(shallow->intensity_samples.size(), 1u);
-  EXPECT_FLOAT_EQ(shallow->intensity_samples[0].raw_intensity, -30.0f);
+  // Original (shallow) hypothesis keeps ONLY its own beam's intensity (Welford
+  // of one corrected sample == the raw, default None correction).
+  EXPECT_EQ(shallow->intensity.n, 1u);
+  EXPECT_DOUBLE_EQ(shallow->intensity.mean, -30.0);
 
   // The outlier's intensity is on the newly-seeded (deep) hypothesis.
-  ASSERT_EQ(deep->intensity_samples.size(), 1u);
-  EXPECT_FLOAT_EQ(deep->intensity_samples[0].raw_intensity, -10.0f);
+  EXPECT_EQ(deep->intensity.n, 1u);
+  EXPECT_DOUBLE_EQ(deep->intensity.mean, -10.0);
 }
 
 // extractNodeRecord() must honor the nominated_hypothesis_ priority path exactly
@@ -462,8 +465,8 @@ TEST_F(NodeTest, NodeRecordHonorsNominatedHypothesis)
   // tell which path extractNodeRecord() took.
   auto nominated = std::make_shared<Hypothesis>(42.0f, 1.0f);
   nominated->input_sample_variance = 4.0f;
-  nominated->recordBeam(-12.0f, 0.0f);
-  nominated->recordBeam(-16.0f, 0.0f);
+  nominated->recordBeam(-12.0f, 0.0f, std::nan(""), params);  // None -> corrected = raw
+  nominated->recordBeam(-16.0f, 0.0f, std::nan(""), params);
   NodeNominationTestAccess::nominate(n, nominated);
 
   auto record = n.extractNodeRecord(params);
@@ -589,13 +592,14 @@ Parameters empiricalParams()
 }
 
 // Build a single-beam node via a nominated hypothesis so the surfaced intensity
-// equals the corrected value of exactly that beam (no averaging).
+// equals the corrected value of exactly that beam (no averaging). The correction
+// is applied AT RECORD (cube#93), so the curve params are passed to recordBeam.
 std::shared_ptr<Hypothesis> singleBeamNominated(
-  Node & n, float raw_intensity, float beam_angle_rad)
+  Node & n, float raw_intensity, float beam_angle_rad, const Parameters & record_params)
 {
   auto h = std::make_shared<Hypothesis>(10.0f, 1.0f);
   h->input_sample_variance = 1.0f;
-  h->recordBeam(raw_intensity, beam_angle_rad);
+  h->recordBeam(raw_intensity, beam_angle_rad, std::nan(""), record_params);
   NodeNominationTestAccess::nominate(n, h);
   return h;
 }
@@ -606,7 +610,7 @@ TEST_F(NodeTest, ARAInterpolation)
 {
   Parameters ara = empiricalParams();
   Node n;
-  singleBeamNominated(n, -30.0f, deg2rad(30.0f));
+  singleBeamNominated(n, -30.0f, deg2rad(30.0f), ara);
 
   auto record = n.extractNodeRecord(ara);
   ASSERT_EQ(record.n_samples, 1u);
@@ -618,7 +622,7 @@ TEST_F(NodeTest, ARANadirIdentity)
 {
   Parameters ara = empiricalParams();
   Node n;
-  singleBeamNominated(n, -30.0f, 0.0f);
+  singleBeamNominated(n, -30.0f, 0.0f, ara);
 
   auto record = n.extractNodeRecord(ara);
   ASSERT_EQ(record.n_samples, 1u);
@@ -633,7 +637,7 @@ TEST_F(NodeTest, ARABeyondMaxAngleClampsToEdge)
   // corrected = raw - curveRel = -30 - (-12) = -18.
   Parameters ara = empiricalParams();
   Node n;
-  singleBeamNominated(n, -30.0f, deg2rad(70.0f));
+  singleBeamNominated(n, -30.0f, deg2rad(70.0f), ara);
 
   auto record = n.extractNodeRecord(ara);
   ASSERT_EQ(record.n_samples, 1u);
@@ -645,7 +649,7 @@ TEST_F(NodeTest, ARANaNAngleIdentity)
 {
   Parameters ara = empiricalParams();
   Node n;
-  singleBeamNominated(n, -30.0f, std::nan(""));
+  singleBeamNominated(n, -30.0f, std::nan(""), ara);
 
   auto record = n.extractNodeRecord(ara);
   ASSERT_EQ(record.n_samples, 1u);
@@ -656,7 +660,7 @@ TEST_F(NodeTest, ARANaNAngleIdentity)
 TEST_F(NodeTest, ARAOffIsIdentity)
 {
   Node n;
-  singleBeamNominated(n, -30.0f, deg2rad(30.0f));
+  singleBeamNominated(n, -30.0f, deg2rad(30.0f), params);  // default None at record
 
   auto record = n.extractNodeRecord(params);  // default None
   ASSERT_EQ(record.n_samples, 1u);
@@ -672,8 +676,8 @@ TEST_F(NodeTest, ARAPortStarboardSymmetry)
   Node n;
   auto h = std::make_shared<Hypothesis>(10.0f, 1.0f);
   h->input_sample_variance = 1.0f;
-  h->recordBeam(-30.0f, deg2rad(30.0f));   // starboard
-  h->recordBeam(-30.0f, deg2rad(-30.0f));  // port
+  h->recordBeam(-30.0f, deg2rad(30.0f), std::nan(""), ara);   // starboard
+  h->recordBeam(-30.0f, deg2rad(-30.0f), std::nan(""), ara);  // port
   NodeNominationTestAccess::nominate(n, h);
 
   auto record = n.extractNodeRecord(ara);
@@ -700,13 +704,15 @@ Parameters tier2Params(float alpha)
 }
 
 // Single-beam nominated hypothesis carrying a per-beam slant range, so the
-// surfaced intensity equals the tier-2 corrected value of exactly that beam.
+// surfaced intensity equals the tier-2 corrected value of exactly that beam. The
+// correction is applied AT RECORD (cube#93), so the tier-2 params are passed in.
 std::shared_ptr<Hypothesis> singleBeamNominatedRange(
-  Node & n, float raw_intensity, float beam_angle_rad, float range)
+  Node & n, float raw_intensity, float beam_angle_rad, float range,
+  const Parameters & record_params)
 {
   auto h = std::make_shared<Hypothesis>(10.0f, 1.0f);
   h->input_sample_variance = 1.0f;
-  h->recordBeam(raw_intensity, beam_angle_rad, range);
+  h->recordBeam(raw_intensity, beam_angle_rad, range, record_params);
   NodeNominationTestAccess::nominate(n, h);
   return h;
 }
@@ -729,7 +735,7 @@ TEST_F(NodeTest, Tier2RemovesTLAndResidual)
   const float range = 50.0f;
   Parameters t2 = tier2Params(alpha);
   Node n;
-  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), range);
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), range, t2);
 
   auto record = n.extractNodeRecord(t2);
   ASSERT_EQ(record.n_samples, 1u);
@@ -745,7 +751,7 @@ TEST_F(NodeTest, Tier2NadirRemovesTLOnly)
   const float range = 35.0f;
   Parameters t2 = tier2Params(alpha);
   Node n;
-  singleBeamNominatedRange(n, -40.0f, 0.0f, range);
+  singleBeamNominatedRange(n, -40.0f, 0.0f, range, t2);
 
   auto record = n.extractNodeRecord(t2);
   ASSERT_EQ(record.n_samples, 1u);
@@ -759,7 +765,7 @@ TEST_F(NodeTest, Tier2NaNRangeSkipsTL)
 {
   Parameters t2 = tier2Params(0.05f);
   Node n;
-  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), std::nan(""));
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), std::nan(""), t2);
 
   auto record = n.extractNodeRecord(t2);
   ASSERT_EQ(record.n_samples, 1u);
@@ -772,7 +778,7 @@ TEST_F(NodeTest, Tier2NonPositiveRangeSkipsTL)
 {
   Parameters t2 = tier2Params(0.05f);
   Node n;
-  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), -5.0f);
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), -5.0f, t2);
 
   auto record = n.extractNodeRecord(t2);
   ASSERT_EQ(record.n_samples, 1u);
@@ -785,7 +791,7 @@ TEST_F(NodeTest, Tier1IgnoresRange)
 {
   Parameters ara = empiricalParams();  // tl_removed defaults false
   Node n;
-  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), 50.0f);
+  singleBeamNominatedRange(n, -30.0f, deg2rad(30.0f), 50.0f, ara);
 
   auto record = n.extractNodeRecord(ara);
   ASSERT_EQ(record.n_samples, 1u);
@@ -808,6 +814,51 @@ TEST_F(NodeTest, Tier2RangeThreadsThroughUpdate)
   ASSERT_EQ(record.n_samples, 1u);
   const double expected = tier2Expected(-30.0, range, alpha, -6.0);
   EXPECT_NEAR(record.intensity, static_cast<float>(expected), 1e-2);
+}
+
+// THE load-bearing cube#93 proof: correct-at-record (streaming Welford of the
+// corrected intensity) reproduces correct-at-extract (retain raw + correct each at
+// extract + naive mean/variance) for a fixed curve. Feed N varied beams through
+// recordBeam (which corrects + folds), extract the node-output mean/variance, and
+// compare to a reference computed the OLD way (correctBeamIntensity per beam, then
+// naive sum / sum-of-squares -- the exact formula extractNodeRecord used before).
+TEST_F(NodeTest, CorrectAtRecordMatchesCorrectAtExtract)
+{
+  Parameters ara = empiricalParams();  // Empirical, curve {{0,0},{60,-12}}
+
+  // A spread of beams across the swath (mix of angles + dB), all on one nominated
+  // hypothesis so the record surfaces exactly this set.
+  const std::vector<std::pair<float, float>> beams = {  // {raw_dB, angle_rad}
+    {-30.0f, deg2rad(0.0f)}, {-28.5f, deg2rad(12.0f)}, {-33.0f, deg2rad(25.0f)},
+    {-26.0f, deg2rad(40.0f)}, {-31.5f, deg2rad(55.0f)}, {-29.0f, deg2rad(70.0f)},
+    {-35.0f, deg2rad(33.0f)}, {-27.0f, deg2rad(8.0f)}};
+
+  Node n;
+  auto h = std::make_shared<Hypothesis>(10.0f, 1.0f);
+  h->input_sample_variance = 1.0f;
+  for (const auto & b : beams) {
+    h->recordBeam(b.first, b.second, std::nan(""), ara);  // correct-at-record
+  }
+  NodeNominationTestAccess::nominate(n, h);
+  const auto record = n.extractNodeRecord(ara);
+
+  // Reference: the OLD retain-and-correct-at-extract computation.
+  double sum = 0.0;
+  double sum_sq = 0.0;
+  const auto nN = static_cast<double>(beams.size());
+  for (const auto & b : beams) {
+    const double c = correctBeamIntensity(b.first, b.second, std::nan(""), ara);
+    sum += c;
+    sum_sq += c * c;
+  }
+  const double ref_mean = sum / nN;
+  const double ref_sample_var = (sum_sq - sum * sum / nN) / (nN - 1.0);
+  const double ref_var_of_mean = ref_sample_var / nN;
+
+  ASSERT_EQ(record.n_samples, beams.size());
+  // Welford vs naive agree to ~13+ digits; assert tight equivalence.
+  EXPECT_NEAR(record.intensity, static_cast<float>(ref_mean), 1e-5);
+  EXPECT_NEAR(record.intensity_var, static_cast<float>(ref_var_of_mean), 1e-5);
 }
 
 }  // namespace cube

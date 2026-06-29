@@ -23,16 +23,23 @@
 #ifndef CUBE_BATHYMETRY__STORE_IMPORT_H_
 #define CUBE_BATHYMETRY__STORE_IMPORT_H_
 
+#include <chrono>
 #include <cstdint>
 #include <map>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "cube_bathymetry/geo_grid.h"
 #include "cube_bathymetry/geo_map_sheet.h"
+#include "cube_bathymetry/geo_sounding.h"
 #include "marine_autonomy/gggs.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/bathymetry_tile.hpp"
 #include "marine_bathymetry_store/bathy_cell.hpp"
+#include "marine_bathymetry_store/registry.hpp"
 #include "marine_mbes_backscatter_store/mbes_cell.hpp"
+#include "marine_mbes_backscatter_store/registry.hpp"
 
 namespace cube
 {
@@ -181,6 +188,133 @@ namespace cube
     marine_bathymetry_store::SourceLayer layer,
     GeoMapSheet & map_sheet,
     bool seed_settled = true);
+
+/// @brief Configuration for @ref ImportAccumulator (cube_bathymetry#92).
+  struct ImportAccumulatorConfig
+  {
+  /// Output bathymetry-store directory (the importer's `-o`). Evicted and
+  /// final-resident bathy tiles are written here under the @ref bathy_layer
+  /// subdirectory; a revisited tile is reloaded from here. Empty = no persistence
+  /// (eviction is then disabled to stay lossless — there is nowhere to drop to).
+    std::string store_dir;
+  /// Bathy store layer the import writes (`Processed` default, `Draft` opt-in, #85).
+    marine_bathymetry_store::SourceLayer bathy_layer =
+      marine_bathymetry_store::SourceLayer::Processed;
+  /// Registry source index stamped into every persisted bathy cell.
+    uint16_t source_index = 0;
+  /// Deterministic per-cell acquisition timestamp (ns since the Unix epoch).
+    int64_t timestamp_ns = 0;
+  /// Survey nominal cell size (m); fixes the GGGS level of the scratch stores used
+  /// to reload an evicted tile and to merge backscatter. Must equal the
+  /// GeoMapSheet's `nominalCellSizeMeters()` so the levels line up.
+    float cell_size_m = 1.0f;
+  /// Optional MBES backscatter store directory (the importer's `--bs-store`).
+  /// Empty disables backscatter co-persistence.
+    std::string bs_store_dir;
+  /// Registry source index stamped into every persisted backscatter cell.
+    uint16_t bs_source_index = 0;
+  /// Maximum resident GeoGrid tiles before persist-then-drop eviction runs.
+  /// 0 = unbounded (never evict — the pre-#92 whole-survey-in-RAM behavior).
+    std::size_t max_resident_tiles = 0;
+  };
+
+/// @brief Bounded-RAM offline import accumulator (cube_bathymetry#92).
+///
+/// Ports the live node's cube#70 persist-then-drop eviction + lossless
+/// reload-on-revisit (ADR-0001) to the offline `import_bag` path, so resident RAM
+/// is bounded by tile COUNT rather than surveyed AREA (a multi-day survey used to
+/// OOM the importer because `grids_` grew with coverage). The host feeds one
+/// batch of soundings per call (one ping in `import_bag`, a synthetic region in
+/// tests); the accumulator drives the underlying @ref GeoMapSheet and persists to
+/// the configured stores.
+///
+/// **Persist-then-drop (lossless):** when the resident tile count exceeds the
+/// budget, each cold tile is written to disk — bathy via @ref geoGridToTile +
+/// `saveTile`, backscatter SUMMARY via `saveTile`, AND its per-cell intensity
+/// Welford `(n, mean, M2)` spilled to a temporary scratch — BEFORE it is dropped
+/// from RAM. A tile whose persist throws is left resident (never dropped), so a
+/// disk failure costs transient RAM, never data.
+///
+/// **Reload-before-add (lossless blend):** the bathy tile stores only the depth
+/// SUMMARY and the backscatter SUMMARY is the corrected mean — neither retains the
+/// running Welford CUBE needs to keep blending. So eviction also spills each cell's
+/// intensity Welford to a scratch file (cube#93: a 3-number sufficient statistic of
+/// the CORRECTED intensity, since correction now runs at record), and the reload
+/// runs BEFORE a batch's soundings are added: it computes the grids the batch will
+/// touch (@ref GeoMapSheet::gridIndicesForSoundings), `loadWindow` +
+/// @ref primeFromTile restores each cell's settled depth as one CUBE hypothesis,
+/// then the spilled Welford is restored onto that hypothesis. The batch's new beams
+/// then continue the Welford on the SAME reloaded hypothesis, so the node-output
+/// intensity is the FULL pre+post-eviction blend — bit-for-bit equal to a
+/// never-evicted build for a consistent re-survey (a Welford triplet is a perfect
+/// sufficient statistic). **Backscatter is lossless under eviction.**
+///
+/// **Remaining approximation (bathy uncertainty only):** the reload reconstructs a
+/// SINGLE depth hypothesis (a Bayesian prior from the stored depth + variance,
+/// ADR-0001), seeded with one sample rather than the original count. The depth
+/// VALUE is faithful (the prior is refined by the revisit), but the re-derived
+/// depth UNCERTAINTY drifts slightly from the unbounded build for a tile evicted
+/// mid-disambiguation — a hypothesis-state collapse, not data loss. The backscatter
+/// estimate does not depend on the depth sample count, so it is unaffected.
+///
+/// **Transient disk cost:** the spill holds a fixed 24-byte Welford record per
+/// surveyed cell for every currently-evicted tile (NOT per beam — cube#93 made
+/// per-cell intensity state O(1)), in a scratch dir deleted in @ref finalize (and
+/// by the destructor on an exception). Scratch-only and local/fast.
+  class ImportAccumulator
+  {
+public:
+  /// @param sheet  The map sheet to accumulate into (lifetime must outlast this).
+  /// @param config Persistence + budget configuration.
+    ImportAccumulator(GeoMapSheet & sheet, ImportAccumulatorConfig config);
+
+  /// @brief Clean up the scratch spill directory (RAII safety net for finalize).
+    ~ImportAccumulator();
+
+  /// @brief Reload-before-add any evicted tile this batch touches, accumulate the
+  ///        batch, then evict cold tiles back to budget.
+    void addBatch(
+      const std::vector < GeoSounding > &soundings,
+      std::chrono::steady_clock::time_point time =
+      std::chrono::steady_clock::now());
+
+  /// @brief Persist every still-resident tile (bathy + backscatter), write both
+  ///        registries, and delete the scratch spill. Evicted tiles are already
+  ///        durable. Call once at end-of-stream.
+    void finalize(
+      const marine_bathymetry_store::SourceRegistry & bathy_registry,
+      const marine_mbes_backscatter_store::SourceRegistry * bs_registry = nullptr);
+
+  /// @brief Tiles currently resident in RAM.
+    std::size_t residentTileCount() const;
+  /// @brief Indices evicted to disk and not yet reloaded.
+    const std::set < gggs::GridIndex > & evictedIndices() const {
+      return evicted_;
+    }
+  /// @brief Cumulative bathy tile writes (eviction + finalize).
+    std::size_t bathyTilesPersisted() const {return bathy_persisted_;}
+  /// @brief Cumulative backscatter tile writes (eviction + finalize).
+    std::size_t backscatterTilesPersisted() const {return bs_persisted_;}
+  /// @brief The scratch spill directory (empty until the first eviction). Exposed
+  ///        for tests that assert it is cleaned up after @ref finalize.
+    const std::string & scratchDir() const {return scratch_dir_;}
+
+private:
+    void evictColdTiles();
+    void persistBathyTile(const gggs::GridIndex & index);
+    void persistBackscatterTile(const gggs::GridIndex & index);
+    void spillIntensitySamples(const gggs::GridIndex & index);
+    void restoreSpilledSamples(const gggs::GridIndex & index);
+    bool reloadEvictedTile(const gggs::GridIndex & index);
+    void cleanupScratch();
+
+    GeoMapSheet & sheet_;
+    ImportAccumulatorConfig cfg_;
+    std::set < gggs::GridIndex > evicted_;
+    std::string scratch_dir_;  // lazily created on first eviction; "" = none
+    std::size_t bathy_persisted_ = 0;
+    std::size_t bs_persisted_ = 0;
+  };
 
 }  // namespace cube
 

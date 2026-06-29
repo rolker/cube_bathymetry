@@ -201,46 +201,72 @@ TEST_F(HypothesisTest, MonitorIsSymmetricInErrorSign)
   EXPECT_EQ(h_plus.sequence_length, h_minus.sequence_length);
 }
 
-// ADR-0007 D3: recordBeam appends the per-beam {raw intensity, grazing angle}
-// sufficient-statistics pair, keeping the raw value re-correctable at output.
-TEST_F(HypothesisTest, RecordBeamAppendsRawAndAngle)
+// ADR-0007 D3/D4, cube#93: recordBeam folds each beam's CORRECTED intensity into
+// the streaming Welford (n, mean, M2). With the default None correction the
+// corrected value equals the raw, so two beams give the running mean of the raw
+// dB. (White-box storage changed from a raw-sample vector to the O(1) Welford;
+// the node-output mean/variance these feed are unchanged -- see test_node.)
+TEST_F(HypothesisTest, RecordBeamFoldsCorrectedIntensityIntoWelford)
 {
   Hypothesis h(10.0f, 1.0f);
-  EXPECT_TRUE(h.intensity_samples.empty());
+  EXPECT_EQ(h.intensity.n, 0u);
 
-  h.recordBeam(-30.0f, 0.1f);
-  h.recordBeam(-28.0f, 0.2f);
+  h.recordBeam(-30.0f, 0.1f, std::nan(""), params);  // None mode -> corrected = raw
+  h.recordBeam(-28.0f, 0.2f, std::nan(""), params);
 
-  ASSERT_EQ(h.intensity_samples.size(), 2u);
-  EXPECT_FLOAT_EQ(h.intensity_samples[0].raw_intensity, -30.0f);
-  EXPECT_FLOAT_EQ(h.intensity_samples[0].beam_angle, 0.1f);
-  EXPECT_FLOAT_EQ(h.intensity_samples[1].raw_intensity, -28.0f);
-  EXPECT_FLOAT_EQ(h.intensity_samples[1].beam_angle, 0.2f);
+  EXPECT_EQ(h.intensity.n, 2u);
+  EXPECT_DOUBLE_EQ(h.intensity.mean, -29.0);  // (-30 + -28) / 2
+  // M2 = sum (x - mean)^2 = 1 + 1 = 2 -> sample variance M2/(n-1) = 2.
+  EXPECT_DOUBLE_EQ(h.intensity.m2, 2.0);
 }
 
 // A NaN raw intensity (source omitted intensities) must never become a phantom
-// backscatter sample.
+// backscatter sample -- it leaves the Welford count unchanged.
 TEST_F(HypothesisTest, RecordBeamSkipsNanIntensity)
 {
   Hypothesis h(10.0f, 1.0f);
 
-  h.recordBeam(std::nan(""), 0.1f);
-  EXPECT_TRUE(h.intensity_samples.empty());
+  h.recordBeam(std::nan(""), 0.1f, std::nan(""), params);
+  EXPECT_EQ(h.intensity.n, 0u);
 
-  h.recordBeam(-25.0f, 0.3f);
-  EXPECT_EQ(h.intensity_samples.size(), 1u);
+  h.recordBeam(-25.0f, 0.3f, std::nan(""), params);
+  EXPECT_EQ(h.intensity.n, 1u);
+  EXPECT_DOUBLE_EQ(h.intensity.mean, -25.0);
 }
 
-// A NaN beam angle is retained: the beam is still a valid intensity sample,
-// it simply cannot be angle-corrected (emitted uncorrected at output).
-TEST_F(HypothesisTest, RecordBeamRetainsNanAngle)
+// A NaN beam angle is still a valid intensity sample: it is counted, just not
+// angle-corrected (with None mode there is no angle term anyway -> corrected = raw).
+TEST_F(HypothesisTest, RecordBeamCountsNanAngle)
 {
   Hypothesis h(10.0f, 1.0f);
 
-  h.recordBeam(-20.0f, std::nan(""));
-  ASSERT_EQ(h.intensity_samples.size(), 1u);
-  EXPECT_FLOAT_EQ(h.intensity_samples[0].raw_intensity, -20.0f);
-  EXPECT_TRUE(std::isnan(h.intensity_samples[0].beam_angle));
+  h.recordBeam(-20.0f, std::nan(""), std::nan(""), params);
+  EXPECT_EQ(h.intensity.n, 1u);
+  EXPECT_DOUBLE_EQ(h.intensity.mean, -20.0);
+}
+
+// cube#93 O(1) memory: per-cell intensity state is a fixed-size Welford triplet,
+// NOT a per-beam vector, so a heavily-oversampled cell (the Massabesic OOM cause:
+// ~10^9 beams over 47 tiles) does not grow per-cell RAM. The portable proxy: fold
+// a large number of beams and assert the per-hypothesis footprint is unchanged
+// (the old raw-sample vector would have grown ~12 bytes/beam without bound).
+TEST_F(HypothesisTest, IntensityStateIsConstantSizeRegardlessOfBeamCount)
+{
+  const std::size_t hypothesis_size = sizeof(Hypothesis);
+
+  Hypothesis h(10.0f, 1.0f);
+  const int many = 500000;
+  for (int i = 0; i < many; ++i) {
+    // Vary the value so it is a real running estimate, not a constant fold.
+    h.recordBeam(-30.0f - static_cast<float>(i % 11), 0.0f, std::nan(""), params);
+  }
+
+  // All beams folded into the O(1) accumulator...
+  EXPECT_EQ(h.intensity.n, static_cast<uint32_t>(many));
+  // ...with NO growth in the per-hypothesis footprint (the accumulator is a value
+  // member of fixed size; this is the cube#93 invariant the old vector violated).
+  EXPECT_EQ(sizeof(Hypothesis), hypothesis_size);
+  EXPECT_LE(sizeof(IntensityWelford), static_cast<std::size_t>(32));
 }
 
 }  // namespace cube

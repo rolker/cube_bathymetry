@@ -292,6 +292,17 @@ if(BUILD_TESTING)
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
   )
+
+  # Bounded == unbounded equivalence for the offline import accumulator (#92):
+  # an eviction-forcing budget reproduces the unbounded bathy + backscatter store
+  # exactly (lossless persist-then-drop + reload-on-revisit), and a persist
+  # failure never drops a tile.
+  ament_add_gtest(test_import_eviction test/test_import_eviction.cpp)
+  target_link_libraries(test_import_eviction
+    cube_bathymetry_store_import
+    marine_bathymetry_store::marine_bathymetry_store
+    marine_mbes_backscatter_store::marine_mbes_backscatter_store
+  )
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers
