@@ -146,9 +146,23 @@ namespace cube
 /// uncertainty squared, floored at a small positive epsilon (Node::setPredictedDepth
 /// requires a finite positive variance; a single-sample CUBE cell can persist a
 /// zero or non-finite uncertainty, so every finite-depth cell is still seeded).
-/// Does NOT insert a CUBE hypothesis and does NOT mark the sheet dirty.
+/// Does NOT mark the sheet dirty.
+///
+/// @param seed_settled When true (default), ALSO reseed each cell's SETTLED depth
+///   as a CUBE hypothesis (`setSettledDepthAt`) so the cell round-trips through
+///   `values()` and survives the next whole-tile save -- the lossless warm-start
+///   reload of a persisted draft tile (ADR-0001, #21/#70). When false, seed ONLY
+///   the predicted surface: the cell carries a **blunder-rejection prior** (it
+///   turns on `Node::insert`'s predicted-surface gate so a false-deep sounding
+///   below `target - blunder_scalar*sqrt(var)` is rejected) but does NOT
+///   fill/settle the cell -- no hypothesis, no `values()` output, the sheet stays
+///   clean. This is the `Chart` (contour) prior path (cube#89): settling coarse
+///   contour depths would contaminate the survey layer (and its co-estimated
+///   backscatter) with non-measured fill, so the prior only gates, it does not
+///   fill; survey-falls-through-to-chart gap-filling stays a query-time concern.
   void primeFromTile(
-    const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet);
+    const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
+    bool seed_settled = true);
 
 /// @brief Load every tile of @p layer from @p store into @p map_sheet,
 ///        priming predicted depths cell-by-cell.
@@ -158,10 +172,15 @@ namespace cube
 /// are seeded. Warm-starts slope correction from persisted draft tiles on
 /// restart; does not reconstruct CUBE hypothesis state (#21). A no-op if @p layer
 /// holds no tiles.
+///
+/// @param seed_settled Forwarded to @ref primeFromTile (default true =
+///   settled+predicted warm-start reload; false = predicted-only blunder-rejection
+///   prior, e.g. priming the predicted surface from a `Chart` layer, cube#89).
   void loadIntoSheet(
     const marine_bathymetry_store::BathymetryStore & store,
     marine_bathymetry_store::SourceLayer layer,
-    GeoMapSheet & map_sheet);
+    GeoMapSheet & map_sheet,
+    bool seed_settled = true);
 
 }  // namespace cube
 

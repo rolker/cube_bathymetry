@@ -76,6 +76,25 @@ std::vector<GeoSounding> makeSoundingsWithIntensity(float intensity)
   return soundings;
 }
 
+// The SAME lat/lon footprint as makeSoundings() (so the touchdown cells coincide
+// cell-for-cell) but every sounding sits at a single, much deeper depth. Used to
+// stage a false-deep "blunder" against a shallow predicted surface (#89).
+std::vector<GeoSounding> makeDeepSoundings(float depth)
+{
+  std::vector<GeoSounding> soundings;
+  const double base_lat = 43.07;
+  const double base_lon = -70.76;
+  for (int i = 0; i < 5; ++i) {
+    gz4d::GeoPointLatLongDegrees point(
+      base_lat + i * 1e-5, base_lon + i * 1e-5, depth);
+    GeoSounding s(point);
+    s.sounding.vertical_error = 0.5f;
+    s.sounding.horizontal_error = 0.1f;
+    soundings.push_back(s);
+  }
+  return soundings;
+}
+
 constexpr int64_t kStamp = 1234567890123456789LL;
 constexpr uint16_t kSource = 7;
 constexpr float kIntensity = 42.5f;
@@ -368,6 +387,131 @@ TEST(StoreImport, BackscatterNaNPropagation)
   const auto cells = mapSheetToBackscatterCells(ms_bs, kStamp, kSource);
   EXPECT_TRUE(cells.empty())
     << "soundings without intensity must surface no backscatter cells";
+}
+
+// Predicted-only prime (seed_settled=false, #89): seeds the predicted surface
+// (turns the blunder gate on) but must NOT settle the cell -- no CUBE hypothesis,
+// no values() output, sheet stays clean. Contrasted in the same test against the
+// default seed_settled=true, which DOES settle the cell.
+TEST(StoreImport, PredictedOnlyPrimeSeedsNoSettledHypothesis)
+{
+  // Build a tile with finite depths from the synthetic soundings.
+  GeoMapSheet source(1.0f);
+  source.addSoundings(makeSoundings());
+  auto grids = source.grids();
+  ASSERT_FALSE(grids.empty());
+
+  const std::vector<DepthAndUncertainty> values = grids.front()->values();
+  const marine_bathymetry_store::BathymetryTile tile =
+    geoGridToTile(*grids.front(), kStamp, kSource);
+
+  // Predicted-only prime: seeds the predicted surface but creates no hypothesis.
+  GeoMapSheet predicted_only(1.0f);
+  primeFromTile(tile, predicted_only, /*seed_settled=*/false);
+
+  // Contrast: the default prime (seed_settled=true) DOES settle each cell.
+  GeoMapSheet settled(1.0f);
+  primeFromTile(tile, settled, /*seed_settled=*/true);
+
+  auto po_grid = predicted_only.gridAt(tile.index());
+  auto st_grid = settled.gridAt(tile.index());
+  ASSERT_NE(po_grid, nullptr);
+  ASSERT_NE(st_grid, nullptr);
+
+  // values() is a const method (it flushes the median pre-filter), so it is safe
+  // to call through the const grid handle.
+  const std::vector<DepthAndUncertainty> po_values = po_grid->values();
+  const std::vector<DepthAndUncertainty> st_values = st_grid->values();
+
+  gggs::CellAreaIterator it(tile.index());
+  std::size_t k = 0;
+  std::size_t checked = 0;
+  for (; it.valid() && k < values.size(); it.next(), ++k) {
+    if (std::isnan(values[k].depth)) {
+      continue;
+    }
+    ++checked;
+    // The predicted surface IS seeded for the predicted-only prime.
+    EXPECT_FLOAT_EQ(po_grid->predictedDepthAt(*it), values[k].depth);
+    // Predicted-only: NO settled hypothesis -> values() carries no estimate.
+    EXPECT_TRUE(std::isnan(po_values[k].depth))
+      << "predicted-only prime must not settle a hypothesis";
+    // Default prime: the SAME cell carries a settled estimate (the distinguishing
+    // contrast -- predicted-only vs predicted+settled).
+    EXPECT_FALSE(std::isnan(st_values[k].depth))
+      << "default prime (seed_settled=true) must settle the cell";
+  }
+  EXPECT_GT(checked, 0u) << "tile should carry some finite cells to prime";
+
+  // Priming reproduces persisted data -- it must never mark the sheet dirty.
+  EXPECT_TRUE(predicted_only.dirtyGrids().empty());
+}
+
+// The load-bearing behavior (#89): a seeded (shallow) predicted surface turns on
+// CUBE's blunder gate so a false-deep sounding is REJECTED, whereas with no prior
+// the same deep sounding is accepted. Demonstrates the bathy store is protected
+// from false-deep detections by the Chart-prior prime.
+TEST(StoreImport, SeededPredictedSurfaceRejectsDeepBlunder)
+{
+  // A shallow predicted surface (~ -10 m) from synthetic soundings -> the Chart-
+  // like prior tile we seed from.
+  GeoMapSheet shallow_src(1.0f);
+  shallow_src.addSoundings(makeSoundings());
+  auto shallow_tiles = mapSheetToTiles(shallow_src, kStamp, kSource);
+  ASSERT_FALSE(shallow_tiles.empty());
+
+  // A clearly-too-deep blunder at the SAME locations (identical touchdown cells),
+  // far below any shallow-surface blunder limit. With target ~ -10 m and the
+  // defaults (blunder_minimum 10, blunder_percent 0.25, blunder_scalar 3), the
+  // limit is ~ -20 m, so -150 m is unambiguously a blunder.
+  constexpr float kDeep = -150.0f;
+  const std::vector<GeoSounding> deep = makeDeepSoundings(kDeep);
+
+  // Baseline: WITHOUT a prior, predicted_depth_ stays INVALID_DATA, so Node::insert
+  // skips the blunder gate and the deep sounding is accepted -> finite deep cells.
+  GeoMapSheet no_prior(1.0f);
+  no_prior.addSoundings(deep);
+  std::size_t accepted_deep = 0;
+  for (const auto & grid : no_prior.grids()) {
+    for (const auto & v : grid->values()) {
+      if (!std::isnan(v.depth) && v.depth < -100.0f) {
+        ++accepted_deep;
+      }
+    }
+  }
+  EXPECT_GT(accepted_deep, 0u)
+    << "without a predicted surface the deep blunder must be accepted";
+
+  // WITH the shallow predicted surface primed (predicted-only): the blunder gate is
+  // active at every primed cell, so the deep sounding that touches it is rejected.
+  GeoMapSheet primed(1.0f);
+  for (const auto & gt : shallow_tiles) {
+    primeFromTile(gt.second, primed, /*seed_settled=*/false);
+  }
+  primed.addSoundings(deep);
+
+  // Every cell that carries a (shallow) predicted depth must end with NO settled
+  // estimate: the deep sounding it received was blunder-rejected, and the
+  // predicted-only prime left no hypothesis of its own.
+  std::size_t gated_cells = 0;
+  for (const auto & gt : shallow_tiles) {
+    const auto & tile = gt.second;
+    auto grid = primed.gridAt(tile.index());
+    ASSERT_NE(grid, nullptr);
+    const std::vector<DepthAndUncertainty> vals = grid->values();
+    const std::vector<double> & depth = tile.depthBand();
+    gggs::CellAreaIterator it(tile.index());
+    std::size_t k = 0;
+    for (; it.valid() && k < depth.size() && k < vals.size(); it.next(), ++k) {
+      if (std::isnan(depth[k])) {
+        continue;  // not a primed cell
+      }
+      ++gated_cells;
+      EXPECT_TRUE(std::isnan(vals[k].depth))
+        << "a deep blunder must be rejected where a shallow predicted surface gates";
+    }
+  }
+  EXPECT_GT(gated_cells, 0u) << "the shallow tile should prime some cells to gate";
 }
 
 }  // namespace cube
