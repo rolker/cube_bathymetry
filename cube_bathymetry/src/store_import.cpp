@@ -455,9 +455,13 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   } catch (const std::exception & e) {
     // The on-disk surface is the real data: on a load error the caller drops the
     // partial re-created grid rather than let a later save clobber the intact file.
+    // The tile stays evicted, so a later batch that revisits it retries the reload;
+    // but this batch's soundings on the tile are dropped now and not re-processed
+    // (the caller WARNs with the count).
     std::cerr << "import_bag: could not reload evicted tile on revisit: "
-              << e.what() << " (dropping the partial re-created tile to protect "
-      "the on-disk surface; will retry on the next revisit)" << std::endl;
+              << e.what() << " (dropping this batch's soundings on the tile to "
+      "protect the on-disk surface; a later batch revisiting the tile retries the "
+      "reload, but these dropped soundings are not re-processed)" << std::endl;
     return false;
   }
   // Restore the raw intensity samples onto the just-reseeded hypotheses so the
@@ -479,9 +483,10 @@ void ImportAccumulator::evictColdTiles()
     return;
   }
   // Persist-then-drop the coldest tiles beyond budget. Each is written to disk
-  // (bathy + backscatter summary) and its raw intensity samples spilled to scratch
-  // BEFORE it is dropped, so eviction is lossless and the tile reloads (with its
-  // full sample population) on revisit. A tile whose persist/spill THROWS is left
+  // (bathy + backscatter summary) and its corrected-intensity Welford spilled to
+  // scratch BEFORE it is dropped, so eviction is lossless and the tile reloads
+  // (with its intensity sufficient statistic) on revisit. A tile whose persist/spill
+  // THROWS is left
   // resident (never dropped): RAM stays transiently over budget rather than losing
   // unsaved data; the next batch retries.
   for (const auto & index : sheet_.coldTiles(cfg_.max_resident_tiles)) {
@@ -506,12 +511,15 @@ void ImportAccumulator::addBatch(
 {
   // Reload-BEFORE-add (cube#92 lossless blend): reload any evicted tile this batch
   // is about to touch FIRST, so the batch's beams accrete onto the reloaded
-  // hypotheses (settled depth + restored raw intensity samples) instead of forming
-  // a fresh, partial tile. gridIndicesForSoundings computes the SAME expanded
-  // window addSoundings will touch (including a near-seam neighbour tile), so no
-  // evicted tile is missed. A tile whose reload FAILS is recorded and dropped
-  // after the add, protecting the intact on-disk surface (it stays evicted and
-  // retries on the next revisit).
+  // hypotheses (settled depth + restored corrected-intensity Welford) instead of
+  // forming a fresh, partial tile. gridIndicesForSoundings computes the SAME
+  // expanded window addSoundings will touch (including a near-seam neighbour tile),
+  // so no evicted tile is missed. A tile whose reload FAILS is recorded and, AFTER
+  // the add, has this batch's soundings on it dropped to protect the intact on-disk
+  // surface. The tile stays evicted, so a LATER batch that revisits it retries the
+  // reload -- but the soundings dropped here are NOT replayed (offline is a single
+  // pass over the bag), so this is a real, bounded loss, not the "lossless"
+  // eviction blend; it is counted and WARNed below rather than hidden.
   std::vector<gggs::GridIndex> reload_failed;
   if (!cfg_.store_dir.empty() && !evicted_.empty()) {
     for (const auto & idx : sheet_.gridIndicesForSoundings(soundings)) {
@@ -527,8 +535,29 @@ void ImportAccumulator::addBatch(
 
   sheet_.addSoundings(soundings, time);
 
-  for (const auto & idx : reload_failed) {
-    sheet_.dropTile(idx);  // protect the intact on-disk surface
+  if (!reload_failed.empty()) {
+    // Count and report the loss before dropping: the tiles that failed to reload
+    // are about to be discarded together with the soundings this batch put on them,
+    // and offline those soundings are never replayed. Count soundings whose centre
+    // falls in a failed tile (a sounding can also spread into neighbour tiles, so
+    // this is a conservative floor, not an exact cell tally -- see
+    // GeoMapSheet::gridIndexForSounding).
+    const std::set<gggs::GridIndex> failed_set(
+      reload_failed.begin(), reload_failed.end());
+    std::size_t dropped_soundings = 0;
+    for (const auto & s : soundings) {
+      if (failed_set.count(sheet_.gridIndexForSounding(s))) {
+        ++dropped_soundings;
+      }
+    }
+    std::cerr << "import_bag: WARNING permanently dropping ~" << dropped_soundings
+              << " sounding(s) centred in " << reload_failed.size()
+              << " un-reloadable tile(s) this batch (reload failed; the on-disk "
+                 "surface is preserved, but these soundings are NOT re-processed "
+                 "offline -- not the lossless eviction blend)" << std::endl;
+    for (const auto & idx : reload_failed) {
+      sheet_.dropTile(idx);  // protect the intact on-disk surface
+    }
   }
 
   evictColdTiles();

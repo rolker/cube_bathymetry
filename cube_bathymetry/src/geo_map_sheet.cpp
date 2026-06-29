@@ -113,6 +113,11 @@ std::vector<gggs::GridIndex> GeoMapSheet::gridIndicesForSoundings(
   return ret;
 }
 
+gggs::GridIndex GeoMapSheet::gridIndexForSounding(const GeoSounding & sounding) const
+{
+  return grid_level_.gridIndex(sounding.latitude, sounding.longitude);
+}
+
 void GeoMapSheet::setSettledIntensityWelfordAt(
   const gggs::CellIndex & cell, const IntensityWelford & intensity)
 {

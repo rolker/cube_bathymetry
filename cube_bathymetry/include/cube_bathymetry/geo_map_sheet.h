@@ -62,6 +62,15 @@ public:
     std::vector < gggs::GridIndex > gridIndicesForSoundings(
       const std::vector < GeoSounding > &soundings) const;
 
+  /// @brief The grid index a single sounding's centre falls in (no creation).
+  ///
+  /// Maps the sounding position to its home tile via the sheet's grid level. The
+  /// bounded-RAM importer uses this to count the soundings lost when a tile that
+  /// failed to reload is dropped. A sounding's influence radius can spread it into
+  /// neighbour tiles too (see GeoGrid::insert), so this home-tile count is a
+  /// conservative floor on the affected soundings, not an exact cell tally.
+    gggs::GridIndex gridIndexForSounding(const GeoSounding & sounding) const;
+
   /// @brief Configure the per-beam backscatter angular-response correction
   ///        applied at node-output (ADR-0007 D3, cube_bathymetry#81).
   ///
