@@ -23,10 +23,12 @@
 #include "cube_bathymetry/store_import.h"
 
 #include <algorithm>
-#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -287,16 +289,24 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
   const std::map<gggs::CellIndex, IntensityWelford> welford =
     grid->nodeIntensityWelford();
 
-  // Lazily create a unique scratch dir on first spill.
+  // Lazily create a unique scratch dir on first spill. mkdtemp atomically creates
+  // a directory with a name guaranteed unique against any other process (it retries
+  // internally on collision), so two concurrent import_bag processes can never
+  // share a spill dir and cross-corrupt each other's tiles. A steady_clock-ns +
+  // per-process atomic counter name could collide cross-process: the counter resets
+  // per process, leaving the ns the only distinguisher, and two processes can read
+  // the same coarse ns tick.
   if (scratch_dir_.empty()) {
-    static std::atomic<uint64_t> counter{0};
-    const auto ns =
-      std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path base = std::filesystem::temp_directory_path() /
-      ("cube_import_spill_" + std::to_string(ns) + "_" +
-      std::to_string(counter.fetch_add(1)));
-    std::filesystem::create_directories(base);
-    scratch_dir_ = base.string();
+    std::string tmpl =
+      (std::filesystem::temp_directory_path() / "cube_import_spill_XXXXXX").string();
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (::mkdtemp(buf.data()) == nullptr) {
+      throw std::runtime_error(
+        std::string("import_bag: cannot create spill scratch dir from template ") +
+        tmpl + ": " + std::strerror(errno));
+    }
+    scratch_dir_ = std::string(buf.data());
   }
 
   const std::string path = scratch_dir_ + "/" + spillFileName(index);
@@ -553,8 +563,8 @@ void ImportAccumulator::addBatch(
     std::cerr << "import_bag: WARNING permanently dropping ~" << dropped_soundings
               << " sounding(s) centred in " << reload_failed.size()
               << " un-reloadable tile(s) this batch (reload failed; the on-disk "
-                 "surface is preserved, but these soundings are NOT re-processed "
-                 "offline -- not the lossless eviction blend)" << std::endl;
+      "surface is preserved, but these soundings are NOT re-processed "
+      "offline -- not the lossless eviction blend)" << std::endl;
     for (const auto & idx : reload_failed) {
       sheet_.dropTile(idx);  // protect the intact on-disk surface
     }
