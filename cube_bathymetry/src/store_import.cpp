@@ -24,11 +24,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <iostream>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "cube_bathymetry/common.h"
 #include "marine_autonomy/gggs.h"
+#include "marine_bathymetry_store/tile_io.hpp"
+#include "marine_mbes_backscatter_store/mbes_store.hpp"
+#include "marine_mbes_backscatter_store/mbes_tile.hpp"
+#include "marine_mbes_backscatter_store/tile_io.hpp"
 
 namespace cube
 {
@@ -209,6 +219,208 @@ void loadIntoSheet(
   // tiles directly. Empty map -> no-op.
   for (const auto & grid_tile : store.tiles(layer)) {
     primeFromTile(grid_tile.second, map_sheet, seed_settled);
+  }
+}
+
+// ===========================================================================
+// ImportAccumulator (cube_bathymetry#92): bounded-RAM offline import.
+// ===========================================================================
+
+ImportAccumulator::ImportAccumulator(GeoMapSheet & sheet, ImportAccumulatorConfig config)
+: sheet_(sheet), cfg_(std::move(config))
+{
+}
+
+std::size_t ImportAccumulator::residentTileCount() const
+{
+  return sheet_.residentTileCount();
+}
+
+void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
+{
+  if (cfg_.store_dir.empty()) {
+    return;
+  }
+  auto grid = sheet_.gridAt(index);
+  if (!grid) {
+    return;
+  }
+  // geoGridToTile flushes the median pre-filter (values()) and writes only the
+  // finite cells; an all-no-data tile is not persisted (matches mapSheetToTiles).
+  marine_bathymetry_store::BathymetryTile tile =
+    geoGridToTile(*grid, cfg_.timestamp_ns, cfg_.source_index);
+  if (!tile.dirty()) {
+    return;
+  }
+  const std::string layer_dir = cfg_.store_dir + "/" +
+    marine_bathymetry_store::layerDirName(cfg_.bathy_layer);
+  std::filesystem::create_directories(layer_dir);
+  // Atomic temp-then-rename via tile_io::saveTile -- a partial write never
+  // corrupts the on-disk surface (same primitive the live node's eviction uses).
+  marine_bathymetry_store::saveTile(
+    tile, layer_dir + "/" + marine_bathymetry_store::tileFilename(index));
+  ++bathy_persisted_;
+}
+
+void ImportAccumulator::persistBackscatterTile(const gggs::GridIndex & index)
+{
+  if (cfg_.bs_store_dir.empty()) {
+    return;
+  }
+  auto grid = sheet_.gridAt(index);
+  if (!grid) {
+    return;
+  }
+  namespace mbs = marine_mbes_backscatter_store;
+  // Only the finite co-estimated cells (NaN-intensity cells are skipped upstream).
+  const std::map<gggs::CellIndex, mbs::MbesCell> cells =
+    geoGridToBackscatterCells(*grid, cfg_.timestamp_ns, cfg_.bs_source_index);
+  if (cells.empty()) {
+    // No new finite intensity this pass -> nothing to merge. Crucially we do NOT
+    // write an empty tile: that would clobber finite cells an earlier eviction of
+    // this same tile already wrote to disk (the backscatter-loss failure mode).
+    return;
+  }
+  const std::string layer_dir = cfg_.bs_store_dir + "/" +
+    mbs::layerDirName(mbs::SourceLayer::Processed);
+  const std::string path = layer_dir + "/" + mbs::tileFilename(index);
+  const gggs::Level level = gggs::Level::fromCellSize(cfg_.cell_size_m);
+  // Newest-finite-wins merge: start from the on-disk tile (if any) so finite
+  // cells written by an earlier eviction of this tile survive, then overwrite the
+  // cells this pass resurveyed. primeFromTile does NOT restore intensity on
+  // reload, so without this merge a revisited tile would NaN-out its earlier
+  // backscatter on the next save.
+  mbs::MbesTile tile = std::filesystem::is_regular_file(path) ?
+    mbs::loadTile(path, level) :
+    mbs::MbesTile(index);
+  for (const auto & entry : cells) {
+    tile.set(entry.first.row(), entry.first.column(), entry.second);
+  }
+  std::filesystem::create_directories(layer_dir);
+  mbs::saveTile(tile, path);
+  ++bs_persisted_;
+}
+
+bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
+{
+  if (cfg_.store_dir.empty()) {
+    return true;
+  }
+  try {
+    marine_bathymetry_store::BathymetryStore scratch =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(cfg_.cell_size_m);
+    const auto sw = index.southWestPosition();
+    const auto ne = index.northEastPosition();
+    marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
+    const auto & tiles = scratch.tiles(cfg_.bathy_layer);
+    auto it = tiles.find(index);
+    if (it != tiles.end()) {
+      // seed_settled=true: restore the settled depth/uncertainty as a CUBE
+      // hypothesis so accumulation continues from the saved state (ADR-0001).
+      primeFromTile(it->second, sheet_);
+    }
+    return true;
+  } catch (const std::exception & e) {
+    // The on-disk surface is the real data: on a load error drop the partial
+    // re-created grid rather than let a later save clobber the intact file.
+    std::cerr << "import_bag: could not reload evicted tile on revisit: "
+              << e.what() << " (dropping the partial re-created tile to protect "
+      "the on-disk surface; will retry on the next revisit)" << std::endl;
+    return false;
+  }
+}
+
+void ImportAccumulator::evictColdTiles()
+{
+  if (cfg_.max_resident_tiles == 0) {
+    return;  // unbounded: never evict (preserves the pre-#92 behavior)
+  }
+  if (cfg_.store_dir.empty()) {
+    return;  // nowhere to persist -> never evict (dropping would lose data)
+  }
+  if (sheet_.residentTileCount() <= cfg_.max_resident_tiles) {
+    return;
+  }
+  // Persist-then-drop the coldest tiles beyond budget. Each is written to disk
+  // (bathy + backscatter) BEFORE it is dropped, so eviction is lossless and the
+  // tile reloads on revisit (ADR-0001). A tile whose persist THROWS is left
+  // resident (never dropped): RAM stays transiently over budget rather than
+  // losing unsaved data; the next batch retries.
+  for (const auto & index : sheet_.coldTiles(cfg_.max_resident_tiles)) {
+    try {
+      persistBathyTile(index);
+      persistBackscatterTile(index);
+    } catch (const std::exception & e) {
+      std::cerr << "import_bag: failed to persist cold tile for eviction: "
+                << e.what() << " (keeping it resident to avoid data loss)"
+                << std::endl;
+      continue;  // do NOT drop -- lossless guarantee
+    }
+    sheet_.dropTile(index);
+    evicted_.insert(index);
+  }
+}
+
+void ImportAccumulator::addBatch(
+  const std::vector<GeoSounding> & soundings,
+  std::chrono::steady_clock::time_point time)
+{
+  sheet_.addSoundings(soundings, time);
+
+  // Reload-on-revisit (mirror cube#70 pingCallback). Any evicted tile this batch
+  // just re-created/dirtied must be reseeded from disk BEFORE its next persist,
+  // or that persist overwrites the tile's full on-disk surface with only the
+  // freshly-accumulated cells. Key off the DIRTY set -- the grids insert()
+  // actually touched -- NOT the sounding centres: addSoundings expands the bounds
+  // by a cell and spills into neighbour tiles near a GGGS seam, so a centre-only
+  // check would miss an evicted neighbour and clobber it. primeFromTile does not
+  // mark dirty, so a reloaded grid stays dirty for the save (reloaded settled
+  // cells + new cells); a resurveyed cell keeps the new value, others the
+  // reloaded one.
+  if (!cfg_.store_dir.empty() && !evicted_.empty()) {
+    std::vector<gggs::GridIndex> revisited;
+    for (const auto & idx : sheet_.dirtyGrids()) {
+      if (evicted_.count(idx)) {
+        revisited.push_back(idx);
+      }
+    }
+    for (const auto & idx : revisited) {
+      if (reloadEvictedTile(idx)) {
+        evicted_.erase(idx);
+      } else {
+        sheet_.dropTile(idx);  // protect the intact on-disk surface
+      }
+    }
+  }
+
+  evictColdTiles();
+}
+
+void ImportAccumulator::finalize(
+  const marine_bathymetry_store::SourceRegistry & bathy_registry,
+  const marine_mbes_backscatter_store::SourceRegistry * bs_registry)
+{
+  // Persist every still-resident tile (evicted tiles are already durable). Snapshot
+  // the indices first so the persist loop iterates a stable, deterministic order.
+  std::vector<gggs::GridIndex> resident;
+  for (const auto & grid : sheet_.grids()) {
+    if (grid) {
+      resident.push_back(grid->index());
+    }
+  }
+  for (const auto & index : resident) {
+    persistBathyTile(index);
+    persistBackscatterTile(index);
+  }
+  // Registries are store-wide sidecars: written once at the end so every cell's
+  // source_index resolves (the per-tile eviction writes carry no registry).
+  if (!cfg_.store_dir.empty()) {
+    std::filesystem::create_directories(cfg_.store_dir);
+    bathy_registry.saveRegistry(cfg_.store_dir);
+  }
+  if (!cfg_.bs_store_dir.empty() && bs_registry != nullptr) {
+    std::filesystem::create_directories(cfg_.bs_store_dir);
+    bs_registry->saveRegistry(cfg_.bs_store_dir);
   }
 }
 

@@ -98,6 +98,14 @@
     "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
     "curve (header '# tl_removed: true' + '# absorption_db_per_m: <a>') also makes "
     "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
+  std::cout << "  --max-resident-tiles <N>: bound resident-tile RAM (cube#92). When "
+    "the in-memory GGGS tile count exceeds N, the coldest tiles are persisted to "
+    "the -o store (and their backscatter to --bs-store, newest-finite-wins) and "
+    "dropped from RAM; a revisit reloads the tile's settled depth+uncertainty "
+    "(ADR-0001 -- faithful once settled, an approximation if evicted "
+    "mid-disambiguation). Default 256 (generous; disk is local/fast offline). "
+    "0 = unbounded (whole survey in RAM -- the pre-#92 behavior; may OOM on a "
+    "large multi-day survey)\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  --source-id <id>: Registry source id recorded for every cell "
     "(default cube-replay)\n";
@@ -291,6 +299,11 @@ int main(int argc, char * argv[])
   double resolution = 1.0;
   std::string iho_order = "order1a";
   int ping_count_limit = 0;
+  // Bounded-RAM eviction budget (cube#92). Default 256 resident tiles: generous
+  // for offline (each ~960x960-cell GeoGrid + CUBE state is the heavy object), so
+  // small/medium surveys never evict (identical output to the old path) while a
+  // large multi-day survey stays bounded. 0 = unbounded (old behavior).
+  std::size_t max_resident_tiles = 256;
   // Backscatter angular-response correction (cube#81). Default none = identity.
   std::string backscatter_correction_str = "none";
   std::string backscatter_curve_file;
@@ -342,6 +355,13 @@ int main(int argc, char * argv[])
       backscatter_correction_str = next_value("--backscatter-correction");
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
+    } else if (*arg == "--max-resident-tiles") {
+      const int64_t v = std::stoll(next_value("--max-resident-tiles"));
+      if (v < 0) {
+        std::cerr << "error: --max-resident-tiles must be >= 0 (0 = unbounded)\n";
+        usage();
+      }
+      max_resident_tiles = static_cast<std::size_t>(v);
     } else if (*arg == "-l") {
       ping_count_limit = std::stoi(next_value("-l"));
     } else if (*arg == "--source-id") {
@@ -572,6 +592,51 @@ int main(int argc, char * argv[])
               << " (blunder rejection active, #89)." << std::endl;
   }
 
+  // Bathy store provenance + bounded-RAM accumulator (cube#92). The registry/
+  // source index are created up front (not at the end) so evicted tiles persisted
+  // mid-pass already carry the right source index; registry.json is written once
+  // at finalize(). The accumulator owns the persist-then-drop eviction + lossless
+  // reload-on-revisit that bounds resident RAM by tile COUNT, not surveyed AREA.
+  marine_bathymetry_store::SourceRegistry registry;
+  const uint16_t source_index = registry.registerSource(source_record);
+
+  // Backscatter store provenance (cube#80), registered up front for the same
+  // reason. Only used when --bs-store is set.
+  marine_mbes_backscatter_store::SourceRegistry bs_registry;
+  uint16_t bs_source_index = 0;
+  if (!bs_store_dir.empty()) {
+    marine_mbes_backscatter_store::SourceRecord bs_source_record;
+    bs_source_record.source_id = source_record.source_id;
+    bs_source_record.platform = source_record.platform;
+    bs_source_record.sensor = source_record.sensor;
+    bs_source_record.sensor_class = "mbes-backscatter";
+    bs_source_record.campaign = source_record.campaign;
+    bs_source_index = bs_registry.registerSource(bs_source_record);
+  }
+
+  cube::ImportAccumulatorConfig accumulator_config;
+  accumulator_config.store_dir = store_dir;
+  accumulator_config.bathy_layer = bathy_layer;
+  accumulator_config.source_index = source_index;
+  accumulator_config.timestamp_ns = cell_timestamp_ns;
+  // Match the store level to the sheet's actual (GGGS-snapped) cell size so the
+  // reload/merge scratch stores tile identically.
+  accumulator_config.cell_size_m =
+    static_cast<float>(geo_map_sheet.nominalCellSizeMeters());
+  accumulator_config.bs_store_dir = bs_store_dir;
+  accumulator_config.bs_source_index = bs_source_index;
+  accumulator_config.max_resident_tiles = max_resident_tiles;
+  cube::ImportAccumulator accumulator(geo_map_sheet, accumulator_config);
+
+  if (max_resident_tiles > 0) {
+    std::cout << "Bounded resident tiles: " << max_resident_tiles
+              << " (cold tiles persist to the -o store and drop from RAM; "
+      "revisits reload losslessly, cube#92)." << std::endl;
+  } else {
+    std::cout << "Unbounded resident tiles (--max-resident-tiles 0): the whole "
+      "survey stays in RAM." << std::endl;
+  }
+
   std::cout << "reading messages..." << std::endl;
 
   int ping_count = 0;
@@ -687,7 +752,11 @@ int main(int argc, char * argv[])
           gs.sounding.slant_range = s.slant_range;
           soundings.push_back(gs);
         }
-        geo_map_sheet.addSoundings(soundings);
+        // Accumulate through the bounded-RAM accumulator (cube#92): adds the
+        // batch, reloads any evicted tile this ping revisits, then evicts cold
+        // tiles back to the budget. With --max-resident-tiles 0 this is a plain
+        // addSoundings (no eviction).
+        accumulator.addBatch(soundings);
         ping_count++;
       } catch (const tf2::TransformException & e) {
         // A ping with no earth transform in the (bounded) buffer at its stamp --
@@ -818,85 +887,41 @@ int main(int argc, char * argv[])
 
   std::cout << "Building store tiles..." << std::endl;
 
-  // The GeoMapSheet picks a GGGS level from the requested cell size; build the
-  // store at the matching default level. importTiles is multi-level, so the
-  // GridIndex on each tile carries the authoritative level regardless.
-  marine_bathymetry_store::BathymetryStore store =
-    marine_bathymetry_store::BathymetryStore::fromCellSize(
-    static_cast<float>(geo_map_sheet.nominalCellSizeMeters()));
+  // Persist the still-resident tiles and write the registries. Tiles evicted
+  // during the pass were already written to disk (bathy in the -o store, their
+  // backscatter merged into --bs-store newest-finite-wins); finalize() writes
+  // whatever is still in RAM, so the on-disk store is the union of evicted +
+  // resident — identical to an unbounded build (cube#92). The off-boat full-bag
+  // CUBE replay is the authoritative product, so bathy defaults to the `Processed`
+  // layer (#85; --bathy-layer overrides); the live node writes `Draft`. Single
+  // fused grid per layer (unh_marine_autonomy#221 — newest value wins per cell).
+  const std::size_t resident_before_final = accumulator.residentTileCount();
+  const std::size_t evicted_count = accumulator.evictedIndices().size();
+  accumulator.finalize(
+    registry, bs_store_dir.empty() ? nullptr : &bs_registry);
+  std::cout << "Persisted " << accumulator.bathyTilesPersisted()
+            << " bathy tile(s) to " << store_dir << " (" << bathy_layer_str
+            << " layer; " << evicted_count << " evicted mid-pass, "
+            << resident_before_final << " resident at end; build: "
+            << phase_secs() << "s)." << std::endl;
 
-  marine_bathymetry_store::SourceRegistry registry;
-  const uint16_t source_index = registry.registerSource(source_record);
-
-  auto tiles = cube::mapSheetToTiles(geo_map_sheet, cell_timestamp_ns, source_index);
-  std::cout << "Tiles with data: " << tiles.size() << " (build: " << phase_secs() << "s)"
-            << std::endl;
-
-  if (tiles.empty()) {
+  if (accumulator.bathyTilesPersisted() == 0) {
     std::cerr << "WARNING: no tiles had finite data -- nothing imported. Check "
       "the projector frame overrides and the detections topic." << std::endl;
   }
 
-  // The off-boat full-bag CUBE replay is the authoritative product, so by default it
-  // lands in the `Processed` layer (#85; --bathy-layer overrides). The live node
-  // writes the `Draft` layer instead. Single fused grid per layer
-  // (unh_marine_autonomy#221 — no per-day epochs, newest value wins per cell).
-  store.importTiles(bathy_layer, std::move(tiles));
-
-  std::size_t written = marine_bathymetry_store::save(store, store_dir, &registry);
-  std::cout << "Saved " << written << " tiles to " << store_dir << " ("
-            << bathy_layer_str << " layer)." << std::endl;
-
-  // Optional: surface the co-estimated backscatter into an MBES backscatter store
-  // layer from the SAME CUBE pass (#80), written to the Processed layer (the
-  // off-boat CUBE re-run is the authoritative product). By default the value is
-  // UNCORRECTED; --backscatter-correction empirical (with a --backscatter-curve)
-  // applies the per-beam angular-response correction at node-output (cube#81),
-  // which corrects both this offline layer and the live tile (#78). Bathy (above)
-  // defaults to the same Processed layer (#85).
+  // The co-estimated backscatter was surfaced into the --bs-store layer (#80) from
+  // the SAME CUBE pass, incrementally under eviction (newest-finite-wins merge,
+  // cube#92). By default UNCORRECTED; --backscatter-correction empirical applies
+  // the per-beam angular-response correction at node-output (cube#81).
   if (!bs_store_dir.empty()) {
-    std::cout << "Building backscatter store tiles..." << std::endl;
-
-    // Match the bathy store's GGGS level so both products tile identically.
-    marine_mbes_backscatter_store::MbesBackscatterStore bs_store =
-      marine_mbes_backscatter_store::MbesBackscatterStore::fromCellSize(
-      static_cast<float>(geo_map_sheet.nominalCellSizeMeters()));
-
-    // Provenance: register the same physical source in the backscatter registry,
-    // tagged with the backscatter sensor class. Every cell carries this index +
-    // the import timestamp, so the Processed product is not source/time-blank.
-    marine_mbes_backscatter_store::SourceRegistry bs_registry;
-    marine_mbes_backscatter_store::SourceRecord bs_source_record;
-    bs_source_record.source_id = source_record.source_id;
-    bs_source_record.platform = source_record.platform;
-    bs_source_record.sensor = source_record.sensor;
-    bs_source_record.sensor_class = "mbes-backscatter";
-    bs_source_record.campaign = source_record.campaign;
-    const uint16_t bs_source_index = bs_registry.registerSource(bs_source_record);
-
-    // Surface the co-estimated intensity cell-by-cell (no bulk-import API is added
-    // to the separate marine_mbes_backscatter_store package; #80 stays in-repo).
-    const std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell>
-    bs_cells = cube::mapSheetToBackscatterCells(
-      geo_map_sheet, cell_timestamp_ns, bs_source_index);
-    std::cout << "Backscatter cells with data: " << bs_cells.size()
-              << " (build: " << phase_secs() << "s)" << std::endl;
-
-    if (bs_cells.empty()) {
+    std::cout << "Persisted " << accumulator.backscatterTilesPersisted()
+              << " backscatter tile(s) to " << bs_store_dir << "." << std::endl;
+    if (accumulator.backscatterTilesPersisted() == 0) {
       std::cerr << "WARNING: no cells had finite backscatter -- nothing written to "
         "the backscatter store. Check that the detections carry intensities."
                 << std::endl;
     }
-
-    for (const auto & cell : bs_cells) {
-      bs_store.set(
-        marine_mbes_backscatter_store::SourceLayer::Processed, cell.first, cell.second);
-    }
-
-    std::size_t bs_written =
-      marine_mbes_backscatter_store::save(bs_store, bs_store_dir, &bs_registry);
-    std::cout << "Saved " << bs_written << " backscatter tiles to " << bs_store_dir
-              << "." << std::endl;
   }
 
   std::cout << "done!" << std::endl;
