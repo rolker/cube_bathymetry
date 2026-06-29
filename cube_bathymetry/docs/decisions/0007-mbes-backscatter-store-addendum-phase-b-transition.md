@@ -23,6 +23,9 @@ now the node-output correction was a **Phase B no-op**: `corrected == raw` for
 every beam, with the per-beam pairs kept so the surfaced backscatter stays
 re-derivable once a real correction lands.
 
+> **Superseded (cube#92/#93):** the correction was later moved to record time and
+> the per-beam raw set is no longer retained — see the *Phase B.2 addendum* below.
+
 An empirical study of the `m3_dryrun` Portsmouth Harbor survey (`/detections`,
 2025 pings, ~445k beams) showed the earlier candidate model — a cos²θ Lambert
 correction — is wrong for this data: it explains only ~¼ of the observed
@@ -83,6 +86,9 @@ sonar. The `rx_angles` sign/zero convention was verified against
   reflect "uncorrected by default".
 - The per-beam `{raw_intensity, beam_angle}` retention is unchanged, so the node
   value stays fully re-derivable when a richer correction lands.
+  **(Superseded by the Phase B.2 addendum, cube#92/#93: raw samples are no longer
+  retained — only an O(1) corrected Welford — so a richer correction now requires
+  re-importing the bag rather than in-place re-derivation.)**
 - Tests: 6 ARA cases at `extractNodeRecord()` (interpolation, nadir identity,
   beyond-max identity, NaN-angle identity, mode-None identity, port/starboard
   symmetry) plus curve-loader/mode-parse tests; the 3 pre-existing default-path
@@ -120,7 +126,10 @@ Design decisions:
    verbatim and never recomputes α, so Python and C++ apply an **identical** TL by
    construction (a divergence would silently corrupt the correction). At 500 kHz /
    24 °C / fresh water α ≈ 0.049 dB/m.
-3. **Per-beam slant range R is a new sufficient statistic**, threaded exactly like
+3. **Per-beam slant range R is a new sufficient statistic** (Superseded by the
+   Phase B.2 addendum, cube#92/#93: R is now consumed by `correctBeamIntensity` at
+   record time and folded into the Welford, not retained per beam), threaded
+   exactly like
    `beam_angle`: `Sounding::slant_range` → `DepthAndUncertainty::range` (the
    pack(1) raster struct grows to 20 bytes; layout-safe because every raster read
    strides by `sizeof(DepthAndUncertainty)`) → `BeamIntensitySample::range`,
@@ -138,6 +147,46 @@ This still does **not** implement the full GeoCoder (insonified-area +
 beam-pattern), which is the deferred tier-3. The TVG/absorption/frequency state
 ultimately belongs in `SonarInfo` (unh_marine_autonomy#240); α is computed
 locally meanwhile.
+
+## Phase B.2 addendum — record-time correction + streaming Welford (cube_bathymetry#92/#93)
+
+cube_bathymetry#93 moves the per-beam correction from **extract** to **record**
+time and replaces the per-beam `{raw_intensity, beam_angle, range}` retention with
+a streaming **Welford** `(n, mean, M2)` of the *corrected* intensity, kept on the
+winning depth hypothesis. cube_bathymetry#92 then makes tile eviction **lossless**
+by spilling and restoring that triplet.
+
+This **reverses** two earlier decisions recorded above:
+
+1. **Correction timing.** Decision 1 located the empirical-ARA (and the tier-2 TL)
+   correction at `Node::extractNodeRecord()`. It now runs at record
+   (`Hypothesis::recordBeam` → `correctBeamIntensity`, the per-beam math moved
+   verbatim to `angular_response_curve.cpp`); extract only reads the triplet. The
+   math is unchanged, so the node-output mean + estimate variance are **identical**
+   to the old correct-at-extract path — only the timing moved.
+
+2. **Raw-sample retention / re-derivability.** The Context and Consequences above
+   state the per-beam `{raw_intensity, beam_angle}` set is retained so the surfaced
+   backscatter "stays fully re-derivable when a richer correction lands." That is
+   **no longer true**: only the O(1) corrected Welford is kept (the cube#93
+   Massabesic OOM fix — per-cell intensity memory used to grow with total beam
+   count). A future richer correction (the deferred tier-3 GeoCoder /
+   cube_bathymetry#15) therefore requires **re-importing the source bag**, not
+   in-place re-derivation from stored raw samples. Per-beam slant range `R`
+   (Tier-2) is likewise folded into the correction at record and not retained.
+
+Why this is acceptable: the empirical ARA + tier-2 TL correction the store needs
+*today* is applied before the Welford folds each beam, so the persisted value is
+the final corrected backscatter; applying a *different* correction was always going
+to be a re-processing operation, and bounding live/offline RAM (the cube#92/#93
+motivation) is the harder constraint. The Welford triplet is a perfect sufficient
+statistic for the mean + estimate variance, so eviction spill/reload is
+bit-identical to never-evicting.
+
+This addendum **supersedes** the "retention is unchanged / re-derivable" statements
+in the Context, Consequences, and Tier-2 sections above, and the backscatter
+"out of scope; re-derivable per cube#15" trade-off note in
+`0001-tile-eviction-and-incremental-publish.md` (§ Negative / trade-offs).
 
 ## Deferred (explicit follow-ups)
 
