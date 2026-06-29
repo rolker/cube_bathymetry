@@ -73,6 +73,9 @@
     "node writes draft. #85)\n";
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
     "needed)\n";
+  std::cout << "  --prior <store_dir>: seed the CUBE predicted surface from this "
+    "store's Chart (contour) layer so blunder rejection drops false-deep "
+    "detections (#89)\n";
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store layer "
     "(Processed) from the same CUBE pass (optional; surfaces the co-estimated "
     "intensity -- uncorrected by default, angle-corrected when "
@@ -278,6 +281,7 @@ int main(int argc, char * argv[])
 
   std::vector<std::string> bagfile_names;
   std::string store_dir;
+  std::string prior_dir;  // optional: Chart-prior store to seed the predicted surface (#89)
   std::string bs_store_dir;  // optional: MBES backscatter store output (#80)
   std::string bathy_layer_str = "processed";  // bathy target layer (#85): draft|processed
   std::string detections_topic;  // required
@@ -318,6 +322,8 @@ int main(int argc, char * argv[])
       usage();
     } else if (*arg == "-o") {
       store_dir = next_value("-o");
+    } else if (*arg == "--prior") {
+      prior_dir = next_value("--prior");
     } else if (*arg == "--bathy-layer") {
       bathy_layer_str = next_value("--bathy-layer");
     } else if (*arg == "--bs-store") {
@@ -488,6 +494,38 @@ int main(int argc, char * argv[])
   geo_map_sheet.setBackscatterCorrection(
     backscatter_mode, std::move(backscatter_curve.points),
     backscatter_curve.tl_removed, backscatter_curve.absorption_db_per_m);
+
+  // Chart-prior prime (#89): seed the CUBE predicted surface from the prior store's
+  // Chart (contour) layer BEFORE any soundings are added. primeFromTile lazy-creates
+  // a node per chart cell carrying a predicted depth, which turns ON CUBE's
+  // predicted-surface blunder gate (Node::insert is a pass-through when
+  // predicted_depth_ is NaN); the survey soundings then hit nodes that already carry
+  // a predicted depth, so a false-deep detection below
+  // `target - blunder_scalar*sqrt(predicted_var)` is rejected. seed_settled=false:
+  // seed ONLY the predicted surface, never settle the coarse contour into the survey
+  // layer (that would contaminate both the bathy and co-estimated backscatter).
+  //
+  // ALIGNMENT CAVEAT: the prior store is built at THIS survey's GGGS level
+  // (fromCellSize(nominalCellSizeMeters())), so a chart cell only coincides with a
+  // survey node -- and thus only gates -- when the Chart layer was imported at a
+  // compatible level. A chart cell at a different level primes a node that the
+  // survey soundings never land on, so it silently won't gate. A future refinement
+  // could resample the chart to the survey level; today we assume compatible levels.
+  if (!prior_dir.empty()) {
+    marine_bathymetry_store::BathymetryStore prior =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      static_cast<float>(geo_map_sheet.nominalCellSizeMeters()));
+    marine_bathymetry_store::SourceRegistry prior_reg;
+    marine_bathymetry_store::load(prior, prior_dir, &prior_reg);
+    const std::size_t prior_tiles =
+      prior.tiles(marine_bathymetry_store::SourceLayer::Chart).size();
+    cube::loadIntoSheet(
+      prior, marine_bathymetry_store::SourceLayer::Chart, geo_map_sheet,
+      /*seed_settled=*/false);
+    std::cout << "Primed CUBE predicted surface from " << prior_tiles
+              << " Chart tile(s) in " << prior_dir
+              << " (blunder rejection active, #89)." << std::endl;
+  }
 
   std::cout << "reading messages..." << std::endl;
 
