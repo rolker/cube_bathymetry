@@ -100,13 +100,14 @@
     "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
   std::cout << "  --max-resident-tiles <N>: bound resident-tile RAM (cube#92). When "
     "the in-memory GGGS tile count exceeds N, the coldest tiles are persisted to "
-    "the -o store (and their backscatter to --bs-store), their raw per-beam "
-    "intensity samples spilled to a temp scratch, and dropped from RAM. A revisit "
-    "reloads the tile (settled depth + restored samples) BEFORE the new soundings, "
-    "so backscatter blends LOSSLESSLY with the pre-eviction beams; only the bathy "
+    "the -o store (and their backscatter to --bs-store), their per-cell intensity "
+    "Welford spilled to a temp scratch, and dropped from RAM. A revisit reloads the "
+    "tile (settled depth + restored Welford) BEFORE the new soundings, so "
+    "backscatter blends LOSSLESSLY with the pre-eviction beams; only the bathy "
     "depth UNCERTAINTY is re-derived (the depth value stays faithful). Default 256 "
-    "(generous; disk is local/fast offline). 0 = unbounded (whole survey in RAM -- "
-    "the pre-#92 behavior; may OOM on a large multi-day survey)\n";
+    "(generous; disk is local/fast offline). 0 = unbounded (whole survey in RAM). "
+    "NOTE: per-cell intensity memory is O(1) regardless of beam count (cube#93), so "
+    "a small heavily-oversampled survey no longer OOMs even without eviction\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  --source-id <id>: Registry source id recorded for every cell "
     "(default cube-replay)\n";

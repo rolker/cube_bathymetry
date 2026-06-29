@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstddef>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -32,6 +34,84 @@
 
 namespace cube
 {
+
+namespace
+{
+/// Empirical angular-response lookup: the curve's db_relative_to_nadir at
+/// @p abs_angle_deg, linearly interpolated between adjacent bin centres. The
+/// curve is ascending {abs_angle_deg, db_relative_to_nadir} pairs (loaded by
+/// loadAngularResponseCurve). Returns 0 (identity) when the curve is empty or
+/// @p abs_angle_deg lies beyond the curve's max angle; clamps to the first bin
+/// below the curve's min angle (nadir bin ~0 -> ~identity near nadir).
+///
+/// Moved verbatim from node.cpp (cube_bathymetry#93): the correction now runs at
+/// record (recordBeam) instead of extract, so this helper lives next to
+/// correctBeamIntensity. Unchanged logic -> identical corrected values.
+double curveRelativeDb(
+  const std::vector<std::pair<float, float>> & curve, double abs_angle_deg)
+{
+  if (curve.empty()) {
+    return 0.0;
+  }
+  // Below the first bin centre: clamp to it (the nadir bin's value, ~0).
+  if (abs_angle_deg <= curve.front().first) {
+    return curve.front().second;
+  }
+  // Beyond the last bin centre: clamp to the outermost bin's correction rather
+  // than jump to identity. The empirical curve is bounded (unlike a cos/log model
+  // that diverges near grazing), so continuing the edge value keeps the correction
+  // continuous and avoids a swath-edge discontinuity / bright ring (#81 review).
+  if (abs_angle_deg > curve.back().first) {
+    return curve.back().second;
+  }
+  // Find the bracketing pair [lo, hi] and linearly interpolate.
+  for (std::size_t i = 1; i < curve.size(); ++i) {
+    if (abs_angle_deg <= curve[i].first) {
+      const double a0 = curve[i - 1].first;
+      const double d0 = curve[i - 1].second;
+      const double a1 = curve[i].first;
+      const double d1 = curve[i].second;
+      const double span = a1 - a0;
+      if (span <= 0.0) {
+        return d1;  // duplicate angle: take the upper bin's value
+      }
+      const double t = (abs_angle_deg - a0) / span;
+      return d0 + t * (d1 - d0);
+    }
+  }
+  return 0.0;  // unreachable (guarded by the back() check above)
+}
+}  // namespace
+
+double correctBeamIntensity(
+  float raw_intensity, float beam_angle, float range, const Parameters & parameters)
+{
+  // Exact per-beam math formerly in Node::extractNodeRecord (cube#80/#81/#87),
+  // moved to record time (cube#93). Apply order is TL add-back THEN angular
+  // residual, accumulated in double -- identical to the old extract.
+  const bool apply_ara =
+    parameters.backscatter_angle_correction ==
+    BackscatterAngleCorrection::Empirical &&
+    !parameters.angular_response_curve.empty();
+  const bool apply_tl = apply_ara && parameters.backscatter_tl_removed;
+  const double alpha = parameters.backscatter_absorption_db_per_m;
+
+  double corrected = raw_intensity;
+  if (apply_tl) {
+    const double range_d = static_cast<double>(range);
+    // Skip the TL term for a missing / non-positive range (log10 undefined); the
+    // beam is still corrected by the residual angular-response curve below.
+    if (std::isfinite(range_d) && range_d > 0.0) {
+      corrected += 40.0 * std::log10(range_d) + 2.0 * alpha * range_d;
+    }
+  }
+  if (apply_ara && !std::isnan(beam_angle)) {
+    const double abs_angle_deg =
+      std::abs(static_cast<double>(beam_angle)) * 180.0 / M_PI;
+    corrected -= curveRelativeDb(parameters.angular_response_curve, abs_angle_deg);
+  }
+  return corrected;
+}
 
 bool parseBackscatterAngleCorrection(
   const std::string & text, BackscatterAngleCorrection & out)

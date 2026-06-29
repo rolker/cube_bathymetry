@@ -230,23 +230,24 @@ namespace cube
 ///
 /// **Persist-then-drop (lossless):** when the resident tile count exceeds the
 /// budget, each cold tile is written to disk — bathy via @ref geoGridToTile +
-/// `saveTile`, backscatter SUMMARY via `saveTile`, AND its raw per-beam intensity
-/// samples spilled to a temporary scratch — BEFORE it is dropped from RAM. A tile
-/// whose persist throws is left resident (never dropped), so a disk failure costs
-/// transient RAM, never data.
+/// `saveTile`, backscatter SUMMARY via `saveTile`, AND its per-cell intensity
+/// Welford `(n, mean, M2)` spilled to a temporary scratch — BEFORE it is dropped
+/// from RAM. A tile whose persist throws is left resident (never dropped), so a
+/// disk failure costs transient RAM, never data.
 ///
 /// **Reload-before-add (lossless blend):** the bathy tile stores only the depth
-/// SUMMARY and the backscatter SUMMARY is a corrected mean — neither retains the
-/// raw per-beam intensity samples CUBE needs to keep blending. So eviction also
-/// spills each cell's raw `intensity_samples` to a scratch file, and the reload
+/// SUMMARY and the backscatter SUMMARY is the corrected mean — neither retains the
+/// running Welford CUBE needs to keep blending. So eviction also spills each cell's
+/// intensity Welford to a scratch file (cube#93: a 3-number sufficient statistic of
+/// the CORRECTED intensity, since correction now runs at record), and the reload
 /// runs BEFORE a batch's soundings are added: it computes the grids the batch will
 /// touch (@ref GeoMapSheet::gridIndicesForSoundings), `loadWindow` +
 /// @ref primeFromTile restores each cell's settled depth as one CUBE hypothesis,
-/// then the spilled raw samples are restored onto that hypothesis. The batch's new
-/// beams then accrete onto the SAME reloaded hypothesis, so the node-output
+/// then the spilled Welford is restored onto that hypothesis. The batch's new beams
+/// then continue the Welford on the SAME reloaded hypothesis, so the node-output
 /// intensity is the FULL pre+post-eviction blend — bit-for-bit equal to a
-/// never-evicted build for a consistent re-survey. **Backscatter is lossless under
-/// eviction.**
+/// never-evicted build for a consistent re-survey (a Welford triplet is a perfect
+/// sufficient statistic). **Backscatter is lossless under eviction.**
 ///
 /// **Remaining approximation (bathy uncertainty only):** the reload reconstructs a
 /// SINGLE depth hypothesis (a Bayesian prior from the stored depth + variance,
@@ -256,10 +257,10 @@ namespace cube
 /// mid-disambiguation — a hypothesis-state collapse, not data loss. The backscatter
 /// estimate does not depend on the depth sample count, so it is unaffected.
 ///
-/// **Transient disk cost:** the spill holds the retained raw samples
-/// (`sizeof(BeamIntensitySample)` per beam) for every currently-evicted tile, in a
-/// scratch dir deleted in @ref finalize (and by the destructor on an exception).
-/// It is proportional to evicted-tile coverage, scratch-only, and local/fast.
+/// **Transient disk cost:** the spill holds a fixed 24-byte Welford record per
+/// surveyed cell for every currently-evicted tile (NOT per beam — cube#93 made
+/// per-cell intensity state O(1)), in a scratch dir deleted in @ref finalize (and
+/// by the destructor on an exception). Scratch-only and local/fast.
   class ImportAccumulator
   {
 public:

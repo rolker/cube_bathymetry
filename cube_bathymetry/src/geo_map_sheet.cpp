@@ -113,13 +113,13 @@ std::vector<gggs::GridIndex> GeoMapSheet::gridIndicesForSoundings(
   return ret;
 }
 
-void GeoMapSheet::setSettledIntensitySamplesAt(
-  const gggs::CellIndex & cell, std::vector<BeamIntensitySample> samples)
+void GeoMapSheet::setSettledIntensityWelfordAt(
+  const gggs::CellIndex & cell, const IntensityWelford & intensity)
 {
   // Lazy-create the grid (mirrors setSettledDepthAt) so the call is safe even if
-  // the grid is absent; GeoGrid::setSettledIntensitySamplesAt is a no-op when the
+  // the grid is absent; GeoGrid::setSettledIntensityWelfordAt is a no-op when the
   // node was not seeded. Does NOT mark dirty (reproduces persisted data).
-  getOrCreateGrid(cell.grid())->setSettledIntensitySamplesAt(cell, std::move(samples));
+  getOrCreateGrid(cell.grid())->setSettledIntensityWelfordAt(cell, intensity);
 }
 
 std::vector<std::shared_ptr<GeoGrid>> GeoMapSheet::getOrCreateGridsIn(

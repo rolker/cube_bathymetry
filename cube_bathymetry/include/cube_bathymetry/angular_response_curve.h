@@ -74,6 +74,27 @@ namespace cube
 /// provenance). Equivalent to `loadAngularResponseCurveWithHeader(path).points`.
   std::vector < std::pair < float, float >> loadAngularResponseCurve(const std::string & path);
 
+/// @brief Apply the node-output backscatter correction to one raw beam
+///        (ADR-0007 D3, cube_bathymetry#81/#87).
+///
+/// Returns the corrected backscatter (dB) for a single beam, computed at RECORD
+/// time (cube_bathymetry#93) so the CUBE hypothesis can stream a Welford of the
+/// CORRECTED intensity instead of retaining every raw beam. This is the exact
+/// per-beam math that used to run inside `Node::extractNodeRecord`, factored out
+/// verbatim so correct-at-record reproduces correct-at-extract bit-for-bit:
+///   - tier-2 TL add-back (cube#87): when @c backscatter_tl_removed and the range
+///     is finite and > 0, add `40*log10(R) + 2*alpha*R` (alpha ==
+///     @c backscatter_absorption_db_per_m). A NaN / non-positive range skips it.
+///   - angular-response residual (cube#81): when the mode is Empirical with a
+///     non-empty curve and the beam angle is not NaN, subtract
+///     `curve(|beam_angle| in degrees)` (linearly interpolated, edge-clamped).
+/// Identity (returns @p raw_intensity) when the mode is None or the curve is
+/// empty, and for the angle term when @p beam_angle is NaN. The caller gates a
+/// NaN @p raw_intensity (a NaN beam is never a sample). Computed and returned in
+/// `double` to match the estimator's accumulation precision.
+  double correctBeamIntensity(
+    float raw_intensity, float beam_angle, float range, const Parameters & parameters);
+
 }  // namespace cube
 
 #endif  // CUBE_BATHYMETRY__ANGULAR_RESPONSE_CURVE_H_

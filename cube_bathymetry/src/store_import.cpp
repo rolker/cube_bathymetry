@@ -234,17 +234,13 @@ void loadIntoSheet(
 
 namespace
 {
-// Per-tile raw-intensity-sample spill (cube#92). A tiny binary file, scratch-only
+// Per-tile intensity-Welford spill (cube#92/#93). A tiny binary file, scratch-only
 // and single-machine, so native layout/endianness is fine. Format:
-//   uint32 magic | uint32 ncells | ncells * { uint16 row, uint16 col,
-//                                              uint32 nsamples,
-//                                              nsamples * BeamIntensitySample }
-// BeamIntensitySample is three tightly-packed floats (asserted below), so the
-// sample run is written/read as a contiguous block.
-constexpr uint32_t kSpillMagic = 0x43425331u;  // "CBS1"
-static_assert(
-  sizeof(BeamIntensitySample) == 3 * sizeof(float),
-  "BeamIntensitySample must be tightly packed for the block spill read/write");
+//   uint32 magic | uint32 ncells |
+//   ncells * { uint16 row, uint16 col, uint32 n, double mean, double m2 }
+// Each cell's record is a fixed 24 bytes -- O(1)/cell (cube#93 replaced the
+// variable-length raw-sample spill with the 3-number corrected-intensity Welford).
+constexpr uint32_t kSpillMagic = 0x43425332u;  // "CBS2" (cube#93 triplet format)
 
 std::string spillFileName(const gggs::GridIndex & index)
 {
@@ -282,14 +278,14 @@ std::size_t ImportAccumulator::residentTileCount() const
 void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
 {
   if (cfg_.bs_store_dir.empty()) {
-    return;  // no backscatter product -> no need to retain raw samples
+    return;  // no backscatter product -> no need to retain the intensity Welford
   }
   auto grid = sheet_.gridAt(index);
   if (!grid) {
     return;
   }
-  const std::map<gggs::CellIndex, std::vector<BeamIntensitySample>> samples =
-    grid->nodeIntensitySamples();
+  const std::map<gggs::CellIndex, IntensityWelford> welford =
+    grid->nodeIntensityWelford();
 
   // Lazily create a unique scratch dir on first spill.
   if (scratch_dir_.empty()) {
@@ -304,9 +300,9 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
   }
 
   const std::string path = scratch_dir_ + "/" + spillFileName(index);
-  if (samples.empty()) {
+  if (welford.empty()) {
     // Nothing to retain; drop any stale spill so a later reload can't restore
-    // outdated samples for this tile.
+    // outdated state for this tile.
     std::error_code ec;
     std::filesystem::remove(path, ec);
     return;
@@ -317,19 +313,20 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
     throw std::runtime_error("import_bag: cannot open spill file " + path);
   }
   const uint32_t magic = kSpillMagic;
-  const uint32_t ncells = static_cast<uint32_t>(samples.size());
+  const uint32_t ncells = static_cast<uint32_t>(welford.size());
   out.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
   out.write(reinterpret_cast<const char *>(&ncells), sizeof(ncells));
-  for (const auto & entry : samples) {
+  for (const auto & entry : welford) {
     const uint16_t row = entry.first.row();
     const uint16_t col = entry.first.column();
-    const uint32_t n = static_cast<uint32_t>(entry.second.size());
+    const uint32_t n = entry.second.n;
+    const double mean = entry.second.mean;
+    const double m2 = entry.second.m2;
     out.write(reinterpret_cast<const char *>(&row), sizeof(row));
     out.write(reinterpret_cast<const char *>(&col), sizeof(col));
     out.write(reinterpret_cast<const char *>(&n), sizeof(n));
-    out.write(
-      reinterpret_cast<const char *>(entry.second.data()),
-      static_cast<std::streamsize>(entry.second.size() * sizeof(BeamIntensitySample)));
+    out.write(reinterpret_cast<const char *>(&mean), sizeof(mean));
+    out.write(reinterpret_cast<const char *>(&m2), sizeof(m2));
   }
   if (!out) {
     throw std::runtime_error("import_bag: failed writing spill file " + path);
@@ -424,24 +421,16 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
   for (uint32_t c = 0; c < ncells; ++c) {
     uint16_t row = 0;
     uint16_t col = 0;
-    uint32_t n = 0;
+    IntensityWelford w;
     in.read(reinterpret_cast<char *>(&row), sizeof(row));
     in.read(reinterpret_cast<char *>(&col), sizeof(col));
-    in.read(reinterpret_cast<char *>(&n), sizeof(n));
+    in.read(reinterpret_cast<char *>(&w.n), sizeof(w.n));
+    in.read(reinterpret_cast<char *>(&w.mean), sizeof(w.mean));
+    in.read(reinterpret_cast<char *>(&w.m2), sizeof(w.m2));
     if (!in) {
-      return;  // truncated header -> stop (what was restored already stands)
+      return;  // truncated record -> stop (what was restored already stands)
     }
-    std::vector<BeamIntensitySample> vec(n);
-    if (n > 0) {
-      in.read(
-        reinterpret_cast<char *>(vec.data()),
-        static_cast<std::streamsize>(static_cast<std::size_t>(n) *
-        sizeof(BeamIntensitySample)));
-      if (!in) {
-        return;  // truncated sample run -> stop
-      }
-    }
-    sheet_.setSettledIntensitySamplesAt(gggs::CellIndex(index, row, col), std::move(vec));
+    sheet_.setSettledIntensityWelfordAt(gggs::CellIndex(index, row, col), w);
   }
 }
 

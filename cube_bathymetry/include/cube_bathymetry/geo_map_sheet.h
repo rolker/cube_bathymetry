@@ -117,17 +117,17 @@ public:
   /// startup prime. Does NOT mark the grid dirty (reproduces persisted data).
     void setSettledDepthAt(const gggs::CellIndex & cell, float depth, float uncertainty);
 
-  /// @brief Restore raw backscatter samples onto @p cell's winning hypothesis
-  ///        (cube_bathymetry#92 lossless eviction reload).
+  /// @brief Restore a corrected-intensity Welford onto @p cell's winning
+  ///        hypothesis (cube_bathymetry#92/#93 lossless eviction reload).
   ///
-  /// Forwards to `GeoGrid::setSettledIntensitySamplesAt` on the grid owning
+  /// Forwards to `GeoGrid::setSettledIntensityWelfordAt` on the grid owning
   /// @p cell (lazy-creates the grid; a no-op on the node if @ref setSettledDepthAt
   /// did not seed it). Must run AFTER the depth reload and BEFORE the revisit's
-  /// soundings are added, so those beams accrete onto the same reloaded hypothesis
-  /// and the node-output backscatter is the full pre+post-eviction blend. Does NOT
-  /// mark the grid dirty (it reproduces already-persisted data).
-    void setSettledIntensitySamplesAt(
-      const gggs::CellIndex & cell, std::vector < BeamIntensitySample > samples);
+  /// soundings are added, so those beams continue the Welford on the same reloaded
+  /// hypothesis (bit-identical to never-evicting). Does NOT mark the grid dirty
+  /// (it reproduces already-persisted data).
+    void setSettledIntensityWelfordAt(
+      const gggs::CellIndex & cell, const IntensityWelford & intensity);
 
   /// @brief Grid indices touched (returning true from insert) since the last
   ///        clearDirtyGrids(). Returned by value -- safe to iterate while saving.

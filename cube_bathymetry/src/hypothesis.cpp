@@ -24,6 +24,8 @@
 
 #include <cmath>
 
+#include "cube_bathymetry/angular_response_curve.h"
+
 namespace cube
 {
 
@@ -115,18 +117,31 @@ bool Hypothesis::update(float depth, float variance, const Parameters & paramete
   return true;
 }
 
-void Hypothesis::recordBeam(float raw_intensity, float beam_angle, float range)
+void Hypothesis::recordBeam(
+  float raw_intensity, float beam_angle, float range, const Parameters & parameters)
 {
   // Skip beams with no reported intensity -- a NaN must never be mistaken for a
   // real backscatter sample (ADR-0007: missing intensity != zero backscatter).
   // A NaN beam_angle is allowed through: the beam is still a valid intensity
-  // measurement, it merely cannot be angle-corrected at output. A NaN / non-
-  // positive range is likewise allowed through (the tier-2 TL term is skipped
-  // for that beam, cube_bathymetry#87).
+  // measurement, it merely cannot be angle-corrected. A NaN / non-positive range
+  // is likewise allowed through (the tier-2 TL term is skipped, cube#87).
   if (std::isnan(raw_intensity)) {
     return;
   }
-  intensity_samples.push_back(BeamIntensitySample{raw_intensity, beam_angle, range});
+
+  // Correct at RECORD (cube#93): apply the angular-response + tier-2 TL correction
+  // now, then stream the corrected value into the Welford -- O(1) per cell instead
+  // of retaining every raw beam. correctBeamIntensity is the exact per-beam math
+  // that used to run at extract, so the node-output mean/variance are unchanged.
+  const double corrected =
+    correctBeamIntensity(raw_intensity, beam_angle, range, parameters);
+
+  // Welford online update (n, mean, M2) in double precision.
+  ++intensity.n;
+  const double delta = corrected - intensity.mean;
+  intensity.mean += delta / intensity.n;
+  const double delta2 = corrected - intensity.mean;
+  intensity.m2 += delta * delta2;
 }
 
 

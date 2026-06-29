@@ -185,34 +185,34 @@ std::vector<NodeRecord> GeoGrid::nodeRecords() const
   return ret;
 }
 
-std::map<gggs::CellIndex, std::vector<BeamIntensitySample>>
-GeoGrid::nodeIntensitySamples() const
+std::map<gggs::CellIndex, IntensityWelford>
+GeoGrid::nodeIntensityWelford() const
 {
-  std::map<gggs::CellIndex, std::vector<BeamIntensitySample>> ret;
+  std::map<gggs::CellIndex, IntensityWelford> ret;
   // Iterate the SPARSE node map (only created cells), not a CellAreaIterator over
-  // all 960x960 cells: a tile has far fewer surveyed nodes than cells, so this
-  // is both faster and avoids materialising ~900k empty sample vectors.
+  // all 960x960 cells: a tile has far fewer surveyed nodes than cells, so this is
+  // both faster and avoids visiting ~900k empty cells.
   for (const auto & entry : nodes_) {
     if(!entry.second) {
       continue;
     }
     entry.second->queueFlush(parameters_);
-    auto samples = entry.second->chosenIntensitySamples(parameters_);
-    if(!samples.empty()) {
-      ret.emplace(entry.first, std::move(samples));
+    const IntensityWelford w = entry.second->chosenIntensityWelford();
+    if(w.n > 0) {
+      ret.emplace(entry.first, w);
     }
   }
   return ret;
 }
 
-void GeoGrid::setSettledIntensitySamplesAt(
-  const gggs::CellIndex & cell, std::vector<BeamIntensitySample> samples)
+void GeoGrid::setSettledIntensityWelfordAt(
+  const gggs::CellIndex & cell, const IntensityWelford & intensity)
 {
   auto it = nodes_.find(cell);
   if(it == nodes_.end() || !it->second) {
     return;  // no node here (depth reload did not seed this cell) -- nothing to do
   }
-  it->second->setSettledIntensitySamples(std::move(samples), parameters_);
+  it->second->setSettledIntensityWelford(intensity);
 }
 
 }  // namespace cube

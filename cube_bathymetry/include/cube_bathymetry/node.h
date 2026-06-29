@@ -204,29 +204,27 @@ public:
   /// raw set is retained so it is re-derivable when #15 provides slope.
     NodeRecord extractNodeRecord(const Parameters & parameters);
 
-  /// @brief The raw per-beam backscatter samples of the WINNING hypothesis
-  ///        (cube_bathymetry#92 lossless eviction spill).
+  /// @brief The corrected-intensity Welford of the WINNING hypothesis
+  ///        (cube_bathymetry#92/#93 lossless eviction spill).
   ///
-  /// Returns a copy of the `intensity_samples` of exactly the hypothesis
-  /// @ref extractNodeRecord would pick (the `nominated_hypothesis_` priority path,
-  /// else @ref chooseHypothesis), so the spilled samples reproduce the same
-  /// node-output intensity on restore. Empty when there is no valid hypothesis or
-  /// it carries no intensity-bearing beams. Like @ref extractNodeRecord this does
-  /// NOT flush the queue -- the caller flushes first (GeoGrid does, via queueFlush).
-    std::vector < BeamIntensitySample > chosenIntensitySamples(const Parameters & parameters);
+  /// Returns the `(n, mean, M2)` of exactly the hypothesis @ref extractNodeRecord
+  /// would pick (the `nominated_hypothesis_` priority path, else
+  /// @ref chooseHypothesis), so spilling and restoring the triplet reproduces the
+  /// same node-output intensity. A default (n == 0) triplet when there is no valid
+  /// hypothesis or it carries no intensity-bearing beams. Does NOT flush the queue
+  /// -- the caller flushes first (GeoGrid does, via queueFlush).
+    IntensityWelford chosenIntensityWelford();
 
-  /// @brief Restore raw per-beam backscatter samples onto the WINNING hypothesis
-  ///        (cube_bathymetry#92 lossless eviction reload).
+  /// @brief Restore a corrected-intensity Welford onto the WINNING hypothesis
+  ///        (cube_bathymetry#92/#93 lossless eviction reload).
   ///
-  /// Sets @p samples as the `intensity_samples` of the chosen hypothesis (same
-  /// selection as @ref chosenIntensitySamples / @ref extractNodeRecord). Used by
-  /// the tile-eviction reload, which runs BEFORE the revisit's soundings are added
-  /// so that those soundings' beams then accrete onto the SAME (reloaded)
-  /// hypothesis -- the node-output backscatter is then the full pre+post-eviction
-  /// blend, matching a never-evicted build (ADR-0007 D4). A no-op when the node
-  /// has no hypothesis (nothing was reloaded for this cell).
-    void setSettledIntensitySamples(
-      std::vector < BeamIntensitySample > samples, const Parameters & parameters);
+  /// Sets @p intensity as the Welford of the chosen hypothesis (same selection as
+  /// @ref chosenIntensityWelford / @ref extractNodeRecord). Used by the tile-
+  /// eviction reload, which runs BEFORE the revisit's soundings are added so those
+  /// beams then CONTINUE the Welford on the same hypothesis. Because `(n, mean,
+  /// M2)` is a perfect sufficient statistic, restore-then-continue is bit-identical
+  /// to never-evicting. A no-op when the node has no hypothesis.
+    void setSettledIntensityWelford(const IntensityWelford & intensity);
 
   /* Routine:  cube_node_choose_hypothesis
   * Purpose:  Choose the current best hypothesis for the node in question

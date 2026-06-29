@@ -32,32 +32,29 @@
 namespace cube
 {
 
-/// Per-beam backscatter sufficient statistics retained on a hypothesis
-/// (ADR-0007 D3). Each contributing beam contributes its RAW (uncorrected)
-/// intensity and the per-beam receive/steering (beam/incidence) angle, so the
-/// radiometric (empirical-ARA / GeoCoder) correction can be applied later -- at
-/// node-output, once depth and local slope have settled -- rather than baking
-/// an angle-corrupted, non-re-correctable average into the hypothesis.
-  struct BeamIntensitySample
+/// @brief Streaming Welford accumulator of the CORRECTED per-beam backscatter on
+///        a hypothesis (ADR-0007 D3/D4, cube_bathymetry#93).
+///
+/// Replaces the unbounded `std::vector<BeamIntensitySample>` raw-sample retention:
+/// the angular-response + tier-2 TL correction is now applied at RECORD time
+/// (`correctBeamIntensity`), and only the running `(n, mean, M2)` of the corrected
+/// dB value is kept -- O(1) per cell regardless of beam count, the fix for the
+/// Massabesic OOM (per-cell intensity memory used to grow with total beams).
+///
+/// `mean` and `m2` (sum of squared deviations from the mean) are `double` for
+/// numerical stability over the ~10^9 beams a multi-day survey accumulates.
+/// Node-output reads `intensity = mean` and the estimate variance
+/// `intensity_var = (m2/(n-1)) / n` (variance of the mean, ADR-0007 D4) -- the
+/// SAME values the retain-and-correct-at-extract path produced.
+  struct IntensityWelford
   {
-  /// Raw, uncorrected per-beam intensity (e.g. M3 reflectivity in dB).
-    float raw_intensity;
-
-  /// Per-beam receive/steering (beam/incidence) angle from nadir, in radians
-  /// (NOT a true grazing angle of 90 deg - theta; nadir = 0). May be NaN when
-  /// the source did not report an angle for the beam; the output correction
-  /// treats a NaN angle as "no angle correction available" and emits that beam
-  /// uncorrected.
-    float beam_angle;
-
-  /// Per-beam slant range R from the sonar head to the touchdown, in meters,
-  /// for the tier-2 backscatter 2-way transmission-loss correction
-  /// (cube_bathymetry#87): `corrected = raw + (40*log10(R) + 2*alpha*R) -
-  /// residualCurve(|angle|)` (the TL is ADDED BACK to compensate the loss). NaN
-  /// (or non-positive) when not reported; the TL
-  /// term is then skipped (identity) so the beam is corrected by the residual
-  /// angular-response curve alone (tier-1 behavior).
-    float range = std::numeric_limits < float > ::quiet_NaN();
+  /// Number of corrected intensity samples folded in (intensity-bearing beams).
+    uint32_t n = 0;
+  /// Running mean of the corrected intensity (dB).
+    double mean = 0.0;
+  /// Running sum of squared deviations from the mean (Welford M2); m2/(n-1) is
+  /// the unbiased sample variance.
+    double m2 = 0.0;
   };
 
 /// Depth hypothesis structure used to maintain a current track on the depth
@@ -117,20 +114,23 @@ namespace cube
   ///   the hypothesis represents (i.e., an intervention is required).
     bool update(float depth, float variance, const Parameters & parameters);
 
-  /// Record one beam's backscatter sufficient statistics on this hypothesis
-  /// (ADR-0007 D3). Called by Node::update() only for a beam whose depth was
-  /// accepted by (or used to seed) THIS hypothesis, so the backscatter
-  /// association mirrors the depth association exactly -- depth-geometry
-  /// outliers the W&H monitor rejects never enter this set.
+  /// Record one beam's backscatter on this hypothesis (ADR-0007 D3/D4,
+  /// cube_bathymetry#93). Called by Node::update() only for a beam whose depth was
+  /// accepted by (or used to seed) THIS hypothesis, so the backscatter association
+  /// mirrors the depth association exactly -- depth-geometry outliers the W&H
+  /// monitor rejects never enter the accumulator.
   ///
-  /// A NaN raw_intensity is skipped (a source that omits intensities must never
-  /// inject a phantom sample); a NaN beam_angle is retained (the beam is
-  /// still a valid intensity sample, merely uncorrectable for angle). A NaN /
-  /// non-positive range is also retained (the beam is a valid intensity sample,
-  /// merely uncorrectable for the tier-2 TL term, cube_bathymetry#87).
+  /// Applies the angular-response + tier-2 TL correction (`correctBeamIntensity`,
+  /// using @p parameters) at RECORD time, then folds the corrected value into the
+  /// streaming Welford `intensity` (no raw-sample retention -- O(1) per cell).
+  ///
+  /// A NaN @p raw_intensity is skipped (a source that omits intensities must never
+  /// inject a phantom sample); a NaN @p beam_angle is still counted (a valid
+  /// intensity sample, merely uncorrected for angle); a NaN / non-positive
+  /// @p range still counted (the tier-2 TL term is skipped for it, cube#87).
     void recordBeam(
-      float raw_intensity, float beam_angle,
-      float range = std::numeric_limits < float > ::quiet_NaN());
+      float raw_intensity, float beam_angle, float range,
+      const Parameters & parameters);
 
   /// Current depth mean estimate
     double current_estimate;
@@ -171,21 +171,14 @@ namespace cube
   /// This tracks the maximum of the two estimates.
     float maximum_of_input_and_predicted_variance = 0.0;
 
-  /// Per-beam backscatter sufficient statistics for the beams associated with
-  /// this hypothesis (ADR-0007 D3). Bounded by hypothesis membership -- one
-  /// entry per contributing beam with a non-NaN intensity, a few bytes each.
-  /// The radiometric correction (D3 GeoCoder) is applied per element at
-  /// node-output (Node::extractNodeRecord); these raw pairs are retained so the
-  /// node value stays re-derivable when slope (cube_bathymetry#15) lands.
-  ///
-  /// Memory budget: sizeof(BeamIntensitySample) == 12 bytes (three floats:
-  /// raw_intensity, beam_angle, range -- range added in cube_bathymetry#87).
-  /// Growth class is identical to number_of_samples (one entry per accepted beam,
-  /// for the survey lifetime of the hypothesis). Worst-case is ~12 bytes/beam/node.
-  /// Once cube_bathymetry#15's correction model settles this can be reduced to
-  /// pure sufficient statistics (mean, M2, count) if the per-beam retention is
-  /// no longer needed for re-derivation.
-    std::vector < BeamIntensitySample > intensity_samples;
+  /// Streaming Welford of the CORRECTED backscatter for the beams associated with
+  /// this hypothesis (ADR-0007 D3/D4, cube_bathymetry#93). O(1) -- 16 bytes,
+  /// independent of beam count (the cube#93 OOM fix). The correction is applied at
+  /// record (`recordBeam` -> `correctBeamIntensity`), so this is already the
+  /// node-output value; `Node::extractNodeRecord` reads it without re-correcting.
+  /// The tile-eviction spill/reload persists this triplet (a perfect sufficient
+  /// statistic, so reload + continue is bit-identical to never-evicting, #92).
+    IntensityWelford intensity;
   };
 
 }  // namespace cube
