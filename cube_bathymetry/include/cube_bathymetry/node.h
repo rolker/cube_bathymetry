@@ -54,9 +54,10 @@ namespace cube
     float depth_var = std::nan("");
 
   /// Co-estimated backscatter intensity: the mean of the per-beam corrected
-  /// intensities on the winning hypothesis. NaN when no intensity-bearing beams.
-  /// (Phase B: correction is currently the identity -- emitted UNCORRECTED
-  /// pending cube_bathymetry#15; see extractNodeRecord().)
+  /// intensities (streaming Welford) on the winning hypothesis. NaN when no
+  /// intensity-bearing beams. The correction (empirical ARA + tier-2 TL) is
+  /// applied at record time and is the identity only when no curve is configured;
+  /// see extractNodeRecord().
     float intensity = std::nan("");
 
   /// Intensity ESTIMATE variance (variance of the mean, shrinks with n_samples;
@@ -196,12 +197,15 @@ public:
   /// co-estimated backscatter intensity/uncertainty/sample-count of the winning
   /// hypothesis. The depth fields match extractDepthAndUncertainty() exactly,
   /// including the nominated_hypothesis_ priority path, so the two outputs never
-  /// disagree for the same node state. Intensity is computed from the winning
-  /// hypothesis's per-beam {raw, angle} set: each beam is angle-corrected (D3),
-  /// then the corrected values are combined into a mean + ESTIMATE variance
-  /// (D4). The angle correction is currently the identity (no-op) pending
-  /// cube_bathymetry#15 -- intensity is emitted UNCORRECTED, but the per-beam
-  /// raw set is retained so it is re-derivable when #15 provides slope.
+  /// disagree for the same node state. Intensity is the winning hypothesis's
+  /// streaming Welford of the CORRECTED per-beam backscatter: each beam is
+  /// angle-/TL-corrected at RECORD time (recordBeam -> correctBeamIntensity,
+  /// D3/cube_bathymetry#93), so extract just reads the triplet -- mean as the
+  /// intensity and M2/(n-1)/n as the ESTIMATE variance (D4), with no re-correction.
+  /// This O(1) (n, mean, M2) replaces the old per-beam {raw, angle} retention (the
+  /// cube_bathymetry#93 OOM fix): raw samples are no longer kept, so a future
+  /// richer correction (cube_bathymetry#15) requires re-importing the bag rather
+  /// than re-deriving in place.
     NodeRecord extractNodeRecord(const Parameters & parameters);
 
   /// @brief The corrected-intensity Welford of the WINNING hypothesis
