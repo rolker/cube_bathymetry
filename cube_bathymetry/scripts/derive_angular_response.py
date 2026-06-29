@@ -56,6 +56,7 @@ import sys
 
 
 def parse_args(argv):
+    """Parse CLI args (bag(s), topic, output, bin width, tier-2 TL options)."""
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -167,8 +168,8 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
         twtt = msg.two_way_travel_times
         sound_speed = msg.ping_info.sound_speed
         freq = msg.ping_info.frequency
-        if math.isfinite(freq) and freq > 0.0:
-            freqs.append(freq)
+        if remove_tl and math.isfinite(freq) and freq > 0.0:
+            freqs.append(freq)  # only needed for the tier-2 absorption alpha
         flags = getattr(msg, 'flags', None)
         count = min(len(intensities), len(rx_angles))
         for i in range(count):
@@ -187,7 +188,12 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
             range_m = 0.0
             if remove_tl:
                 # R = twtt * c / 2; skip beams with a non-positive / NaN range
-                # (log10 undefined) so they never poison the residual.
+                # (log10 undefined) so they never poison the residual. NOTE: this
+                # DROPS such beams from the derivation entirely, whereas the C++
+                # estimator RETAINS them and just skips the TL term (tier-1 fallback
+                # for that beam) -- an intentional asymmetry: a beam with no valid
+                # range can't inform the TL-removed residual, but its raw value is
+                # still a usable backscatter sample at apply time.
                 if i >= len(twtt):
                     continue
                 range_m = twtt[i] * sound_speed / 2.0

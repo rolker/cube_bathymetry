@@ -52,8 +52,9 @@ namespace cube
 
   /// Per-beam slant range R from the sonar head to the touchdown, in meters,
   /// for the tier-2 backscatter 2-way transmission-loss correction
-  /// (cube_bathymetry#87): `corrected = raw - (40*log10(R) + 2*alpha*R) -
-  /// residualCurve(|angle|)`. NaN (or non-positive) when not reported; the TL
+  /// (cube_bathymetry#87): `corrected = raw + (40*log10(R) + 2*alpha*R) -
+  /// residualCurve(|angle|)` (the TL is ADDED BACK to compensate the loss). NaN
+  /// (or non-positive) when not reported; the TL
   /// term is then skipped (identity) so the beam is corrected by the residual
   /// angular-response curve alone (tier-1 behavior).
     float range = std::numeric_limits < float > ::quiet_NaN();

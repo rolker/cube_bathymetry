@@ -970,8 +970,13 @@ private:
         s.sounding.intensity = intensity;    // per-beam backscatter (may be NaN)
         s.sounding.beam_angle = beam_angle;  // incidence rel. nadir (may be NaN)
         // Per-beam slant range for the tier-2 TL correction (cube#87). The
-        // /soundings cloud carries the touchdown in the SENSOR frame, so its
-        // norm IS the slant range from the sonar head -- no extra field needed.
+        // /soundings cloud carries the touchdown in the SENSOR frame, so its norm
+        // equals the slant range R = twtt*c/2 EXACTLY when the transmit tilt is
+        // zero -- which holds for the M3 (flat downward array, tx_angle == 0, the
+        // only tier-2-calibrated sonar today). For a tilted-transmit sonar the
+        // norm is R*sqrt(1 + sin^2(tx)*sin^2(rx)), a small bounded overestimate;
+        // the offline import_bag path uses twtt*c/2 directly, so live/offline
+        // match for the M3. Revisit (carry twtt) if a tilted-tx sonar is added.
         s.sounding.slant_range = std::sqrt(x * x + y * y + z * z);
         soundings.push_back(s);
       }
