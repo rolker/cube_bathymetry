@@ -45,3 +45,27 @@ issue: 92
 Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 92 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-06-29 09:30 +0000
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-92 at `dbe7b21`
+**Mode**: pre-push
+**Depth**: Deep (reason: ~2000 lines / 20 files; cross-cutting resource-management + numerical estimator + binary serialization)
+**Must-fix**: 0 | **Suggestions**: 5
+**Round**: 2 | **Ship**: recommended — re-review of round-1 fixes; all 3 must-fix + 2 suggestions confirmed addressed, no new must-fix, remaining items are doc-accuracy / observability robustness.
+
+### Findings
+- [ ] (suggestion) `restoreSpilledSamples` is silent on a missing/corrupt spill while `persistBackscatterTile` plain-overwrites the tile → out-of-band spill loss (e.g. /tmp reaper on a multi-day import) silently drops pre-eviction backscatter; add a WARN mirroring the bathy reload-failure WARN — `cube_bathymetry/src/store_import.cpp` (`restoreSpilledSamples`/`persistBackscatterTile`)
+- [ ] (suggestion) Comment claims "Atomic temp-then-rename via tile_io::saveTile"; verified false — `marine_tiled_raster_store/src/tile_io.cpp:132` writes directly to the final path via GDAL `Create` (no temp/rename). Runtime is still safe (throw keeps tile resident) but the crash-safety reasoning is wrong — fix the comment — `cube_bathymetry/src/store_import.cpp` (`persistBathyTile`)
+- [ ] (suggestion) Bolded "Backscatter is lossless under eviction." reads unconditionally; the real guarantee is scoped to a consistent re-survey (a depth-disambiguation divergence between visits could divert backscatter) — tighten the claim — `cube_bathymetry/include/cube_bathymetry/store_import.h`
+- [ ] (suggestion) Registries written only at finalize; a mid-pass crash leaves evicted tiles with a source_index but no registry.json — likely acceptable (re-runnable single pass) but undocumented at the eviction site; add a one-line note — `cube_bathymetry/src/store_import.cpp` (`persistBathyTile`/`finalize`)
+- [ ] (suggestion) `reloadEvictedTile`'s `loadWindow(sw,ne)` over the tile's own corners relies on loadWindow inclusivity to reload that exact tile (correct per source); add a targeted single-tile reload round-trip test to lock it in — `cube_bathymetry/src/store_import.cpp` (`reloadEvictedTile`)
+
+**Static analysis**: `ament_cpplint` + `ament_uncrustify` clean on all changed C++/headers/tests. A full `colcon build` was not possible here (lower layers provide `marine_autonomy`/`gggs.h` only via install trees absent in this worktree); the two highest-risk correctness paths were verified by hand against source: (1) the reload window equals the add window exactly (shared `boundsForSoundings` + identical `GridAreaIterator`), so no touched evicted tile is missed; (2) a reload-seeded hypothesis has `number_of_samples == 1`, so the Welford-restore gate never silently skips the restore.
+
+### Next step
+Lifecycle: **Local Review** (approved) → push / open PR → **triage-reviews**. The 5 suggestions are advisory (doc/observability); the operator/host decides whether to apply them before or after push.
