@@ -355,7 +355,12 @@ void Node::setSettledIntensityWelford(const IntensityWelford & intensity)
   if(nominated_hypothesis_) {
     chosen = nominated_hypothesis_;
   } else {
-    chosen = chooseHypothesis();
+    // Same number_of_samples > 0 gate chosenIntensityWelford()/extractNodeRecord()
+    // apply, so the restore targets exactly the hypothesis the spill read from.
+    auto h = chooseHypothesis();
+    if(h && h->number_of_samples > 0) {
+      chosen = h;
+    }
   }
   if(chosen) {
     chosen->intensity = intensity;
