@@ -85,17 +85,28 @@ namespace cube
 
   /// Per-beam receive/steering angle (radians) accompanying the intensity, the
   /// {raw intensity, angle} sufficient-statistics pair (ADR-0007 D3). NaN when
-  /// not reported. NOTE: extending this #pragma pack(push,1) struct from 8 to
-  /// 16 bytes is layout-safe -- no caller depends on sizeof(DepthAndUncertainty)
-  /// (the only sizeof uses are raster-band strides, 2*sizeof(float)).
+  /// not reported.
     float beam_angle;
+
+  /// Per-beam slant range R (meters) accompanying the intensity, carried through
+  /// the median queue bound to its depth so the tier-2 backscatter TL correction
+  /// (cube_bathymetry#87) reads the same beam's range. NaN when not reported.
+  ///
+  /// LAYOUT NOTE: this #pragma pack(push,1) struct is now 20 bytes (5 floats).
+  /// The only sizeof uses are raster-band strides that read the first two floats
+  /// (depth, uncertainty) as bands using sizeof(DepthAndUncertainty) as the
+  /// element stride (e.g. bag_to_geotiff.cpp RasterIO). Appending floats at the
+  /// END is layout-safe ONLY because every raster read uses
+  /// sizeof(DepthAndUncertainty) (NOT a hardcoded 8/16); verified for #87.
+    float range;
 
     DepthAndUncertainty(float depth = std::numeric_limits < float > ::quiet_NaN(),
       float uncertainty = std::numeric_limits < float > ::quiet_NaN(),
       float intensity = std::numeric_limits < float > ::quiet_NaN(),
-      float beam_angle = std::numeric_limits < float > ::quiet_NaN())
+      float beam_angle = std::numeric_limits < float > ::quiet_NaN(),
+      float range = std::numeric_limits < float > ::quiet_NaN())
       : depth(depth), uncertainty(uncertainty), intensity(intensity),
-      beam_angle(beam_angle) {
+      beam_angle(beam_angle), range(range) {
     }
   };
 #pragma pack(pop)

@@ -37,11 +37,15 @@ GeoMapSheet::GeoMapSheet(float cell_size, std::string iho_order)
 
 void GeoMapSheet::setBackscatterCorrection(
   BackscatterAngleCorrection mode,
-  std::vector<std::pair<float, float>> curve)
+  std::vector<std::pair<float, float>> curve,
+  bool tl_removed,
+  float absorption_db_per_m)
 {
   // Grids hold a const reference to parameters_, so this reaches all of them.
   parameters_.backscatter_angle_correction = mode;
   parameters_.angular_response_curve = std::move(curve);
+  parameters_.backscatter_tl_removed = tl_removed;
+  parameters_.backscatter_absorption_db_per_m = absorption_db_per_m;
 }
 
 void GeoMapSheet::addSoundings(

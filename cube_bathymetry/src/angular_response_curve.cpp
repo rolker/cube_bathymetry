@@ -52,23 +52,82 @@ bool parseBackscatterAngleCorrection(
   return false;
 }
 
-std::vector<std::pair<float, float>> loadAngularResponseCurve(const std::string & path)
+namespace
 {
-  std::vector<std::pair<float, float>> curve;
+// Parse a `# key: value` provenance comment. Returns true and fills `value`
+// (trimmed) when `line` (already known to start with '#') matches `key`.
+bool matchHeaderComment(
+  const std::string & line, const std::string & key, std::string & value)
+{
+  // Strip the leading '#' and surrounding whitespace, then split on the first
+  // ':'. Tolerant of arbitrary leading whitespace / spacing around the colon.
+  const auto hash = line.find('#');
+  std::string body = line.substr(hash + 1);
+  const auto colon = body.find(':');
+  if (colon == std::string::npos) {
+    return false;
+  }
+  std::string k = body.substr(0, colon);
+  std::string v = body.substr(colon + 1);
+  auto trim = [](std::string & s) {
+      const auto b = s.find_first_not_of(" \t\r\n");
+      const auto e = s.find_last_not_of(" \t\r\n");
+      if (b == std::string::npos) {
+        s.clear();
+      } else {
+        s = s.substr(b, e - b + 1);
+      }
+    };
+  trim(k);
+  trim(v);
+  if (k != key) {
+    return false;
+  }
+  value = v;
+  return true;
+}
+}  // namespace
+
+AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path)
+{
+  AngularResponseCurve result;
+  std::vector<std::pair<float, float>> & curve = result.points;
   if (path.empty()) {
-    return curve;
+    return result;
   }
 
   std::ifstream in(path);
   if (!in) {
-    return curve;
+    return result;
   }
 
   std::string line;
   while (std::getline(in, line)) {
-    // Skip blank lines and comments.
+    // Skip blank lines and comments -- but first mine comments for the optional
+    // self-describing TL header (cube_bathymetry#87).
     const auto first = line.find_first_not_of(" \t\r\n");
     if (first == std::string::npos || line[first] == '#') {
+      if (first != std::string::npos) {
+        std::string value;
+        if (matchHeaderComment(line, "tl_removed", value)) {
+          // Case-insensitive "true"/"1" -> true; anything else -> false.
+          std::string lower;
+          for (char c : value) {
+            lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+          }
+          result.tl_removed = (lower == "true" || lower == "1");
+        } else if (matchHeaderComment(line, "absorption_db_per_m", value)) {
+          try {
+            std::size_t used = 0;
+            const float a = std::stof(value, &used);
+            if (used > 0) {
+              result.absorption_db_per_m = a;
+            }
+          } catch (const std::exception &) {
+            // Malformed absorption value -- leave at the tier-1 default (0).
+          }
+        }
+      }
       continue;
     }
 
@@ -113,7 +172,12 @@ std::vector<std::pair<float, float>> loadAngularResponseCurve(const std::string 
       return a.first < b.first;
     });
 
-  return curve;
+  return result;
+}
+
+std::vector<std::pair<float, float>> loadAngularResponseCurve(const std::string & path)
+{
+  return loadAngularResponseCurveWithHeader(path).points;
 }
 
 }  // namespace cube

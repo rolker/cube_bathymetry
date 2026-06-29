@@ -41,6 +41,10 @@ namespace cube
       : depth(depth)
   {
     auto range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0;
+    // Retain the per-beam slant range as a first-class field (not only baked into
+    // sonar_relative_position) so the tier-2 backscatter TL correction can read it
+    // downstream (cube_bathymetry#87). Same value used for the geometry below.
+    slant_range = static_cast < float > (range);
     float tx_angle = 0.0;
     if(i < detections.tx_angles.size()) {
         tx_angle = detections.tx_angles[i];
@@ -117,6 +121,14 @@ namespace cube
   /// cross-checked against the marine_acoustic_msgs producer. A sign error
   /// would bias the incidence correction and corrupt the settled backscatter.
     float beam_angle = std::nan("");
+
+  /// Per-beam slant range R from the sonar head to the touchdown, in meters
+  /// (`two_way_travel_times[i] * sound_speed / 2`). Retained for the tier-2
+  /// backscatter 2-way transmission-loss correction (cube_bathymetry#87), which
+  /// removes `40*log10(R) + 2*alpha*R` so the empirical angular-response curve
+  /// becomes depth/range transferable. NaN when constructed without detections
+  /// (the `explicit Sounding(float depth)` ctor); the TL term is then skipped.
+    float slant_range = std::nan("");
 
   // Position relative to the sonar head, in meters.
   // For a typical down looking sonar, x is along the heading, y is to starboard, and z is down.

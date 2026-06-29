@@ -90,7 +90,9 @@
     "per-sonar curve from --backscatter-curve (cube#81)\n";
   std::cout << "  --backscatter-curve <file>: empirical angular-response curve CSV "
     "(abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir). Required for "
-    "--backscatter-correction empirical; empty -> correction is a no-op\n";
+    "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
+    "curve (header '# tl_removed: true' + '# absorption_db_per_m: <a>') also makes "
+    "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  --source-id <id>: Registry source id recorded for every cell "
     "(default cube-replay)\n";
@@ -457,14 +459,14 @@ int main(int argc, char * argv[])
               << "(got '" << backscatter_correction_str << "')\n";
     usage();
   }
-  std::vector<std::pair<float, float>> backscatter_curve;
+  cube::AngularResponseCurve backscatter_curve;
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
     !backscatter_curve_file.empty())
   {
-    backscatter_curve = cube::loadAngularResponseCurve(backscatter_curve_file);
+    backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
   }
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
-    backscatter_curve.empty())
+    backscatter_curve.points.empty())
   {
     // Loud, not silent: enabled but no curve loaded -> correction is a no-op.
     std::cerr << "warning: --backscatter-correction empirical but no curve was "
@@ -473,11 +475,19 @@ int main(int argc, char * argv[])
       "uncorrected). Provide a valid curve CSV.\n";
   } else if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical) {
     std::cout << "Backscatter angular-response correction: empirical, "
-              << backscatter_curve.size() << "-point curve from "
-              << backscatter_curve_file << std::endl;
+              << backscatter_curve.points.size() << "-point curve from "
+              << backscatter_curve_file;
+    if (backscatter_curve.tl_removed) {
+      // tier-2 (cube#87): the curve is a TL-removed residual; the estimator
+      // also removes 40*log10(R) + 2*alpha*R per beam.
+      std::cout << " [tier-2: TL-removed, alpha="
+                << backscatter_curve.absorption_db_per_m << " dB/m]";
+    }
+    std::cout << std::endl;
   }
   geo_map_sheet.setBackscatterCorrection(
-    backscatter_mode, std::move(backscatter_curve));
+    backscatter_mode, std::move(backscatter_curve.points),
+    backscatter_curve.tl_removed, backscatter_curve.absorption_db_per_m);
 
   std::cout << "reading messages..." << std::endl;
 
@@ -589,6 +599,9 @@ int main(int argc, char * argv[])
           // emits the value UNCORRECTED; the angle correction is cube#81.
           gs.sounding.intensity = s.intensity;
           gs.sounding.beam_angle = s.beam_angle;
+          // Per-beam slant range R = twtt*c/2 (set in the Sounding detections
+          // ctor) for the tier-2 TL correction (cube#87).
+          gs.sounding.slant_range = s.slant_range;
           soundings.push_back(gs);
         }
         geo_map_sheet.addSoundings(soundings);

@@ -190,6 +190,24 @@ namespace cube
   /// CSV. Empty -> the Empirical correction is a no-op (logged as a warning at
   /// configure time). Used only when backscatter_angle_correction == Empirical.
     std::vector < std::pair < float, float >> angular_response_curve;
+
+  /// Tier-2 backscatter correction (cube_bathymetry#87): when true, the loaded
+  /// angular_response_curve is a TL-REMOVED residual, so the estimator removes
+  /// the per-beam 2-way transmission loss `40*log10(R) + 2*alpha*R` (R = per-beam
+  /// slant range, m) BEFORE subtracting the residual curve, making the curve
+  /// depth/range transferable. Set by the curve loader from the CSV header
+  /// (`# tl_removed: <bool>`). Default false = tier-1 (no TL term), fully
+  /// backward compatible. Used only when backscatter_angle_correction ==
+  /// Empirical.
+    bool backscatter_tl_removed = false;
+
+  /// Tier-2 absorption coefficient alpha in dB/m (cube_bathymetry#87). The scalar
+  /// the estimator multiplies into the TL term `2*alpha*R`; read verbatim from
+  /// the curve CSV header (`# absorption_db_per_m: <float>`) so the C++ estimator
+  /// NEVER recomputes the (Francois-Garrison) absorption -- the Python derive tool
+  /// is the single source of truth, guaranteeing Python/C++ consistency. Default
+  /// 0 = no absorption term (tier-1, or fresh water at negligible alpha).
+    float backscatter_absorption_db_per_m = 0.0f;
   };
 
 }  // namespace cube

@@ -116,7 +116,7 @@ void Node::seedSettledDepth(
 
 bool Node::update(
   float depth, float variance, const Parameters & parameters,
-  float intensity, float beam_angle)
+  float intensity, float beam_angle, float range)
 {
   /* Find the best matching hypothesis for the current input sample given
    * those currently being tracked.
@@ -131,14 +131,14 @@ bool Node::update(
     addHypothesis(depth, variance);
     // This beam seeded (and so is a member of) the new hypothesis: record its
     // backscatter on it. Without this the first beam at every node is dropped.
-    depth_hypotheses_.back()->recordBeam(intensity, beam_angle);
+    depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range);
     return true;
   } else {
     /* Update the best hypothesis with the current data */
     if(best->update(depth, variance, parameters)) {
       // Accepted into the winning hypothesis -- accumulate its backscatter on
       // the SAME hypothesis (ADR-0007 D2: intensity rides the winning depth).
-      best->recordBeam(intensity, beam_angle);
+      best->recordBeam(intensity, beam_angle, range);
     } else {
       /* Failed update --- indicates an intervention, so that we need to
                          * start a new hypothesis to capture the outlier/datum shift.
@@ -148,7 +148,7 @@ bool Node::update(
       // The beam was REJECTED from `best` (depth-geometry outlier) and used to
       // seed the new hypothesis, so its backscatter belongs to the new
       // hypothesis, NOT to `best` (exclusion-on-intervention invariant).
-      depth_hypotheses_.back()->recordBeam(intensity, beam_angle);
+      depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range);
     }
   }
   return true;
@@ -253,17 +253,18 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
   nominated_hypothesis_.reset();
 
   return queueEstimate(sounding.depth + offset, variance, parameters,
-      sounding.intensity, sounding.beam_angle);
+      sounding.intensity, sounding.beam_angle, sounding.slant_range);
 }
 
 bool Node::queueEstimate(
   float depth, float variance, const Parameters & parameters,
-  float intensity, float beam_angle)
+  float intensity, float beam_angle, float range)
 {
   if(queue_.size() >= parameters.median_length) {
     auto mi = queue_.begin();
     advance(mi, parameters.median_length / 2);
-    update(mi->depth, mi->uncertainty, parameters, mi->intensity, mi->beam_angle);
+    update(mi->depth, mi->uncertainty, parameters, mi->intensity, mi->beam_angle,
+      mi->range);
     queue_.erase(mi);
   }
 
@@ -271,7 +272,7 @@ bool Node::queueEstimate(
   while(i != queue_.end() && i->depth > depth) {
     i++;
   }
-  queue_.insert(i, DepthAndUncertainty(depth, variance, intensity, beam_angle));
+  queue_.insert(i, DepthAndUncertainty(depth, variance, intensity, beam_angle, range));
 
   if(queue_.size() >= parameters.median_length) {
     /* Compute the likely 99% confidence bound below the shallowest point, and
@@ -358,21 +359,48 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
   // intensity in dB). The curve is keyed on |beam_angle|, so port/starboard beams
   // of equal magnitude get the same correction.
   //
+  // Tier-2 (cube_bathymetry#87): when the loaded curve is a TL-REMOVED residual
+  // (backscatter_tl_removed), compensate each beam's 2-way transmission loss by
+  // ADDING IT BACK -- a distant return lost more energy, so it is boosted to
+  // recover range-independent backscatter (TVG-style):
+  //   TL(R) = 40*log10(R) + 2*alpha*R      (R = per-beam slant range, m)
+  // so the residual curve is depth/range transferable:
+  //   corrected = raw + TL(R) - residualCurve(|beam_angle|).
+  // alpha is read verbatim from the curve header (backscatter_absorption_db_per_m);
+  // the estimator NEVER recomputes the (Francois-Garrison) absorption -- the
+  // Python derive tool is the single source of truth, guaranteeing consistency.
+  // A NaN / non-positive R skips the TL term (no log of a non-positive range);
+  // tier-1 (backscatter_tl_removed == false) skips it entirely (unchanged).
+  //
   // Deferred (NOT done here): the full radiometric GeoCoder chain -- insonified
   // area, beam-pattern, TVG residual, and the depth/slope incidence term
   // (ADR-0007 D3, cube_bathymetry#15/#59). The empirical curve absorbs the
   // aggregate angular falloff for a flat bottom; per-beam {raw_intensity,
-  // beam_angle} stay retained so the node value is re-derivable when #15 lands.
+  // beam_angle, range} stay retained so the node value is re-derivable when #15
+  // lands.
   const bool apply_ara =
     parameters.backscatter_angle_correction ==
     BackscatterAngleCorrection::Empirical &&
     !parameters.angular_response_curve.empty();
+  const bool apply_tl = apply_ara && parameters.backscatter_tl_removed;
+  const double alpha = parameters.backscatter_absorption_db_per_m;
   double sum = 0.0;
   double sum_sq = 0.0;
   uint32_t n = 0;
   for(const auto & sample : chosen->intensity_samples) {
     // recordBeam() already excluded NaN-intensity beams, so raw_intensity is real.
     double corrected = sample.raw_intensity;
+    if(apply_tl) {
+      const double range = static_cast<double>(sample.range);
+      // Skip the TL term for a missing / non-positive range (log10 undefined);
+      // the beam is still corrected by the residual angular-response curve below.
+      if(std::isfinite(range) && range > 0.0) {
+        // Compensate (ADD BACK) the 2-way transmission loss: a distant return
+        // lost more energy, so boost it to recover range-independent backscatter
+        // (TVG-style). #87 sign fix.
+        corrected += 40.0 * std::log10(range) + 2.0 * alpha * range;
+      }
+    }
     if(apply_ara && !std::isnan(sample.beam_angle)) {
       const double abs_angle_deg =
         std::abs(static_cast<double>(sample.beam_angle)) * 180.0 / M_PI;
@@ -496,7 +524,7 @@ void Node::queueFlush(const Parameters & parameters)
 
   while (ex_pt >= 0) {
     update(q[ex_pt].depth, q[ex_pt].uncertainty, parameters,
-      q[ex_pt].intensity, q[ex_pt].beam_angle);
+      q[ex_pt].intensity, q[ex_pt].beam_angle, q[ex_pt].range);
     ex_pt += direction * scale;
     direction = -direction;
     scale++;

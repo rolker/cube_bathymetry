@@ -37,15 +37,41 @@ namespace cube
   bool parseBackscatterAngleCorrection(
     const std::string & text, BackscatterAngleCorrection & out);
 
+/// A loaded angular-response curve plus its self-describing TL provenance
+/// (cube_bathymetry#87). `points` is the ascending {abs_angle_deg,
+/// db_relative_to_nadir} curve. When `tl_removed` is true the curve is a TL-
+/// REMOVED residual (tier-2) and the estimator must remove the per-beam 2-way
+/// transmission loss `40*log10(R) + 2*alpha*R` (alpha == `absorption_db_per_m`)
+/// before subtracting the residual. A tier-1 curve has `tl_removed == false`
+/// and `absorption_db_per_m == 0`, fully backward compatible.
+  struct AngularResponseCurve
+  {
+    std::vector < std::pair < float, float >> points;
+    bool tl_removed = false;
+    float absorption_db_per_m = 0.0f;
+  };
+
 /// Load an empirical angular-response curve from a CSV file matching the seed at
 /// ~/data/logs/analysis/m3_angular_response_curve.csv: a header line then rows
 /// `abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir`. Reads the first
 /// (abs_angle_deg_center) and fourth (db_relative_to_nadir) columns into ascending
 /// {abs_angle_deg, db_relative_to_nadir} pairs (sorted by angle).
 ///
+/// Also parses the optional self-describing TL header comments written by the
+/// derive tool (cube_bathymetry#87):
+///   `# tl_removed: true|false`
+///   `# absorption_db_per_m: <float>`
+/// Their absence yields tier-1 defaults (tl_removed=false, absorption=0), so a
+/// tier-1 curve keeps loading unchanged. The scalar `absorption_db_per_m` is read
+/// verbatim (the C++ estimator never recomputes alpha).
+///
 /// Comment lines (`#`...), blank lines, the header row, and rows that fail to
-/// parse are skipped. A missing/unreadable file yields an empty vector (the
+/// parse are skipped. A missing/unreadable file yields an empty curve (the
 /// Empirical correction then degrades to a no-op -- callers should warn).
+  AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path);
+
+/// Backward-compatible convenience: the curve `points` only (drops the TL
+/// provenance). Equivalent to `loadAngularResponseCurveWithHeader(path).points`.
   std::vector < std::pair < float, float >> loadAngularResponseCurve(const std::string & path);
 
 }  // namespace cube

@@ -24,6 +24,7 @@
 #define CUBE_BATHYMETRY__HYPOTHESIS_H_
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 #include "cube_bathymetry/parameters.h"
@@ -48,6 +49,15 @@ namespace cube
   /// treats a NaN angle as "no angle correction available" and emits that beam
   /// uncorrected.
     float beam_angle;
+
+  /// Per-beam slant range R from the sonar head to the touchdown, in meters,
+  /// for the tier-2 backscatter 2-way transmission-loss correction
+  /// (cube_bathymetry#87): `corrected = raw + (40*log10(R) + 2*alpha*R) -
+  /// residualCurve(|angle|)` (the TL is ADDED BACK to compensate the loss). NaN
+  /// (or non-positive) when not reported; the TL
+  /// term is then skipped (identity) so the beam is corrected by the residual
+  /// angular-response curve alone (tier-1 behavior).
+    float range = std::numeric_limits < float > ::quiet_NaN();
   };
 
 /// Depth hypothesis structure used to maintain a current track on the depth
@@ -115,8 +125,12 @@ namespace cube
   ///
   /// A NaN raw_intensity is skipped (a source that omits intensities must never
   /// inject a phantom sample); a NaN beam_angle is retained (the beam is
-  /// still a valid intensity sample, merely uncorrectable for angle).
-    void recordBeam(float raw_intensity, float beam_angle);
+  /// still a valid intensity sample, merely uncorrectable for angle). A NaN /
+  /// non-positive range is also retained (the beam is a valid intensity sample,
+  /// merely uncorrectable for the tier-2 TL term, cube_bathymetry#87).
+    void recordBeam(
+      float raw_intensity, float beam_angle,
+      float range = std::numeric_limits < float > ::quiet_NaN());
 
   /// Current depth mean estimate
     double current_estimate;
