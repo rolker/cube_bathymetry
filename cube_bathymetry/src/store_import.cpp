@@ -149,7 +149,8 @@ mapSheetToBackscatterCells(
 }
 
 void primeFromTile(
-  const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet)
+  const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
+  bool seed_settled)
 {
   const gggs::GridIndex & grid = tile.index();
   const std::vector<double> & depth = tile.depthBand();
@@ -178,6 +179,16 @@ void primeFromTile(
     map_sheet.setPredictedDepthAt(
       *it, static_cast<float>(d), static_cast<float>(variance));
 
+    if (!seed_settled) {
+      // Predicted-only prime (cube#89): seed the slope/blunder-rejection prior
+      // but do NOT settle the cell. A `Chart` (contour) prior must turn the
+      // blunder gate on WITHOUT filling the survey layer with coarse contour
+      // depths (which would also contaminate the co-estimated backscatter with
+      // non-measured cells). The survey accumulates real data on top; gap-filling
+      // survey->chart is a query-time overlay, not a settled fill.
+      continue;
+    }
+
     // Lossless reload (ADR-0001): also reseed the SETTLED depth as a CUBE
     // hypothesis so the primed cell round-trips through values() and survives the
     // next whole-tile save. Without this, a tile primed at startup, partially
@@ -191,12 +202,13 @@ void primeFromTile(
 void loadIntoSheet(
   const marine_bathymetry_store::BathymetryStore & store,
   marine_bathymetry_store::SourceLayer layer,
-  GeoMapSheet & map_sheet)
+  GeoMapSheet & map_sheet,
+  bool seed_settled)
 {
   // Single fused grid per layer (unh_marine_autonomy#221): iterate the layer's
   // tiles directly. Empty map -> no-op.
   for (const auto & grid_tile : store.tiles(layer)) {
-    primeFromTile(grid_tile.second, map_sheet);
+    primeFromTile(grid_tile.second, map_sheet, seed_settled);
   }
 }
 
