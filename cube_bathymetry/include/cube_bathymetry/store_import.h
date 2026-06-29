@@ -230,36 +230,36 @@ namespace cube
 ///
 /// **Persist-then-drop (lossless):** when the resident tile count exceeds the
 /// budget, each cold tile is written to disk — bathy via @ref geoGridToTile +
-/// `saveTile`, and (if a `--bs-store` is configured) backscatter via a
-/// newest-finite-wins merge — BEFORE it is dropped from RAM. A tile whose persist
-/// throws is left resident (never dropped), so a disk failure costs transient RAM,
-/// never data.
+/// `saveTile`, backscatter SUMMARY via `saveTile`, AND its raw per-beam intensity
+/// samples spilled to a temporary scratch — BEFORE it is dropped from RAM. A tile
+/// whose persist throws is left resident (never dropped), so a disk failure costs
+/// transient RAM, never data.
 ///
-/// **Reload-on-revisit (settled-output reload, NOT full estimator state):** before
-/// a batch's soundings that land on a previously-evicted tile are next persisted,
-/// the tile's SETTLED 2-band output (depth + uncertainty) is reloaded from the
-/// `-o` store (`loadWindow` + @ref primeFromTile, seed_settled), so a resurveyed
-/// area is refined, not overwritten with an empty grid. Keyed off the sheet's
-/// dirty set (not the sounding centres) so a neighbour tile a batch spills into
-/// near a GGGS seam is not missed (cube#70 review). This is faithful for a
-/// SETTLED/converged tile (the eviction first flushes the median pre-filter queue,
-/// so no pending samples are lost), but only an APPROXIMATION for a tile evicted
-/// mid-disambiguation: CUBE's competing depth hypotheses and exact sample counts
-/// are NOT persisted, so the reload reconstructs a SINGLE hypothesis (a Bayesian
-/// prior from the stored depth + variance, ADR-0001's narrow sense), and the
-/// re-derived uncertainty drifts slightly from the unbounded build. Depth is
-/// preserved; the uncertainty drift is a hypothesis-state collapse, not data loss.
+/// **Reload-before-add (lossless blend):** the bathy tile stores only the depth
+/// SUMMARY and the backscatter SUMMARY is a corrected mean — neither retains the
+/// raw per-beam intensity samples CUBE needs to keep blending. So eviction also
+/// spills each cell's raw `intensity_samples` to a scratch file, and the reload
+/// runs BEFORE a batch's soundings are added: it computes the grids the batch will
+/// touch (@ref GeoMapSheet::gridIndicesForSoundings), `loadWindow` +
+/// @ref primeFromTile restores each cell's settled depth as one CUBE hypothesis,
+/// then the spilled raw samples are restored onto that hypothesis. The batch's new
+/// beams then accrete onto the SAME reloaded hypothesis, so the node-output
+/// intensity is the FULL pre+post-eviction blend — bit-for-bit equal to a
+/// never-evicted build for a consistent re-survey. **Backscatter is lossless under
+/// eviction.**
 ///
-/// **Backscatter caveat (newest-finite-wins, not Welford-merged):**
-/// @ref primeFromTile restores depth but NOT the co-estimated intensity, so an
-/// evicted tile's intensity must be persisted at eviction and merged on disk:
-/// the new pass's finite cells overwrite, every other on-disk cell is preserved
-/// (@ref geoGridToBackscatterCells emits only finite cells, so a NaN cell never
-/// clobbers a stored finite one). A cell surveyed across an eviction boundary
-/// therefore keeps the *newest* visit's intensity estimate rather than a Welford
-/// blend of both visits — the documented divergence from an unbounded build
-/// (ADR-0007 D7 newest-valid-wins). For a cell surveyed only once (or with
-/// identical samples each visit) the result matches the unbounded build.
+/// **Remaining approximation (bathy uncertainty only):** the reload reconstructs a
+/// SINGLE depth hypothesis (a Bayesian prior from the stored depth + variance,
+/// ADR-0001), seeded with one sample rather than the original count. The depth
+/// VALUE is faithful (the prior is refined by the revisit), but the re-derived
+/// depth UNCERTAINTY drifts slightly from the unbounded build for a tile evicted
+/// mid-disambiguation — a hypothesis-state collapse, not data loss. The backscatter
+/// estimate does not depend on the depth sample count, so it is unaffected.
+///
+/// **Transient disk cost:** the spill holds the retained raw samples
+/// (`sizeof(BeamIntensitySample)` per beam) for every currently-evicted tile, in a
+/// scratch dir deleted in @ref finalize (and by the destructor on an exception).
+/// It is proportional to evicted-tile coverage, scratch-only, and local/fast.
   class ImportAccumulator
   {
 public:
@@ -267,15 +267,19 @@ public:
   /// @param config Persistence + budget configuration.
     ImportAccumulator(GeoMapSheet & sheet, ImportAccumulatorConfig config);
 
-  /// @brief Accumulate one batch, then reload-on-revisit + evict to budget.
+  /// @brief Clean up the scratch spill directory (RAII safety net for finalize).
+    ~ImportAccumulator();
+
+  /// @brief Reload-before-add any evicted tile this batch touches, accumulate the
+  ///        batch, then evict cold tiles back to budget.
     void addBatch(
       const std::vector < GeoSounding > &soundings,
       std::chrono::steady_clock::time_point time =
       std::chrono::steady_clock::now());
 
-  /// @brief Persist every still-resident tile (bathy + backscatter) and write
-  ///        both registries. Evicted tiles are already durable. Call once at
-  ///        end-of-stream.
+  /// @brief Persist every still-resident tile (bathy + backscatter), write both
+  ///        registries, and delete the scratch spill. Evicted tiles are already
+  ///        durable. Call once at end-of-stream.
     void finalize(
       const marine_bathymetry_store::SourceRegistry & bathy_registry,
       const marine_mbes_backscatter_store::SourceRegistry * bs_registry = nullptr);
@@ -290,16 +294,23 @@ public:
     std::size_t bathyTilesPersisted() const {return bathy_persisted_;}
   /// @brief Cumulative backscatter tile writes (eviction + finalize).
     std::size_t backscatterTilesPersisted() const {return bs_persisted_;}
+  /// @brief The scratch spill directory (empty until the first eviction). Exposed
+  ///        for tests that assert it is cleaned up after @ref finalize.
+    const std::string & scratchDir() const {return scratch_dir_;}
 
 private:
     void evictColdTiles();
     void persistBathyTile(const gggs::GridIndex & index);
     void persistBackscatterTile(const gggs::GridIndex & index);
+    void spillIntensitySamples(const gggs::GridIndex & index);
+    void restoreSpilledSamples(const gggs::GridIndex & index);
     bool reloadEvictedTile(const gggs::GridIndex & index);
+    void cleanupScratch();
 
     GeoMapSheet & sheet_;
     ImportAccumulatorConfig cfg_;
     std::set < gggs::GridIndex > evicted_;
+    std::string scratch_dir_;  // lazily created on first eviction; "" = none
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
   };

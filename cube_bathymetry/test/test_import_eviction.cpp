@@ -279,34 +279,35 @@ TEST(ImportEviction, RevisitEqualsUnbounded)
   std::filesystem::remove_all(root);
 }
 
-// Documented divergence (cube#92, ADR-0007 D7): a cell resurveyed AFTER its tile
-// was evicted keeps only the NEWEST visit's backscatter, not a Welford blend of
-// both visits. Co-estimated intensity lives in the in-RAM CUBE node records, NOT
-// in the persisted bathy tile, so reload restores depth but cannot restore
-// intensity -- the revisit re-estimates intensity from its own pings only. This
-// test MEASURES that divergence (it is not hidden behind a loose tolerance): the
-// bounded build's resurveyed cell equals visit-2's intensity, while the unbounded
-// build blends visit-1 and visit-2. For overlapping survey lines the overlap
-// cells are exactly these resurveyed cells.
-TEST(ImportEviction, ResurveyedBackscatterIsNewestWinsNotBlended)
+// Lossless backscatter blend (cube#92 Option A): a cell resurveyed AFTER its tile
+// was evicted blends BOTH visits' backscatter, matching a never-evicted build.
+// The raw per-beam intensity samples are spilled to scratch on eviction and
+// restored onto the reloaded hypothesis BEFORE the revisit's beams accrete, so the
+// node-output intensity is the full population, not just the newest visit. Both
+// visits survey the SAME depth so they land on one hypothesis (a consistent
+// re-survey -- the overlap case of crossing survey lines).
+TEST(ImportEviction, ResurveyedBackscatterBlendsLosslessly)
 {
   constexpr double kLat = 43.0;
   constexpr double kLon = -70.0;
+  constexpr float kDepth = 12.0f;
   constexpr float kI1 = 20.0f;  // visit-1 intensity
-  constexpr float kI2 = 60.0f;  // visit-2 intensity (same cell)
+  constexpr float kI2 = 60.0f;  // visit-2 intensity (same cell, same depth)
 
   std::vector<std::vector<GeoSounding>> batches;
-  batches.push_back(surveyCell(kLat, kLon, 12.0f, kI1));        // visit 1
+  batches.push_back(surveyCell(kLat, kLon, kDepth, kI1));       // visit 1
   for (int i = 1; i <= 10; ++i) {                               // evict the tile
     batches.push_back(surveyCell(43.0 + 0.02 * i, -71.0, 15.0f + i, 25.0f + i));
   }
-  batches.push_back(surveyCell(kLat, kLon, 12.0f, kI2));        // visit 2, SAME cell
+  batches.push_back(surveyCell(kLat, kLon, kDepth, kI2));       // visit 2, SAME cell
 
   const std::string root = makeTempDir("resurvey");
+  const std::string b_dir = root + "/bounded";
+  const std::string u_dir = root + "/unbounded";
   const std::string b_bs = root + "/bounded_bs";
   const std::string u_bs = root + "/unbounded_bs";
-  runImport(batches, root + "/bounded", b_bs, /*budget=*/3);
-  runImport(batches, root + "/unbounded", u_bs, /*budget=*/0);
+  runImport(batches, b_dir, b_bs, /*budget=*/3);    // evict + reload-before-add
+  runImport(batches, u_dir, u_bs, /*budget=*/0);    // never evicts
 
   // The resurveyed cell's CellIndex (deterministic for a fixed position).
   marine_mbes_backscatter_store::MbesBackscatterStore probe =
@@ -321,14 +322,40 @@ TEST(ImportEviction, ResurveyedBackscatterIsNewestWinsNotBlended)
   const float bounded_i = bs_b.at(xcell).first;
   const float unbounded_i = bs_u.at(xcell).first;
 
-  // Bounded == newest visit only (pre-eviction samples are gone).
-  EXPECT_NEAR(bounded_i, kI2, 0.5f) << "bounded should keep visit-2 intensity only";
-  // Unbounded == Welford blend of equal-count visits ~ (I1 + I2) / 2.
-  EXPECT_NEAR(unbounded_i, 0.5f * (kI1 + kI2), 0.5f)
-    << "unbounded should blend both visits";
-  // The divergence is real and sizeable -- ~|I1 - I2| / 2, NOT noise.
-  EXPECT_GT(std::abs(bounded_i - unbounded_i), 0.25f * std::abs(kI1 - kI2))
-    << "resurveyed-cell backscatter divergence under eviction should be measurable";
+  // Bounded == unbounded == the blend of both equal-count visits ~ (I1 + I2) / 2.
+  EXPECT_NEAR(unbounded_i, 0.5f * (kI1 + kI2), 0.5f) << "unbounded should blend";
+  EXPECT_NEAR(bounded_i, unbounded_i, 1e-3f)
+    << "bounded build must reproduce the unbounded blend (lossless backscatter)";
+  // And the intensity VARIANCE (estimate variance, shrinks with sample count)
+  // matches too -- same sample population => same variance.
+  EXPECT_NEAR(bs_b.at(xcell).second, bs_u.at(xcell).second, 1e-3f)
+    << "bounded build must reproduce the unbounded intensity variance";
+}
+
+// The scratch spill directory is created during eviction and DELETED by finalize.
+TEST(ImportEviction, ScratchDirCleanedUpAfterFinalize)
+{
+  const std::string root = makeTempDir("scratch");
+  const std::string store_dir = root + "/store";
+  const std::string bs_dir = root + "/bs";
+
+  GeoMapSheet sheet(kCellSize);
+  ImportAccumulator accumulator(sheet, makeConfig(store_dir, bs_dir, /*budget=*/3));
+  for (int i = 0; i < 12; ++i) {  // >> budget -> forces eviction (and a spill)
+    accumulator.addBatch(surveyCell(43.0 + 0.02 * i, -70.0, 10.0f + i, 30.0f + i));
+  }
+  const std::string scratch = accumulator.scratchDir();
+  ASSERT_FALSE(scratch.empty()) << "eviction should have created a scratch dir";
+  EXPECT_TRUE(std::filesystem::exists(scratch)) << "scratch dir should exist mid-run";
+
+  marine_bathymetry_store::SourceRegistry bathy_reg;
+  marine_mbes_backscatter_store::SourceRegistry bs_reg;
+  accumulator.finalize(bathy_reg, &bs_reg);
+
+  EXPECT_FALSE(std::filesystem::exists(scratch))
+    << "finalize must delete the scratch spill dir";
+  EXPECT_TRUE(accumulator.scratchDir().empty())
+    << "finalize must clear the scratch path";
 
   std::filesystem::remove_all(root);
 }

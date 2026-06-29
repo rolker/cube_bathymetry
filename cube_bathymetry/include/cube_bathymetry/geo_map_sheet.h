@@ -50,6 +50,18 @@ public:
       const std::vector < GeoSounding > &soundings,
       std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now());
 
+  /// @brief The grid indices @ref addSoundings would touch for @p soundings,
+  ///        WITHOUT creating them (cube_bathymetry#92 reload-before-add).
+  ///
+  /// Computes the same expanded bounds @ref addSoundings uses (the sounding extent
+  /// grown by one cell so a near-seam sounding reaches its neighbour tile) and
+  /// returns every `gggs::GridIndex` in that window. The bounded-RAM importer calls
+  /// this BEFORE addSoundings to reload any evicted tile the batch is about to
+  /// touch, so the new soundings accrete onto the reloaded hypotheses (lossless
+  /// blend) instead of forming a fresh, partial tile. Empty for empty input.
+    std::vector < gggs::GridIndex > gridIndicesForSoundings(
+      const std::vector < GeoSounding > &soundings) const;
+
   /// @brief Configure the per-beam backscatter angular-response correction
   ///        applied at node-output (ADR-0007 D3, cube_bathymetry#81).
   ///
@@ -104,6 +116,18 @@ public:
   /// soundings (ADR-0001). Used by the tile-eviction revisit-reload and the
   /// startup prime. Does NOT mark the grid dirty (reproduces persisted data).
     void setSettledDepthAt(const gggs::CellIndex & cell, float depth, float uncertainty);
+
+  /// @brief Restore raw backscatter samples onto @p cell's winning hypothesis
+  ///        (cube_bathymetry#92 lossless eviction reload).
+  ///
+  /// Forwards to `GeoGrid::setSettledIntensitySamplesAt` on the grid owning
+  /// @p cell (lazy-creates the grid; a no-op on the node if @ref setSettledDepthAt
+  /// did not seed it). Must run AFTER the depth reload and BEFORE the revisit's
+  /// soundings are added, so those beams accrete onto the same reloaded hypothesis
+  /// and the node-output backscatter is the full pre+post-eviction blend. Does NOT
+  /// mark the grid dirty (it reproduces already-persisted data).
+    void setSettledIntensitySamplesAt(
+      const gggs::CellIndex & cell, std::vector < BeamIntensitySample > samples);
 
   /// @brief Grid indices touched (returning true from insert) since the last
   ///        clearDirtyGrids(). Returned by value -- safe to iterate while saving.

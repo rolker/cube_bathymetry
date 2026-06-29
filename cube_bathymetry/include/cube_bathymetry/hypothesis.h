@@ -178,9 +178,10 @@ namespace cube
   /// node-output (Node::extractNodeRecord); these raw pairs are retained so the
   /// node value stays re-derivable when slope (cube_bathymetry#15) lands.
   ///
-  /// Memory budget: sizeof(BeamIntensitySample) == 8 bytes (two floats). Growth
-  /// class is identical to number_of_samples (one entry per accepted beam, for
-  /// the survey lifetime of the hypothesis). Worst-case is ~8 bytes/beam/node.
+  /// Memory budget: sizeof(BeamIntensitySample) == 12 bytes (three floats:
+  /// raw_intensity, beam_angle, range -- range added in cube_bathymetry#87).
+  /// Growth class is identical to number_of_samples (one entry per accepted beam,
+  /// for the survey lifetime of the hypothesis). Worst-case is ~12 bytes/beam/node.
   /// Once cube_bathymetry#15's correction model settles this can be reduced to
   /// pure sufficient statistics (mean, M2, count) if the per-beam retention is
   /// no longer needed for re-derivation.

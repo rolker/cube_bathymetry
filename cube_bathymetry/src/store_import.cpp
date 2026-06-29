@@ -23,17 +23,23 @@
 #include "cube_bathymetry/store_import.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
 #include "cube_bathymetry/common.h"
+#include "cube_bathymetry/hypothesis.h"
 #include "marine_autonomy/gggs.h"
 #include "marine_bathymetry_store/tile_io.hpp"
 #include "marine_mbes_backscatter_store/mbes_store.hpp"
@@ -226,14 +232,108 @@ void loadIntoSheet(
 // ImportAccumulator (cube_bathymetry#92): bounded-RAM offline import.
 // ===========================================================================
 
+namespace
+{
+// Per-tile raw-intensity-sample spill (cube#92). A tiny binary file, scratch-only
+// and single-machine, so native layout/endianness is fine. Format:
+//   uint32 magic | uint32 ncells | ncells * { uint16 row, uint16 col,
+//                                              uint32 nsamples,
+//                                              nsamples * BeamIntensitySample }
+// BeamIntensitySample is three tightly-packed floats (asserted below), so the
+// sample run is written/read as a contiguous block.
+constexpr uint32_t kSpillMagic = 0x43425331u;  // "CBS1"
+static_assert(
+  sizeof(BeamIntensitySample) == 3 * sizeof(float),
+  "BeamIntensitySample must be tightly packed for the block spill read/write");
+
+std::string spillFileName(const gggs::GridIndex & index)
+{
+  // Reuse the bathy tile naming (level_row_col.tif) for a unique per-tile stem.
+  return marine_bathymetry_store::tileFilename(index) + ".spill";
+}
+}  // namespace
+
 ImportAccumulator::ImportAccumulator(GeoMapSheet & sheet, ImportAccumulatorConfig config)
 : sheet_(sheet), cfg_(std::move(config))
 {
 }
 
+ImportAccumulator::~ImportAccumulator()
+{
+  // RAII safety net: finalize() normally cleans up, but an exception on the import
+  // path must not leak the scratch spill.
+  cleanupScratch();
+}
+
+void ImportAccumulator::cleanupScratch()
+{
+  if (!scratch_dir_.empty()) {
+    std::error_code ec;
+    std::filesystem::remove_all(scratch_dir_, ec);  // best-effort; never throws here
+    scratch_dir_.clear();
+  }
+}
+
 std::size_t ImportAccumulator::residentTileCount() const
 {
   return sheet_.residentTileCount();
+}
+
+void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
+{
+  if (cfg_.bs_store_dir.empty()) {
+    return;  // no backscatter product -> no need to retain raw samples
+  }
+  auto grid = sheet_.gridAt(index);
+  if (!grid) {
+    return;
+  }
+  const std::map<gggs::CellIndex, std::vector<BeamIntensitySample>> samples =
+    grid->nodeIntensitySamples();
+
+  // Lazily create a unique scratch dir on first spill.
+  if (scratch_dir_.empty()) {
+    static std::atomic<uint64_t> counter{0};
+    const auto ns =
+      std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path base = std::filesystem::temp_directory_path() /
+      ("cube_import_spill_" + std::to_string(ns) + "_" +
+      std::to_string(counter.fetch_add(1)));
+    std::filesystem::create_directories(base);
+    scratch_dir_ = base.string();
+  }
+
+  const std::string path = scratch_dir_ + "/" + spillFileName(index);
+  if (samples.empty()) {
+    // Nothing to retain; drop any stale spill so a later reload can't restore
+    // outdated samples for this tile.
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return;
+  }
+
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    throw std::runtime_error("import_bag: cannot open spill file " + path);
+  }
+  const uint32_t magic = kSpillMagic;
+  const uint32_t ncells = static_cast<uint32_t>(samples.size());
+  out.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
+  out.write(reinterpret_cast<const char *>(&ncells), sizeof(ncells));
+  for (const auto & entry : samples) {
+    const uint16_t row = entry.first.row();
+    const uint16_t col = entry.first.column();
+    const uint32_t n = static_cast<uint32_t>(entry.second.size());
+    out.write(reinterpret_cast<const char *>(&row), sizeof(row));
+    out.write(reinterpret_cast<const char *>(&col), sizeof(col));
+    out.write(reinterpret_cast<const char *>(&n), sizeof(n));
+    out.write(
+      reinterpret_cast<const char *>(entry.second.data()),
+      static_cast<std::streamsize>(entry.second.size() * sizeof(BeamIntensitySample)));
+  }
+  if (!out) {
+    throw std::runtime_error("import_bag: failed writing spill file " + path);
+  }
 }
 
 void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
@@ -276,29 +376,73 @@ void ImportAccumulator::persistBackscatterTile(const gggs::GridIndex & index)
   const std::map<gggs::CellIndex, mbs::MbesCell> cells =
     geoGridToBackscatterCells(*grid, cfg_.timestamp_ns, cfg_.bs_source_index);
   if (cells.empty()) {
-    // No new finite intensity this pass -> nothing to merge. Crucially we do NOT
-    // write an empty tile: that would clobber finite cells an earlier eviction of
-    // this same tile already wrote to disk (the backscatter-loss failure mode).
+    // No finite intensity this pass -> nothing to write. Do NOT write an empty
+    // tile over a populated one. With the sample spill/restore this is only hit
+    // for a genuinely intensity-less tile (it never loses an earlier write).
     return;
   }
   const std::string layer_dir = cfg_.bs_store_dir + "/" +
     mbs::layerDirName(mbs::SourceLayer::Processed);
   const std::string path = layer_dir + "/" + mbs::tileFilename(index);
-  const gggs::Level level = gggs::Level::fromCellSize(cfg_.cell_size_m);
-  // Newest-finite-wins merge: start from the on-disk tile (if any) so finite
-  // cells written by an earlier eviction of this tile survive, then overwrite the
-  // cells this pass resurveyed. primeFromTile does NOT restore intensity on
-  // reload, so without this merge a revisited tile would NaN-out its earlier
-  // backscatter on the next save.
-  mbs::MbesTile tile = std::filesystem::is_regular_file(path) ?
-    mbs::loadTile(path, level) :
-    mbs::MbesTile(index);
+  // Plain overwrite (no on-disk merge): the reload-before-add path restores the
+  // tile's raw intensity samples before a revisit accretes onto them, so at every
+  // eviction the in-RAM tile already holds the COMPLETE sample population for each
+  // cell -- its corrected summary is the complete value, and overwriting the
+  // on-disk tile reproduces it losslessly. (The old newest-finite-wins disk merge
+  // was only needed when reload could not restore intensity; #92 removes that gap.)
+  mbs::MbesTile tile(index);
   for (const auto & entry : cells) {
     tile.set(entry.first.row(), entry.first.column(), entry.second);
   }
   std::filesystem::create_directories(layer_dir);
   mbs::saveTile(tile, path);
   ++bs_persisted_;
+}
+
+void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
+{
+  // Best-effort: a missing/corrupt/truncated spill only degrades backscatter for
+  // this tile to the post-reload samples; the depth reload already succeeded.
+  if (scratch_dir_.empty()) {
+    return;
+  }
+  const std::string path = scratch_dir_ + "/" + spillFileName(index);
+  if (!std::filesystem::is_regular_file(path)) {
+    return;
+  }
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return;
+  }
+  uint32_t magic = 0;
+  uint32_t ncells = 0;
+  in.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+  in.read(reinterpret_cast<char *>(&ncells), sizeof(ncells));
+  if (!in || magic != kSpillMagic) {
+    return;
+  }
+  for (uint32_t c = 0; c < ncells; ++c) {
+    uint16_t row = 0;
+    uint16_t col = 0;
+    uint32_t n = 0;
+    in.read(reinterpret_cast<char *>(&row), sizeof(row));
+    in.read(reinterpret_cast<char *>(&col), sizeof(col));
+    in.read(reinterpret_cast<char *>(&n), sizeof(n));
+    if (!in) {
+      return;  // truncated header -> stop (what was restored already stands)
+    }
+    std::vector<BeamIntensitySample> vec(n);
+    if (n > 0) {
+      in.read(
+        reinterpret_cast<char *>(vec.data()),
+        static_cast<std::streamsize>(static_cast<std::size_t>(n) *
+        sizeof(BeamIntensitySample)));
+      if (!in) {
+        return;  // truncated sample run -> stop
+      }
+    }
+    sheet_.setSettledIntensitySamplesAt(gggs::CellIndex(index, row, col), std::move(vec));
+  }
 }
 
 bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
@@ -315,19 +459,23 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
     const auto & tiles = scratch.tiles(cfg_.bathy_layer);
     auto it = tiles.find(index);
     if (it != tiles.end()) {
-      // seed_settled=true: restore the settled depth/uncertainty as a CUBE
+      // seed_settled=true: restore each cell's settled depth/uncertainty as a CUBE
       // hypothesis so accumulation continues from the saved state (ADR-0001).
       primeFromTile(it->second, sheet_);
     }
-    return true;
   } catch (const std::exception & e) {
-    // The on-disk surface is the real data: on a load error drop the partial
-    // re-created grid rather than let a later save clobber the intact file.
+    // The on-disk surface is the real data: on a load error the caller drops the
+    // partial re-created grid rather than let a later save clobber the intact file.
     std::cerr << "import_bag: could not reload evicted tile on revisit: "
               << e.what() << " (dropping the partial re-created tile to protect "
       "the on-disk surface; will retry on the next revisit)" << std::endl;
     return false;
   }
+  // Restore the raw intensity samples onto the just-reseeded hypotheses so the
+  // revisit's beams blend with the pre-eviction population (lossless backscatter).
+  // Runs AFTER the depth reseed and BEFORE the batch's soundings are added.
+  restoreSpilledSamples(index);
+  return true;
 }
 
 void ImportAccumulator::evictColdTiles()
@@ -342,14 +490,16 @@ void ImportAccumulator::evictColdTiles()
     return;
   }
   // Persist-then-drop the coldest tiles beyond budget. Each is written to disk
-  // (bathy + backscatter) BEFORE it is dropped, so eviction is lossless and the
-  // tile reloads on revisit (ADR-0001). A tile whose persist THROWS is left
-  // resident (never dropped): RAM stays transiently over budget rather than
-  // losing unsaved data; the next batch retries.
+  // (bathy + backscatter summary) and its raw intensity samples spilled to scratch
+  // BEFORE it is dropped, so eviction is lossless and the tile reloads (with its
+  // full sample population) on revisit. A tile whose persist/spill THROWS is left
+  // resident (never dropped): RAM stays transiently over budget rather than losing
+  // unsaved data; the next batch retries.
   for (const auto & index : sheet_.coldTiles(cfg_.max_resident_tiles)) {
     try {
       persistBathyTile(index);
       persistBackscatterTile(index);
+      spillIntensitySamples(index);
     } catch (const std::exception & e) {
       std::cerr << "import_bag: failed to persist cold tile for eviction: "
                 << e.what() << " (keeping it resident to avoid data loss)"
@@ -365,32 +515,31 @@ void ImportAccumulator::addBatch(
   const std::vector<GeoSounding> & soundings,
   std::chrono::steady_clock::time_point time)
 {
+  // Reload-BEFORE-add (cube#92 lossless blend): reload any evicted tile this batch
+  // is about to touch FIRST, so the batch's beams accrete onto the reloaded
+  // hypotheses (settled depth + restored raw intensity samples) instead of forming
+  // a fresh, partial tile. gridIndicesForSoundings computes the SAME expanded
+  // window addSoundings will touch (including a near-seam neighbour tile), so no
+  // evicted tile is missed. A tile whose reload FAILS is recorded and dropped
+  // after the add, protecting the intact on-disk surface (it stays evicted and
+  // retries on the next revisit).
+  std::vector<gggs::GridIndex> reload_failed;
+  if (!cfg_.store_dir.empty() && !evicted_.empty()) {
+    for (const auto & idx : sheet_.gridIndicesForSoundings(soundings)) {
+      if (evicted_.count(idx)) {
+        if (reloadEvictedTile(idx)) {
+          evicted_.erase(idx);
+        } else {
+          reload_failed.push_back(idx);
+        }
+      }
+    }
+  }
+
   sheet_.addSoundings(soundings, time);
 
-  // Reload-on-revisit (mirror cube#70 pingCallback). Any evicted tile this batch
-  // just re-created/dirtied must be reseeded from disk BEFORE its next persist,
-  // or that persist overwrites the tile's full on-disk surface with only the
-  // freshly-accumulated cells. Key off the DIRTY set -- the grids insert()
-  // actually touched -- NOT the sounding centres: addSoundings expands the bounds
-  // by a cell and spills into neighbour tiles near a GGGS seam, so a centre-only
-  // check would miss an evicted neighbour and clobber it. primeFromTile does not
-  // mark dirty, so a reloaded grid stays dirty for the save (reloaded settled
-  // cells + new cells); a resurveyed cell keeps the new value, others the
-  // reloaded one.
-  if (!cfg_.store_dir.empty() && !evicted_.empty()) {
-    std::vector<gggs::GridIndex> revisited;
-    for (const auto & idx : sheet_.dirtyGrids()) {
-      if (evicted_.count(idx)) {
-        revisited.push_back(idx);
-      }
-    }
-    for (const auto & idx : revisited) {
-      if (reloadEvictedTile(idx)) {
-        evicted_.erase(idx);
-      } else {
-        sheet_.dropTile(idx);  // protect the intact on-disk surface
-      }
-    }
+  for (const auto & idx : reload_failed) {
+    sheet_.dropTile(idx);  // protect the intact on-disk surface
   }
 
   evictColdTiles();
@@ -422,6 +571,9 @@ void ImportAccumulator::finalize(
     std::filesystem::create_directories(cfg_.bs_store_dir);
     bs_registry->saveRegistry(cfg_.bs_store_dir);
   }
+  // The spilled raw samples were only needed to reload an evicted tile mid-run;
+  // the import is complete, so delete the scratch dir.
+  cleanupScratch();
 }
 
 }  // namespace cube

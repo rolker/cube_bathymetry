@@ -431,6 +431,45 @@ NodeRecord Node::extractNodeRecord(const Parameters & parameters)
   return record;
 }
 
+std::vector<BeamIntensitySample> Node::chosenIntensitySamples(const Parameters & parameters)
+{
+  // Same hypothesis selection as extractNodeRecord(), so the spilled samples and
+  // the persisted node-output intensity come from the SAME hypothesis (#92).
+  (void)parameters;  // selection does not need parameters; kept for API symmetry
+  std::shared_ptr<Hypothesis> chosen;
+  if(nominated_hypothesis_) {
+    chosen = nominated_hypothesis_;
+  } else {
+    auto h = chooseHypothesis();
+    if(h && h->number_of_samples > 0) {
+      chosen = h;
+    }
+  }
+  if(!chosen) {
+    return {};
+  }
+  return chosen->intensity_samples;
+}
+
+void Node::setSettledIntensitySamples(
+  std::vector<BeamIntensitySample> samples, const Parameters & parameters)
+{
+  (void)parameters;  // selection does not need parameters; kept for API symmetry
+  // Target the same hypothesis chosenIntensitySamples()/extractNodeRecord() read.
+  // On the eviction-reload path the node is freshly reseeded (seedSettledDepth
+  // pushed exactly one hypothesis), so this is that hypothesis; the revisit's
+  // beams then accrete onto it via recordBeam(), giving the full blend.
+  std::shared_ptr<Hypothesis> chosen;
+  if(nominated_hypothesis_) {
+    chosen = nominated_hypothesis_;
+  } else {
+    chosen = chooseHypothesis();
+  }
+  if(chosen) {
+    chosen->intensity_samples = std::move(samples);
+  }
+}
+
 std::shared_ptr<Hypothesis> Node::chooseHypothesis()
 {
   std::shared_ptr<Hypothesis> ret;

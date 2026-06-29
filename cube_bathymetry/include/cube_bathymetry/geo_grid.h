@@ -127,6 +127,29 @@ public:
   /// beam-angle/GeoCoder correction is deferred to cube#81).
     std::vector < NodeRecord > nodeRecords() const;
 
+  /// @brief Raw per-beam backscatter samples of every cell's winning hypothesis,
+  ///        keyed by `gggs::CellIndex` (cube_bathymetry#92 lossless eviction spill).
+  ///
+  /// Iterates the SPARSE node map (not all 960x960 cells), flushes each node's
+  /// median pre-filter (`queueFlush`, like @ref nodeRecords) and emits the
+  /// @ref Node::chosenIntensitySamples for cells that carry intensity-bearing
+  /// beams. The result is what must be persisted to a scratch spill so a tile
+  /// evicted from RAM can later be reloaded with its full backscatter sample
+  /// population intact (the bathy tile stores only the depth summary; the raw
+  /// intensity samples live only here).
+    std::map < gggs::CellIndex, std::vector < BeamIntensitySample >> nodeIntensitySamples() const;
+
+  /// @brief Restore raw backscatter samples onto @p cell's winning hypothesis
+  ///        (cube_bathymetry#92 lossless eviction reload).
+  ///
+  /// Forwards to @ref Node::setSettledIntensitySamples on the node at @p cell. A
+  /// no-op if no node exists there (the cell was not reseeded by the depth
+  /// reload). Must run AFTER @ref setSettledDepthAt (which lazy-creates the node)
+  /// and BEFORE the revisit's soundings are added, so those soundings' beams then
+  /// accrete onto the same reloaded hypothesis.
+    void setSettledIntensitySamplesAt(
+      const gggs::CellIndex & cell, std::vector < BeamIntensitySample > samples);
+
 private:
     gggs::GridIndex index_;
 
