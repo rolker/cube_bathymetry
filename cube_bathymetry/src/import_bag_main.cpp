@@ -75,7 +75,9 @@
     "needed)\n";
   std::cout << "  --prior <store_dir>: seed the CUBE predicted surface from this "
     "store's Chart (contour) layer so blunder rejection drops false-deep "
-    "detections (#89)\n";
+    "detections (#89). The chart must be at the survey GGGS level. NOTE: a "
+    "coarse/shallow-biased chart can also reject LEGITIMATE deeper-than-charted "
+    "returns; the rejection margin is tunable via the blunder_* params\n";
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store layer "
     "(Processed) from the same CUBE pass (optional; surfaces the co-estimated "
     "intensity -- uncorrected by default, angle-corrected when "
@@ -505,25 +507,68 @@ int main(int argc, char * argv[])
   // seed ONLY the predicted surface, never settle the coarse contour into the survey
   // layer (that would contaminate both the bathy and co-estimated backscatter).
   //
-  // ALIGNMENT CAVEAT: the prior store is built at THIS survey's GGGS level
-  // (fromCellSize(nominalCellSizeMeters())), so a chart cell only coincides with a
-  // survey node -- and thus only gates -- when the Chart layer was imported at a
-  // compatible level. A chart cell at a different level primes a node that the
-  // survey soundings never land on, so it silently won't gate. A future refinement
-  // could resample the chart to the survey level; today we assume compatible levels.
+  // ALIGNMENT: load() restores each Chart tile at the GGGS level encoded in its
+  // filename (the store is multi-level; the fromCellSize() arg below only sets the
+  // store's default cellIndex() level, it does NOT pin the level tiles load at). A
+  // chart cell only coincides with -- and thus gates -- a survey node when its level
+  // matches the survey level, i.e. the Chart layer was imported at the survey's
+  // resolution. A chart tile at a different level primes a node the survey soundings
+  // never land on, so it cannot gate. Rather than silently build an un-gated store
+  // (the operator passed --prior to reject outliers), we validate below and refuse
+  // when nothing would gate. A future refinement could resample the chart.
   if (!prior_dir.empty()) {
     marine_bathymetry_store::BathymetryStore prior =
       marine_bathymetry_store::BathymetryStore::fromCellSize(
       static_cast<float>(geo_map_sheet.nominalCellSizeMeters()));
     marine_bathymetry_store::SourceRegistry prior_reg;
-    marine_bathymetry_store::load(prior, prior_dir, &prior_reg);
-    const std::size_t prior_tiles =
-      prior.tiles(marine_bathymetry_store::SourceLayer::Chart).size();
+    try {
+      marine_bathymetry_store::load(prior, prior_dir, &prior_reg);
+    } catch (const std::exception & e) {
+      std::cerr << "ERROR: --prior store '" << prior_dir << "' failed to load: "
+                << e.what() << std::endl;
+      return 1;
+    }
+    const auto & chart_tiles =
+      prior.tiles(marine_bathymetry_store::SourceLayer::Chart);
+    const std::size_t prior_tiles = chart_tiles.size();
+    if (prior_tiles == 0) {
+      std::cerr << "ERROR: --prior store '" << prior_dir << "' has no Chart-layer "
+                << "tiles; nothing would seed the predicted surface and blunder "
+                << "rejection would be INACTIVE. Check the path and that the store "
+                << "has a chart/ layer (refusing to build an un-gated store)."
+                << std::endl;
+      return 1;
+    }
+    // Only tiles at the survey level can coincide with a survey node and gate
+    // (see ALIGNMENT above). The prior store's default level is fromCellSize() of
+    // the survey cell size, so it equals the survey sheet's level.
+    const uint8_t survey_level = prior.level().level();
+    std::size_t mismatched = 0;
+    for (const auto & grid_tile : chart_tiles) {
+      if (grid_tile.second.index().level() != survey_level) {
+        ++mismatched;
+      }
+    }
+    if (mismatched == prior_tiles) {
+      std::cerr << "ERROR: all " << prior_tiles << " Chart tile(s) in '" << prior_dir
+                << "' are at a GGGS level other than the survey level "
+                << static_cast<int>(survey_level) << "; none would coincide with a "
+                << "survey node, so blunder rejection would be INACTIVE. Re-import "
+                << "the chart at the survey resolution (refusing to build an "
+                << "un-gated store)." << std::endl;
+      return 1;
+    }
+    if (mismatched > 0) {
+      std::cerr << "WARNING: " << mismatched << " of " << prior_tiles << " Chart "
+                << "tile(s) are not at the survey level "
+                << static_cast<int>(survey_level) << " and will not gate; only the "
+                << "level-matched tiles seed the predicted surface." << std::endl;
+    }
     cube::loadIntoSheet(
       prior, marine_bathymetry_store::SourceLayer::Chart, geo_map_sheet,
       /*seed_settled=*/false);
-    std::cout << "Primed CUBE predicted surface from " << prior_tiles
-              << " Chart tile(s) in " << prior_dir
+    std::cout << "Primed CUBE predicted surface from " << (prior_tiles - mismatched)
+              << " of " << prior_tiles << " Chart tile(s) in " << prior_dir
               << " (blunder rejection active, #89)." << std::endl;
   }
 
