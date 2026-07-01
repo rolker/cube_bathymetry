@@ -180,7 +180,7 @@ public:
       const rosbag2_cpp::Reader & reader)
     : message(message)
     {
-      for (auto & topic_info : reader.get_all_topics_and_types()) {
+      for (const auto & topic_info : reader.get_all_topics_and_types()) {
         if (topic_info.name == message->topic_name) {
           data_type = topic_info.type;
           break;
