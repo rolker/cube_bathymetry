@@ -779,8 +779,9 @@ private:
   }
 
   // Persist every grid touched since the last save as a marine_bathymetry_store
-  // draft tile (atomic temp-then-rename via tile_io::saveTile), then clear the
-  // dirty set. A no-op when persistence is disabled or nothing changed.
+  // draft tile (via tile_io::saveTile -- a direct, flush/close-checked write, not
+  // crash-atomic), then clear the dirty set. A no-op when persistence is disabled or
+  // nothing changed.
   //
   // NOTE: geoGridToTile() calls GeoGrid::values(), which flushes the median
   // pre-filter -- the same flush the end-of-session export does, now happening

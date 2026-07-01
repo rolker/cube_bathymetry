@@ -50,8 +50,9 @@ namespace cube
 /// The live `cube_bathymetry_node` accumulates into a geographic
 /// @ref GeoMapSheet (migrated from the Cartesian `MapSheet`, #21) so that
 /// `geoGridToTile` / `mapSheetToTiles` persist live data directly into the
-/// `marine_bathymetry_store` `draft/` layer tiles via `tile_io` (atomic
-/// temp-then-rename) with NO lossy Cartesian→geographic resample. The single
+/// `marine_bathymetry_store` `draft/` layer tiles via `tile_io` (a direct,
+/// flush/close-checked write — not crash-atomic) with NO lossy Cartesian→geographic
+/// resample. The single
 /// fused `draft` grid (no per-day epochs, unh_marine_autonomy#221) accumulates
 /// newest-value-wins per cell. The costmap `bathymetry_layer` (#164) and the sim
 /// live loop (#77) then read exactly what CUBE writes.
@@ -251,6 +252,16 @@ namespace cube
   /// Maximum resident GeoGrid tiles before persist-then-drop eviction runs.
   /// 0 = unbounded (never evict — the pre-#92 whole-survey-in-RAM behavior).
     std::size_t max_resident_tiles = 0;
+  /// When true, @ref ImportAccumulator::seedNewTile SKIPS the rung-1 survey
+  /// warm-start (it still applies the rung-2 reference gate). Set by @ref BatchRegen
+  /// for its gather: batch-regen replays a tile's COMPLETE sounding population in one
+  /// pass, so warm-starting that same tile from a pre-existing `survey/` tile in the
+  /// OUTPUT store would double-count it — the gather would blend onto data it is
+  /// about to fully reproduce, silently corrupting an exact rebuild. Forcing
+  /// from-scratch makes batch-regen a true rebuild regardless of the `-o` store's
+  /// prior contents. The live import path leaves this false (its warm-start is the
+  /// intended incremental-import behavior).
+    bool skip_survey_seed = false;
   };
 
 /// @brief Bounded-RAM offline import accumulator (cube_bathymetry#92).
@@ -369,7 +380,12 @@ private:
   ///           counted as measured data, NO backscatter seed.
   ///        else blank (no prior). A no-op beyond marking @ref seeded_ when no
   ///        seed source is configured or found.
-    void seedNewTile(const gggs::GridIndex & index);
+  /// @return false if the rung-1 survey seed threw (the on-disk survey tile exists
+  ///        but could not be read): the caller then drops this tile like a failed
+  ///        reload, protecting the intact-but-unreadable surface from being
+  ///        overwritten with from-scratch data, and leaves it UNseeded so a later
+  ///        batch retries. true otherwise (seeded, or nothing to seed).
+    bool seedNewTile(const gggs::GridIndex & index);
     void cleanupScratch();
 
     GeoMapSheet & sheet_;

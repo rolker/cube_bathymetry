@@ -198,6 +198,18 @@ IntensityWelford welfordFromCell(
   const double sample_sd = static_cast<double>(cell.sample_sd);
   const double se =
     static_cast<double>(cell.standard_error) / kBackscatterConfidenceScale;
+  if (!(se > 0.0)) {
+    // Defensive: a well-formed encode pairs a non-zero sample_sd with a non-zero
+    // standard_error (both are zero iff the variance is zero, handled above). A
+    // corrupt or hand-built tile with sample_sd != 0 but a zero / negative /
+    // non-finite standard_error would drive ratio = sample_sd / se to +/-inf or
+    // NaN, and std::lround(inf/NaN) is undefined behaviour with an out-of-range
+    // uint32_t cast. A zero SE carries no dispersion information, so fall back to
+    // the n = 1 sentinel rather than invoke UB.
+    w.n = 1;
+    w.m2 = 0.0;
+    return w;
+  }
   const double ratio = sample_sd / se;
   w.n = static_cast<uint32_t>(std::lround(ratio * ratio));
   if (w.n < 2) {
@@ -414,8 +426,11 @@ void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
     marine_bathymetry_store::layerDirName(
     marine_bathymetry_store::SourceLayer::Survey);
   std::filesystem::create_directories(layer_dir);
-  // Atomic temp-then-rename via tile_io::saveTile -- a partial write never
-  // corrupts the on-disk surface (same primitive the live node's eviction uses).
+  // tile_io::saveTile writes the GTiff directly to the final path and checks the
+  // flush/close result (an I/O error or full disk throws), but it is NOT crash-atomic:
+  // it does not temp-then-rename, so a crash/kill mid-write can leave a partial tile
+  // at the final path. Making that write atomic is a tracked marine_tiled_raster_store
+  // follow-up (#96 review); a batch-regen re-run reproduces the tile exactly.
   marine_bathymetry_store::saveTile(
     tile, layer_dir + "/" + marine_bathymetry_store::tileFilename(index));
   ++bathy_persisted_;
@@ -534,7 +549,7 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   return true;
 }
 
-void ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
+bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
 {
   // Two-rung seed precedence (#96), run once per tile on first touch. survey wins
   // over reference: a survey tile is measured CUBE data (settle it, seed its
@@ -544,7 +559,10 @@ void ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
   // an existing store, or -- via reloadEvictedTile -- an already-written tile).
   // loadWindow silently returns 0 when store_dir has no survey/ layer yet (a fresh
   // import), so this falls through to the reference rung with no error/warning.
-  if (!cfg_.store_dir.empty()) {
+  // skip_survey_seed disables this rung for the batch-regen gather: replaying a
+  // tile's complete sounding population onto a warm-start from that same tile in the
+  // OUTPUT store would double-count it (a silent blend, not an exact rebuild).
+  if (!cfg_.store_dir.empty() && !cfg_.skip_survey_seed) {
     try {
       marine_bathymetry_store::BathymetryStore scratch =
         marine_bathymetry_store::BathymetryStore::fromCellSize(cfg_.cell_size_m);
@@ -579,13 +597,21 @@ void ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
           }
         }
         seeded_.insert(index);
-        return;
+        return true;
       }
     } catch (const std::exception & e) {
-      // A seed load failure must never corrupt the run: skip seeding (the tile
-      // accumulates from scratch) rather than abort. The on-disk prior is untouched.
+      // A survey-seed read error means the on-disk survey tile EXISTS but could not
+      // be loaded (a fresh import returns 0 tiles WITHOUT throwing, so it never
+      // reaches here). Accumulating from scratch and then persisting would overwrite
+      // that intact-but-unreadable tile with partial data -- the same data-loss the
+      // reload path guards against. Mirror reloadEvictedTile: signal failure so the
+      // caller drops this tile (and its soundings) to protect the on-disk surface,
+      // and leave it UNseeded so a later batch retries the seed.
       std::cerr << "import_bag: could not survey-seed tile on first touch: "
-                << e.what() << " (accumulating this tile from scratch)" << std::endl;
+                << e.what() << " (dropping this batch's soundings on the tile to "
+        "protect the on-disk surface; a later batch retries the seed, but these "
+        "dropped soundings are not re-processed)" << std::endl;
+      return false;
     }
   }
 
@@ -614,6 +640,7 @@ void ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
 
   // else blank -- nothing to seed; still mark it seeded so we do not retry.
   seeded_.insert(index);
+  return true;
 }
 
 void ImportAccumulator::evictColdTiles()
@@ -679,7 +706,12 @@ void ImportAccumulator::addBatch(
         reload_failed.push_back(idx);
       }
     } else if (!seeded_.count(idx)) {
-      seedNewTile(idx);
+      if (!seedNewTile(idx)) {
+        // Survey-seed read error on an existing tile: protect it exactly like a
+        // failed reload -- drop this batch's soundings on it after the add so the
+        // intact-but-unreadable on-disk surface is never overwritten from scratch.
+        reload_failed.push_back(idx);
+      }
     }
   }
 
@@ -702,9 +734,9 @@ void ImportAccumulator::addBatch(
     }
     std::cerr << "import_bag: WARNING permanently dropping ~" << dropped_soundings
               << " sounding(s) centred in " << reload_failed.size()
-              << " un-reloadable tile(s) this batch (reload failed; the on-disk "
-      "surface is preserved, but these soundings are NOT re-processed "
-      "offline -- not the lossless eviction blend)" << std::endl;
+              << " un-reloadable/un-seedable tile(s) this batch (reload or "
+      "survey-seed failed; the on-disk surface is preserved, but these soundings "
+      "are NOT re-processed offline -- not the lossless eviction blend)" << std::endl;
     for (const auto & idx : reload_failed) {
       sheet_.dropTile(idx);  // protect the intact on-disk surface
     }
