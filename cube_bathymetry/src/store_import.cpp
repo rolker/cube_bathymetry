@@ -318,6 +318,15 @@ std::size_t ImportAccumulator::residentTileCount() const
   return sheet_.residentTileCount();
 }
 
+void ImportAccumulator::persistResidentTile(const gggs::GridIndex & index)
+{
+  // Batch-regen gather (#96): write only this tile (bathy + backscatter). The
+  // gather sheet may also hold neighbour grids a near-seam sounding spilled into;
+  // those are each written by their OWN tile's gather, so we never persist them here.
+  persistBathyTile(index);
+  persistBackscatterTile(index);
+}
+
 void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
 {
   if (cfg_.bs_store_dir.empty()) {

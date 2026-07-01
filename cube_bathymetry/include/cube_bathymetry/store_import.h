@@ -326,6 +326,17 @@ public:
       const marine_bathymetry_store::StoreMetadata * bathy_metadata = nullptr,
       const marine_mbes_backscatter_store::StoreMetadata * bs_metadata = nullptr);
 
+  /// @brief Persist ONE resident tile's bathy + backscatter, nothing else
+  ///        (batch-regen gather, #96).
+  ///
+  /// Unlike @ref finalize this writes only @p index and no store-level metadata,
+  /// so the batch-regen gather can process one tile bucket in a fresh sheet and
+  /// write ONLY the target tile — never the neighbour grids a near-seam sounding
+  /// also created in that sheet. Runs the same @ref seedNewTile precedence via the
+  /// preceding @ref addBatch, so a survey/reference prior is honoured. Increments
+  /// the persisted-tile counters.
+    void persistResidentTile(const gggs::GridIndex & index);
+
   /// @brief Tiles currently resident in RAM.
     std::size_t residentTileCount() const;
   /// @brief Indices evicted to disk and not yet reloaded.
