@@ -237,10 +237,10 @@ fresh-context sub-agent:
 **Round**: 2 | **Ship**: recommended — one mechanical read-back guard; must-fix fell 2→1, not a design question
 
 ### Findings
-- [ ] (must-fix) Gather read-back swallows I/O errors, breaking the bit-exact contract on the error path: read-open failure on a known-created bucket is `continue`d and `in.read` can't tell `badbit` from EOF → silently missing/truncated tile; guard symmetric with the hard-throwing write path — `cube_bathymetry/src/batch_regen.cpp:274-281`
-- [ ] (suggestion) `closeAllStreams` discards close-time errors, safe only because `flushOpenStreams` runs first; bind that ordering (assert/comment or check-and-throw) — `cube_bathymetry/src/batch_regen.cpp:224-228`
-- [ ] (suggestion) `import_bag_main` still uses raw `std::stod`/`std::stoi`/`std::stoll` → `std::terminate` on bad CLI value; mirror the guarded parse helpers added to the sibling `batch_regen_main` — `cube_bathymetry/src/import_bag_main.cpp:351-382`
-- [ ] (suggestion) `topic_info` loop var can be `const &` (cppcheck); folds into the tracked ~800-line dedup follow-up — `cube_bathymetry/src/batch_regen_main.cpp:183`
+- [x] (must-fix) Gather read-back swallows I/O errors, breaking the bit-exact contract on the error path: read-open failure on a known-created bucket is `continue`d and `in.read` can't tell `badbit` from EOF → silently missing/truncated tile; guard symmetric with the hard-throwing write path — `cube_bathymetry/src/batch_regen.cpp:274-281`
+- [x] (suggestion) `closeAllStreams` discards close-time errors, safe only because `flushOpenStreams` runs first; bind that ordering (assert/comment or check-and-throw) — `cube_bathymetry/src/batch_regen.cpp:224-228`
+- [x] (suggestion) `import_bag_main` still uses raw `std::stod`/`std::stoi`/`std::stoll` → `std::terminate` on bad CLI value; mirror the guarded parse helpers added to the sibling `batch_regen_main` — `cube_bathymetry/src/import_bag_main.cpp:351-382`
+- [x] (suggestion) `topic_info` loop var can be `const &` (cppcheck); folds into the tracked ~800-line dedup follow-up — `cube_bathymetry/src/batch_regen_main.cpp:183`
 
 ### Notes
 - Round 1's two must-fixes (near-seam bit-exactness, `welfordFromCell` division UB) verified correctly fixed under adversarial tracing (Lens A + Lens B) with new regression tests.
@@ -251,3 +251,39 @@ fresh-context sub-agent:
 ### Next step
 Lifecycle: **Local Review** → `address-findings` (verdict changes-requested) → re-run `review-code` → push / open PR → `triage-reviews`.
 Ship advisory is **recommended** after the one mechanical must-fix lands; the host decides.
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-01 16:44 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-96 at `b9d9a94`   <!-- PR-less (`--issue 96`) -->
+**Addressed**: Local Review (Pre-Push) — 2026-07-01 16:25 +00:00, branch feature/issue-96 at `16b0de1`
+**Commits**: `23dfe42` (batch_regen), `3ab4035` (import_bag_main), `b9d9a94` (batch_regen_main)
+
+### Actions
+- [x] (must-fix) Gather read-back now symmetric with the hard-throwing scatter/flush path: a reopen failure on a bucket this run created **throws** (was `continue`d); after the read loop, `in.bad()` (a real I/O fault, not EOF) **throws**, and a non-zero `in.gcount()` at loop exit (a truncated partial trailing record) **throws** — no error path can silently drop or truncate a tile from the "bit-exact" rebuild — `cube_bathymetry/src/batch_regen.cpp`
+- [x] (suggestion) `closeAllStreams` swallow-close-errors invariant bound with a comment: it is safe only because the success path (`finalize`) runs the checked `flushOpenStreams()` first; the only unflushed caller is `~BatchRegen` (exception mid-scatter), where throwing during unwinding is wrong and dropping soon-to-be-deleted scratch is correct — `cube_bathymetry/src/batch_regen.cpp`
+- [x] (suggestion) `import_bag_main` numeric flag parsing guarded: `parse_double`/`parse_int`/`parse_long` helpers (mirroring the sibling `batch_regen_main`) catch and route bad `-r`/`--max-resident-tiles`/`-l`/`--minimum-range`/`--maximum-range` values to `usage()` (rejecting trailing junk) instead of `std::terminate` — `cube_bathymetry/src/import_bag_main.cpp`
+- [x] (suggestion) `batch_regen_main` bag-topic lookup loop var taken by `const &` (cppcheck) — `cube_bathymetry/src/batch_regen_main.cpp`
+
+### Build / test — GREEN
+Full layer stack rebuilt from source in-container (underlay_ws → core_ws store libs
+`marine_autonomy`/`marine_bathymetry_store`/`marine_mbes_backscatter_store`/`marine_tiled_raster_store`),
+then `cube_bathymetry` built + tested against them:
+- **build GREEN** (only pre-existing warnings: `tmpnam` in `test_angular_response_curve`,
+  unused-var in `test_tile_eviction_rss`).
+- **tests GREEN** — full suite **442 tests, 0 failures, 58 skipped** (skips pre-existing);
+  `BatchRegen` gather/seam tests, `test_store_import` Welford round-trips, `test_import_eviction` green.
+- **lint** — uncrustify + cpplint clean on all changed files.
+
+### Deferred (unchanged from prior round — not re-opened here)
+- Extract a shared `BagReaders`/`speedAt`/projection helper from
+  `batch_regen_main.cpp` + `import_bag_main.cpp` (the ~800-line dedup follow-up).
+- Make `marine_tiled_raster_store::saveTile` crash-atomic (temp-then-rename), other repo.
+
+### Next step
+Lifecycle: **Implementation → review-code** (re-review the fixes). Hand off to a
+fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 96 --skill review-code
