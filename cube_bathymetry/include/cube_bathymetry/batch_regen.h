@@ -53,12 +53,15 @@ namespace cube
 /// in a single pass over the COMPLETE set of soundings that touch it, so no tile is
 /// ever evicted mid-disambiguation.
 ///
-/// **Scatter (streaming):** @ref addBatch routes each sounding to a per-tile binary
-/// bucket file on disk — one bucket per GGGS tile the sounding touches (its
-/// one-cell-expanded window, so a near-seam sounding lands in every tile it would
-/// influence, exactly as @ref GeoMapSheet::addSoundings spreads it). Nothing is
-/// accumulated in RAM during the scatter; resident memory is bounded by the open
-/// bucket-stream cache, not by surveyed area.
+/// **Scatter (streaming):** @ref addBatch appends each batch to the per-tile binary
+/// bucket files on disk — one bucket per GGGS tile in the batch's one-cell-expanded
+/// bounds, each receiving the WHOLE batch, exactly the tiles + soundings
+/// @ref GeoMapSheet::addSoundings feeds each grid. Writing the whole batch (not just
+/// the soundings whose own centre is near a tile) preserves the far-radius
+/// cross-sounding deposits addSoundings makes near a seam (out to
+/// max_radius = CONF_99PC·√(horizontal_error)), so the rebuild stays bit-exact for
+/// any TPU. Nothing is accumulated in RAM during the scatter; resident memory is
+/// bounded by the open bucket-stream cache, not by surveyed area.
 ///
 /// **Gather:** @ref finalize processes one bucket at a time. Each tile's soundings
 /// are replayed, in global scatter order, into a FRESH @ref GeoMapSheet driven by a
@@ -119,6 +122,10 @@ private:
   /// scratch dir and truncating the file the first time this tile is seen; keeps a
   /// bounded LRU of open streams so the scatter never exhausts file descriptors.
     std::ofstream & bucketStream(const gggs::GridIndex & index);
+  /// Flush every open bucket stream and throw if any flush failed (disk-full / I/O
+  /// error), so a truncated bucket is a hard error before the gather reads it rather
+  /// than a silently-wrong tile. Called by @ref finalize before @ref closeAllStreams.
+    void flushOpenStreams();
     void closeAllStreams();
     void cleanupScratch();
     std::string bucketPath(const gggs::GridIndex & index) const;

@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -145,7 +146,20 @@ std::ofstream & BatchRegen::bucketStream(const gggs::GridIndex & index)
   while (open_streams_.size() >= kMaxOpenStreams && !lru_.empty()) {
     const gggs::GridIndex victim = lru_.back();
     lru_.pop_back();
-    open_streams_.erase(victim);  // closes the stream
+    auto vit = open_streams_.find(victim);
+    if (vit != open_streams_.end()) {
+      // Flush before the stream is closed+destroyed so a disk-full / I/O failure on
+      // the buffered data surfaces HERE. Letting the ofstream destructor swallow a
+      // close-time flush failure would truncate this bucket and yield a
+      // silently-wrong tile when the gather reads it back.
+      vit->second.first.flush();
+      if (!vit->second.first) {
+        throw std::runtime_error(
+          "batch_regen: failed flushing scatter bucket " + bucketPath(victim) +
+          " on eviction (disk full?) -- aborting to avoid a silently-truncated tile");
+      }
+      open_streams_.erase(vit);  // closes the stream
+    }
   }
 
   const std::string path = bucketPath(index);
@@ -161,19 +175,48 @@ std::ofstream & BatchRegen::bucketStream(const gggs::GridIndex & index)
 
 void BatchRegen::addBatch(const std::vector<GeoSounding> & soundings)
 {
-  // Scatter each sounding into EVERY tile it would touch — its one-cell-expanded
-  // window (gridIndicesForSoundings on the singleton), the same set addSoundings
-  // spreads it into. So a tile's bucket ends up holding exactly the soundings a
-  // single unbounded pass would feed that tile's grid, in global scatter order.
-  for (const auto & s : soundings) {
-    const std::vector<GeoSounding> one{s};
-    for (const auto & idx : index_sheet_->gridIndicesForSoundings(one)) {
-      std::ofstream & out = bucketStream(idx);
+  if (soundings.empty()) {
+    return;
+  }
+  // Route the WHOLE batch into every tile addSoundings would create for it, so the
+  // scatter mirrors a single unbounded pass EXACTLY. GeoMapSheet::addSoundings takes
+  // gridIndicesForSoundings(batch) (the batch's one-cell-expanded bounds) and calls
+  // grid->insert(batch) on every grid in that set -- i.e. each such grid sees the
+  // ENTIRE batch, not just the soundings whose own centre is near it. A sounding
+  // near a tile seam deposits into a neighbour tile's cells out to
+  // max_radius = CONF_99PC*sqrt(horizontal_error), MULTIPLE cells for realistic TPU.
+  // Scattering each sounding only to its own one-cell window (the earlier approach)
+  // dropped those far-radius cross-sounding deposits, so the gather was not bit-exact
+  // near seams -- masked only because the tests use a sub-cell horizontal_error.
+  // Writing the whole batch to every grid in its expanded bounds reproduces
+  // addSoundings' touch set exactly; the gather's GeoGrid::insert re-applies the true
+  // per-cell radius test, so a bucketed sounding that does not actually reach the tile
+  // is harmlessly filtered (no false deposit) -- the bucket is a superset the radius
+  // test trims back to the exact single-pass deposit set.
+  for (const auto & idx : index_sheet_->gridIndicesForSoundings(soundings)) {
+    std::ofstream & out = bucketStream(idx);
+    for (const auto & s : soundings) {
       const ScatterRecord rec = toRecord(s);
       out.write(reinterpret_cast<const char *>(&rec), sizeof(rec));
       if (!out) {
         throw std::runtime_error("batch_regen: failed writing scatter bucket");
       }
+    }
+  }
+}
+
+void BatchRegen::flushOpenStreams()
+{
+  // Force every still-open bucket's buffered data out and CHECK the result, so a
+  // disk-full / I/O error surfaces before the gather reads the buckets back rather
+  // than being swallowed by ofstream's destructor in closeAllStreams().
+  for (auto & entry : open_streams_) {
+    std::ofstream & out = entry.second.first;
+    out.flush();
+    if (!out) {
+      throw std::runtime_error(
+        "batch_regen: failed flushing scatter bucket " + bucketPath(entry.first) +
+        " (disk full?) -- aborting to avoid a silently-truncated tile");
     }
   }
 }
@@ -188,13 +231,40 @@ void BatchRegen::finalize(
   const marine_bathymetry_store::StoreMetadata * bathy_metadata,
   const marine_mbes_backscatter_store::StoreMetadata * bs_metadata)
 {
-  // Flush and close every bucket before reading them back.
+  // Flush every bucket and CHECK the result before reading them back, so a disk-full
+  // truncation is a hard error here rather than a silently-wrong tile at gather; then
+  // close them all.
+  flushOpenStreams();
   closeAllStreams();
 
+  // A non-empty output survey layer means batch-regen is rebuilding over a populated
+  // store. The gather forces from-scratch (skip_survey_seed below) so it never blends
+  // onto the tiles it rebuilds, but tiles NOT touched by this run stay behind as
+  // stale survey data mixed with the fresh rebuild -- warn so the operator can point
+  // -o at an empty directory for a clean exact rebuild.
+  if (!cfg_.store_dir.empty()) {
+    const std::string survey_dir = cfg_.store_dir + "/" +
+      marine_bathymetry_store::layerDirName(
+      marine_bathymetry_store::SourceLayer::Survey);
+    std::error_code ec;
+    if (std::filesystem::is_directory(survey_dir, ec) &&
+      !std::filesystem::is_empty(survey_dir, ec))
+    {
+      std::cerr << "batch_regen: WARNING output survey layer '" << survey_dir
+                << "' is not empty; batch-regen rebuilds each touched tile from "
+        "scratch, but any pre-existing tile this run does NOT touch is left in "
+        "place (stale data mixed with the rebuild). Point -o at an empty directory "
+        "for a clean exact rebuild." << std::endl;
+    }
+  }
+
   // No eviction in the gather (each bucket is a single tile). Copy the config with
-  // the budget forced unbounded so the gather accumulator never drops a grid.
+  // the budget forced unbounded so the gather accumulator never drops a grid, and
+  // skip the rung-1 survey warm-start so the gather never double-counts a tile it is
+  // rebuilding from its complete bucket (exact rebuild, not a blend).
   ImportAccumulatorConfig gather_cfg = cfg_;
   gather_cfg.max_resident_tiles = 0;
+  gather_cfg.skip_survey_seed = true;
 
   // Gather one tile at a time, in deterministic (sorted GridIndex) order.
   for (const auto & idx : tiles_) {

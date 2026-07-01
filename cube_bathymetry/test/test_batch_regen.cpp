@@ -35,6 +35,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -259,6 +260,73 @@ TEST(BatchRegen, RevisitExactMatch)
 
   runBatchRegen(batches, r_dir, r_bs);
   runSinglePass(batches, s_dir, s_bs);
+
+  expectExactMatch(r_dir, s_dir, r_bs, s_bs);
+  std::filesystem::remove_all(root);
+}
+
+// A survey straddling a GGGS tile seam with a MULTI-CELL deposit radius. This is
+// the case the earlier per-sounding ±1-cell scatter got WRONG: GeoGrid::insert
+// spreads a sounding out to radius ~= CONF_99PC*sqrt(horizontal_error) (several
+// cells for realistic TPU), so a sounding two-plus cells inside one tile still
+// deposits into the neighbour tile's cells across the seam. A single unbounded pass
+// makes those cross-seam deposits (the neighbour grid receives the whole batch);
+// per-sounding scatter dropped them because the sounding's own ±1-cell window never
+// reached the neighbour tile. The other tests use a sub-cell horizontal_error (0.1),
+// so they never cross a seam and cannot catch this -- this test pins the fix.
+TEST(BatchRegen, SeamCrossingExactMatch)
+{
+  const gggs::Level level = gggs::Level::fromCellSize(kCellSize);
+  // East edge of the tile containing (43, -70) == west edge of its east neighbour.
+  const double seam_lon = level.gridIndex(43.0, -70.0).eastLongitude();
+  const double lat = 43.0;
+  const double deg_per_m_lon = 1.0 / (111320.0 * std::cos(lat * M_PI / 180.0));
+
+  // horizontal_error = 4 m -> max_radius = CONF_99PC*sqrt(4) = 5.152 m. With a small
+  // vertical_error the effective radius (sqrt(ratio-1) - max_radius, clamped) settles
+  // near 3 m -- about three 1 m cells. vertical_error is chosen so ratio =
+  // maxVarianceAllowed(~12 m, order1a)/vertical_error ~= 67, i.e. sqrt(ratio-1) ~=
+  // 8.15 and radius ~= 3 m. Survey cells sit 1..4 m either side of the seam, so the
+  // ones >= 2 m from it deposit across the seam yet lie outside their own ±1-cell
+  // window -- exactly the deposits the old scatter dropped.
+  const float kHorizErr = 4.0f;
+  const float kVertErr = 0.00106f;
+
+  std::vector<GeoSounding> batch;
+  for (int c = -4; c <= 4; ++c) {
+    if (c == 0) {continue;}
+    const double lon = seam_lon + c * 1.0 * deg_per_m_lon;
+    for (int rep = 0; rep < 8; ++rep) {
+      gz4d::GeoPointLatLongDegrees point(lat, lon, -12.0 - rep * 0.001);
+      GeoSounding s(point);
+      s.sounding.vertical_error = kVertErr;
+      s.sounding.horizontal_error = kHorizErr;
+      s.sounding.intensity = 30.0f + c + rep * 0.7f;  // real dispersion (n>=2)
+      s.sounding.beam_angle = 0.0f;
+      s.sounding.slant_range = 12.0f;
+      batch.push_back(s);
+    }
+  }
+  const std::vector<std::vector<GeoSounding>> batches{batch};
+
+  const std::string root = makeTempDir("seam");
+  const std::string r_dir = root + "/regen";
+  const std::string s_dir = root + "/single";
+  const std::string r_bs = root + "/regen_bs";
+  const std::string s_bs = root + "/single_bs";
+
+  runBatchRegen(batches, r_dir, r_bs);
+  runSinglePass(batches, s_dir, s_bs);
+
+  // The survey must actually span both tiles, else the seam was never crossed and
+  // the test would be vacuous.
+  const auto cells = loadBathyCells(s_dir);
+  std::set<gggs::GridIndex> grids;
+  for (const auto & kv : cells) {
+    grids.insert(kv.first.grid());
+  }
+  ASSERT_GE(grids.size(), 2u)
+    << "seam survey must span >= 2 tiles to exercise cross-seam deposits";
 
   expectExactMatch(r_dir, s_dir, r_bs, s_bs);
   std::filesystem::remove_all(root);
