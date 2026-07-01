@@ -223,6 +223,14 @@ void BatchRegen::flushOpenStreams()
 
 void BatchRegen::closeAllStreams()
 {
+  // Deliberately swallows close-time flush errors (the ofstream destructor cannot
+  // report them). That is only safe because of a strict ordering invariant: on any
+  // SUCCESS path a checked flushOpenStreams() MUST run first (finalize() does), so every
+  // buffer is already empty and surfaced any disk-full/I/O fault. The only caller that
+  // reaches here with unflushed buffers is ~BatchRegen (an exception mid-scatter), where
+  // throwing would terminate during stack unwinding -- there, dropping the scratch data
+  // we were going to delete anyway is correct. Do NOT call this as the success-path close
+  // without a preceding flushOpenStreams().
   open_streams_.clear();  // destructor flushes + closes each ofstream
   lru_.clear();
 }
@@ -271,13 +279,35 @@ void BatchRegen::finalize(
     const std::string path = bucketPath(idx);
     std::vector<GeoSounding> bucket;
     {
+      // Every idx in tiles_ had its bucket created (and written) by bucketStream, so a
+      // reopen failure here is a real I/O fault, NOT a benign "missing bucket" -- treat
+      // it symmetrically with the hard-throwing scatter/flush path so it cannot silently
+      // drop a tile from the "bit-exact" rebuild.
       std::ifstream in(path, std::ios::binary);
       if (!in) {
-        continue;  // best-effort: a missing bucket just yields no cells for this tile
+        throw std::runtime_error(
+          "batch_regen: cannot reopen scatter bucket " + path +
+          " for gather -- a bucket this run created is unreadable; aborting to avoid a "
+          "silently-missing tile");
       }
       ScatterRecord rec;
       while (in.read(reinterpret_cast<char *>(&rec), sizeof(rec))) {
         bucket.push_back(fromRecord(rec));
+      }
+      // read() sets eofbit+failbit at a clean end-of-file, but badbit on an actual I/O
+      // error -- distinguish them so a hardware read fault is not mistaken for EOF. A
+      // partial trailing record (gcount != 0 after the failed read) means the bucket was
+      // truncated to a non-record boundary; both are silently-wrong tiles, so throw.
+      if (in.bad()) {
+        throw std::runtime_error(
+          "batch_regen: I/O error reading scatter bucket " + path +
+          " during gather -- aborting to avoid a silently-truncated tile");
+      }
+      if (in.gcount() != 0) {
+        throw std::runtime_error(
+          "batch_regen: scatter bucket " + path +
+          " ends with a partial record (truncated) -- aborting to avoid a "
+          "silently-wrong tile");
       }
     }
     if (bucket.empty()) {
