@@ -223,3 +223,31 @@ Lifecycle: **Implementation → review-code** (re-review the fixes). Hand off to
 fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 96 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-01 16:25 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-96 at `16b0de1`
+**Mode**: pre-push
+**Depth**: Deep (reason: store-format migration + new binary + 2 ADR addenda, +3002/-354)
+**Must-fix**: 1 | **Suggestions**: 3
+**Round**: 2 | **Ship**: recommended — one mechanical read-back guard; must-fix fell 2→1, not a design question
+
+### Findings
+- [ ] (must-fix) Gather read-back swallows I/O errors, breaking the bit-exact contract on the error path: read-open failure on a known-created bucket is `continue`d and `in.read` can't tell `badbit` from EOF → silently missing/truncated tile; guard symmetric with the hard-throwing write path — `cube_bathymetry/src/batch_regen.cpp:274-281`
+- [ ] (suggestion) `closeAllStreams` discards close-time errors, safe only because `flushOpenStreams` runs first; bind that ordering (assert/comment or check-and-throw) — `cube_bathymetry/src/batch_regen.cpp:224-228`
+- [ ] (suggestion) `import_bag_main` still uses raw `std::stod`/`std::stoi`/`std::stoll` → `std::terminate` on bad CLI value; mirror the guarded parse helpers added to the sibling `batch_regen_main` — `cube_bathymetry/src/import_bag_main.cpp:351-382`
+- [ ] (suggestion) `topic_info` loop var can be `const &` (cppcheck); folds into the tracked ~800-line dedup follow-up — `cube_bathymetry/src/batch_regen_main.cpp:183`
+
+### Notes
+- Round 1's two must-fixes (near-seam bit-exactness, `welfordFromCell` division UB) verified correctly fixed under adversarial tracing (Lens A + Lens B) with new regression tests.
+- Static analysis: cpplint + uncrustify clean; cppcheck 2 trivial style notes (finding above + a `useStlAlgorithm` nit dropped as below threshold).
+- Governance Watch: `build_massabesic_store.sh` (unh_echoboats_project11) flag migration is a real breaking consequence, documented as an out-of-scope follow-up ops PR.
+- Base `origin/jazzy` reviewed from local ref (remote fetch failed on host-key verification — possibly stale).
+
+### Next step
+Lifecycle: **Local Review** → `address-findings` (verdict changes-requested) → re-run `review-code` → push / open PR → `triage-reviews`.
+Ship advisory is **recommended** after the one mechanical must-fix lands; the host decides.
