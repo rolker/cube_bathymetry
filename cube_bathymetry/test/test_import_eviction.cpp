@@ -58,7 +58,6 @@ namespace cube
 {
 namespace
 {
-constexpr int64_t kStamp = 1234567890123456789LL;
 constexpr float kCellSize = 1.0f;
 
 std::string makeTempDir(const std::string & tag)
@@ -95,12 +94,8 @@ ImportAccumulatorConfig makeConfig(
 {
   ImportAccumulatorConfig cfg;
   cfg.store_dir = store_dir;
-  cfg.bathy_layer = marine_bathymetry_store::SourceLayer::Processed;
-  cfg.source_index = 1;
-  cfg.timestamp_ns = kStamp;
   cfg.cell_size_m = kCellSize;
   cfg.bs_store_dir = bs_dir;
-  cfg.bs_source_index = 1;
   cfg.max_resident_tiles = budget;
   return cfg;
 }
@@ -115,15 +110,9 @@ void runImport(
   for (const auto & batch : batches) {
     accumulator.addBatch(batch);
   }
-  marine_bathymetry_store::SourceRegistry bathy_reg;
-  marine_bathymetry_store::SourceRecord bathy_rec;
-  bathy_rec.source_id = "test";
-  bathy_reg.registerSource(bathy_rec);
-  marine_mbes_backscatter_store::SourceRegistry bs_reg;
-  marine_mbes_backscatter_store::SourceRecord bs_rec;
-  bs_rec.source_id = "test";
-  bs_reg.registerSource(bs_rec);
-  accumulator.finalize(bathy_reg, bs_dir.empty() ? nullptr : &bs_reg);
+  // No StoreMetadata needed for the equivalence assertions (uma#248 moved provenance
+  // to an optional store-level sidecar; the tile bands carry the data under test).
+  accumulator.finalize();
 }
 
 // Load every finite bathy cell of a store layer into a comparable map.
@@ -132,11 +121,10 @@ std::map<gggs::CellIndex, std::pair<double, double>> loadBathyCells(
 {
   marine_bathymetry_store::BathymetryStore store =
     marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
-  marine_bathymetry_store::SourceRegistry reg;
-  marine_bathymetry_store::load(store, store_dir, &reg);
+  marine_bathymetry_store::load(store, store_dir);
   std::map<gggs::CellIndex, std::pair<double, double>> out;
   for (const auto & grid_tile : store.tiles(
-      marine_bathymetry_store::SourceLayer::Processed))
+      marine_bathymetry_store::SourceLayer::Survey))
   {
     const auto & depth = grid_tile.second.depthBand();
     const auto & unc = grid_tile.second.uncertaintyBand();
@@ -151,24 +139,43 @@ std::map<gggs::CellIndex, std::pair<double, double>> loadBathyCells(
   return out;
 }
 
-// Load every finite backscatter cell of a store into a comparable map.
+// Count finite cells in a store's `reference` layer (what a measured seed WOULD
+// have contributed, for the reference-seed enforcement test).
+std::size_t countReferenceFiniteCells(const std::string & store_dir)
+{
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+  marine_bathymetry_store::load(store, store_dir);
+  std::size_t n = 0;
+  for (const auto & grid_tile : store.tiles(
+      marine_bathymetry_store::SourceLayer::Reference))
+  {
+    for (double d : grid_tile.second.depthBand()) {
+      if (std::isfinite(d)) {++n;}
+    }
+  }
+  return n;
+}
+
+// Load every finite backscatter cell of a store into a comparable map. Compares
+// the RAW stored 3-band statistic (mean, sample_sd) so bounded vs unbounded is a
+// byte-level losslessness check (no reconstruction, so no n=1-sentinel ambiguity).
 std::map<gggs::CellIndex, std::pair<float, float>> loadBackscatterCells(
   const std::string & bs_dir)
 {
   marine_mbes_backscatter_store::MbesBackscatterStore store =
     marine_mbes_backscatter_store::MbesBackscatterStore::fromCellSize(kCellSize);
-  marine_mbes_backscatter_store::SourceRegistry reg;
-  marine_mbes_backscatter_store::load(store, bs_dir, &reg);
+  marine_mbes_backscatter_store::load(store, bs_dir);
   std::map<gggs::CellIndex, std::pair<float, float>> out;
   for (const auto & grid_tile : store.tiles(
-      marine_mbes_backscatter_store::SourceLayer::Processed))
+      marine_mbes_backscatter_store::SourceLayer::Survey))
   {
     gggs::CellAreaIterator it(grid_tile.second.index());
     for (; it.valid(); it.next()) {
       const marine_mbes_backscatter_store::MbesCell c =
         grid_tile.second.get((*it).row(), (*it).column());
       if (c.hasData()) {
-        out.emplace(*it, std::make_pair(c.intensity, c.intensity_variance));
+        out.emplace(*it, std::make_pair(c.mean, c.sample_sd));
       }
     }
   }
@@ -213,8 +220,8 @@ void expectStoresEqual(
   for (const auto & [cell, iv] : bs_u) {
     auto it = bs_b.find(cell);
     ASSERT_NE(it, bs_b.end()) << "bounded build is missing a backscatter cell";
-    EXPECT_NEAR(it->second.first, iv.first, 1e-3) << "intensity differs";
-    EXPECT_NEAR(it->second.second, iv.second, 1e-3) << "intensity_variance differs";
+    EXPECT_NEAR(it->second.first, iv.first, 1e-3) << "backscatter mean differs";
+    EXPECT_NEAR(it->second.second, iv.second, 1e-3) << "backscatter sample_sd differs";
   }
 }
 }  // namespace
@@ -326,10 +333,10 @@ TEST(ImportEviction, ResurveyedBackscatterBlendsLosslessly)
   EXPECT_NEAR(unbounded_i, 0.5f * (kI1 + kI2), 0.5f) << "unbounded should blend";
   EXPECT_NEAR(bounded_i, unbounded_i, 1e-3f)
     << "bounded build must reproduce the unbounded blend (lossless backscatter)";
-  // And the intensity VARIANCE (estimate variance, shrinks with sample count)
-  // matches too -- same sample population => same variance.
+  // And the sample standard deviation (the stored dispersion band) matches too --
+  // same sample population => same sample_sd.
   EXPECT_NEAR(bs_b.at(xcell).second, bs_u.at(xcell).second, 1e-3f)
-    << "bounded build must reproduce the unbounded intensity variance";
+    << "bounded build must reproduce the unbounded backscatter sample_sd";
 }
 
 // The scratch spill directory is created during eviction and DELETED by finalize.
@@ -348,9 +355,7 @@ TEST(ImportEviction, ScratchDirCleanedUpAfterFinalize)
   ASSERT_FALSE(scratch.empty()) << "eviction should have created a scratch dir";
   EXPECT_TRUE(std::filesystem::exists(scratch)) << "scratch dir should exist mid-run";
 
-  marine_bathymetry_store::SourceRegistry bathy_reg;
-  marine_mbes_backscatter_store::SourceRegistry bs_reg;
-  accumulator.finalize(bathy_reg, &bs_reg);
+  accumulator.finalize();
 
   EXPECT_FALSE(std::filesystem::exists(scratch))
     << "finalize must delete the scratch spill dir";
@@ -368,13 +373,13 @@ TEST(ImportEviction, NeverDropsTileWhenPersistFails)
   const std::string root = makeTempDir("persistfail");
   const std::string store_dir = root + "/store";
   std::filesystem::create_directories(store_dir);
-  // layerDirName(Processed) == "processed": plant a FILE there so
+  // layerDirName(Survey) == "survey": plant a FILE there so
   // create_directories() throws and persistBathyTile cannot write.
   {
     std::ofstream blocker(
       store_dir + "/" +
       marine_bathymetry_store::layerDirName(
-        marine_bathymetry_store::SourceLayer::Processed));
+        marine_bathymetry_store::SourceLayer::Survey));
     blocker << "not a directory";
   }
 
@@ -396,6 +401,76 @@ TEST(ImportEviction, NeverDropsTileWhenPersistFails)
   EXPECT_EQ(accumulator.bathyTilesPersisted(), static_cast<std::size_t>(0));
   EXPECT_GE(accumulator.residentTileCount(), static_cast<std::size_t>(n_tiles));
   EXPECT_GT(accumulator.residentTileCount(), budget);
+
+  std::filesystem::remove_all(root);
+}
+
+// Reference-layer seed precedence (#96): a tile seeded from the `reference` prior
+// must NOT be counted as measured data. The coarse prior gates blunder rejection
+// (seed_settled=false) but never settles a cell, so a sparse survey over a
+// reference-seeded tile writes ONLY the resurveyed cells -- identical in count to
+// the same survey with NO reference at all, and far fewer than the reference
+// tile's own finite cells.
+TEST(ImportEviction, ReferenceSeedDoesNotAddMeasuredData)
+{
+  const std::string root = makeTempDir("refseed");
+  const std::string ref_dir = root + "/reference_store";
+
+  // Build a DENSE reference tile (many finite cells) and write it to the store's
+  // reference/ layer. Depth ~ 20 m so a same-depth survey later is accepted (not
+  // blunder-rejected) by the seeded predicted surface.
+  {
+    GeoMapSheet ref_sheet(kCellSize);
+    for (int i = 0; i < 20; ++i) {
+      // ~1.1 m steps (1e-5 deg) keep the cells within one ~960 m tile.
+      ref_sheet.addSoundings(
+        surveyCell(43.0 + i * 1e-5, -70.0 + i * 1e-5, 20.0f, 30.0f));
+    }
+    auto tiles = mapSheetToTiles(ref_sheet);
+    ASSERT_FALSE(tiles.empty());
+    marine_bathymetry_store::BathymetryStore ref_store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    ref_store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(ref_store, ref_dir);
+  }
+  const std::size_t reference_finite = countReferenceFiniteCells(ref_dir);
+  ASSERT_GT(reference_finite, 1u) << "reference tile should cover many cells";
+
+  // A sparse survey: soundings on ONE cell of that tile, at the same ~20 m depth.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(43.00000, -70.00000, 20.0f, 40.0f));
+
+  // Run WITH reference seeding.
+  const std::string with_ref = root + "/with_ref";
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(with_ref, "", /*budget=*/0);
+    cfg.reference_store_dir = ref_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  // Run WITHOUT reference seeding (baseline).
+  const std::string no_ref = root + "/no_ref";
+  runImport(batches, no_ref, "", /*budget=*/0);
+
+  const auto with = loadBathyCells(with_ref);
+  const auto without = loadBathyCells(no_ref);
+
+  ASSERT_FALSE(with.empty()) << "the sparse survey should settle at least one cell";
+  // The reference seed contributed ZERO measured cells: the two survey stores hold
+  // the same cell COUNT (only the sparse survey's cells)...
+  EXPECT_EQ(with.size(), without.size())
+    << "reference seeding must not add measured cells";
+  // ...and that is far fewer than the reference tile's own finite cells (the prior
+  // fill was gated-only, never settled).
+  EXPECT_LT(with.size(), reference_finite)
+    << "the reference prior's cells must not be settled as survey data";
 
   std::filesystem::remove_all(root);
 }
