@@ -167,3 +167,23 @@ own ADRs (ADR-0001 + ADR-0007 addenda) per the operator's Issue-Review resolutio
 ## Estimated Scope
 
 Single PR (all three features share the `store_import.{h,cpp}` tile-seeding infrastructure and the uma#248 migration is a prerequisite for all three).
+
+## Deviations during implementation
+
+- **Registry migration (unplanned but required).** uma#248 also replaced the
+  per-cell `SourceRegistry`/`SourceRecord` interning table with a store-level
+  `StoreMetadata` sidecar. The plan's Files-to-Change was silent on this, but the
+  old types no longer compile. `ImportAccumulator::finalize` now takes
+  `const StoreMetadata *` pointers; `import_bag` builds `StoreMetadata` from
+  `--platform`/`--sensor`/`--campaign`(→survey). `--source-id`/`--sensor-class`
+  were dropped (greenfield; no per-cell source id exists anymore).
+- **Dead conversion params removed.** Because `BathyCell` (2-band) and `MbesCell`
+  (3-band) no longer carry `timestamp`/`source_index`, those args were removed from
+  `geoGridToTile`/`mapSheetToTiles`/`geoGridToBackscatterCells`/
+  `mapSheetToBackscatterCells`, and `source_index`/`timestamp_ns` were removed from
+  `ImportAccumulatorConfig` (plan only named `bathy_layer`/`bs_source_index`).
+- **Batch-regen is a library class, not just a binary.** `BatchRegen`
+  (`batch_regen.{h,cpp}`) lives in the `cube_bathymetry_store_import` library so
+  `test_batch_regen` can drive it directly (a bag-only binary is not unit-testable).
+  Added `ImportAccumulator::persistResidentTile` for the single-tile gather write.
+  `batch_regen_main.cpp` + the `batch_regen_bag` target are as planned.
