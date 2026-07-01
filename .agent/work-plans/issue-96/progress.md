@@ -156,3 +156,26 @@ built and tested against them:
   `--sensor-class` and switch to `--reference-store`; it will otherwise error on the
   removed flags. Provenance now flows through `--platform`/`--sensor`/`--campaign`.
 - Push + open PR (local-first; not pushed by this sub-agent).
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-01 15:30 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-96 at `0a83ad0`
+**Mode**: pre-push
+**Depth**: Deep (reason: +2688/-354 across 18 files, 2 new ADRs, store-format migration + new binary)
+**Must-fix**: 2 | **Suggestions**: 6
+**Round**: 1 | **Ship**: continue — a real correctness gap in the headline "bit-exact" contract warrants a fix + re-review
+
+### Findings
+- [ ] (must-fix) Batch-regen not bit-exact near seams: scatter routes each sounding to its ±1-cell window, but `GeoGrid::insert` deposits up to `max_radius=CONF_99PC·√(horizontal_error)` (multiple cells for realistic TPU); single-pass gets far-radius cross-sounding deposits the gather omits. Tests use he=0.1 (sub-cell) so they mask it — `cube_bathymetry/src/batch_regen.cpp:162`
+- [ ] (must-fix) `welfordFromCell` UB: unguarded `se=standard_error/kScale` division when `standard_error==0` & `sample_sd!=0` → `lround(inf)` + out-of-range uint32 cast; add `se==0→n=1` guard (cross-confirmed both lenses) — `cube_bathymetry/src/store_import.cpp:199`
+- [ ] (suggestion) Re-running batch-regen into a non-empty `-o` store silently blends (seedNewTile warm-starts output-store survey tiles) instead of exact rebuild; warn/guard/`--append` — `cube_bathymetry/src/batch_regen.cpp` finalize
+- [ ] (suggestion) `closeAllStreams` doesn't check ofstream close-time flush; a disk-full final flush silently truncates a bucket → silently-wrong tile — `cube_bathymetry/src/batch_regen.cpp:181`
+- [ ] (suggestion) `seedNewTile` swallows a survey-seed load failure then overwrites the tile from scratch, discarding existing coverage on a transient read error (asymmetric with reload path) — `cube_bathymetry/src/store_import.cpp:584`
+- [ ] (suggestion) `batch_regen_main` `std::stod`/`std::stoi` unguarded → `std::terminate` on a bad flag value (mirrors import_bag) — `cube_bathymetry/src/batch_regen_main.cpp:343`
+- [ ] (suggestion) `-r` resolution not validated `> 0` before driving GGGS level — `cube_bathymetry/src/batch_regen_main.cpp:343`
+- [ ] (suggestion) `batch_regen_main.cpp` duplicates ~800 lines of `import_bag_main.cpp` (BagReaders/speedAt/projection pipeline); extract shared helper — `cube_bathymetry/src/batch_regen_main.cpp`
+- [ ] (watch, pre-existing/out-of-scope) `marine_tiled_raster_store::saveTile` writes direct to the final path (no temp-then-rename); the "atomic … never corrupts the surface" comments (from #92) overstate the durability #96's gather/eviction leans on — follow-up to make the write atomic or fix the comments
