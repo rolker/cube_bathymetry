@@ -206,3 +206,60 @@ in the Context, Consequences, and Tier-2 sections above, and the backscatter
   correction assumes dB (a subtraction). Sonars reporting linear intensity would
   need a divide, or a domain conversion at ingest. **Follow-up to file:** model
   the intensity domain as a sonar property rather than assuming dB.
+
+## Addendum (cube_bathymetry#96) — 3-band `MbesCell` write/reconstruct
+
+unh_marine_autonomy#248 replaced the per-cell backscatter record
+`{intensity, intensity_variance, timestamp, source_index}` with a **3-band
+`Float32` Welford sufficient statistic** `{mean, standard_error, sample_sd}` (the
+per-cell `timestamp`/`source_index` companions were dropped; coarse provenance is
+now store-level `StoreMetadata`). The single layer is `survey` (draft/processed
+collapsed). This addendum records how `cube_bathymetry` writes and reconstructs it;
+the store round-trips the three floats bit-exactly and does no scaling itself.
+
+### Write (`geoGridToBackscatterCells`)
+
+From each node's `NodeRecord {intensity (running mean), intensity_var (estimate
+variance = M2/(n−1)/n, NaN with <2 samples), n_samples}`:
+
+- **`mean = intensity`** always.
+- **n = 1 sentinel** (`intensity_var` is NaN — a single beam, no dispersion):
+  `standard_error = 0`, `sample_sd = 0`. A finite `mean` with `sample_sd == 0`
+  reconstructs to `n = 1`; distinct from no-data (`mean = NaN`).
+- **n ≥ 2**: `sample_sd = sqrt(intensity_var · n_samples)` (the beams' sample
+  standard deviation, `sqrt(M2/(n−1))`); `standard_error = kScale ·
+  sqrt(intensity_var)` (the confidence-scaled standard error of the mean, true
+  `SE = sqrt(intensity_var) = sample_sd/sqrt(n)`).
+
+`kScale = kBackscatterConfidenceScale = 1.96f`, a single shared constant on both the
+write and reconstruct sides (mirrors the bathy store's
+`stddev_to_confidence_interval_scale` convention), so the round-trip is
+self-consistent regardless of its numeric value.
+
+### Reconstruct (`welfordFromCell`) — the exact inverse
+
+Used to seed backscatter accumulation from a persisted `survey` tile on first tile
+touch (seed precedence, ADR-0001 addendum) so an off-boat re-run blends with the
+stored population rather than restarting it:
+
+- `!hasData()` (`mean` NaN) → empty Welford `{n = 0}`.
+- `sample_sd == 0 && isfinite(mean)` → `{n = 1, mean, M2 = 0}` (n=1 sentinel).
+- else `SE = standard_error / kScale`; `n = round((sample_sd / SE)²)`;
+  `M2 = sample_sd² · (n − 1)`.
+
+`round()` absorbs float round-trip error in `n`. Round-trip guarantee: for a node
+with ≥2 samples of genuine dispersion the reconstructed `(n, mean, M2)` — hence the
+estimate variance `(M2/(n−1))/n` — reproduces the original. Enforced by
+`test_store_import.WelfordFromCellInvertsEncode` and
+`BackscatterWelfordRoundTripMultiSample`.
+
+### Accepted limitation — n ≥ 2 identical samples
+
+A cell whose n ≥ 2 samples are all **exactly** identical has `M2 = 0` →
+`sample_sd = 0`, indistinguishable on reload from the n=1 sentinel: it collapses to
+`n = 1`. For continuous corrected-dB data this is astronomically rare (exact float
+equality across ≥2 beams), and the only consequence is a slightly under-counted `n`
+on a subsequent re-survey blend of that one cell — the **mean stays exact**. It is
+**not code-guarded**: a guard would need a separate "n but zero-variance" encoding
+(a fourth band, or a reserved sentinel), which is not worth it for a
+non-occurring case. Documented here as an accepted limitation.

@@ -206,3 +206,59 @@ dependency) rather than retained.
 - Reload model aligns with cube#15 (cross-epoch self-improvement).
 - Consumer of the deferred `~/tiles` contract: rolker/unh_marine_autonomy#86,
   rolker/unh_marine_autonomy#250.
+
+## Addendum (cube_bathymetry#96) — two-rung seed precedence, `seed_settled`, batch-regen, live-node → survey
+
+unh_marine_autonomy#248 simplified the store taxonomy (`draft`/`processed`/`chart`
+→ `survey`/`reference`) and the backscatter cell (3-band Welford sufficient
+statistic). This addendum records the CUBE-side decisions #96 layered on top; the
+backscatter-format decisions live in the ADR-0007 addendum.
+
+### Live node writes the `survey` layer
+
+The live `cube_bathymetry_node` now persists directly to the **`survey`** layer
+(the old `draft` layer is gone; #248 collapsed draft+processed into one). The
+boat-side product is bounded/approximate (the eviction-uncertainty artifact noted
+in § Negative trade-offs); the off-boat **batch-regen** rebuild overwrites it as
+the authoritative surface. The `draft_dir` ROS parameter name is retained (external
+interface stability) but its tiles land under `<draft_dir>/survey/`.
+Operator-confirmed.
+
+### Two-rung seed precedence + the `seed_settled` contract
+
+The startup-prime (#21) and revisit-reload (#70) paths generalize into a single
+**per-tile, first-touch seed precedence** in `ImportAccumulator::seedNewTile`
+(reused by the batch-regen gather). When a tile is first touched:
+
+1. **survey** — a `survey/` bathy tile already on disk (a pre-existing store, or a
+   tile written earlier this run) is restored with `seed_settled=true`: settled
+   depth as a CUBE hypothesis (round-trips through `values()`, refines under new
+   soundings) **and** its per-cell backscatter Welford reconstructed from the
+   `survey/` backscatter tile (`welfordFromCell`, ADR-0007 addendum). Measured data.
+2. **reference** — else a `reference/` prior tile is primed with
+   `seed_settled=false`: predicted-surface only (turns the blunder-rejection gate
+   on) but **never settled**, so it produces no `values()` output, seeds no
+   backscatter, and is **not counted as measured data**. Enforced by
+   `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData`.
+3. else **blank**.
+
+`seed_settled` is thus the contract boundary between *measured* (survey: settled +
+backscatter) and *prior-only* (reference: gate-only). This replaces the pre-#96
+upfront whole-store `loadIntoSheet` of a `--prior` chart, which loaded the entire
+prior into the sheet at once and defeated bounded-RAM eviction; the importer flag is
+now `--reference-store` and priming is lazy, per tile.
+
+### Batch-regen — the exact rebuild path
+
+The eviction reload restores a *single reseeded hypothesis*, so a tile evicted
+mid-disambiguation has a faithful depth **value** but a slightly re-derived depth
+**uncertainty** (the § Negative trade-off above). **batch-regen** (`batch_regen_bag`
+/ `BatchRegen`) removes even that artifact: it scatters every sounding to a per-tile
+on-disk bucket (the sounding's one-cell-expanded window, matching `addSoundings`'
+spread), then gathers each tile in a single **unbounded** pass over the complete set
+of soundings that touch it — so no tile is ever evicted mid-disambiguation and the
+output is **bit-exact** vs a whole-survey-in-RAM build (depth, uncertainty, and the
+3-band backscatter). RAM is bounded by one tile's soundings, not surveyed area.
+This is the authoritative off-boat product; the bounded-RAM `import_bag` remains the
+live/streaming path. Enforced by `test_batch_regen` (byte-exact vs a single-pass
+unbounded `ImportAccumulator`).
