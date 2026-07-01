@@ -68,18 +68,19 @@
 {
   std::cout << "usage: import_bag [options] -o <store_dir> "
     "-d <detections_topic> <bag> [<bag> ...]\n";
-  std::cout << "  --bathy-layer draft|processed: bathymetry store layer for this "
-    "import (default processed: the off-boat CUBE re-run is authoritative; the live "
-    "node writes draft. #85)\n";
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
-    "needed)\n";
-  std::cout << "  --prior <store_dir>: seed the CUBE predicted surface from this "
-    "store's Chart (contour) layer so blunder rejection drops false-deep "
-    "detections (#89). The chart must be at the survey GGGS level. NOTE: a "
-    "coarse/shallow-biased chart can also reject LEGITIMATE deeper-than-charted "
-    "returns; the rejection margin is tunable via the blunder_* params\n";
-  std::cout << "  --bs-store <dir>: Also write an MBES backscatter store layer "
-    "(Processed) from the same CUBE pass (optional; surfaces the co-estimated "
+    "needed). The off-boat CUBE re-run is authoritative, so it always writes the "
+    "`survey` layer (uma#248 collapsed the draft/processed split into one)\n";
+  std::cout << "  --reference-store <store_dir>: seed the CUBE predicted surface "
+    "lazily, per tile on first touch, from this store's `reference` (prior) layer "
+    "so blunder rejection drops false-deep detections (#89, #96). Only tiles at the "
+    "survey GGGS level gate. Predicted-only: the coarse prior is NEVER settled as "
+    "measured data and seeds no backscatter. NOTE: a coarse/shallow-biased prior "
+    "can also reject LEGITIMATE deeper-than-charted returns; the rejection margin "
+    "is tunable via the blunder_* params. (A `survey` tile already in -o takes "
+    "precedence and is warm-started as measured data instead.)\n";
+  std::cout << "  --bs-store <dir>: Also write an MBES backscatter store `survey` "
+    "layer from the same CUBE pass (optional; surfaces the co-estimated "
     "intensity -- uncorrected by default, angle-corrected when "
     "--backscatter-correction empirical is set, cube#81)\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
@@ -109,10 +110,10 @@
     "NOTE: per-cell intensity memory is O(1) regardless of beam count (cube#93), so "
     "a small heavily-oversampled survey no longer OOMs even without eviction\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
-  std::cout << "  --source-id <id>: Registry source id recorded for every cell "
-    "(default cube-replay)\n";
-  std::cout << "  --platform / --sensor / --sensor-class / --campaign <str>: "
-    "registry provenance fields\n";
+  std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
+    "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
+    "to the survey/campaign id). Per-cell source interning was retired for the "
+    "single-platform deployment\n";
   std::cout << "  Frame/range overrides for the offline projector (must match "
     "the bag's namespaced frames, or the grid comes out empty):\n";
   std::cout << "    --base-link-frame, --level-frame, --tide-frame\n";
@@ -293,9 +294,9 @@ int main(int argc, char * argv[])
 
   std::vector<std::string> bagfile_names;
   std::string store_dir;
-  std::string prior_dir;  // optional: Chart-prior store to seed the predicted surface (#89)
+  // optional: reference-prior store to seed the predicted surface lazily (#89, #96)
+  std::string reference_store_dir;
   std::string bs_store_dir;  // optional: MBES backscatter store output (#80)
-  std::string bathy_layer_str = "processed";  // bathy target layer (#85): draft|processed
   std::string detections_topic;  // required
   std::string odom_topic;  // optional: nav_msgs/Odometry for per-ping vessel speed
   double resolution = 1.0;
@@ -310,9 +311,8 @@ int main(int argc, char * argv[])
   std::string backscatter_correction_str = "none";
   std::string backscatter_curve_file;
 
-  // Registry provenance fields for the imported cells.
-  marine_bathymetry_store::SourceRecord source_record;
-  source_record.source_id = "cube-replay";
+  // Store-level provenance (uma#248 StoreMetadata, written once at finalize).
+  marine_bathymetry_store::StoreMetadata store_metadata;
 
   // DetectionsProjector configuration for the offline path. Defaults match
   // detections_to_pointcloud's node defaults so a detections-only bag projects
@@ -339,10 +339,8 @@ int main(int argc, char * argv[])
       usage();
     } else if (*arg == "-o") {
       store_dir = next_value("-o");
-    } else if (*arg == "--prior") {
-      prior_dir = next_value("--prior");
-    } else if (*arg == "--bathy-layer") {
-      bathy_layer_str = next_value("--bathy-layer");
+    } else if (*arg == "--reference-store") {
+      reference_store_dir = next_value("--reference-store");
     } else if (*arg == "--bs-store") {
       bs_store_dir = next_value("--bs-store");
     } else if (*arg == "-d") {
@@ -366,16 +364,12 @@ int main(int argc, char * argv[])
       max_resident_tiles = static_cast<std::size_t>(v);
     } else if (*arg == "-l") {
       ping_count_limit = std::stoi(next_value("-l"));
-    } else if (*arg == "--source-id") {
-      source_record.source_id = next_value("--source-id");
     } else if (*arg == "--platform") {
-      source_record.platform = next_value("--platform");
+      store_metadata.platform = next_value("--platform");
     } else if (*arg == "--sensor") {
-      source_record.sensor = next_value("--sensor");
-    } else if (*arg == "--sensor-class") {
-      source_record.sensor_class = next_value("--sensor-class");
+      store_metadata.sensor = next_value("--sensor");
     } else if (*arg == "--campaign") {
-      source_record.campaign = next_value("--campaign");
+      store_metadata.survey = next_value("--campaign");
     } else if (*arg == "--base-link-frame") {
       projector_params.base_link_frame = next_value("--base-link-frame");
     } else if (*arg == "--level-frame") {
@@ -405,19 +399,6 @@ int main(int argc, char * argv[])
   if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
     std::cerr << "error: -o <store_dir>, -d <detections_topic>, and "
       "at least one bag are all required\n";
-    usage();
-  }
-
-  // Bathy target layer (#85). The off-boat CUBE re-run is the authoritative product
-  // (the live node writes Draft), so this defaults to Processed; --bathy-layer draft
-  // overrides (e.g. to seed a draft from a bag).
-  marine_bathymetry_store::SourceLayer bathy_layer =
-    marine_bathymetry_store::SourceLayer::Processed;
-  if (bathy_layer_str == "draft") {
-    bathy_layer = marine_bathymetry_store::SourceLayer::Draft;
-  } else if (bathy_layer_str != "processed") {
-    std::cerr << "error: --bathy-layer must be 'draft' or 'processed' (got '"
-              << bathy_layer_str << "')\n";
     usage();
   }
 
@@ -519,116 +500,43 @@ int main(int argc, char * argv[])
     backscatter_mode, std::move(backscatter_curve.points),
     backscatter_curve.tl_removed, backscatter_curve.absorption_db_per_m);
 
-  // Chart-prior prime (#89): seed the CUBE predicted surface from the prior store's
-  // Chart (contour) layer BEFORE any soundings are added. primeFromTile lazy-creates
-  // a node per chart cell carrying a predicted depth, which turns ON CUBE's
-  // predicted-surface blunder gate (Node::insert is a pass-through when
-  // predicted_depth_ is NaN); the survey soundings then hit nodes that already carry
-  // a predicted depth, so a false-deep detection below
-  // `target - blunder_scalar*sqrt(predicted_var)` is rejected. seed_settled=false:
-  // seed ONLY the predicted surface, never settle the coarse contour into the survey
-  // layer (that would contaminate both the bathy and co-estimated backscatter).
-  //
-  // ALIGNMENT: load() restores each Chart tile at the GGGS level encoded in its
-  // filename (the store is multi-level; the fromCellSize() arg below only sets the
-  // store's default cellIndex() level, it does NOT pin the level tiles load at). A
-  // chart cell only coincides with -- and thus gates -- a survey node when its level
-  // matches the survey level, i.e. the Chart layer was imported at the survey's
-  // resolution. A chart tile at a different level primes a node the survey soundings
-  // never land on, so it cannot gate. Rather than silently build an un-gated store
-  // (the operator passed --prior to reject outliers), we validate below and refuse
-  // when nothing would gate. A future refinement could resample the chart.
-  if (!prior_dir.empty()) {
-    marine_bathymetry_store::BathymetryStore prior =
-      marine_bathymetry_store::BathymetryStore::fromCellSize(
-      static_cast<float>(geo_map_sheet.nominalCellSizeMeters()));
-    marine_bathymetry_store::SourceRegistry prior_reg;
-    try {
-      marine_bathymetry_store::load(prior, prior_dir, &prior_reg);
-    } catch (const std::exception & e) {
-      std::cerr << "ERROR: --prior store '" << prior_dir << "' failed to load: "
-                << e.what() << std::endl;
-      return 1;
-    }
-    const auto & chart_tiles =
-      prior.tiles(marine_bathymetry_store::SourceLayer::Chart);
-    const std::size_t prior_tiles = chart_tiles.size();
-    if (prior_tiles == 0) {
-      std::cerr << "ERROR: --prior store '" << prior_dir << "' has no Chart-layer "
-                << "tiles; nothing would seed the predicted surface and blunder "
-                << "rejection would be INACTIVE. Check the path and that the store "
-                << "has a chart/ layer (refusing to build an un-gated store)."
-                << std::endl;
-      return 1;
-    }
-    // Only tiles at the survey level can coincide with a survey node and gate
-    // (see ALIGNMENT above). The prior store's default level is fromCellSize() of
-    // the survey cell size, so it equals the survey sheet's level.
-    const uint8_t survey_level = prior.level().level();
-    std::size_t mismatched = 0;
-    for (const auto & grid_tile : chart_tiles) {
-      if (grid_tile.second.index().level() != survey_level) {
-        ++mismatched;
-      }
-    }
-    if (mismatched == prior_tiles) {
-      std::cerr << "ERROR: all " << prior_tiles << " Chart tile(s) in '" << prior_dir
-                << "' are at a GGGS level other than the survey level "
-                << static_cast<int>(survey_level) << "; none would coincide with a "
-                << "survey node, so blunder rejection would be INACTIVE. Re-import "
-                << "the chart at the survey resolution (refusing to build an "
-                << "un-gated store)." << std::endl;
-      return 1;
-    }
-    if (mismatched > 0) {
-      std::cerr << "WARNING: " << mismatched << " of " << prior_tiles << " Chart "
-                << "tile(s) are not at the survey level "
-                << static_cast<int>(survey_level) << " and will not gate; only the "
-                << "level-matched tiles seed the predicted surface." << std::endl;
-    }
-    cube::loadIntoSheet(
-      prior, marine_bathymetry_store::SourceLayer::Chart, geo_map_sheet,
-      /*seed_settled=*/false);
-    std::cout << "Primed CUBE predicted surface from " << (prior_tiles - mismatched)
-              << " of " << prior_tiles << " Chart tile(s) in " << prior_dir
-              << " (blunder rejection active, #89)." << std::endl;
-  }
+  // Reference-prior seeding (#89, #96) is now LAZY, per tile on first touch, driven
+  // by the accumulator's seedNewTile (see ImportAccumulatorConfig::reference_store_dir
+  // below): a `reference/` tile primes the CUBE predicted surface only (seed_settled=
+  // false) so the blunder gate turns on WITHOUT settling coarse prior depths as
+  // measured data. Only tiles at the survey GGGS level coincide with a survey node
+  // and gate; a reference tile at another level primes a node the soundings never
+  // land on (harmless no-op). The pre-#96 upfront whole-store loadIntoSheet was
+  // removed: it defeated the bounded-RAM eviction by loading the entire prior into
+  // the sheet at once.
 
-  // Bathy store provenance + bounded-RAM accumulator (cube#92). The registry/
-  // source index are created up front (not at the end) so evicted tiles persisted
-  // mid-pass already carry the right source index; registry.json is written once
-  // at finalize(). The accumulator owns the persist-then-drop eviction + lossless
-  // reload-on-revisit that bounds resident RAM by tile COUNT, not surveyed AREA.
-  marine_bathymetry_store::SourceRegistry registry;
-  const uint16_t source_index = registry.registerSource(source_record);
-
-  // Backscatter store provenance (cube#80), registered up front for the same
-  // reason. Only used when --bs-store is set.
-  marine_mbes_backscatter_store::SourceRegistry bs_registry;
-  uint16_t bs_source_index = 0;
-  if (!bs_store_dir.empty()) {
-    marine_mbes_backscatter_store::SourceRecord bs_source_record;
-    bs_source_record.source_id = source_record.source_id;
-    bs_source_record.platform = source_record.platform;
-    bs_source_record.sensor = source_record.sensor;
-    bs_source_record.sensor_class = "mbes-backscatter";
-    bs_source_record.campaign = source_record.campaign;
-    bs_source_index = bs_registry.registerSource(bs_source_record);
-  }
+  // Store-level provenance (uma#248 StoreMetadata) + bounded-RAM accumulator
+  // (cube#92). The accumulator owns the persist-then-drop eviction + lossless
+  // reload-on-revisit that bounds resident RAM by tile COUNT (not surveyed AREA)
+  // and the two-rung seed precedence (#96). registry.json is written once at
+  // finalize(). Backscatter provenance mirrors the bathy platform/sensor with an
+  // MBES-specific calibration ref (empty until a beam-pattern calibration exists).
+  marine_mbes_backscatter_store::StoreMetadata bs_metadata;
+  bs_metadata.platform = store_metadata.platform;
+  bs_metadata.sensor = store_metadata.sensor;
+  bs_metadata.survey = store_metadata.survey;
+  bs_metadata.date = store_metadata.date;
 
   cube::ImportAccumulatorConfig accumulator_config;
   accumulator_config.store_dir = store_dir;
-  accumulator_config.bathy_layer = bathy_layer;
-  accumulator_config.source_index = source_index;
-  accumulator_config.timestamp_ns = cell_timestamp_ns;
+  accumulator_config.reference_store_dir = reference_store_dir;
   // Match the store level to the sheet's actual (GGGS-snapped) cell size so the
-  // reload/merge scratch stores tile identically.
+  // reload/seed/merge scratch stores tile identically.
   accumulator_config.cell_size_m =
     static_cast<float>(geo_map_sheet.nominalCellSizeMeters());
   accumulator_config.bs_store_dir = bs_store_dir;
-  accumulator_config.bs_source_index = bs_source_index;
   accumulator_config.max_resident_tiles = max_resident_tiles;
   cube::ImportAccumulator accumulator(geo_map_sheet, accumulator_config);
+
+  if (!reference_store_dir.empty()) {
+    std::cout << "Reference-prior seeding from " << reference_store_dir
+              << " (lazy per-tile; predicted-only blunder gate, #96)." << std::endl;
+  }
 
   if (max_resident_tiles > 0) {
     std::cout << "Bounded resident tiles: " << max_resident_tiles
@@ -889,21 +797,21 @@ int main(int argc, char * argv[])
 
   std::cout << "Building store tiles..." << std::endl;
 
-  // Persist the still-resident tiles and write the registries. Tiles evicted
-  // during the pass were already written to disk (bathy in the -o store, their
-  // backscatter merged into --bs-store newest-finite-wins); finalize() writes
-  // whatever is still in RAM, so the on-disk store is the union of evicted +
-  // resident — identical to an unbounded build (cube#92). The off-boat full-bag
-  // CUBE replay is the authoritative product, so bathy defaults to the `Processed`
-  // layer (#85; --bathy-layer overrides); the live node writes `Draft`. Single
-  // fused grid per layer (unh_marine_autonomy#221 — newest value wins per cell).
+  // Persist the still-resident tiles and write the store-level metadata. Tiles
+  // evicted during the pass were already written to disk (bathy in the -o store,
+  // their backscatter to --bs-store); finalize() writes whatever is still in RAM,
+  // so the on-disk store is the union of evicted + resident — identical to an
+  // unbounded build (cube#92). The off-boat full-bag CUBE replay is the
+  // authoritative product, so it always writes the `survey` layer (uma#248
+  // collapsed draft/processed). Single fused grid per layer (uma#221).
   const std::size_t resident_before_final = accumulator.residentTileCount();
   const std::size_t evicted_count = accumulator.evictedIndices().size();
   accumulator.finalize(
-    registry, bs_store_dir.empty() ? nullptr : &bs_registry);
+    store_metadata.empty() ? nullptr : &store_metadata,
+    (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
   std::cout << "Persisted " << accumulator.bathyTilesPersisted()
-            << " bathy tile(s) to " << store_dir << " (" << bathy_layer_str
-            << " layer; " << evicted_count << " evicted mid-pass, "
+            << " bathy tile(s) to " << store_dir << " (survey layer; "
+            << evicted_count << " evicted mid-pass, "
             << resident_before_final << " resident at end; build: "
             << phase_secs() << "s)." << std::endl;
 
