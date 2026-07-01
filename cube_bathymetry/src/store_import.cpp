@@ -61,8 +61,7 @@ namespace
 constexpr double kPrimeVarianceFloor = 1e-4;
 }  // namespace
 
-marine_bathymetry_store::BathymetryTile geoGridToTile(
-  const GeoGrid & grid, int64_t timestamp_ns, uint16_t source_index)
+marine_bathymetry_store::BathymetryTile geoGridToTile(const GeoGrid & grid)
 {
   marine_bathymetry_store::BathymetryTile tile(grid.index());
 
@@ -81,21 +80,21 @@ marine_bathymetry_store::BathymetryTile geoGridToTile(
     if (std::isnan(v.depth)) {
       continue;  // no estimate here; leave the tile's NaN no-data sentinel
     }
+    // BathyCell is 2-band {depth, uncertainty} since uma#248 (the per-cell
+    // timestamp/source bands were dropped; coarse provenance is store-level
+    // StoreMetadata). values() returns float; widen to the store's double.
     tile.set(
       (*it).row(), (*it).column(),
       marine_bathymetry_store::BathyCell{
         static_cast<double>(v.depth),
-        static_cast<double>(v.uncertainty),
-        timestamp_ns,
-        source_index});
+        static_cast<double>(v.uncertainty)});
   }
 
   return tile;
 }
 
 std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile>
-mapSheetToTiles(
-  const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index)
+mapSheetToTiles(const GeoMapSheet & map_sheet)
 {
   std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
 
@@ -103,8 +102,7 @@ mapSheetToTiles(
     if (!grid) {
       continue;
     }
-    marine_bathymetry_store::BathymetryTile tile =
-      geoGridToTile(*grid, timestamp_ns, source_index);
+    marine_bathymetry_store::BathymetryTile tile = geoGridToTile(*grid);
     // Drop a grid that yielded no finite cells -- an all-no-data tile would just
     // persist as an empty file.
     if (!tile.dirty()) {
@@ -117,8 +115,7 @@ mapSheetToTiles(
 }
 
 std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell>
-geoGridToBackscatterCells(
-  const GeoGrid & grid, int64_t timestamp_ns, uint16_t source_index)
+geoGridToBackscatterCells(const GeoGrid & grid)
 {
   std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell> cells;
 
@@ -136,20 +133,34 @@ geoGridToBackscatterCells(
     if (std::isnan(r.intensity)) {
       continue;  // no co-estimated backscatter here -- skip (mirrors NaN-depth skip)
     }
-    // intensity_var is the estimate variance (NaN with < 2 samples); it rides
-    // into the quality band (ADR-0007 D6). timestamp/source stamp provenance.
-    cells.emplace(
-      *it,
-      marine_mbes_backscatter_store::MbesCell{
-        r.intensity, r.intensity_var, timestamp_ns, source_index});
+    // Encode the Welford sufficient statistic into the 3-band MbesCell (uma#248
+    // A.1); welfordFromCell is the exact inverse. r.intensity is the running mean;
+    // r.intensity_var is the estimate variance (variance of the mean = M2/(n-1)/n),
+    // NaN with < 2 samples.
+    marine_mbes_backscatter_store::MbesCell cell;
+    cell.mean = r.intensity;
+    if (std::isnan(r.intensity_var)) {
+      // n = 1 sentinel: a single beam has no dispersion. sample_sd == 0 with a
+      // finite mean reconstructs to n = 1 (distinct from mean = NaN no-data).
+      cell.standard_error = 0.0f;
+      cell.sample_sd = 0.0f;
+    } else {
+      // n >= 2. sample_sd = sqrt(intensity_var * n) is the beams' sample stddev;
+      // standard_error = scale * sqrt(intensity_var) is the confidence-scaled SE
+      // of the mean (true SE = sqrt(intensity_var)).
+      const float n = static_cast<float>(r.n_samples);
+      cell.sample_sd = std::sqrt(r.intensity_var * n);
+      cell.standard_error =
+        kBackscatterConfidenceScale * std::sqrt(r.intensity_var);
+    }
+    cells.emplace(*it, cell);
   }
 
   return cells;
 }
 
 std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell>
-mapSheetToBackscatterCells(
-  const GeoMapSheet & map_sheet, int64_t timestamp_ns, uint16_t source_index)
+mapSheetToBackscatterCells(const GeoMapSheet & map_sheet)
 {
   std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell> cells;
 
@@ -158,12 +169,42 @@ mapSheetToBackscatterCells(
       continue;
     }
     std::map<gggs::CellIndex, marine_mbes_backscatter_store::MbesCell> grid_cells =
-      geoGridToBackscatterCells(*grid, timestamp_ns, source_index);
+      geoGridToBackscatterCells(*grid);
     // Grids cover disjoint GGGS cells, so merge never collides.
     cells.merge(grid_cells);
   }
 
   return cells;
+}
+
+IntensityWelford welfordFromCell(
+  const marine_mbes_backscatter_store::MbesCell & cell)
+{
+  IntensityWelford w;
+  if (!cell.hasData()) {
+    return w;  // no-data cell (mean NaN) -> empty Welford {n=0}
+  }
+  w.mean = static_cast<double>(cell.mean);
+  if (cell.sample_sd == 0.0f) {
+    // n = 1 sentinel (a single-beam node, or -- the accepted limitation -- an n>=2
+    // cell whose samples were all exactly identical, M2 == 0). Reconstruct n = 1.
+    w.n = 1;
+    w.m2 = 0.0;
+    return w;
+  }
+  // Divide the confidence scale back out of standard_error to recover the true
+  // standard error of the mean, then invert n = (sample_sd / SE)^2 and
+  // M2 = sample_sd^2 * (n - 1). round() absorbs float round-trip error in n.
+  const double sample_sd = static_cast<double>(cell.sample_sd);
+  const double se =
+    static_cast<double>(cell.standard_error) / kBackscatterConfidenceScale;
+  const double ratio = sample_sd / se;
+  w.n = static_cast<uint32_t>(std::lround(ratio * ratio));
+  if (w.n < 2) {
+    w.n = 2;  // sample_sd != 0 implies >= 2 samples; guard against round-to-1
+  }
+  w.m2 = sample_sd * sample_sd * static_cast<double>(w.n - 1);
+  return w;
 }
 
 void primeFromTile(
@@ -354,13 +395,15 @@ void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
   }
   // geoGridToTile flushes the median pre-filter (values()) and writes only the
   // finite cells; an all-no-data tile is not persisted (matches mapSheetToTiles).
-  marine_bathymetry_store::BathymetryTile tile =
-    geoGridToTile(*grid, cfg_.timestamp_ns, cfg_.source_index);
+  marine_bathymetry_store::BathymetryTile tile = geoGridToTile(*grid);
   if (!tile.dirty()) {
     return;
   }
+  // The off-boat CUBE re-run is the authoritative product: always the `survey`
+  // layer (uma#248 collapsed the draft/processed split into one).
   const std::string layer_dir = cfg_.store_dir + "/" +
-    marine_bathymetry_store::layerDirName(cfg_.bathy_layer);
+    marine_bathymetry_store::layerDirName(
+    marine_bathymetry_store::SourceLayer::Survey);
   std::filesystem::create_directories(layer_dir);
   // Atomic temp-then-rename via tile_io::saveTile -- a partial write never
   // corrupts the on-disk surface (same primitive the live node's eviction uses).
@@ -381,7 +424,7 @@ void ImportAccumulator::persistBackscatterTile(const gggs::GridIndex & index)
   namespace mbs = marine_mbes_backscatter_store;
   // Only the finite co-estimated cells (NaN-intensity cells are skipped upstream).
   const std::map<gggs::CellIndex, mbs::MbesCell> cells =
-    geoGridToBackscatterCells(*grid, cfg_.timestamp_ns, cfg_.bs_source_index);
+    geoGridToBackscatterCells(*grid);
   if (cells.empty()) {
     // No finite intensity this pass -> nothing to write. Do NOT write an empty
     // tile over a populated one. With the sample spill/restore this is only hit
@@ -389,7 +432,7 @@ void ImportAccumulator::persistBackscatterTile(const gggs::GridIndex & index)
     return;
   }
   const std::string layer_dir = cfg_.bs_store_dir + "/" +
-    mbs::layerDirName(mbs::SourceLayer::Processed);
+    mbs::layerDirName(mbs::SourceLayer::Survey);
   const std::string path = layer_dir + "/" + mbs::tileFilename(index);
   // Plain overwrite (no on-disk merge): the reload-before-add path restores the
   // tile's raw intensity samples before a revisit accretes onto them, so at every
@@ -455,7 +498,8 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
     const auto sw = index.southWestPosition();
     const auto ne = index.northEastPosition();
     marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
-    const auto & tiles = scratch.tiles(cfg_.bathy_layer);
+    const auto & tiles =
+      scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
     auto it = tiles.find(index);
     if (it != tiles.end()) {
       // seed_settled=true: restore each cell's settled depth/uncertainty as a CUBE
@@ -479,6 +523,88 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   // Runs AFTER the depth reseed and BEFORE the batch's soundings are added.
   restoreSpilledSamples(index);
   return true;
+}
+
+void ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
+{
+  // Two-rung seed precedence (#96), run once per tile on first touch. survey wins
+  // over reference: a survey tile is measured CUBE data (settle it, seed its
+  // backscatter); a reference tile is a coarse read-only prior (gate only).
+
+  // Rung 1 -- survey: a pre-existing survey bathy tile (an incremental import into
+  // an existing store, or -- via reloadEvictedTile -- an already-written tile).
+  // loadWindow silently returns 0 when store_dir has no survey/ layer yet (a fresh
+  // import), so this falls through to the reference rung with no error/warning.
+  if (!cfg_.store_dir.empty()) {
+    try {
+      marine_bathymetry_store::BathymetryStore scratch =
+        marine_bathymetry_store::BathymetryStore::fromCellSize(cfg_.cell_size_m);
+      const auto sw = index.southWestPosition();
+      const auto ne = index.northEastPosition();
+      marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
+      const auto & tiles =
+        scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
+      auto it = tiles.find(index);
+      if (it != tiles.end()) {
+        // Settled warm-start: the survey layer round-trips as a CUBE hypothesis and
+        // refines under new soundings (ADR-0001).
+        primeFromTile(it->second, sheet_, /*seed_settled=*/true);
+        // Reconstruct each cell's corrected-intensity Welford from the survey
+        // backscatter tile so the re-run's beams blend with the stored population
+        // (lossless backscatter seed). welfordFromCell inverts the 3-band write.
+        if (!cfg_.bs_store_dir.empty()) {
+          namespace mbs = marine_mbes_backscatter_store;
+          const std::string bs_path = cfg_.bs_store_dir + "/" +
+            mbs::layerDirName(mbs::SourceLayer::Survey) + "/" +
+            mbs::tileFilename(index);
+          if (std::filesystem::is_regular_file(bs_path)) {
+            const gggs::Level level = gggs::Level::fromCellSize(cfg_.cell_size_m);
+            const mbs::MbesTile bs_tile = mbs::loadTile(bs_path, level);
+            gggs::CellAreaIterator cit(index);
+            for (; cit.valid(); cit.next()) {
+              const mbs::MbesCell c = bs_tile.get((*cit).row(), (*cit).column());
+              if (c.hasData()) {
+                sheet_.setSettledIntensityWelfordAt(*cit, welfordFromCell(c));
+              }
+            }
+          }
+        }
+        seeded_.insert(index);
+        return;
+      }
+    } catch (const std::exception & e) {
+      // A seed load failure must never corrupt the run: skip seeding (the tile
+      // accumulates from scratch) rather than abort. The on-disk prior is untouched.
+      std::cerr << "import_bag: could not survey-seed tile on first touch: "
+                << e.what() << " (accumulating this tile from scratch)" << std::endl;
+    }
+  }
+
+  // Rung 2 -- reference: a coarse read-only prior. Predicted-only prime
+  // (seed_settled=false) turns the blunder gate on but does NOT settle the cell as
+  // measured data (no values() output, sheet stays clean) and seeds NO backscatter.
+  if (!cfg_.reference_store_dir.empty()) {
+    try {
+      marine_bathymetry_store::BathymetryStore ref =
+        marine_bathymetry_store::BathymetryStore::fromCellSize(cfg_.cell_size_m);
+      const auto sw = index.southWestPosition();
+      const auto ne = index.northEastPosition();
+      marine_bathymetry_store::loadWindow(
+        ref, cfg_.reference_store_dir, sw, ne, nullptr);
+      const auto & tiles =
+        ref.tiles(marine_bathymetry_store::SourceLayer::Reference);
+      auto it = tiles.find(index);
+      if (it != tiles.end()) {
+        primeFromTile(it->second, sheet_, /*seed_settled=*/false);
+      }
+    } catch (const std::exception & e) {
+      std::cerr << "import_bag: could not reference-seed tile on first touch: "
+                << e.what() << " (no prior gate for this tile)" << std::endl;
+    }
+  }
+
+  // else blank -- nothing to seed; still mark it seeded so we do not retry.
+  seeded_.insert(index);
 }
 
 void ImportAccumulator::evictColdTiles()
@@ -530,16 +656,21 @@ void ImportAccumulator::addBatch(
   // reload -- but the soundings dropped here are NOT replayed (offline is a single
   // pass over the bag), so this is a real, bounded loss, not the "lossless"
   // eviction blend; it is counted and WARNed below rather than hidden.
+  // For each tile this batch is about to touch: reload it if it was evicted, else
+  // seed it if this is its first touch (seed precedence #96 -- survey warm-start,
+  // reference gate, or blank). Both run BEFORE the soundings are added so the new
+  // beams accrete onto the seeded/reloaded hypotheses (lossless blend). Iterating
+  // the window every batch is cheap; seedNewTile is a marked-once no-op thereafter.
   std::vector<gggs::GridIndex> reload_failed;
-  if (!cfg_.store_dir.empty() && !evicted_.empty()) {
-    for (const auto & idx : sheet_.gridIndicesForSoundings(soundings)) {
-      if (evicted_.count(idx)) {
-        if (reloadEvictedTile(idx)) {
-          evicted_.erase(idx);
-        } else {
-          reload_failed.push_back(idx);
-        }
+  for (const auto & idx : sheet_.gridIndicesForSoundings(soundings)) {
+    if (evicted_.count(idx)) {
+      if (reloadEvictedTile(idx)) {
+        evicted_.erase(idx);
+      } else {
+        reload_failed.push_back(idx);
       }
+    } else if (!seeded_.count(idx)) {
+      seedNewTile(idx);
     }
   }
 
@@ -574,8 +705,8 @@ void ImportAccumulator::addBatch(
 }
 
 void ImportAccumulator::finalize(
-  const marine_bathymetry_store::SourceRegistry & bathy_registry,
-  const marine_mbes_backscatter_store::SourceRegistry * bs_registry)
+  const marine_bathymetry_store::StoreMetadata * bathy_metadata,
+  const marine_mbes_backscatter_store::StoreMetadata * bs_metadata)
 {
   // Persist every still-resident tile (evicted tiles are already durable). Snapshot
   // the indices first so the persist loop iterates a stable, deterministic order.
@@ -589,15 +720,20 @@ void ImportAccumulator::finalize(
     persistBathyTile(index);
     persistBackscatterTile(index);
   }
-  // Registries are store-wide sidecars: written once at the end so every cell's
-  // source_index resolves (the per-tile eviction writes carry no registry).
-  if (!cfg_.store_dir.empty()) {
+  // Store-level provenance sidecars (uma#248 replaced the per-cell SourceRegistry
+  // interning table with one coarse StoreMetadata `registry.json` at the store
+  // root). Written once at the end; skipped when absent or empty.
+  if (!cfg_.store_dir.empty() && bathy_metadata != nullptr &&
+    !bathy_metadata->empty())
+  {
     std::filesystem::create_directories(cfg_.store_dir);
-    bathy_registry.saveRegistry(cfg_.store_dir);
+    bathy_metadata->save(cfg_.store_dir);
   }
-  if (!cfg_.bs_store_dir.empty() && bs_registry != nullptr) {
+  if (!cfg_.bs_store_dir.empty() && bs_metadata != nullptr &&
+    !bs_metadata->empty())
+  {
     std::filesystem::create_directories(cfg_.bs_store_dir);
-    bs_registry->saveRegistry(cfg_.bs_store_dir);
+    bs_metadata->save(cfg_.bs_store_dir);
   }
   // The spilled raw samples were only needed to reload an evicted tile mid-run;
   // the import is complete, so delete the scratch dir.
