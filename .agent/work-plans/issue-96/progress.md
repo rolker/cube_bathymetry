@@ -64,3 +64,15 @@ processing changes.
 - [ ] Add an explicit test for reference-layer seed precedence semantics: assert that a tile seeded from the `reference` layer does not contribute to accumulated sample counts (i.e., `seed_settled=false` path is not counted as measured data).
 - [ ] Confirm that all identifiers, CLI flags, and store-path logic use the finalized layer names `survey` + `reference` (not the old `cube` + `pre-existing`).
 - [ ] Verify uma#248 has landed before beginning implementation; gate the plan on this dependency.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-07-01 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-96/plan.md` at `795b888`
+**Branch**: feature/issue-96 at `795b888`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
