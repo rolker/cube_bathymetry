@@ -22,6 +22,49 @@ lookup `map_frame ← header.frame_id` at the ping stamp. Consumers read fields 
 name** (`cube_bathymetry_node` and `bag_to_geotiff` both use named PointCloud2
 iterators), so the field order is not load-bearing.
 
+## Offline store import & rebuild
+
+Two offline tools replay a detections bag through CUBE and write a
+`marine_bathymetry_store` (and optional `marine_mbes_backscatter_store`). Both
+share `bag_to_geotiff`'s projection pipeline and write the **`survey`** layer
+(unh_marine_autonomy#248 collapsed the old `draft`/`processed`/`chart` layers into
+`survey` + `reference`; the off-boat re-run is authoritative).
+
+| Tool | RAM | Output | Use when |
+|---|---|---|---|
+| `import_bag` | bounded by `--max-resident-tiles` (persist-then-drop eviction, #92) | lossless, but a tile evicted mid-disambiguation has a slightly re-derived depth **uncertainty** (depth value faithful) | streaming / very large surveys where RAM is the constraint |
+| `batch_regen_bag` | bounded by one tile's soundings | **bit-exact** vs a whole-survey-in-RAM build (depth, uncertainty, and backscatter) | the authoritative off-boat product |
+
+`batch_regen` scatters each projected sounding to a per-tile bucket on disk, then
+gathers each tile in a single unbounded pass (no eviction) — so no tile is ever
+evicted mid-disambiguation. Its scratch scatter directory is cleaned up at the end.
+
+### Seed precedence (`--reference-store`)
+
+On the first touch of each tile, both tools seed it with a two-rung precedence:
+
+1. **survey** — a `survey/` tile already in the output store (a pre-existing store,
+   or a tile written earlier this run) is warm-started as measured CUBE data
+   (settled depth **and** its backscatter Welford, restored losslessly).
+2. **reference** — else, if `--reference-store <dir>` is given, a `reference/`
+   (prior/contour) tile primes the **predicted surface only**: it turns CUBE's
+   blunder-rejection gate on so false-deep detections are dropped, but is **never
+   settled** as measured data and seeds **no** backscatter. Only tiles at the survey
+   GGGS level gate. (Replaces the pre-#96 `--prior` flag, which loaded the whole
+   prior into RAM up front and defeated eviction.)
+3. else **blank**.
+
+### Backscatter fidelity
+
+The co-estimated per-cell backscatter is stored as a 3-band Welford sufficient
+statistic `{mean, standard_error, sample_sd}` (uma#248), so the estimate
+reconstructs losslessly on an off-boat re-run: a single-beam cell is the `n = 1`
+sentinel (`sample_sd = 0`, finite mean), and a multi-beam cell round-trips
+`n`/mean/variance exactly. Values are **uncorrected** by default; pass
+`--backscatter-correction empirical --backscatter-curve <csv>` for the per-beam
+angular-response (and tier-2 TL) correction. See
+`docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
+
 ## Data flow & pose sourcing (design: #31)
 
 The package faithfully ports Calder's CUBE *algorithm* but originally diverged

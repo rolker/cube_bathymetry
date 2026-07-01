@@ -229,13 +229,15 @@ public:
           marine_bathymetry_store::BathymetryStore::fromCellSize(
           static_cast<float>(cell_size_));
         marine_bathymetry_store::load(store, draft_dir_);
+        // The live node writes (and re-primes from) the `survey` layer since
+        // uma#248 collapsed the draft/processed split into one (ADR-0001 addendum).
         const auto & draft_tiles =
-          store.tiles(marine_bathymetry_store::SourceLayer::Draft);
+          store.tiles(marine_bathymetry_store::SourceLayer::Survey);
         if (!draft_tiles.empty()) {
           cube::loadIntoSheet(
-            store, marine_bathymetry_store::SourceLayer::Draft, *geo_map_sheet_);
+            store, marine_bathymetry_store::SourceLayer::Survey, *geo_map_sheet_);
           RCLCPP_INFO(get_logger(),
-            "Primed GeoMapSheet from %zu draft tiles under %s",
+            "Primed GeoMapSheet from %zu survey tiles under %s",
             draft_tiles.size(), draft_dir_.c_str());
           // Bound the prime to the resident budget (must-fix): loadIntoSheet loads
           // the WHOLE store, so without this a restart mid-long-survey re-creates
@@ -761,7 +763,7 @@ private:
       const auto ne = index.northEastPosition();
       marine_bathymetry_store::loadWindow(scratch, draft_dir_, sw, ne, nullptr);
       const auto & tiles =
-        scratch.tiles(marine_bathymetry_store::SourceLayer::Draft);
+        scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
       auto it = tiles.find(index);
       if(it != tiles.end()) {
         cube::primeFromTile(it->second, *geo_map_sheet_);
@@ -777,8 +779,9 @@ private:
   }
 
   // Persist every grid touched since the last save as a marine_bathymetry_store
-  // draft tile (atomic temp-then-rename via tile_io::saveTile), then clear the
-  // dirty set. A no-op when persistence is disabled or nothing changed.
+  // draft tile (via tile_io::saveTile -- a direct, flush/close-checked write, not
+  // crash-atomic), then clear the dirty set. A no-op when persistence is disabled or
+  // nothing changed.
   //
   // NOTE: geoGridToTile() calls GeoGrid::values(), which flushes the median
   // pre-filter -- the same flush the end-of-session export does, now happening
@@ -795,14 +798,16 @@ private:
       return;
     }
 
-    const int64_t ts_ns = get_clock()->now().nanoseconds();
-    // Single fused draft grid (unh_marine_autonomy#221): tiles go directly under
-    // <draft_dir>/draft/ with no per-day epoch segment. Newest value wins per
+    // Single fused survey grid (unh_marine_autonomy#221, #248): tiles go directly
+    // under <draft_dir>/survey/ with no per-day epoch segment. The live node now
+    // writes the `survey` layer directly (uma#248 collapsed the draft/processed
+    // split; ADR-0001 addendum): a bounded/approximate boat-side product that an
+    // off-boat batch-regen later overwrites as authoritative. Newest value wins per
     // cell, so successive saves and sessions accumulate into one grid.
     const std::string dir =
       draft_dir_ + "/" +
       marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Draft);
+      marine_bathymetry_store::SourceLayer::Survey);
 
     std::size_t written = 0;
     try {
@@ -812,10 +817,11 @@ private:
         if (!grid_ptr) {
           continue;
         }
-        // source_index 0 = no registry wired yet (#21 scope); follow-on once
-        // marine_control device-control lands.
+        // BathyCell is 2-band since uma#248 (no per-cell timestamp/source_index);
+        // coarse provenance is store-level StoreMetadata (not wired in the live
+        // node yet, #21 scope).
         marine_bathymetry_store::BathymetryTile tile =
-          cube::geoGridToTile(*grid_ptr, ts_ns, /*source_index=*/0);
+          cube::geoGridToTile(*grid_ptr);
         if (!tile.dirty()) {
           // No finite cells (all queued/NaN) -- nothing to write. dirty() is the
           // value-raster flag geoGridToTile sets iff it wrote a finite cell

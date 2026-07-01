@@ -68,18 +68,15 @@ std::vector<GeoSounding> makeSoundings()
   return soundings;
 }
 
-constexpr int64_t kStamp = 1234567890123456789LL;
-
 // Mirror cube_bathymetry_node::saveDirtyTiles() at library level: write each
-// dirty grid as a draft tile under <dir>/draft/ (flat, no epoch segment).
-std::size_t saveDirty(
-  GeoMapSheet & sheet, const std::string & dir, int64_t ts_ns)
+// dirty grid as a survey tile under <dir>/survey/ (flat, no epoch segment).
+std::size_t saveDirty(GeoMapSheet & sheet, const std::string & dir)
 {
   const std::set<gggs::GridIndex> dirty = sheet.dirtyGrids();
   const std::string out =
     dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Draft);
+    marine_bathymetry_store::SourceLayer::Survey);
   std::filesystem::create_directories(out);
   std::size_t written = 0;
   for (const auto & index : dirty) {
@@ -87,8 +84,7 @@ std::size_t saveDirty(
     if (!grid) {
       continue;
     }
-    marine_bathymetry_store::BathymetryTile tile =
-      geoGridToTile(*grid, ts_ns, 0);
+    marine_bathymetry_store::BathymetryTile tile = geoGridToTile(*grid);
     if (!tile.dirty()) {
       continue;
     }
@@ -110,14 +106,14 @@ std::string makeTempDir(const std::string & tag)
 }
 }  // namespace
 
-// confirm layerDirName(Draft) == "draft" so the hand-built save path matches the
-// directory load() scans.
-TEST(Persistence, DraftLayerDirNameIsDraft)
+// confirm layerDirName(Survey) == "survey" so the hand-built save path matches the
+// directory load() scans (uma#248 renamed the live layer draft -> survey).
+TEST(Persistence, SurveyLayerDirNameIsSurvey)
 {
   EXPECT_EQ(
     marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Draft),
-    "draft");
+      marine_bathymetry_store::SourceLayer::Survey),
+    "survey");
 }
 
 // Save dirty tiles, then load the whole store back and verify the depth/
@@ -130,12 +126,12 @@ TEST(Persistence, SaveDirtyThenStoreLoadRoundTrips)
   sheet.addSoundings(makeSoundings());
   ASSERT_FALSE(sheet.dirtyGrids().empty());
 
-  const std::size_t written = saveDirty(sheet, dir, kStamp);
+  const std::size_t written = saveDirty(sheet, dir);
   ASSERT_GT(written, 0u);
   EXPECT_TRUE(sheet.dirtyGrids().empty()) << "save must clear the dirty set";
 
   // Reference: convert the same sheet to tiles directly (end-of-session export).
-  auto reference = mapSheetToTiles(sheet, kStamp, 0);
+  auto reference = mapSheetToTiles(sheet);
   ASSERT_FALSE(reference.empty());
 
   // Load the store back through the public store-level load().
@@ -145,7 +141,7 @@ TEST(Persistence, SaveDirtyThenStoreLoadRoundTrips)
   EXPECT_EQ(loaded_count, written);
 
   const auto & draft_tiles =
-    loaded.tiles(marine_bathymetry_store::SourceLayer::Draft);
+    loaded.tiles(marine_bathymetry_store::SourceLayer::Survey);
   ASSERT_FALSE(draft_tiles.empty()) << "draft tiles must be present after load";
 
   // Every finite reference cell must match a loaded cell (depth + uncertainty).
@@ -192,10 +188,10 @@ TEST(Persistence, PeriodicSaveEqualsEndOfSessionExport)
   // and saving wholesale).
   GeoMapSheet sheet_ref(1.0f);
   sheet_ref.addSoundings(makeSoundings());
-  auto ref_tiles = mapSheetToTiles(sheet_ref, kStamp, 0);
+  auto ref_tiles = mapSheetToTiles(sheet_ref);
 
   // Periodic-style save of every dirty grid.
-  const std::size_t written = saveDirty(sheet, dir_periodic, kStamp);
+  const std::size_t written = saveDirty(sheet, dir_periodic);
   ASSERT_EQ(written, ref_tiles.size());
 
   // Load the periodic store and compare to the reference tiles.
@@ -203,7 +199,7 @@ TEST(Persistence, PeriodicSaveEqualsEndOfSessionExport)
     marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
   marine_bathymetry_store::load(loaded, dir_periodic);
   const auto & draft_tiles =
-    loaded.tiles(marine_bathymetry_store::SourceLayer::Draft);
+    loaded.tiles(marine_bathymetry_store::SourceLayer::Survey);
   ASSERT_FALSE(draft_tiles.empty());
 
   EXPECT_EQ(draft_tiles.size(), ref_tiles.size());
@@ -232,7 +228,7 @@ std::size_t finiteCellCount(
   const marine_bathymetry_store::BathymetryStore & store,
   const gggs::GridIndex & index)
 {
-  const auto & tiles = store.tiles(marine_bathymetry_store::SourceLayer::Draft);
+  const auto & tiles = store.tiles(marine_bathymetry_store::SourceLayer::Survey);
   auto it = tiles.find(index);
   if (it == tiles.end()) {
     return 0;
@@ -286,7 +282,7 @@ TEST(Persistence, RevisitAfterEvictPreservesData)
   // 1. Survey the tile fully and save it (the pre-eviction durable state).
   GeoMapSheet surveyed(1.0f);
   surveyed.addSoundings(makeSoundings());
-  ASSERT_GT(saveDirty(surveyed, dir, kStamp), 0u);
+  ASSERT_GT(saveDirty(surveyed, dir), 0u);
   const std::size_t original_finite = finiteCellCount(loadDraft(dir), index);
   ASSERT_GT(original_finite, 1u) << "the survey must populate more than one cell";
 
@@ -295,10 +291,10 @@ TEST(Persistence, RevisitAfterEvictPreservesData)
   GeoMapSheet reloaded(1.0f);
   {
     marine_bathymetry_store::BathymetryStore store = loadDraft(dir);
-    loadIntoSheet(store, marine_bathymetry_store::SourceLayer::Draft, reloaded);
+    loadIntoSheet(store, marine_bathymetry_store::SourceLayer::Survey, reloaded);
   }
   reloaded.addSoundings(makeSparseResurvey());  // touches ~one cell
-  ASSERT_GT(saveDirty(reloaded, dir, kStamp + 1), 0u);
+  ASSERT_GT(saveDirty(reloaded, dir), 0u);
   const std::size_t after_reload_finite = finiteCellCount(loadDraft(dir), index);
   EXPECT_GE(after_reload_finite, original_finite)
     << "reload+resurvey+save must NOT lose any previously-surveyed cell";
@@ -308,10 +304,10 @@ TEST(Persistence, RevisitAfterEvictPreservesData)
   const std::string dir_ctrl = makeTempDir("lossless_ctrl");
   GeoMapSheet seeded(1.0f);
   seeded.addSoundings(makeSoundings());
-  ASSERT_GT(saveDirty(seeded, dir_ctrl, kStamp), 0u);
+  ASSERT_GT(saveDirty(seeded, dir_ctrl), 0u);
   GeoMapSheet no_reload(1.0f);
   no_reload.addSoundings(makeSparseResurvey());
-  ASSERT_GT(saveDirty(no_reload, dir_ctrl, kStamp + 1), 0u);
+  ASSERT_GT(saveDirty(no_reload, dir_ctrl), 0u);
   const std::size_t no_reload_finite = finiteCellCount(loadDraft(dir_ctrl), index);
   EXPECT_LT(no_reload_finite, original_finite)
     << "without reload the overwrite-on-save DOES lose cells -- "

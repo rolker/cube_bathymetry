@@ -91,7 +91,10 @@ install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 # store). Linked by the offline import_bag tool and its test, AND -- since the
 # draft-tile persistence work (#21) -- by the runtime cube_bathymetry_node, which
 # uses geoGridToTile / loadIntoSheet to save and warm-start draft tiles.
-add_library(cube_bathymetry_store_import src/store_import.cpp)
+add_library(cube_bathymetry_store_import
+  src/store_import.cpp
+  src/batch_regen.cpp   # exact scatter/gather store rebuild (#96)
+)
 target_link_libraries(cube_bathymetry_store_import
   cube_bathymetry
   marine_bathymetry_store::marine_bathymetry_store
@@ -229,6 +232,26 @@ install(TARGETS import_bag
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Exact, bounded-RAM store rebuild: scatter soundings to per-tile buckets, gather
+# each tile in one unbounded pass (no eviction -> bit-exact output) (#96).
+add_executable(batch_regen_bag src/batch_regen_main.cpp)
+target_link_libraries(batch_regen_bag
+  cube_bathymetry_store_import   # BatchRegen + cube_bathymetry + marine_bathymetry_store
+  marine_mbes_backscatter_store::marine_mbes_backscatter_store  # --bs-store output (#80)
+  ${geometry_msgs_TARGETS}
+  ${marine_acoustic_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  rclcpp::rclcpp
+  rosbag2_cpp::rosbag2_cpp
+  rosbag2_transport::rosbag2_transport
+  tf2_geometry_msgs::tf2_geometry_msgs
+  tf2_ros::tf2_ros
+)
+
+install(TARGETS batch_regen_bag
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
@@ -299,6 +322,15 @@ if(BUILD_TESTING)
   # failure never drops a tile.
   ament_add_gtest(test_import_eviction test/test_import_eviction.cpp)
   target_link_libraries(test_import_eviction
+    cube_bathymetry_store_import
+    marine_bathymetry_store::marine_bathymetry_store
+    marine_mbes_backscatter_store::marine_mbes_backscatter_store
+  )
+
+  # Batch-regen exactness (#96): the scatter/gather rebuild produces a byte-exact
+  # bathy + backscatter store vs a single-pass unbounded ImportAccumulator.
+  ament_add_gtest(test_batch_regen test/test_batch_regen.cpp)
+  target_link_libraries(test_batch_regen
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
     marine_mbes_backscatter_store::marine_mbes_backscatter_store

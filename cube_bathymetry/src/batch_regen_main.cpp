@@ -19,14 +19,16 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-// import_bag: offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store
-// importer (PR-B of unh_marine_autonomy#147, cube_bathymetry#57; adapted to the
-// single fused draft grid in unh_marine_autonomy#221).
+// batch_regen: offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store
+// EXACT rebuild (cube_bathymetry#96). Shares import_bag's projection pipeline but
+// scatters each projected sounding to a per-tile bucket on disk, then gathers each
+// tile in a single unbounded pass (no eviction) so the output is BIT-EXACT vs a
+// whole-survey-in-RAM build -- the authoritative off-boat rebuild path.
 //
 // Mirrors the bag_to_geotiff `-d` offline-projection chain (rosbag2
 // SequentialReader -> tf2::BufferCore from /tf + /tf_static -> DetectionsProjector
 // -> per-sounding lookupTransform("earth", frame_id, stamp) -> GeoSounding ->
-// GeoMapSheet) but writes marine_bathymetry_store draft tiles instead of a GeoTIFF.
+// GeoMapSheet) but writes marine_bathymetry_store survey tiles instead of a GeoTIFF.
 
 #include <algorithm>
 #include <chrono>
@@ -46,6 +48,7 @@
 #include <vector>
 
 #include "cube_bathymetry/angular_response_curve.h"
+#include "cube_bathymetry/batch_regen.h"
 #include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
@@ -68,8 +71,12 @@
 
 [[noreturn]] void usage()
 {
-  std::cout << "usage: import_bag [options] -o <store_dir> "
+  std::cout << "usage: batch_regen [options] -o <store_dir> "
     "-d <detections_topic> <bag> [<bag> ...]\n";
+  std::cout << "  Exact rebuild: scatters soundings to per-tile buckets on disk, "
+    "then gathers each tile in one unbounded pass (no eviction), so the output is "
+    "bit-exact vs a whole-survey-in-RAM build (cube#96). Use this for the "
+    "authoritative off-boat product; use import_bag for the bounded-RAM path.\n";
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
     "needed). The off-boat CUBE re-run is authoritative, so it always writes the "
     "`survey` layer (uma#248 collapsed the draft/processed split into one)\n";
@@ -101,16 +108,6 @@
     "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
     "curve (header '# tl_removed: true' + '# absorption_db_per_m: <a>') also makes "
     "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
-  std::cout << "  --max-resident-tiles <N>: bound resident-tile RAM (cube#92). When "
-    "the in-memory GGGS tile count exceeds N, the coldest tiles are persisted to "
-    "the -o store (and their backscatter to --bs-store), their per-cell intensity "
-    "Welford spilled to a temp scratch, and dropped from RAM. A revisit reloads the "
-    "tile (settled depth + restored Welford) BEFORE the new soundings, so "
-    "backscatter blends LOSSLESSLY with the pre-eviction beams; only the bathy "
-    "depth UNCERTAINTY is re-derived (the depth value stays faithful). Default 256 "
-    "(generous; disk is local/fast offline). 0 = unbounded (whole survey in RAM). "
-    "NOTE: per-cell intensity memory is O(1) regardless of beam count (cube#93), so "
-    "a small heavily-oversampled survey no longer OOMs even without eviction\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
@@ -183,7 +180,7 @@ public:
       const rosbag2_cpp::Reader & reader)
     : message(message)
     {
-      for (auto & topic_info : reader.get_all_topics_and_types()) {
+      for (const auto & topic_info : reader.get_all_topics_and_types()) {
         if (topic_info.name == message->topic_name) {
           data_type = topic_info.type;
           break;
@@ -304,11 +301,6 @@ int main(int argc, char * argv[])
   double resolution = 1.0;
   std::string iho_order = "order1a";
   int ping_count_limit = 0;
-  // Bounded-RAM eviction budget (cube#92). Default 256 resident tiles: generous
-  // for offline (each ~960x960-cell GeoGrid + CUBE state is the heavy object), so
-  // small/medium surveys never evict (identical output to the old path) while a
-  // large multi-day survey stays bounded. 0 = unbounded (old behavior).
-  std::size_t max_resident_tiles = 256;
   // Backscatter angular-response correction (cube#81). Default none = identity.
   std::string backscatter_correction_str = "none";
   std::string backscatter_curve_file;
@@ -336,10 +328,10 @@ int main(int argc, char * argv[])
       return *arg;
     };
 
-  // Guarded numeric parses: std::stod/std::stoi/std::stoll THROW on a non-numeric value
-  // and, uncaught in main, would std::terminate the process with an opaque message.
-  // Catch and route to usage() with a clear diagnostic instead (mirrors the sibling
-  // batch_regen_main). usage() is [[noreturn]], so these never fall through.
+  // Guarded numeric parses: std::stod/std::stoi THROW on a non-numeric value and,
+  // uncaught in main, would std::terminate the process with an opaque message
+  // (mirrors the hardening import_bag still lacks). Catch and route to usage() with
+  // a clear diagnostic instead. usage() is [[noreturn]], so these never fall through.
   auto parse_double = [&](const char * flag, const std::string & value) -> double {
       try {
         std::size_t consumed = 0;
@@ -358,20 +350,6 @@ int main(int argc, char * argv[])
       try {
         std::size_t consumed = 0;
         const int parsed = std::stoi(value, &consumed);
-        if (consumed != value.size()) {
-          throw std::invalid_argument("trailing characters");
-        }
-        return parsed;
-      } catch (const std::exception &) {
-        std::cerr << "error: option '" << flag << "' expects an integer, got '"
-                  << value << "'\n";
-        usage();
-      }
-    };
-  auto parse_long = [&](const char * flag, const std::string & value) -> int64_t {
-      try {
-        std::size_t consumed = 0;
-        const int64_t parsed = std::stoll(value, &consumed);
         if (consumed != value.size()) {
           throw std::invalid_argument("trailing characters");
         }
@@ -404,13 +382,6 @@ int main(int argc, char * argv[])
       backscatter_correction_str = next_value("--backscatter-correction");
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
-    } else if (*arg == "--max-resident-tiles") {
-      const int64_t v = parse_long("--max-resident-tiles", next_value("--max-resident-tiles"));
-      if (v < 0) {
-        std::cerr << "error: --max-resident-tiles must be >= 0 (0 = unbounded)\n";
-        usage();
-      }
-      max_resident_tiles = static_cast<std::size_t>(v);
     } else if (*arg == "-l") {
       ping_count_limit = parse_int("-l", next_value("-l"));
     } else if (*arg == "--platform") {
@@ -426,11 +397,11 @@ int main(int argc, char * argv[])
     } else if (*arg == "--tide-frame") {
       projector_params.tide_frame = next_value("--tide-frame");
     } else if (*arg == "--minimum-range") {
-      projector_params.minimum_range = parse_double("--minimum-range",
-        next_value("--minimum-range"));
+      projector_params.minimum_range =
+        parse_double("--minimum-range", next_value("--minimum-range"));
     } else if (*arg == "--maximum-range") {
-      projector_params.maximum_range = parse_double("--maximum-range",
-        next_value("--maximum-range"));
+      projector_params.maximum_range =
+        parse_double("--maximum-range", next_value("--maximum-range"));
     } else if (!arg->empty() && (*arg)[0] == '-' && *arg != "-") {
       // An unrecognized flag would otherwise be silently treated as a bag path
       // and fail later with a confusing "cannot open bag". Reject it up front.
@@ -450,6 +421,13 @@ int main(int argc, char * argv[])
   if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
     std::cerr << "error: -o <store_dir>, -d <detections_topic>, and "
       "at least one bag are all required\n";
+    usage();
+  }
+
+  // Resolution drives the GGGS level (Level::fromCellSize); a non-positive value is
+  // nonsensical and would produce a degenerate/garbage level rather than fail cleanly.
+  if (!(resolution > 0.0)) {
+    std::cerr << "error: -r resolution must be > 0 (got " << resolution << ")\n";
     usage();
   }
 
@@ -548,55 +526,55 @@ int main(int argc, char * argv[])
     std::cout << std::endl;
   }
   geo_map_sheet.setBackscatterCorrection(
-    backscatter_mode, std::move(backscatter_curve.points),
+    backscatter_mode, backscatter_curve.points,
     backscatter_curve.tl_removed, backscatter_curve.absorption_db_per_m);
 
-  // Reference-prior seeding (#89, #96) is now LAZY, per tile on first touch, driven
-  // by the accumulator's seedNewTile (see ImportAccumulatorConfig::reference_store_dir
-  // below): a `reference/` tile primes the CUBE predicted surface only (seed_settled=
-  // false) so the blunder gate turns on WITHOUT settling coarse prior depths as
-  // measured data. Only tiles at the survey GGGS level coincide with a survey node
-  // and gate; a reference tile at another level primes a node the soundings never
-  // land on (harmless no-op). The pre-#96 upfront whole-store loadIntoSheet was
-  // removed: it defeated the bounded-RAM eviction by loading the entire prior into
-  // the sheet at once.
+  // Sheet factory (#96): batch-regen builds one routing sheet + one gather sheet
+  // per tile, all of which MUST be configured identically to this projection sheet
+  // (cell size, IHO order, backscatter correction) for the rebuild to be exact.
+  // Capture the correction settings by value so the factory can build many sheets.
+  cube::BatchRegen::SheetFactory make_sheet =
+    [resolution, iho_order, backscatter_mode,
+      curve_points = backscatter_curve.points,
+      tl_removed = backscatter_curve.tl_removed,
+      absorption = backscatter_curve.absorption_db_per_m]() {
+      auto sheet = std::make_unique<cube::GeoMapSheet>(resolution, iho_order);
+      sheet->setBackscatterCorrection(
+        backscatter_mode, curve_points, tl_removed, absorption);
+      return sheet;
+    };
 
-  // Store-level provenance (uma#248 StoreMetadata) + bounded-RAM accumulator
-  // (cube#92). The accumulator owns the persist-then-drop eviction + lossless
-  // reload-on-revisit that bounds resident RAM by tile COUNT (not surveyed AREA)
-  // and the two-rung seed precedence (#96). registry.json is written once at
-  // finalize(). Backscatter provenance mirrors the bathy platform/sensor with an
-  // MBES-specific calibration ref (empty until a beam-pattern calibration exists).
+  // Reference-prior seeding (#89, #96) is LAZY, per tile on first touch, driven by
+  // the gather accumulator's seedNewTile: a `reference/` tile primes the CUBE
+  // predicted surface only (seed_settled=false) so the blunder gate turns on WITHOUT
+  // settling coarse prior depths as measured data. Only tiles at the survey GGGS
+  // level coincide with a survey node and gate.
+
+  // Store-level provenance (uma#248 StoreMetadata), written once at finalize.
+  // Backscatter provenance mirrors the bathy platform/sensor with an MBES-specific
+  // calibration ref (empty until a beam-pattern calibration exists).
   marine_mbes_backscatter_store::StoreMetadata bs_metadata;
   bs_metadata.platform = store_metadata.platform;
   bs_metadata.sensor = store_metadata.sensor;
   bs_metadata.survey = store_metadata.survey;
   bs_metadata.date = store_metadata.date;
 
-  cube::ImportAccumulatorConfig accumulator_config;
-  accumulator_config.store_dir = store_dir;
-  accumulator_config.reference_store_dir = reference_store_dir;
+  cube::ImportAccumulatorConfig regen_config;
+  regen_config.store_dir = store_dir;
+  regen_config.reference_store_dir = reference_store_dir;
   // Match the store level to the sheet's actual (GGGS-snapped) cell size so the
-  // reload/seed/merge scratch stores tile identically.
-  accumulator_config.cell_size_m =
+  // scatter routing + gather scratch stores tile identically.
+  regen_config.cell_size_m =
     static_cast<float>(geo_map_sheet.nominalCellSizeMeters());
-  accumulator_config.bs_store_dir = bs_store_dir;
-  accumulator_config.max_resident_tiles = max_resident_tiles;
-  cube::ImportAccumulator accumulator(geo_map_sheet, accumulator_config);
+  regen_config.bs_store_dir = bs_store_dir;
+  cube::BatchRegen regen(make_sheet, regen_config);
 
   if (!reference_store_dir.empty()) {
     std::cout << "Reference-prior seeding from " << reference_store_dir
               << " (lazy per-tile; predicted-only blunder gate, #96)." << std::endl;
   }
-
-  if (max_resident_tiles > 0) {
-    std::cout << "Bounded resident tiles: " << max_resident_tiles
-              << " (cold tiles persist to the -o store and drop from RAM; "
-      "revisits reload losslessly, cube#92)." << std::endl;
-  } else {
-    std::cout << "Unbounded resident tiles (--max-resident-tiles 0): the whole "
-      "survey stays in RAM." << std::endl;
-  }
+  std::cout << "Exact rebuild: scatter to per-tile buckets, then gather each tile "
+    "in one unbounded pass (cube#96)." << std::endl;
 
   std::cout << "reading messages..." << std::endl;
 
@@ -713,11 +691,9 @@ int main(int argc, char * argv[])
           gs.sounding.slant_range = s.slant_range;
           soundings.push_back(gs);
         }
-        // Accumulate through the bounded-RAM accumulator (cube#92): adds the
-        // batch, reloads any evicted tile this ping revisits, then evicts cold
-        // tiles back to the budget. With --max-resident-tiles 0 this is a plain
-        // addSoundings (no eviction).
-        accumulator.addBatch(soundings);
+        // Scatter this ping's soundings to their per-tile buckets on disk (cube#96).
+        // Nothing accumulates in RAM here; the gather (finalize) builds each tile.
+        regen.addBatch(soundings);
         ping_count++;
       } catch (const tf2::TransformException & e) {
         // A ping with no earth transform in the (bounded) buffer at its stamp --
@@ -846,39 +822,33 @@ int main(int argc, char * argv[])
               << std::endl;
   }
 
-  std::cout << "Building store tiles..." << std::endl;
+  std::cout << "Gathering per-tile buckets (exact rebuild)..." << std::endl;
 
-  // Persist the still-resident tiles and write the store-level metadata. Tiles
-  // evicted during the pass were already written to disk (bathy in the -o store,
-  // their backscatter to --bs-store); finalize() writes whatever is still in RAM,
-  // so the on-disk store is the union of evicted + resident — identical to an
-  // unbounded build (cube#92). The off-boat full-bag CUBE replay is the
-  // authoritative product, so it always writes the `survey` layer (uma#248
-  // collapsed draft/processed). Single fused grid per layer (uma#221).
-  const std::size_t resident_before_final = accumulator.residentTileCount();
-  const std::size_t evicted_count = accumulator.evictedIndices().size();
-  accumulator.finalize(
+  // Gather every scattered tile bucket: each tile is rebuilt in a single unbounded
+  // pass over the complete set of soundings that touch it (no eviction), then
+  // written once to the `survey` layer (uma#248 collapsed draft/processed). Store-
+  // level metadata is written once here. The scatter scratch dir is cleaned up.
+  const std::size_t tile_buckets = regen.tileCount();
+  regen.finalize(
     store_metadata.empty() ? nullptr : &store_metadata,
     (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
-  std::cout << "Persisted " << accumulator.bathyTilesPersisted()
+  std::cout << "Persisted " << regen.bathyTilesPersisted()
             << " bathy tile(s) to " << store_dir << " (survey layer; "
-            << evicted_count << " evicted mid-pass, "
-            << resident_before_final << " resident at end; build: "
+            << tile_buckets << " tile bucket(s) gathered; build: "
             << phase_secs() << "s)." << std::endl;
 
-  if (accumulator.bathyTilesPersisted() == 0) {
+  if (regen.bathyTilesPersisted() == 0) {
     std::cerr << "WARNING: no tiles had finite data -- nothing imported. Check "
       "the projector frame overrides and the detections topic." << std::endl;
   }
 
-  // The co-estimated backscatter was surfaced into the --bs-store layer (#80) from
-  // the SAME CUBE pass, incrementally under eviction (newest-finite-wins merge,
-  // cube#92). By default UNCORRECTED; --backscatter-correction empirical applies
-  // the per-beam angular-response correction at node-output (cube#81).
+  // The co-estimated backscatter was surfaced into the --bs-store `survey` layer
+  // (#80) from the SAME CUBE pass. By default UNCORRECTED; --backscatter-correction
+  // empirical applies the per-beam angular-response correction at node-output (#81).
   if (!bs_store_dir.empty()) {
-    std::cout << "Persisted " << accumulator.backscatterTilesPersisted()
+    std::cout << "Persisted " << regen.backscatterTilesPersisted()
               << " backscatter tile(s) to " << bs_store_dir << "." << std::endl;
-    if (accumulator.backscatterTilesPersisted() == 0) {
+    if (regen.backscatterTilesPersisted() == 0) {
       std::cerr << "WARNING: no cells had finite backscatter -- nothing written to "
         "the backscatter store. Check that the detections carry intensities."
                 << std::endl;

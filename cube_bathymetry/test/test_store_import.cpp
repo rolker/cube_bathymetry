@@ -95,8 +95,6 @@ std::vector<GeoSounding> makeDeepSoundings(float depth)
   return soundings;
 }
 
-constexpr int64_t kStamp = 1234567890123456789LL;
-constexpr uint16_t kSource = 7;
 constexpr float kIntensity = 42.5f;
 }  // namespace
 
@@ -118,7 +116,7 @@ TEST(StoreImport, TileCellsMatchGridValues)
     // the same way geoGridToTile does, then compare against the produced tile.
     const std::vector<DepthAndUncertainty> values = grid->values();
     const marine_bathymetry_store::BathymetryTile tile =
-      geoGridToTile(*grid, kStamp, kSource);
+      geoGridToTile(*grid);
 
     gggs::CellAreaIterator it(grid->index());
     std::size_t k = 0;
@@ -134,8 +132,6 @@ TEST(StoreImport, TileCellsMatchGridValues)
         ASSERT_TRUE(cell.hasData());
         EXPECT_DOUBLE_EQ(cell.depth, static_cast<double>(values[k].depth));
         EXPECT_DOUBLE_EQ(cell.uncertainty, static_cast<double>(values[k].uncertainty));
-        EXPECT_EQ(cell.timestamp, kStamp);
-        EXPECT_EQ(cell.source_index, kSource);
       }
     }
     finite_total += finite_in_grid;
@@ -144,14 +140,15 @@ TEST(StoreImport, TileCellsMatchGridValues)
 }
 
 // Converting the same map sheet twice must yield an identical tile set: same
-// grids, and byte-identical depth/uncertainty/timestamp/source bands.
+// grids, and byte-identical depth/uncertainty bands (BathyCell is 2-band since
+// uma#248 — the timestamp/source bands were dropped).
 TEST(StoreImport, ConversionIsDeterministic)
 {
   GeoMapSheet ms(1.0f);
   ms.addSoundings(makeSoundings());
 
-  auto tiles_a = mapSheetToTiles(ms, kStamp, kSource);
-  auto tiles_b = mapSheetToTiles(ms, kStamp, kSource);
+  auto tiles_a = mapSheetToTiles(ms);
+  auto tiles_b = mapSheetToTiles(ms);
 
   ASSERT_FALSE(tiles_a.empty());
   ASSERT_EQ(tiles_a.size(), tiles_b.size());
@@ -179,8 +176,6 @@ TEST(StoreImport, ConversionIsDeterministic)
         EXPECT_DOUBLE_EQ(ua[i], ub[i]);
       }
     }
-    EXPECT_EQ(ta.timestampBand(), tb.timestampBand());
-    EXPECT_EQ(ta.sourceBand(), tb.sourceBand());
   }
 }
 
@@ -188,7 +183,7 @@ TEST(StoreImport, ConversionIsDeterministic)
 TEST(StoreImport, EmptyMapSheetYieldsNoTiles)
 {
   GeoMapSheet ms(1.0f);
-  auto tiles = mapSheetToTiles(ms, kStamp, kSource);
+  auto tiles = mapSheetToTiles(ms);
   EXPECT_TRUE(tiles.empty());
 }
 
@@ -204,7 +199,7 @@ TEST(StoreImport, PrimeFromTileSeedsFiniteCells)
 
   const std::vector<DepthAndUncertainty> values = grids.front()->values();
   const marine_bathymetry_store::BathymetryTile tile =
-    geoGridToTile(*grids.front(), kStamp, kSource);
+    geoGridToTile(*grids.front());
 
   // Prime a fresh sheet from that tile.
   GeoMapSheet primed(1.0f);
@@ -238,7 +233,7 @@ TEST(StoreImport, LoadIntoSheetRoundTrip)
   GeoMapSheet source(1.0f);
   source.addSoundings(makeSoundings());
 
-  auto tiles = mapSheetToTiles(source, kStamp, kSource);
+  auto tiles = mapSheetToTiles(source);
   ASSERT_FALSE(tiles.empty());
 
   marine_bathymetry_store::BathymetryStore store =
@@ -247,11 +242,11 @@ TEST(StoreImport, LoadIntoSheetRoundTrip)
   // Copy the tile map (importTiles consumes it) but keep a reference set.
   std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles_copy = tiles;
   store.importTiles(
-    marine_bathymetry_store::SourceLayer::Draft, std::move(tiles));
+    marine_bathymetry_store::SourceLayer::Survey, std::move(tiles));
 
   GeoMapSheet loaded(1.0f);
   loadIntoSheet(
-    store, marine_bathymetry_store::SourceLayer::Draft, loaded);
+    store, marine_bathymetry_store::SourceLayer::Survey, loaded);
 
   std::size_t checked = 0;
   for (const auto & grid_tile : tiles_copy) {
@@ -281,15 +276,15 @@ TEST(StoreImport, LoadIntoSheetEmptyLayerIsNoOp)
     marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
   GeoMapSheet loaded(1.0f);
   loadIntoSheet(
-    store, marine_bathymetry_store::SourceLayer::Draft, loaded);
+    store, marine_bathymetry_store::SourceLayer::Survey, loaded);
   EXPECT_TRUE(loaded.grids().empty());
 }
 
 // Intensity-bearing soundings must produce a non-empty backscatter cell map whose
 // cells match the grid's finite-intensity nodeRecords() entries cell-for-cell,
-// carry the import timestamp/source, and (with a constant input intensity) surface
-// that same constant value (the surfaced backscatter is uncorrected by default,
-// BackscatterAngleCorrection::None, #80).
+// encode the 3-band MbesCell sufficient statistic (mean + n=1 sentinel here), and
+// (with a constant input intensity) surface that same constant mean (the surfaced
+// backscatter is uncorrected by default, BackscatterAngleCorrection::None, #80).
 TEST(StoreImport, BackscatterCellsMatchGridRecords)
 {
   GeoMapSheet ms(1.0f);
@@ -298,7 +293,7 @@ TEST(StoreImport, BackscatterCellsMatchGridRecords)
   auto grids = ms.grids();
   ASSERT_FALSE(grids.empty());
 
-  const auto cells = mapSheetToBackscatterCells(ms, kStamp, kSource);
+  const auto cells = mapSheetToBackscatterCells(ms);
   EXPECT_FALSE(cells.empty())
     << "intensity-bearing soundings should co-estimate some backscatter cells";
 
@@ -320,18 +315,28 @@ TEST(StoreImport, BackscatterCellsMatchGridRecords)
       } else {
         ++finite_total;
         ASSERT_NE(found, cells.end());
-        EXPECT_FLOAT_EQ(found->second.intensity, records[k].intensity);
+        // mean is the running-mean band, unchanged from the NodeRecord intensity.
+        EXPECT_FLOAT_EQ(found->second.mean, records[k].intensity);
         // Constant input intensity, uncorrected surface by default (None) ->
-        // emitted value is that constant (mean of equal per-beam intensities).
-        EXPECT_FLOAT_EQ(found->second.intensity, kIntensity);
-        EXPECT_EQ(found->second.timestamp, kStamp);
-        EXPECT_EQ(found->second.source_index, kSource);
-        // intensity_variance mirrors intensity_var (NaN with < 2 samples); a
-        // finite value must round-trip exactly.
+        // emitted mean is that constant (mean of equal per-beam intensities).
+        EXPECT_FLOAT_EQ(found->second.mean, kIntensity);
+        // Each cell here has a single intensity-bearing beam (the soundings spread
+        // one-per-cell), so intensity_var is NaN and the n=1 sentinel is written:
+        // sample_sd == 0, standard_error == 0. welfordFromCell reconstructs n = 1.
         if (std::isnan(records[k].intensity_var)) {
-          EXPECT_TRUE(std::isnan(found->second.intensity_variance));
+          EXPECT_FLOAT_EQ(found->second.sample_sd, 0.0f);
+          EXPECT_FLOAT_EQ(found->second.standard_error, 0.0f);
+          const IntensityWelford w = welfordFromCell(found->second);
+          EXPECT_EQ(w.n, 1u);
+          EXPECT_DOUBLE_EQ(w.mean, static_cast<double>(records[k].intensity));
         } else {
-          EXPECT_FLOAT_EQ(found->second.intensity_variance, records[k].intensity_var);
+          // n >= 2: sample_sd = sqrt(var*n), standard_error = scale*sqrt(var).
+          const float n = static_cast<float>(records[k].n_samples);
+          EXPECT_FLOAT_EQ(
+            found->second.sample_sd, std::sqrt(records[k].intensity_var * n));
+          EXPECT_FLOAT_EQ(
+            found->second.standard_error,
+            kBackscatterConfidenceScale * std::sqrt(records[k].intensity_var));
         }
       }
     }
@@ -348,7 +353,7 @@ TEST(StoreImport, BackscatterCellsMatchGridRecords)
   std::size_t bathy_finite = 0;
   for (const auto & grid : grids) {
     const marine_bathymetry_store::BathymetryTile tile =
-      geoGridToTile(*grid, kStamp, kSource);
+      geoGridToTile(*grid);
     gggs::CellAreaIterator it(grid->index());
     for (; it.valid(); it.next()) {
       const marine_bathymetry_store::BathyCell bcell =
@@ -379,12 +384,12 @@ TEST(StoreImport, BackscatterNaNPropagation)
 
   // Sanity: the same soundings DO yield finite bathy tiles, so an empty
   // backscatter map is about missing intensity, not missing data.
-  auto bathy = mapSheetToTiles(ms, kStamp, kSource);
+  auto bathy = mapSheetToTiles(ms);
   ASSERT_FALSE(bathy.empty());
 
   GeoMapSheet ms_bs(1.0f);
   ms_bs.addSoundings(makeSoundings());
-  const auto cells = mapSheetToBackscatterCells(ms_bs, kStamp, kSource);
+  const auto cells = mapSheetToBackscatterCells(ms_bs);
   EXPECT_TRUE(cells.empty())
     << "soundings without intensity must surface no backscatter cells";
 }
@@ -403,7 +408,7 @@ TEST(StoreImport, PredictedOnlyPrimeSeedsNoSettledHypothesis)
 
   const std::vector<DepthAndUncertainty> values = grids.front()->values();
   const marine_bathymetry_store::BathymetryTile tile =
-    geoGridToTile(*grids.front(), kStamp, kSource);
+    geoGridToTile(*grids.front());
 
   // Predicted-only prime: seeds the predicted surface but creates no hypothesis.
   GeoMapSheet predicted_only(1.0f);
@@ -457,7 +462,7 @@ TEST(StoreImport, SeededPredictedSurfaceRejectsDeepBlunder)
   // like prior tile we seed from.
   GeoMapSheet shallow_src(1.0f);
   shallow_src.addSoundings(makeSoundings());
-  auto shallow_tiles = mapSheetToTiles(shallow_src, kStamp, kSource);
+  auto shallow_tiles = mapSheetToTiles(shallow_src);
   ASSERT_FALSE(shallow_tiles.empty());
 
   // A clearly-too-deep blunder at the SAME locations (identical touchdown cells),
@@ -512,6 +517,94 @@ TEST(StoreImport, SeededPredictedSurfaceRejectsDeepBlunder)
     }
   }
   EXPECT_GT(gated_cells, 0u) << "the shallow tile should prime some cells to gate";
+}
+
+// Backscatter Welford round-trip incl. n>=2 real dispersion (#96): several beams
+// with DIFFERENT intensities on one cell produce a finite intensity_var; the
+// 3-band encode + welfordFromCell reconstruct the sample count, mean, and estimate
+// variance -- the seed-from-store path an off-boat re-run relies on.
+TEST(StoreImport, BackscatterWelfordRoundTripMultiSample)
+{
+  GeoMapSheet ms(1.0f);
+  // Several soundings at the SAME position (one cell) with distinct intensities so
+  // the node co-estimates n>=2 with real dispersion (intensity_var finite).
+  std::vector<GeoSounding> stacked;
+  const float intensities[] = {30.0f, 32.0f, 28.0f, 31.0f, 29.0f};
+  for (float bs : intensities) {
+    gz4d::GeoPointLatLongDegrees point(43.07, -70.76, -12.0);
+    GeoSounding s(point);
+    s.sounding.vertical_error = 0.5f;
+    s.sounding.horizontal_error = 0.1f;
+    s.sounding.intensity = bs;
+    s.sounding.beam_angle = 0.0f;
+    stacked.push_back(s);
+  }
+  ms.addSoundings(stacked);
+
+  const auto cells = mapSheetToBackscatterCells(ms);
+  ASSERT_FALSE(cells.empty());
+
+  std::size_t checked_multi = 0;
+  for (const auto & grid : ms.grids()) {
+    const std::vector<NodeRecord> records = grid->nodeRecords();
+    gggs::CellAreaIterator it(grid->index());
+    std::size_t k = 0;
+    for (; it.valid() && k < records.size(); it.next(), ++k) {
+      if (std::isnan(records[k].intensity)) {continue;}
+      const auto found = cells.find(*it);
+      ASSERT_NE(found, cells.end());
+      if (!std::isnan(records[k].intensity_var)) {
+        ++checked_multi;
+        const IntensityWelford w = welfordFromCell(found->second);
+        EXPECT_EQ(w.n, records[k].n_samples);
+        EXPECT_NEAR(w.mean, static_cast<double>(records[k].intensity), 1e-4);
+        // Estimate variance ((m2/(n-1))/n) round-trips to intensity_var.
+        const double recon_var = (w.m2 / (w.n - 1)) / w.n;
+        EXPECT_NEAR(
+          recon_var, static_cast<double>(records[k].intensity_var), 1e-4);
+      }
+    }
+  }
+  EXPECT_GT(checked_multi, 0u)
+    << "stacked soundings should co-estimate at least one n>=2 cell";
+}
+
+// welfordFromCell unit round-trip: the n=1 sentinel, the no-data cell, and the
+// n>=2 path each invert the 3-band encode exactly (#96).
+TEST(StoreImport, WelfordFromCellInvertsEncode)
+{
+  namespace mbs = marine_mbes_backscatter_store;
+  // n = 1 sentinel: sample_sd == 0 with a finite mean -> n = 1, M2 = 0.
+  {
+    mbs::MbesCell cell;
+    cell.mean = 25.0f;
+    cell.standard_error = 0.0f;
+    cell.sample_sd = 0.0f;
+    const IntensityWelford w = welfordFromCell(cell);
+    EXPECT_EQ(w.n, 1u);
+    EXPECT_DOUBLE_EQ(w.mean, 25.0);
+    EXPECT_DOUBLE_EQ(w.m2, 0.0);
+  }
+  // no-data cell (mean NaN) -> empty Welford {n = 0}.
+  {
+    const mbs::MbesCell cell;  // defaults: mean NaN
+    const IntensityWelford w = welfordFromCell(cell);
+    EXPECT_EQ(w.n, 0u);
+  }
+  // n >= 2: build the 3-band from a known (n, var), invert, confirm n recovered.
+  {
+    const uint32_t n = 7;
+    const float var = 0.5f;  // variance of the mean
+    mbs::MbesCell cell;
+    cell.mean = 40.0f;
+    cell.sample_sd = std::sqrt(var * n);
+    cell.standard_error = kBackscatterConfidenceScale * std::sqrt(var);
+    const IntensityWelford w = welfordFromCell(cell);
+    EXPECT_EQ(w.n, n);
+    EXPECT_DOUBLE_EQ(w.mean, 40.0);
+    const double recon_var = (w.m2 / (w.n - 1)) / w.n;
+    EXPECT_NEAR(recon_var, static_cast<double>(var), 1e-5);
+  }
 }
 
 }  // namespace cube

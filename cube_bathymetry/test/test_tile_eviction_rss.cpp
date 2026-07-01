@@ -52,8 +52,6 @@ namespace cube
 
 namespace
 {
-constexpr int64_t kStamp = 1234567890123456789LL;
-
 // Add several soundings at one location so CUBE settles a finite estimate (a
 // single sample may not resolve) -- one tile's worth of survey.
 void surveyTile(GeoMapSheet & sheet, double lat, double lon)
@@ -79,7 +77,7 @@ bool persistTile(
   if (!grid) {
     return false;
   }
-  marine_bathymetry_store::BathymetryTile tile = geoGridToTile(*grid, kStamp, 0);
+  marine_bathymetry_store::BathymetryTile tile = geoGridToTile(*grid);
   if (!tile.dirty()) {
     return false;
   }
@@ -125,7 +123,7 @@ TEST(TileEvictionRss, ResidentCountBoundedWhileDiskGrows)
   const std::string draft_dir =
     dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Draft);
+    marine_bathymetry_store::SourceLayer::Survey);
   std::filesystem::create_directories(draft_dir);
 
   GeoMapSheet sheet(1.0f);
