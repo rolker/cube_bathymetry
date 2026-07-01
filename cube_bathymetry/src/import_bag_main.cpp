@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <deque>
 #include <iomanip>
 #include <iostream>
@@ -39,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -334,6 +336,53 @@ int main(int argc, char * argv[])
       return *arg;
     };
 
+  // Guarded numeric parses: std::stod/std::stoi/std::stoll THROW on a non-numeric value
+  // and, uncaught in main, would std::terminate the process with an opaque message.
+  // Catch and route to usage() with a clear diagnostic instead (mirrors the sibling
+  // batch_regen_main). usage() is [[noreturn]], so these never fall through.
+  auto parse_double = [&](const char * flag, const std::string & value) -> double {
+      try {
+        std::size_t consumed = 0;
+        const double parsed = std::stod(value, &consumed);
+        if (consumed != value.size()) {
+          throw std::invalid_argument("trailing characters");
+        }
+        return parsed;
+      } catch (const std::exception &) {
+        std::cerr << "error: option '" << flag << "' expects a number, got '"
+                  << value << "'\n";
+        usage();
+      }
+    };
+  auto parse_int = [&](const char * flag, const std::string & value) -> int {
+      try {
+        std::size_t consumed = 0;
+        const int parsed = std::stoi(value, &consumed);
+        if (consumed != value.size()) {
+          throw std::invalid_argument("trailing characters");
+        }
+        return parsed;
+      } catch (const std::exception &) {
+        std::cerr << "error: option '" << flag << "' expects an integer, got '"
+                  << value << "'\n";
+        usage();
+      }
+    };
+  auto parse_long = [&](const char * flag, const std::string & value) -> int64_t {
+      try {
+        std::size_t consumed = 0;
+        const int64_t parsed = std::stoll(value, &consumed);
+        if (consumed != value.size()) {
+          throw std::invalid_argument("trailing characters");
+        }
+        return parsed;
+      } catch (const std::exception &) {
+        std::cerr << "error: option '" << flag << "' expects an integer, got '"
+                  << value << "'\n";
+        usage();
+      }
+    };
+
   for (; arg != arguments.end(); arg++) {
     if (*arg == "-h") {
       usage();
@@ -348,7 +397,7 @@ int main(int argc, char * argv[])
     } else if (*arg == "--odom-topic") {
       odom_topic = next_value("--odom-topic");
     } else if (*arg == "-r") {
-      resolution = std::stod(next_value("-r"));
+      resolution = parse_double("-r", next_value("-r"));
     } else if (*arg == "--iho-order") {
       iho_order = next_value("--iho-order");
     } else if (*arg == "--backscatter-correction") {
@@ -356,14 +405,14 @@ int main(int argc, char * argv[])
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
     } else if (*arg == "--max-resident-tiles") {
-      const int64_t v = std::stoll(next_value("--max-resident-tiles"));
+      const int64_t v = parse_long("--max-resident-tiles", next_value("--max-resident-tiles"));
       if (v < 0) {
         std::cerr << "error: --max-resident-tiles must be >= 0 (0 = unbounded)\n";
         usage();
       }
       max_resident_tiles = static_cast<std::size_t>(v);
     } else if (*arg == "-l") {
-      ping_count_limit = std::stoi(next_value("-l"));
+      ping_count_limit = parse_int("-l", next_value("-l"));
     } else if (*arg == "--platform") {
       store_metadata.platform = next_value("--platform");
     } else if (*arg == "--sensor") {
@@ -377,9 +426,11 @@ int main(int argc, char * argv[])
     } else if (*arg == "--tide-frame") {
       projector_params.tide_frame = next_value("--tide-frame");
     } else if (*arg == "--minimum-range") {
-      projector_params.minimum_range = std::stod(next_value("--minimum-range"));
+      projector_params.minimum_range = parse_double("--minimum-range",
+        next_value("--minimum-range"));
     } else if (*arg == "--maximum-range") {
-      projector_params.maximum_range = std::stod(next_value("--maximum-range"));
+      projector_params.maximum_range = parse_double("--maximum-range",
+        next_value("--maximum-range"));
     } else if (!arg->empty() && (*arg)[0] == '-' && *arg != "-") {
       // An unrecognized flag would otherwise be silently treated as a bag path
       // and fail later with a confusing "cannot open bag". Reject it up front.
