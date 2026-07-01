@@ -57,6 +57,18 @@ New helper `welfordFromCell(MbesCell) -> IntensityWelford`:
 - Else: `SE = standard_error / kScale`; `n = round((sample_sd / SE)^2)`;
   `m2 = sample_sd^2 * (n - 1)`.
 
+**Edge case (review-plan suggestion): `sample_sd==0` for n≥2** — a cell whose
+n≥2 samples are all *identical* has `M2=0` → `sample_sd=0`, indistinguishable
+from the n=1 sentinel on reload (collapses to n=1). For continuous corrected-dB
+data this is astronomically rare (exact float equality across ≥2 beams), and the
+only consequence is a slightly under-counted `n` on a subsequent re-survey blend
+of that one cell — the mean is still exact. **Documented as an accepted
+limitation in the ADR-0007 addendum** (not guarded in code: a guard would need a
+separate "n but zero-variance" encoding, not worth a band for a non-occurring
+case). `kScale` is a single shared constant (matches the store's bathy
+`stddev_to_confidence_interval_scale` convention) so write/read round-trip is
+self-consistent.
+
 Used in Step 4 when reloading backscatter from the survey layer on first tile touch.
 
 ### Step 4 — Seed precedence (`ImportAccumulator`)
@@ -105,6 +117,9 @@ a single-pass unbounded `ImportAccumulator` run over the same soundings.
 |------|--------|
 | `include/cube_bathymetry/store_import.h` | `ImportAccumulatorConfig`: remove `bathy_layer`/`bs_source_index`, add `reference_store_dir`; update doc comments |
 | `src/store_import.cpp` | Steps 2–4: `geoGridToBackscatterCells`, `persistBackscatterTile`, `reloadEvictedTile`, `addBatch`, new `seedNewTile`/`welfordFromCell` |
+| `src/cube_bathymetry_node.cpp` | **Live-node SourceLayer migration (compile-breaker): `Draft`→`Survey`.** The live boat node now writes the `survey` layer directly (draft+processed collapsed; reference is read-only prior). Bounded/approximate boat-side product; batch-regen overwrites it as authoritative. Operator-confirmed behavior; document in the ADR-0001 addendum. |
+| `test/test_persistence.cpp` | SourceLayer/MbesCell migration (compile-breaker: uses removed `Draft`/`Chart`) |
+| `test/test_tile_eviction_rss.cpp` | SourceLayer/MbesCell migration (compile-breaker: uses removed `Draft`/`Chart`) |
 | `src/import_bag_main.cpp` | Remove `--bathy-layer`, replace `--prior` with `--reference-store`, remove upfront loadIntoSheet block |
 | `test/test_store_import.cpp` | SourceLayer + MbesCell field migration |
 | `test/test_import_eviction.cpp` | SourceLayer + MbesCell migration; add reference-layer seed test (asserts no sample count increment) |
@@ -127,10 +142,15 @@ a single-pass unbounded `ImportAccumulator` run over the same soundings.
 
 ## ADR Compliance
 
+The issue body's **"ADR-0002 (store)" citation is unh_marine_autonomy's ADR-0002**
+(the bathy-store ADR) — already amended by #248 on the store side. This CUBE-side
+work does **not** touch it; all decisions here are documented in cube_bathymetry's
+own ADRs (ADR-0001 + ADR-0007 addenda) per the operator's Issue-Review resolution.
+
 | ADR | Triggered | How addressed |
 |---|---|---|
-| cube_bathymetry ADR-0001 | Yes | Addendum: two-rung seed precedence generalizes the reload/eviction prime paths |
-| cube_bathymetry ADR-0007 addendum | Yes | Addendum: 3-band MbesCell sufficient statistics, reconstruction formula, n=1 sentinel |
+| cube_bathymetry ADR-0001 | Yes | Addendum: two-rung seed precedence generalizes the reload/eviction prime paths; live-node now targets the `survey` layer |
+| cube_bathymetry ADR-0007 addendum | Yes | Addendum: 3-band MbesCell sufficient statistics, reconstruction formula, n=1 sentinel + the n≥2 identical-sample limitation |
 
 ## Consequences
 
