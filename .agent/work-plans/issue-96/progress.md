@@ -76,3 +76,18 @@ processing changes.
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-01 11:54 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-96/plan.md` at `795b888`
+**PR**: PR-less (`--issue 96`)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (must-fix) File table omits three compile-breaking files that use removed `SourceLayer::Draft`/`Chart`: `src/cube_bathymetry_node.cpp`, `test/test_persistence.cpp`, `test/test_tile_eviction_rss.cpp` — `plan.md:104-116`
+- [ ] (must-fix) Live-node `Draft`→`Survey` layer switch is an unstated behavioral consequence; confirm/document the live node's target layer — `plan.md:29-42`
+- [ ] (suggestion) `welfordFromCell` collapses `n→1` when `sample_sd==0` for `n≥2` (identical samples); guard or document in ADR-0007 addendum — `plan.md:54-60`
+- [ ] (suggestion) Explicitly resolve the issue's "ADR-0002 (store)" citation as addressed via ADR-0001/0007 addenda — `plan.md:129-134`
