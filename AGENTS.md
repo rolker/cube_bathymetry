@@ -2,8 +2,10 @@
 
 Instructions for AI agents working in this repository — including **GitHub
 Copilot code review**, which reads this file when reviewing PRs. There is no
-`.agents/README.md` deep guide yet; start from the top-level `README.md` and
-`docs/` (including this repo's ADRs under `docs/decisions/`).
+`.agents/README.md` deep guide yet (the workspace convention for project
+agent guides — distinct from the `.agent/work-plans/` directory); start from
+the top-level `README.md` and `docs/` (including this repo's ADRs under
+`docs/decisions/`).
 
 ## Workspace Rules
 
@@ -47,9 +49,10 @@ Robustness is not optional.
   elevations, dB conventions, and transmission-loss corrections have all
   produced sign bugs before; intensity statistics ride Welford accumulators
   where order-independence and merge semantics matter.
-- **Survey data is never lost to bound memory**: draft-tile eviction
-  persists to the durable store *before* dropping from RAM; the tile store
-  is the product of record for live coverage.
-- **CI is industrial_ci with a prebaked GHCR deps image**: `ci.yml` and
-  `.github/ci/Dockerfile` must stay in sync — dependency changes usually
-  touch both.
+- **Eviction that bounds memory must never lose survey data**: draft-tile
+  eviction persists to the durable store *before* dropping from RAM; the
+  tile store is the product of record for live coverage.
+- **CI is industrial_ci with a prebaked GHCR deps image**:
+  `.github/workflows/ci.yml` (build/test), `.github/workflows/ci-image.yml`
+  (image publish), and `.github/ci/Dockerfile` must stay in sync —
+  dependency changes usually touch more than one.
