@@ -61,6 +61,73 @@
 #include "marine_mbes_backscatter_store/registry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rosbag2_transport/reader_writer_factory.hpp"
+#include "cube_bathymetry/sonar_info_curve.h"
+#include "marine_interfaces/msg/sonar_info.hpp"
+
+namespace
+{
+
+/// Default sonar_info topic beside the detections topic (#102): replace the
+/// last path element, e.g. /bizzy/sensors/m3/detections ->
+/// /bizzy/sensors/m3/sonar_info. A topic with no '/' just becomes
+/// "sonar_info" (same namespace).
+std::string deriveSonarInfoTopic(const std::string & detections_topic)
+{
+  const auto slash = detections_topic.rfind('/');
+  if (slash == std::string::npos) {
+    return "sonar_info";
+  }
+  return detections_topic.substr(0, slash + 1) + "sonar_info";
+}
+
+/// Pre-pass over the bags' sonar_info topic for the FIRST valid
+/// angular-response curve (latch-first -- heartbeats republish the same
+/// message; a mid-survey curve change is not adopted, matching the live
+/// node). Returns false with `last_reject` set when non-empty curves were
+/// seen but all rejected; false with it empty when the topic carried no
+/// curve at all (normal for pre-SonarInfo bags). Open errors are ignored
+/// here -- the main pass reports them.
+bool loadCurveFromBagSonarInfo(
+  const std::vector<std::string> & bags, const std::string & topic,
+  cube::AngularResponseCurve & out, std::string & last_reject)
+{
+  rclcpp::Serialization<marine_interfaces::msg::SonarInfo> serialization;
+  for (const auto & bag : bags) {
+    rosbag2_storage::StorageOptions storage_options;
+    storage_options.uri = bag;
+    auto reader = rosbag2_transport::ReaderWriterFactory::make_reader(storage_options);
+    try {
+      reader->open(storage_options);
+    } catch (const std::exception &) {
+      continue;
+    }
+    rosbag2_storage::StorageFilter filter;
+    filter.topics = {topic};
+    reader->set_filter(filter);
+    while (reader->has_next()) {
+      const auto message = reader->read_next();
+      rclcpp::SerializedMessage sm(*message->serialized_data);
+      marine_interfaces::msg::SonarInfo info;
+      try {
+        serialization.deserialize_message(&sm, &info);
+      } catch (const std::exception &) {
+        continue;  // corrupt record: skip, keep scanning
+      }
+      std::string reject;
+      if (cube::curveFromSonarInfo(info, out, reject)) {
+        return true;
+      }
+      if (!info.angular_response_angle_deg.empty() ||
+        !info.angular_response_db_rel_nadir.empty())
+      {
+        last_reject = reject;
+      }
+    }
+  }
+  return false;
+}
+
+}  // namespace
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_msgs/msg/tf_message.hpp"
 #include "tf2/time.h"
@@ -93,7 +160,10 @@
   std::cout << "  -r <meters>: Grid resolution (nominal; snapped to GGGS). "
     "Default 1.0\n";
   std::cout << "  --iho-order <order>: CUBE IHO order (default order1a)\n";
-  std::cout << "  --backscatter-correction none|empirical: per-beam angular-response "
+  std::cout << "  --sonar-info-topic <topic>: SonarInfo topic scanned for the "
+    "angular-response curve (auto mode, cube#102). Default: the detections "
+    "topic's sibling 'sonar_info'. An explicit --backscatter-curve wins.\n";
+  std::cout << "  --backscatter-correction none|empirical|auto: per-beam angular-response "
     "correction at node-output (default none = identity). 'empirical' subtracts the "
     "per-sonar curve from --backscatter-curve (cube#81)\n";
   std::cout << "  --backscatter-curve <file>: empirical angular-response curve CSV "
@@ -309,9 +379,12 @@ int main(int argc, char * argv[])
   // small/medium surveys never evict (identical output to the old path) while a
   // large multi-day survey stays bounded. 0 = unbounded (old behavior).
   std::size_t max_resident_tiles = 256;
-  // Backscatter angular-response correction (cube#81). Default none = identity.
-  std::string backscatter_correction_str = "none";
+  // Backscatter angular-response correction (cube#81, #102). Default auto:
+  // a valid curve in the bag's SonarInfo enables it; none in the bag =
+  // identity, exactly the old default for pre-SonarInfo bags.
+  std::string backscatter_correction_str = "auto";
   std::string backscatter_curve_file;
+  std::string sonar_info_topic;  // default: derived from detections_topic
 
   // Store-level provenance (uma#248 StoreMetadata, written once at finalize).
   marine_bathymetry_store::StoreMetadata store_metadata;
@@ -404,6 +477,8 @@ int main(int argc, char * argv[])
       backscatter_correction_str = next_value("--backscatter-correction");
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
+    } else if (*arg == "--sonar-info-topic") {
+      sonar_info_topic = next_value("--sonar-info-topic");
     } else if (*arg == "--max-resident-tiles") {
       const int64_t v = parse_long("--max-resident-tiles", next_value("--max-resident-tiles"));
       if (v < 0) {
@@ -517,28 +592,46 @@ int main(int argc, char * argv[])
   if (!cube::parseBackscatterAngleCorrection(
       backscatter_correction_str, backscatter_mode))
   {
-    std::cerr << "error: --backscatter-correction must be 'none' or 'empirical' "
-              << "(got '" << backscatter_correction_str << "')\n";
+    std::cerr << "error: --backscatter-correction must be 'none', 'empirical' "
+              << "or 'auto' (got '" << backscatter_correction_str << "')\n";
     usage();
   }
   cube::AngularResponseCurve backscatter_curve;
-  if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
+  std::string backscatter_curve_source = backscatter_curve_file;
+  if (backscatter_mode != cube::BackscatterAngleCorrection::None &&
     !backscatter_curve_file.empty())
   {
+    // Explicit file wins over SonarInfo (the reprocessing override, #102).
     backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
+  } else if (backscatter_mode != cube::BackscatterAngleCorrection::None) {
+    // SonarInfo pre-pass (#102): scan the bags' sonar_info topic for the
+    // first valid curve (latch-first; heartbeats republish the same one).
+    const std::string topic = sonar_info_topic.empty() ?
+      deriveSonarInfoTopic(detections_topic) : sonar_info_topic;
+    std::string last_reject;
+    if (loadCurveFromBagSonarInfo(
+        bagfile_names, topic, backscatter_curve, last_reject))
+    {
+      backscatter_curve_source = "SonarInfo topic '" + topic + "'";
+    } else if (!last_reject.empty()) {
+      std::cerr << "warning: SonarInfo on '" << topic
+                << "' carried an angular-response curve, but it was rejected: "
+                << last_reject << "\n";
+    }
   }
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
     backscatter_curve.points.empty())
   {
-    // Loud, not silent: enabled but no curve loaded -> correction is a no-op.
+    // Loud, not silent: explicitly enabled but no curve loaded -> no-op.
+    // (auto with no curve is quiet by design: identity is its fallback.)
     std::cerr << "warning: --backscatter-correction empirical but no curve was "
       "loaded from --backscatter-curve '" << backscatter_curve_file
-              << "' -- the correction is ENABLED but a NO-OP (intensity emitted "
-      "uncorrected). Provide a valid curve CSV.\n";
-  } else if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical) {
-    std::cout << "Backscatter angular-response correction: empirical, "
+              << "' or the bag's SonarInfo -- the correction is ENABLED but a "
+      "NO-OP (intensity emitted uncorrected). Provide a valid curve CSV.\n";
+  } else if (!backscatter_curve.points.empty()) {
+    std::cout << "Backscatter angular-response correction: "
               << backscatter_curve.points.size() << "-point curve from "
-              << backscatter_curve_file;
+              << backscatter_curve_source;
     if (backscatter_curve.tl_removed) {
       // tier-2 (cube#87): the curve is a TL-removed residual; the estimator
       // also removes 40*log10(R) + 2*alpha*R per beam.

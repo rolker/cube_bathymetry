@@ -139,6 +139,21 @@ install(TARGETS cube_bathymetry_quantize_tile EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
+# SonarInfo -> AngularResponseCurve validation (#102). Own target so the
+# marine_interfaces message dependency stays out of the core cube_bathymetry
+# library (mirrors quantize_tile's isolation) and the accept/reject logic is
+# unit-testable without a ROS node.
+add_library(cube_bathymetry_sonar_info_curve src/sonar_info_curve.cpp)
+target_link_libraries(cube_bathymetry_sonar_info_curve
+  cube_bathymetry
+  ${marine_interfaces_TARGETS}
+)
+install(TARGETS cube_bathymetry_sonar_info_curve EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
 target_include_directories(cube_bathymetry_node PUBLIC
   ${grid_map_ros_INCLUDE_DIRS}
@@ -147,6 +162,7 @@ target_link_libraries(cube_bathymetry_node
   cube_bathymetry
   cube_bathymetry_grid_projection
   cube_bathymetry_quantize_tile   # GeoGrid -> SonarVisualizationTile (#78)
+  cube_bathymetry_sonar_info_curve  # SonarInfo curve delivery (#102)
   cube_bathymetry_store_import   # geoGridToTile / loadIntoSheet + store (#21)
   marine_bathymetry_store::marine_bathymetry_store  # saveTile / load / store API
   marine_tiled_raster_store::marine_tiled_raster_store  # TileCatalogBuilder (#230)
@@ -214,6 +230,9 @@ install(TARGETS bag_to_geotiff
 
 # Offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store epoch importer (#57).
 add_executable(import_bag src/import_bag_main.cpp)
+target_link_libraries(import_bag
+  cube_bathymetry_sonar_info_curve  # SonarInfo curve pre-pass (#102)
+)
 
 target_link_libraries(import_bag
   cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
@@ -266,6 +285,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
+
+  ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)
+  target_link_libraries(test_sonar_info_curve cube_bathymetry_sonar_info_curve)
 
   ament_add_gtest(test_parameters test/test_parameters.cpp)
   target_link_libraries(test_parameters cube_bathymetry)

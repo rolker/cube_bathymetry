@@ -31,9 +31,11 @@
 namespace cube
 {
 
-/// Parse a backscatter angular-response correction mode string ("none" or
-/// "empirical", case-insensitive). Returns false on an unrecognized value
-/// (out is left unchanged); the caller decides how to report the error.
+/// Parse a backscatter angular-response correction mode string ("none",
+/// "empirical", or "auto" -- cube#102 -- case-insensitive). Returns false on
+/// an unrecognized value (out is left unchanged); the caller decides how to
+/// report the error. Note the empty string parses as None (legacy), so
+/// callers wanting an "auto" DEFAULT must default the parameter text itself.
   bool parseBackscatterAngleCorrection(
     const std::string & text, BackscatterAngleCorrection & out);
 

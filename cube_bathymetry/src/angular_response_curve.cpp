@@ -90,8 +90,10 @@ double correctBeamIntensity(
   // moved to record time (cube#93). Apply order is TL add-back THEN angular
   // residual, accumulated in double -- identical to the old extract.
   const bool apply_ara =
+    (parameters.backscatter_angle_correction ==
+    BackscatterAngleCorrection::Empirical ||
     parameters.backscatter_angle_correction ==
-    BackscatterAngleCorrection::Empirical &&
+    BackscatterAngleCorrection::Auto) &&
     !parameters.angular_response_curve.empty();
   const bool apply_tl = apply_ara && parameters.backscatter_tl_removed;
   const double alpha = parameters.backscatter_absorption_db_per_m;
@@ -127,6 +129,10 @@ bool parseBackscatterAngleCorrection(
   }
   if (lower == "empirical") {
     out = BackscatterAngleCorrection::Empirical;
+    return true;
+  }
+  if (lower == "auto") {
+    out = BackscatterAngleCorrection::Auto;
     return true;
   }
   return false;
@@ -168,6 +174,9 @@ bool matchHeaderComment(
 }
 }  // namespace
 
+// NOTE: kongsberg_em_bridge/angular_response.py (marine_tools) is a Python
+// mirror of this loader -- it parses the same CSVs to publish the curve in
+// SonarInfo (marine_tools#71). Keep parsing-semantics changes in sync.
 AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path)
 {
   AngularResponseCurve result;
