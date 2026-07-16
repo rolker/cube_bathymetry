@@ -60,9 +60,17 @@ The co-estimated per-cell backscatter is stored as a 3-band Welford sufficient
 statistic `{mean, standard_error, sample_sd}` (uma#248), so the estimate
 reconstructs losslessly on an off-boat re-run: a single-beam cell is the `n = 1`
 sentinel (`sample_sd = 0`, finite mean), and a multi-beam cell round-trips
-`n`/mean/variance exactly. Values are **uncorrected** by default; pass
-`--backscatter-correction empirical --backscatter-curve <csv>` for the per-beam
-angular-response (and tier-2 TL) correction. See
+`n`/mean/variance exactly. The per-beam angular-response (and tier-2 TL)
+correction defaults to **auto** (#102): a valid curve published in
+`marine_interfaces/SonarInfo` beside the sonar stream (or recorded in the bag)
+enables it, with TL provenance validated (uma#268) — no curve means values
+stay uncorrected, exactly the pre-SonarInfo behavior. Pass
+`--backscatter-correction none` to hard-disable, or
+`--backscatter-correction empirical --backscatter-curve <csv>` (node:
+`backscatter_curve_file`) to override the published curve with an explicit
+CSV (e.g. reprocessing with a better curve; `--sonar-info-topic` overrides
+the scanned topic, default = the detections topic's sibling `sonar_info`).
+See
 `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
 
 ## Data flow & pose sourcing (design: #31)

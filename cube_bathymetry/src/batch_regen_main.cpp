@@ -102,7 +102,9 @@
   std::cout << "  --iho-order <order>: CUBE IHO order (default order1a)\n";
   std::cout << "  --backscatter-correction none|empirical: per-beam angular-response "
     "correction at node-output (default none = identity). 'empirical' subtracts the "
-    "per-sonar curve from --backscatter-curve (cube#81)\n";
+    "per-sonar curve from --backscatter-curve (cube#81). NOTE: import_bag's "
+    "'auto' (SonarInfo, cube#102) is NOT supported here -- match import_bag's "
+    "effective correction explicitly for bit-exact regeneration\n";
   std::cout << "  --backscatter-curve <file>: empirical angular-response curve CSV "
     "(abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir). Required for "
     "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
@@ -497,6 +499,16 @@ int main(int argc, char * argv[])
   {
     std::cerr << "error: --backscatter-correction must be 'none' or 'empirical' "
               << "(got '" << backscatter_correction_str << "')\n";
+    usage();
+  }
+  if (backscatter_mode == cube::BackscatterAngleCorrection::Auto) {
+    // The shared parser accepts 'auto' (cube#102), but batch_regen has no
+    // SonarInfo source to auto-load a curve from -- accepting it would be a
+    // silent identity. Bit-exactness vs import_bag is preserved by passing
+    // the same explicit none/empirical+curve flags to both tools.
+    std::cerr << "error: --backscatter-correction auto (SonarInfo delivery, "
+      "cube#102) is not supported by batch_regen; pass 'none' or "
+      "'empirical' with --backscatter-curve\n";
     usage();
   }
   cube::AngularResponseCurve backscatter_curve;

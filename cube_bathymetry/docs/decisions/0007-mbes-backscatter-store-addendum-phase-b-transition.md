@@ -4,6 +4,24 @@
 
 Accepted (addendum).
 
+**Amended 2026-07-16
+([#102](https://github.com/rolker/cube_bathymetry/issues/102)):** the
+correction's mode set and delivery changed. A third mode **`auto`** is now
+the **default** (was `none`): a valid angular-response curve published in
+`marine_interfaces/SonarInfo` beside the sonar stream — with TL provenance,
+[uma#268](https://github.com/rolker/unh_marine_autonomy/issues/268), produced
+per [marine_tools#71](https://github.com/rolker/marine_tools/issues/71) —
+enables the empirical correction without configuration (decision: Roland,
+2026-07-16). No curve = identity, so pre-SonarInfo deployments and bags are
+unchanged. The `backscatter_curve_file` / `--backscatter-curve` CSV path
+described in Decisions 2–3 below survives as the **explicit override**
+(reprocessing with a better curve), no longer the primary delivery.
+`batch_regen` deliberately rejects `auto` (it has no SonarInfo source);
+bit-exact regeneration vs `import_bag` requires matching the effective
+correction explicitly. This partially realizes the "SonarInfo (uma#240)"
+future work in the Deferred section. Statements below reading "default
+`none`" or describing CSV-only delivery are superseded accordingly.
+
 This is an **addendum**, not the canonical ADR-0007 document. The full
 `0007-mbes-backscatter-store.md` (the per-beam co-estimation design and the
 "D1–D5" decision points referenced throughout the `cube_bathymetry` sources) has

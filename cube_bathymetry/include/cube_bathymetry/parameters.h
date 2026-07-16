@@ -44,7 +44,14 @@ namespace cube
   /// Empirical angular-response (ARA): subtract a per-sonar curve's
   /// db_relative_to_nadir, linearly interpolated by |beam_angle| in degrees.
   /// Requires a non-empty angular_response_curve; empty curve -> no-op.
-    Empirical
+    Empirical,
+
+  /// Auto (cube#102, the default): behaves exactly like Empirical once a
+  /// curve is present -- the curve arriving via SonarInfo (or an explicit
+  /// file) is what enables the correction; no curve -> identity, silently
+  /// (unlike Empirical, which warns, because Empirical is an explicit
+  /// operator request for the correction).
+    Auto
   };
 
 /// Extraction method for depth and uncertainty surfaces.  This is used only in
