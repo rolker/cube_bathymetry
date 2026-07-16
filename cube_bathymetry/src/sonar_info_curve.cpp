@@ -66,6 +66,19 @@ bool curveFromSonarInfo(
     return false;
   }
 
+  // Wire input: reject non-finite points outright. Beyond feeding NaN into
+  // the interpolation, a NaN point would also break the consumer's
+  // latch-first same-curve comparison (NaN != NaN) on every heartbeat.
+  for (std::size_t i = 0; i < angles.size(); ++i) {
+    if (!std::isfinite(angles[i]) || !std::isfinite(dbs[i])) {
+      std::ostringstream ss;
+      ss << "SonarInfo angular-response curve has a non-finite point at index "
+         << i << " (malformed producer)";
+      reject_reason = ss.str();
+      return false;
+    }
+  }
+
   out.points.clear();
   out.points.reserve(angles.size());
   for (std::size_t i = 0; i < angles.size(); ++i) {

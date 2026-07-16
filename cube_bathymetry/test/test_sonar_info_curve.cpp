@@ -95,6 +95,12 @@ TEST(SonarInfoCurve, RejectsEmptyUnknownProvenanceMismatchAndNanAlpha)
     std::numeric_limits<float>::quiet_NaN();
   EXPECT_FALSE(cube::curveFromSonarInfo(nan_alpha, curve, reason));
   EXPECT_NE(reason.find("not finite"), std::string::npos);
+
+  auto nan_point = tier2Info();  // wire input: non-finite points rejected
+  nan_point.angular_response_db_rel_nadir[0] =
+    std::numeric_limits<float>::quiet_NaN();
+  EXPECT_FALSE(cube::curveFromSonarInfo(nan_point, curve, reason));
+  EXPECT_NE(reason.find("non-finite point"), std::string::npos);
 }
 
 TEST(SonarInfoCurve, ParseAutoModeAndAutoAppliesLikeEmpirical)

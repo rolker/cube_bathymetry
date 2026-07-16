@@ -232,9 +232,6 @@ install(TARGETS bag_to_geotiff
 add_executable(import_bag src/import_bag_main.cpp)
 target_link_libraries(import_bag
   cube_bathymetry_sonar_info_curve  # SonarInfo curve pre-pass (#102)
-)
-
-target_link_libraries(import_bag
   cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
   marine_mbes_backscatter_store::marine_mbes_backscatter_store  # --bs-store output (#80)
   ${geometry_msgs_TARGETS}

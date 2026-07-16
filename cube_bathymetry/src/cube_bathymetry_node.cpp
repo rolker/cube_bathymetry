@@ -133,6 +133,16 @@ public:
     {
       bs_curve = cube::loadAngularResponseCurveWithHeader(bs_curve_file);
       bs_curve_applied_ = !bs_curve.points.empty();
+      if (!bs_curve_applied_) {
+        // Loud in EVERY mode (not just empirical): an explicit file also
+        // suppresses the SonarInfo fallback (it stays the operator's chosen
+        // source), so a failed load must never vanish silently (#102 r1).
+        RCLCPP_WARN(get_logger(),
+          "backscatter_curve_file='%s' yielded an EMPTY curve (missing/"
+          "unparseable) -- no correction from it, and published SonarInfo "
+          "curves stay IGNORED because an explicit file was configured. "
+          "Fix or clear the parameter.", bs_curve_file.c_str());
+      }
     }
     if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.points.empty()) {
       // Loud, not silent: the operator asked for the correction but no curve was
@@ -324,14 +334,25 @@ public:
     // with no SonarInfo producer the subscription simply never fires).
     // Matched transient_local so the latched message arrives on configure.
     // Skipped entirely when the mode is none (hard off).
+    // Reset unconditionally so a reconfigure to mode 'none' cannot leave a
+    // prior cycle's live subscription attached (#102 r1). NOTE: rosbag2
+    // replays topics as VOLATILE by default, which is durability-incompatible
+    // with this transient_local request -- a bag played into the live node
+    // delivers no sonar_info; reprocess bags with import_bag (whose pre-pass
+    // reads the topic directly) or use a playback QoS override.
     const std::string sonar_info_topic =
       declare_parameter("sonar_info_topic", std::string("sonar_info"));
+    sonar_info_subscription_.reset();
     if (bs_mode != cube::BackscatterAngleCorrection::None) {
       sonar_info_subscription_ =
         create_subscription<marine_interfaces::msg::SonarInfo>(
         sonar_info_topic, rclcpp::QoS(1).reliable().transient_local(),
         std::bind(&CubeBathymetry::sonarInfoCallback, this,
         std::placeholders::_1));
+    } else {
+      RCLCPP_INFO(get_logger(),
+        "backscatter_angle_correction=none: any published SonarInfo "
+        "angular-response curve will be ignored.");
     }
 
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
@@ -392,6 +413,10 @@ public:
       catalog_timer_->cancel();
       catalog_timer_.reset();
     }
+    // Symmetric teardown for the one conditionally-created subscription
+    // (#102): its callback has no lifecycle-state gate, so it must not
+    // outlive the configured state and touch the stale sheet.
+    sonar_info_subscription_.reset();
     return LifecycleNode::on_cleanup(state);
   }
 
@@ -427,6 +452,12 @@ private:
   bool bs_curve_applied_ = false;   // latch-first: one curve per run
   cube::AngularResponseCurve bs_applied_curve_;
 
+  // Latch-first curve adoption (#102). The latched (transient_local)
+  // producer normally delivers before activation, so the whole grid is
+  // corrected consistently; a LATE producer means early beams fold in
+  // uncorrected before the curve applies -- acceptable under auto's
+  // "no curve = identity" contract, and the adoption INFO log timestamps
+  // the transition for post-survey scrutiny.
   void sonarInfoCallback(const marine_interfaces::msg::SonarInfo & info)
   {
     cube::AngularResponseCurve curve;

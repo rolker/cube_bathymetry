@@ -164,7 +164,8 @@ bool loadCurveFromBagSonarInfo(
     "angular-response curve (auto mode, cube#102). Default: the detections "
     "topic's sibling 'sonar_info'. An explicit --backscatter-curve wins.\n";
   std::cout << "  --backscatter-correction none|empirical|auto: per-beam angular-response "
-    "correction at node-output (default none = identity). 'empirical' subtracts the "
+    "correction at node-output (default auto = a valid curve in the bag's "
+    "SonarInfo enables it; no curve = identity, cube#102). 'empirical' subtracts the "
     "per-sonar curve from --backscatter-curve (cube#81)\n";
   std::cout << "  --backscatter-curve <file>: empirical angular-response curve CSV "
     "(abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir). Required for "
@@ -598,12 +599,22 @@ int main(int argc, char * argv[])
   }
   cube::AngularResponseCurve backscatter_curve;
   std::string backscatter_curve_source = backscatter_curve_file;
-  if (backscatter_mode != cube::BackscatterAngleCorrection::None &&
-    !backscatter_curve_file.empty())
-  {
+  if (backscatter_mode == cube::BackscatterAngleCorrection::None) {
+    std::cout << "--backscatter-correction none: any SonarInfo "
+      "angular-response curve in the bag will be ignored." << std::endl;
+  } else if (!backscatter_curve_file.empty()) {
     // Explicit file wins over SonarInfo (the reprocessing override, #102).
     backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
-  } else if (backscatter_mode != cube::BackscatterAngleCorrection::None) {
+    if (backscatter_curve.points.empty()) {
+      // Loud in EVERY mode: the explicit file also suppresses the SonarInfo
+      // pre-pass (it stays the operator's chosen source), so a failed load
+      // must never vanish silently (#102 r1).
+      std::cerr << "warning: --backscatter-curve '" << backscatter_curve_file
+                << "' yielded an EMPTY curve (missing/unparseable) -- no "
+        "correction from it, and the bag's SonarInfo curves stay IGNORED "
+        "because an explicit file was given. Fix or drop the flag.\n";
+    }
+  } else {
     // SonarInfo pre-pass (#102): scan the bags' sonar_info topic for the
     // first valid curve (latch-first; heartbeats republish the same one).
     const std::string topic = sonar_info_topic.empty() ?
