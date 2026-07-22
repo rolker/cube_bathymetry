@@ -43,7 +43,10 @@ Desk verification closed the issue's open questions:
    currently relies on upstream filtering).
 3. **Doc-comment sync** — update the "one-cell-expanded bounds" references:
    `geo_map_sheet.cpp:35-38`, `batch_regen.h` scatter doc (~line 57),
-   `batch_regen.cpp:183`, `store_import.cpp:687`.
+   `batch_regen.cpp:183`, `store_import.cpp:687`, the revisit-reload comment
+   at `cube_bathymetry_node.cpp:1138` ("addSoundings expands the bounds by a
+   cell"), and repo ADR-0001's batch-regen addendum ("the sounding's
+   one-cell-expanded window", line 257).
 4. **Unit tests** (`test/test_geo_map_sheet.cpp`):
    - Boundary-adjacent sounding whose spillover reaches a neighbor grid it
      doesn't enter → neighbor grid is created, receives data, and appears in
@@ -51,6 +54,9 @@ Desk verification closed the issue's open questions:
    - `gridIndicesForSoundings` returns the same widened set (scatter parity).
    - Regression: small-radius sounding far from any seam still selects only
      its home tile (no over-selection).
+   - Non-finite guard: a batch containing one sounding with NaN/negative
+     `horizontal_error` must not poison the batch bounds — finite soundings
+     still select and write their tiles.
 5. **Existing-suite pass** — `test_batch_regen`, `test_store_import`,
    `test_publish_equivalence` must stay green (the bit-exact scatter/gather
    claim is preserved because scatter and live widen through the same code).
@@ -69,6 +75,7 @@ Desk verification closed the issue's open questions:
 | `src/grid.cpp` | Use helper in `insert` (keep non-finite gate) |
 | `src/geo_map_sheet.cpp` | Radius-based padding in `boundsForSoundings`; comment |
 | `include/cube_bathymetry/batch_regen.h`, `src/batch_regen.cpp`, `src/store_import.cpp` | Doc comments only |
+| `src/cube_bathymetry_node.cpp`, `docs/decisions/0001-tile-eviction-and-incremental-publish.md` | Doc/comment wording only ("one-cell-expanded") |
 | `test/test_geo_map_sheet.cpp` | Seam spillover + parity + no-over-selection tests |
 | `test/test_parameters.cpp` | Helper matches the historical formula (drift guard) |
 
@@ -85,7 +92,7 @@ Desk verification closed the issue's open questions:
 
 | ADR | Triggered | How addressed |
 |---|---|---|
-| repo ADR-0001 (tile eviction & incremental publish) | Yes | Dirty/publish-dirty semantics unchanged; spillover tiles now correctly enter the publish-dirty set. LRU last-touch now bumps the occasional extra seam tile — negligible (radius ≪ tile span) |
+| repo ADR-0001 (tile eviction & incremental publish) | Yes | Dirty/publish-dirty semantics unchanged; spillover tiles now correctly enter the publish-dirty set. LRU last-touch now bumps the occasional extra seam tile — negligible (radius ≪ tile span). The evicted-tile revisit reload is keyed off the **dirty set**, not sounding centres (`cube_bathymetry_node.cpp:1149-1156`), so widened selection flows into the reload protection consistently by construction — no node logic change needed. ADR-0001's addendum wording updated per step 3 |
 | workspace ADR-0002 (worktree isolation) | Yes | Layer worktree `issue-cube_bathymetry-104` |
 
 ## Consequences
