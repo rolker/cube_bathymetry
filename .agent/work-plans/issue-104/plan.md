@@ -1,0 +1,107 @@
+# Plan: Live coverage tiles: neighbor tiles never update — grid selection under-margined vs sounding influence radius
+
+## Issue
+
+https://github.com/rolker/cube_bathymetry/issues/104
+
+## Context
+
+`boundsForSoundings` (`src/geo_map_sheet.cpp:39`) pads the sounding batch's
+bounding box by **one cell**, but `GeoGrid::insert` (`src/geo_grid.cpp:56`)
+spreads each sounding over an influence radius up to
+`CONF_99PC·√(horizontal_error)` — typically several cells. A neighbor tile
+reached only by spillover is never selected, so it is never written or marked
+dirty — reproducing both 2026-07-21 field symptoms (only the home tile updates
+near a seam; spillover-only tiles never update).
+
+Desk verification closed the issue's open questions:
+
+- `gggs::GridAreaIterator` (unh_marine_autonomy) correctly enumerates the full
+  inclusive grid rectangle — beam-straddle is **ruled out**; under-margin is
+  the sole cause.
+- All three ingest paths share the same selection: live
+  `GeoMapSheet::addSoundings`, `store_import.cpp:701` and
+  `batch_regen.cpp:196` (both via `gridIndicesForSoundings` →
+  `boundsForSoundings`). One fix covers all, and scatter/live stay consistent.
+- The 07-21 gabby bags (`~/data/logs/gabby/logs/bizzyboat_sonar/…`) recorded
+  the **inputs** (`m3/detections`, tf, sonar_info), not the tile outputs — so
+  verification is a before/after replay through `import_bag`, not a log diff.
+
+## Approach
+
+1. **Shared radius helper** — extract the influence-radius formula (currently
+   duplicated in `geo_grid.cpp:48-68` and legacy `grid.cpp:64-84`) into
+   `Parameters::influenceRadius(const Sounding &) const` (`parameters.h`).
+   Use it in `GeoGrid::insert`, `Grid::insert`, and `boundsForSoundings` so
+   selection and spreading can never drift again.
+2. **Radius-based padding** — in `boundsForSoundings`, expand the bounds by
+   each sounding's `gz4d::BoundsDegrees::radiusFromCenter(s, influenceRadius)`
+   (handles lat/lon scaling), keeping the existing one-cell pad as a floor.
+   Skip padding for a sounding whose radius is non-finite (NaN
+   `horizontal_error` must not poison the whole batch's bounds; the legacy
+   `Grid::insert` already gates non-finite soundings — `GeoGrid::insert`
+   currently relies on upstream filtering).
+3. **Doc-comment sync** — update the "one-cell-expanded bounds" references:
+   `geo_map_sheet.cpp:35-38`, `batch_regen.h` scatter doc (~line 57),
+   `batch_regen.cpp:183`, `store_import.cpp:687`.
+4. **Unit tests** (`test/test_geo_map_sheet.cpp`):
+   - Boundary-adjacent sounding whose spillover reaches a neighbor grid it
+     doesn't enter → neighbor grid is created, receives data, and appears in
+     both `dirtyGrids()` and `publishDirtyGrids()`.
+   - `gridIndicesForSoundings` returns the same widened set (scatter parity).
+   - Regression: small-radius sounding far from any seam still selects only
+     its home tile (no over-selection).
+5. **Existing-suite pass** — `test_batch_regen`, `test_store_import`,
+   `test_publish_equivalence` must stay green (the bit-exact scatter/gather
+   claim is preserved because scatter and live widen through the same code).
+6. **Bag verification** — replay the 2026-07-21 14:09 UTC gabby sonar session
+   through `import_bag` pre- and post-fix into scratch stores (outputs under
+   the session scratchpad; bags read-only), diff the populated tile sets:
+   previously-stuck seam-neighbor tiles must appear post-fix. Record the
+   result on the issue.
+
+## Files to Change
+
+| File | Change |
+|------|--------|
+| `include/cube_bathymetry/parameters.h` | Add `influenceRadius(const Sounding &)` |
+| `src/geo_grid.cpp` | Use helper in `insert` |
+| `src/grid.cpp` | Use helper in `insert` (keep non-finite gate) |
+| `src/geo_map_sheet.cpp` | Radius-based padding in `boundsForSoundings`; comment |
+| `include/cube_bathymetry/batch_regen.h`, `src/batch_regen.cpp`, `src/store_import.cpp` | Doc comments only |
+| `test/test_geo_map_sheet.cpp` | Seam spillover + parity + no-over-selection tests |
+| `test/test_parameters.cpp` | Helper matches the historical formula (drift guard) |
+
+## Principles Self-Check
+
+| Principle | Consideration |
+|---|---|
+| Test what breaks | Tests target the exact field failure (seam spillover) plus the drift risk (shared helper) |
+| A change includes its consequences | batch_regen/store_import doc comments and their tests updated in the same PR |
+| Only what's needed | Keeps the rectangle-of-grids selection; no redesign. Legacy planar `MapSheet` bounds (2-cell buffer, no live users) left as-is |
+| Improve incrementally | Single focused PR |
+
+## ADR Compliance
+
+| ADR | Triggered | How addressed |
+|---|---|---|
+| repo ADR-0001 (tile eviction & incremental publish) | Yes | Dirty/publish-dirty semantics unchanged; spillover tiles now correctly enter the publish-dirty set. LRU last-touch now bumps the occasional extra seam tile — negligible (radius ≪ tile span) |
+| workspace ADR-0002 (worktree isolation) | Yes | Layer worktree `issue-cube_bathymetry-104` |
+
+## Consequences
+
+| If we change... | Also update... | Included in plan? |
+|---|---|---|
+| `boundsForSoundings` widening | batch_regen scatter docs (bit-exact claim) | Yes — step 3 |
+| Radius formula location | Both `insert` implementations | Yes — step 1 |
+| Tiles emitted near seams | `~/tiles` publish volume (occasional extra tile) | Noted; no cap exists, no change needed |
+
+## Open Questions
+
+- None blocking. Legacy planar `MapSheet::addSoundings` keeps its 2-cell
+  buffer (unused code path; shared helper still removes its radius-formula
+  duplicate).
+
+## Estimated Scope
+
+Single PR.
