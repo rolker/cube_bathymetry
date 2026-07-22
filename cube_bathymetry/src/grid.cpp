@@ -62,27 +62,8 @@ bool Grid::insert(const MapSounding & sounding)
     return false;
   }
 
-  double max_variance_allowed = parameters_.maxVarianceAllowed(sounding.sounding.depth);
-  double ratio = max_variance_allowed / sounding.sounding.vertical_error;
-
-  /* Ensure some spreading on point */
-  if(ratio <= 2.0) {
-    ratio = 2.0;
-  }
-
-  double max_radius = CONF_99PC * std::sqrt(sounding.sounding.horizontal_error);
-
-  double radius = parameters_.distance_scale * pow(ratio - 1.0,
-      parameters_.inverse_distance_exponent) - max_radius;
-  if (radius < 0.0) {
-    radius = parameters_.distance_scale;
-  }
-  if (radius > max_radius) {
-    radius = max_radius;
-  }
-  if (radius < parameters_.distance_scale) {
-    radius = parameters_.distance_scale;
-  }
+  // Shared with GeoGrid::insert and GeoMapSheet's grid-selection margin (#104).
+  const double radius = parameters_.influenceRadius(sounding.sounding);
 
 
   /* Determine coordinates of effect square.  This is designed to

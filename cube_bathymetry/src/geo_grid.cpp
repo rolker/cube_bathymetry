@@ -45,28 +45,31 @@ bool GeoGrid::insert(const std::vector<GeoSounding> & soundings)
 bool GeoGrid::insert(const GeoSounding & geo_sounding)
 {
   const Sounding & sounding = geo_sounding.sounding;
-  double max_variance_allowed = parameters_.maxVarianceAllowed(sounding.depth);
-  double ratio = max_variance_allowed / sounding.vertical_error;
-
-  /* Ensure some spreading on point */
-  if(ratio <= 2.0) {
-    ratio = 2.0;
+  // Reject non-finite/degenerate soundings at the door (parity with the planar
+  // Grid::insert gate): a NaN position/depth or a non-positive vertical error
+  // propagates through the CUBE variance math into NaN hypothesis estimates
+  // that can blank cells, and horizontal_error feeds sqrt() in influenceRadius,
+  // where a negative value (not just NaN) reintroduces NaN. One bad sounding
+  // must never be able to empty the grid.
+  if(!std::isfinite(geo_sounding.latitude) || !std::isfinite(geo_sounding.longitude) ||
+    !std::isfinite(sounding.depth) ||
+    !std::isfinite(sounding.vertical_error) ||
+    !std::isfinite(sounding.horizontal_error) ||
+    sounding.vertical_error <= 0.0 ||
+    sounding.horizontal_error < 0.0)
+  {
+    return false;
   }
 
-  double max_radius = CONF_99PC * std::sqrt(sounding.horizontal_error);
-
-  double radius = parameters_.distance_scale * pow(ratio - 1.0,
-      parameters_.inverse_distance_exponent) - max_radius;
-  if (radius < 0.0) {
-    radius = parameters_.distance_scale;
+  // Shared with Grid::insert and GeoMapSheet's grid-selection margin so the
+  // spread region and the selected-tile set can never drift apart (#104).
+  const double radius = parameters_.influenceRadius(sounding);
+  // Defensive: with door-gated inputs the radius is finite (overflow clamps to
+  // max_radius), but a non-finite radius must never reach radiusFromCenter's
+  // corners and the cell iterator.
+  if(!std::isfinite(radius)) {
+    return false;
   }
-  if (radius > max_radius) {
-    radius = max_radius;
-  }
-  if (radius < parameters_.distance_scale) {
-    radius = parameters_.distance_scale;
-  }
-
 
   auto bounds = gz4d::BoundsDegrees::radiusFromCenter(geo_sounding, radius);
 

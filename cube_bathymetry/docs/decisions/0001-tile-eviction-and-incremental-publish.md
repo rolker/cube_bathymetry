@@ -254,8 +254,10 @@ The eviction reload restores a *single reseeded hypothesis*, so a tile evicted
 mid-disambiguation has a faithful depth **value** but a slightly re-derived depth
 **uncertainty** (the § Negative trade-off above). **batch-regen** (`batch_regen_bag`
 / `BatchRegen`) removes even that artifact: it scatters every sounding to a per-tile
-on-disk bucket (the sounding's one-cell-expanded window, matching `addSoundings`'
-spread), then gathers each tile in a single **unbounded** pass over the complete set
+on-disk bucket (the batch's influence-radius-expanded window, matching
+`addSoundings`' spread — wording updated by cube_bathymetry#104, which fixed the
+selection margin from one cell to the soundings' actual influence radius), then
+gathers each tile in a single **unbounded** pass over the complete set
 of soundings that touch it — so no tile is ever evicted mid-disambiguation and the
 output is **bit-exact** vs a whole-survey-in-RAM build (depth, uncertainty, and the
 3-band backscatter). RAM is bounded by one tile's soundings, not surveyed area.
