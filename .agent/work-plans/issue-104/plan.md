@@ -42,11 +42,13 @@ Desk verification closed the issue's open questions:
    `Grid::insert` already gates non-finite soundings — `GeoGrid::insert`
    currently relies on upstream filtering).
 3. **Doc-comment sync** — update the "one-cell-expanded bounds" references:
-   `geo_map_sheet.cpp:35-38`, `batch_regen.h` scatter doc (~line 57),
-   `batch_regen.cpp:183`, `store_import.cpp:687`, the revisit-reload comment
-   at `cube_bathymetry_node.cpp:1138` ("addSoundings expands the bounds by a
-   cell"), and repo ADR-0001's batch-regen addendum ("the sounding's
-   one-cell-expanded window", line 257).
+   `geo_map_sheet.cpp:35-38`, `geo_map_sheet.h` (`gridIndicesForSoundings`
+   doc), `batch_regen.h` scatter doc (~line 57), `batch_regen.cpp:183`, the
+   revisit-reload comment at `cube_bathymetry_node.cpp:1138` ("addSoundings
+   expands the bounds by a cell"), and repo ADR-0001's batch-regen addendum
+   ("the sounding's one-cell-expanded window", line 257).
+   (`store_import.cpp:687` turned out to be margin-agnostic — "computes the
+   SAME expanded window" — so it needs no edit.)
 4. **Unit tests** (`test/test_geo_map_sheet.cpp`):
    - Boundary-adjacent sounding whose spillover reaches a neighbor grid it
      doesn't enter → neighbor grid is created, receives data, and appears in
@@ -71,7 +73,7 @@ Desk verification closed the issue's open questions:
 | File | Change |
 |------|--------|
 | `include/cube_bathymetry/parameters.h` | Add `influenceRadius(const Sounding &)` |
-| `src/geo_grid.cpp` | Use helper in `insert` |
+| `src/geo_grid.cpp` | Use helper in `insert`; gate non-finite radius before the cell iterator |
 | `src/grid.cpp` | Use helper in `insert` (keep non-finite gate) |
 | `src/geo_map_sheet.cpp` | Radius-based padding in `boundsForSoundings`; comment |
 | `include/cube_bathymetry/batch_regen.h`, `src/batch_regen.cpp`, `src/store_import.cpp` | Doc comments only |
@@ -112,3 +114,21 @@ Desk verification closed the issue's open questions:
 ## Estimated Scope
 
 Single PR.
+
+## Implementation Notes
+
+- **Capture-gate interplay (discovered writing the seam test)**:
+  `Node::insert` accepts a deposit only within
+  `max(capture_distance_scale·|depth|, 0.5)` m of the sounding
+  (`node.cpp:154`), independent of the influence radius — so the *effective*
+  spillover reach is `min(influenceRadius, capture reach)`. The seam unit test
+  uses depth −100 m (capture reach 5 m) so the 3 m seam gap is depositable.
+  Field implication: Bizzy runs `cell_size: 0.5`, so the pre-#104 margin was
+  0.5 m while capture reach at Massabesic depths (~10–15 m) is 0.5–0.75 m —
+  the under-margin bites there only in a narrow seam band. The bag replay
+  (step 6) is therefore the arbiter of how much of the 2026-07-21 symptom
+  this fix explains; the selection fix is correct regardless (selection must
+  cover everything the insert path can deposit).
+- `GeoGrid::insert` also gained a non-finite-radius gate (not only the bounds
+  padding): a NaN radius previously flowed into `radiusFromCenter` and the
+  cell iterator.

@@ -33,17 +33,33 @@ namespace cube
 namespace
 {
 // Expanded geographic bounds covering a sounding batch: the sounding extent grown
-// by one cell on every side so a sounding near a tile seam still reaches its
-// neighbour tile. Shared by addSoundings (which then creates the grids) and
+// by each sounding's actual influence radius (Parameters::influenceRadius -- the
+// same radius GeoGrid::insert spreads over), with a one-cell floor, so a
+// neighbour tile reached only by spillover is still selected and marked dirty
+// (#104: a one-cell margin under-selected vs the multi-cell spread radius,
+// leaving seam-neighbour tiles permanently un-updated in the live coverage).
+// Shared by addSoundings (which then creates the grids) and
 // gridIndicesForSoundings (which only enumerates them) so the two never drift.
 gz4d::BoundsDegrees boundsForSoundings(
-  const std::vector<GeoSounding> & soundings, const gggs::Level & grid_level)
+  const std::vector<GeoSounding> & soundings, const gggs::Level & grid_level,
+  const Parameters & parameters)
 {
   gz4d::BoundsDegrees bounds;
   for (const auto & s  :  soundings) {
     bounds.expand(s);
+    const double radius = parameters.influenceRadius(s.sounding);
+    // A non-finite radius (NaN/negative horizontal_error) must not poison the
+    // whole batch's bounds; that sounding spreads nowhere (GeoGrid::insert's
+    // distance < radius test is never true), so it needs no margin either.
+    if(std::isfinite(radius)) {
+      const auto influence = gz4d::BoundsDegrees::radiusFromCenter(s, radius);
+      bounds.expand(influence.minimum());
+      bounds.expand(influence.maximum());
+    }
   }
-  // quick hack to make sure to go a bit beyond the outer soundings
+  // One-cell floor beyond the outer soundings (the pre-#104 margin), kept so
+  // selection never rounds a boundary-touching influence region down to only
+  // its home tile.
   const auto angular_span = grid_level.cellAngularSpan();
   auto min = bounds.minimum();
   min = gz4d::PositionDegrees(min.latitude - angular_span, min.longitude - angular_span);
@@ -82,7 +98,7 @@ void GeoMapSheet::addSoundings(
     return;
   }
 
-  auto grids = getOrCreateGridsIn(boundsForSoundings(soundings, grid_level_));
+  auto grids = getOrCreateGridsIn(boundsForSoundings(soundings, grid_level_, parameters_));
   for (auto g  :  grids) {
     if(g->insert(soundings)) {
       last_update_time_ = time;
@@ -102,7 +118,7 @@ std::vector<gggs::GridIndex> GeoMapSheet::gridIndicesForSoundings(
   if(soundings.empty()) {
     return ret;
   }
-  const gz4d::BoundsDegrees bounds = boundsForSoundings(soundings, grid_level_);
+  const gz4d::BoundsDegrees bounds = boundsForSoundings(soundings, grid_level_, parameters_);
   gggs::GridAreaIterator i(
     grid_level_.gridIndex(bounds.minimum().latitude, bounds.minimum().longitude),
     grid_level_.gridIndex(bounds.maximum().latitude, bounds.maximum().longitude));

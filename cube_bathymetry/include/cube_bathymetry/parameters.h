@@ -81,6 +81,7 @@ namespace cube
   };
 
   class MapSheet;
+  struct Sounding;
 
 /// Algorithm control parameters
   struct Parameters
@@ -99,6 +100,18 @@ namespace cube
   /// so the operator-precedence trap that dropped iho_fixed out of the division
   /// (#46) cannot recur in the two grid call sites.
     double maxVarianceAllowed(double depth) const;
+
+  /// Radius (m) over which a sounding spreads its influence on insertion:
+  /// distance_scale·(ratio-1)^(1/distance_exponent) - max_radius, clamped to
+  /// [distance_scale, max_radius = CONF_99PC·√(horizontal_error)] (Calder's
+  /// effect-region radius). Kept in one place so the spreading loops
+  /// (Grid::insert, GeoGrid::insert) and the grid selection margin
+  /// (GeoMapSheet's boundsForSoundings) can never disagree -- a selection
+  /// margin narrower than the spread radius silently starves seam-neighbour
+  /// tiles of their spillover (cube_bathymetry#104). NaN in when
+  /// horizontal_error is NaN; negative horizontal_error also yields NaN
+  /// (callers treat non-finite as "no spread").
+    double influenceRadius(const Sounding & sounding) const;
 
   /// Value used to indicate 'no data' (typ. FLT_MAX)
     float no_data_value = std::numeric_limits < float > ::quiet_NaN();

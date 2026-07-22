@@ -54,8 +54,9 @@ namespace cube
 /// ever evicted mid-disambiguation.
 ///
 /// **Scatter (streaming):** @ref addBatch appends each batch to the per-tile binary
-/// bucket files on disk — one bucket per GGGS tile in the batch's one-cell-expanded
-/// bounds, each receiving the WHOLE batch, exactly the tiles + soundings
+/// bucket files on disk — one bucket per GGGS tile in the batch's
+/// influence-radius-expanded bounds (one-cell floor, #104), each receiving the
+/// WHOLE batch, exactly the tiles + soundings
 /// @ref GeoMapSheet::addSoundings feeds each grid. Writing the whole batch (not just
 /// the soundings whose own centre is near a tile) preserves the far-radius
 /// cross-sounding deposits addSoundings makes near a seam (out to

@@ -54,7 +54,8 @@ public:
   ///        WITHOUT creating them (cube_bathymetry#92 reload-before-add).
   ///
   /// Computes the same expanded bounds @ref addSoundings uses (the sounding extent
-  /// grown by one cell so a near-seam sounding reaches its neighbour tile) and
+  /// grown by each sounding's influence radius, one-cell floor -- #104 -- so a
+  /// near-seam sounding reaches every neighbour tile its spillover writes) and
   /// returns every `gggs::GridIndex` in that window. The bounded-RAM importer calls
   /// this BEFORE addSoundings to reload any evicted tile the batch is about to
   /// touch, so the new soundings accrete onto the reloaded hypotheses (lossless

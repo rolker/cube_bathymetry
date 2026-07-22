@@ -23,6 +23,7 @@
 #include "cube_bathymetry/parameters.h"
 #include <stdexcept>
 #include <cmath>
+#include "cube_bathymetry/sounding.h"
 
 namespace cube
 {
@@ -65,6 +66,33 @@ void Parameters::setIHOLimits(std::string order)
 double Parameters::maxVarianceAllowed(double depth) const
 {
   return (iho_fixed + iho_percent * depth * depth) / (CONF_95PC * CONF_95PC);
+}
+
+double Parameters::influenceRadius(const Sounding & sounding) const
+{
+  double max_variance_allowed = maxVarianceAllowed(sounding.depth);
+  double ratio = max_variance_allowed / sounding.vertical_error;
+
+  /* Ensure some spreading on point */
+  if(ratio <= 2.0) {
+    ratio = 2.0;
+  }
+
+  double max_radius = CONF_99PC * std::sqrt(sounding.horizontal_error);
+
+  double radius = distance_scale * std::pow(ratio - 1.0,
+      inverse_distance_exponent) - max_radius;
+  if (radius < 0.0) {
+    radius = distance_scale;
+  }
+  if (radius > max_radius) {
+    radius = max_radius;
+  }
+  if (radius < distance_scale) {
+    radius = distance_scale;
+  }
+
+  return radius;
 }
 
 void Parameters::setGridResolution(CellSizes sizes)

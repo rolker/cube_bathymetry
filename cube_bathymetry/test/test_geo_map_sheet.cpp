@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "marine_autonomy/gggs.h"
@@ -346,6 +347,109 @@ TEST_F(GeoMapSheetTest, ColdTilesEmptyWithinBudget)
   const std::size_t resident = ms.residentTileCount();
   EXPECT_TRUE(ms.coldTiles(resident).empty()) << "budget == resident: nothing cold";
   EXPECT_TRUE(ms.coldTiles(resident + 5).empty()) << "budget > resident: nothing cold";
+}
+
+// #104: a sounding whose influence radius crosses a tile seam must select,
+// write, and dirty the neighbour tile EVEN WHEN its own position stays more
+// than the old one-cell margin away from the seam. Pre-#104 the selection
+// bounds grew by one cell only, so this neighbour was never created and its
+// live coverage tile never updated (2026-07-21 Massabesic symptom).
+TEST_F(GeoMapSheetTest, SpilloverOnlySeamNeighborIsSelectedWrittenAndPublished)
+{
+  GeoMapSheet ms(cell_size);
+  const auto level = gggs::Level::fromCellSize(cell_size);
+
+  // Home tile of the reference point; place the sounding INSIDE it, ~3 m south
+  // of its north seam (~3 cells -- beyond the old one-cell margin, inside the
+  // ~5 m influence radius below).
+  const auto home = level.gridIndex(43.0, -70.0);
+  constexpr double kMPerDegLat = 111132.0;  // ~43N; metre-scale accuracy suffices
+  const double lat = home.northLatitude() - 3.0 / kMPerDegLat;
+  const double lon = 0.5 * (home.westLongitude() + home.eastLongitude());
+  const auto neighbor = level.gridIndex(home.northLatitude() + 1.0 / kMPerDegLat, lon);
+
+  // Depth -100 m: Node::insert's capture gate accepts deposits out to
+  // capture_distance_scale * |depth| = 5 m, past the 3 m seam gap. (At shallow
+  // depth the gate, not the influence radius, is the binding reach limit.)
+  GeoSounding s(gz4d::GeoPointLatLongDegrees(lat, lon, -100.0));
+  // High-confidence sounding: tiny vertical error pushes the spread out to
+  // max_radius = CONF_99PC * sqrt(horizontal_error) ~= 2.576 * sqrt(3.77) ~= 5 m.
+  s.sounding.vertical_error = 1e-4f;
+  s.sounding.horizontal_error = 3.77f;
+  std::vector<GeoSounding> batch{s};
+
+  // Selection parity: the non-creating enumeration path must include the
+  // spillover neighbour too (store_import / batch_regen ride this).
+  const auto indices = ms.gridIndicesForSoundings(batch);
+  EXPECT_NE(std::find(indices.begin(), indices.end(), neighbor), indices.end())
+    << "gridIndicesForSoundings missed the spillover-only neighbour tile";
+
+  ms.addSoundings(batch);
+
+  // The neighbour grid exists, received spillover, and is flagged for both the
+  // save and the incremental ~/tiles publish (ADR-0001).
+  ASSERT_NE(ms.gridAt(neighbor), nullptr)
+    << "spillover-only neighbour tile was never selected/created";
+  EXPECT_TRUE(ms.dirtyGrids().count(neighbor))
+    << "spillover-only neighbour tile not marked save-dirty";
+  EXPECT_TRUE(ms.publishDirtyGrids().count(neighbor))
+    << "spillover-only neighbour tile not marked publish-dirty";
+  EXPECT_TRUE(ms.dirtyGrids().count(home));
+}
+
+// The widened selection must not over-select: away from any seam a
+// small-influence sounding still touches exactly its home tile.
+TEST_F(GeoMapSheetTest, NoOverSelectionAwayFromSeams)
+{
+  GeoMapSheet ms(cell_size);
+  const auto level = gggs::Level::fromCellSize(cell_size);
+  const auto home = level.gridIndex(43.0, -70.0);
+  const double lat = 0.5 * (home.southLatitude() + home.northLatitude());
+  const double lon = 0.5 * (home.westLongitude() + home.eastLongitude());
+
+  GeoSounding s(gz4d::GeoPointLatLongDegrees(lat, lon, -10.0));
+  s.sounding.vertical_error = 0.5f;
+  s.sounding.horizontal_error = 0.1f;  // sub-cell spread (distance_scale floor)
+  std::vector<GeoSounding> batch{s};
+
+  EXPECT_EQ(ms.gridIndicesForSoundings(batch).size(), 1u);
+  ms.addSoundings(batch);
+  EXPECT_EQ(ms.grids().size(), 1u);
+}
+
+// A non-finite influence radius (NaN or negative horizontal_error) must not
+// poison the batch bounds: selection stays bounded and the finite soundings'
+// tiles are still selected and written.
+TEST_F(GeoMapSheetTest, NonFiniteHorizontalErrorDoesNotPoisonBatchBounds)
+{
+  GeoMapSheet ms(cell_size);
+  const auto level = gggs::Level::fromCellSize(cell_size);
+  const auto home = level.gridIndex(43.0, -70.0);
+  const double lat = 0.5 * (home.southLatitude() + home.northLatitude());
+  const double lon = 0.5 * (home.westLongitude() + home.eastLongitude());
+
+  GeoSounding good(gz4d::GeoPointLatLongDegrees(lat, lon, -10.0));
+  good.sounding.vertical_error = 0.5f;
+  good.sounding.horizontal_error = 0.1f;
+
+  GeoSounding bad_nan(gz4d::GeoPointLatLongDegrees(lat, lon, -10.0));
+  bad_nan.sounding.vertical_error = 0.5f;
+  bad_nan.sounding.horizontal_error = std::numeric_limits<float>::quiet_NaN();
+
+  GeoSounding bad_negative(gz4d::GeoPointLatLongDegrees(lat, lon, -10.0));
+  bad_negative.sounding.vertical_error = 0.5f;
+  bad_negative.sounding.horizontal_error = -1.0f;
+
+  std::vector<GeoSounding> batch{good, bad_nan, bad_negative};
+
+  // Selection stays bounded by the finite sounding's influence...
+  EXPECT_EQ(ms.gridIndicesForSoundings(batch).size(), 1u)
+    << "a non-finite influence radius leaked into the batch bounds";
+
+  // ...and the finite sounding still lands and dirties its home tile.
+  ms.addSoundings(batch);
+  ASSERT_EQ(ms.grids().size(), 1u);
+  EXPECT_TRUE(ms.dirtyGrids().count(home));
 }
 
 }  // namespace cube

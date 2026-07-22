@@ -180,7 +180,8 @@ void BatchRegen::addBatch(const std::vector<GeoSounding> & soundings)
   }
   // Route the WHOLE batch into every tile addSoundings would create for it, so the
   // scatter mirrors a single unbounded pass EXACTLY. GeoMapSheet::addSoundings takes
-  // gridIndicesForSoundings(batch) (the batch's one-cell-expanded bounds) and calls
+  // gridIndicesForSoundings(batch) (the batch's influence-radius-expanded bounds,
+  // one-cell floor -- #104) and calls
   // grid->insert(batch) on every grid in that set -- i.e. each such grid sees the
   // ENTIRE batch, not just the soundings whose own centre is near it. A sounding
   // near a tile seam deposits into a neighbour tile's cells out to

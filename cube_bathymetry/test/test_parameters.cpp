@@ -21,8 +21,10 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include "cube_bathymetry/parameters.h"
+#include "cube_bathymetry/sounding.h"
 
 namespace cube
 {
@@ -151,6 +153,76 @@ TEST(ParametersTest, MaxVarianceAllowedDividesWholeNumerator)
   EXPECT_NEAR(
     p.maxVarianceAllowed(50.0),
     (p.iho_fixed + p.iho_percent * 50.0 * 50.0) / conf2, 1e-12);
+}
+
+// #104 drift guard: influenceRadius must reproduce the spread-radius formula
+// the grid insert loops used before it was factored out (Calder's effect-region
+// radius). The grid-selection margin pads by this same function, so any drift
+// here would silently reopen the seam-neighbour starvation #104 fixed.
+TEST(ParametersTest, InfluenceRadiusMatchesHistoricalSpreadFormula)
+{
+  Parameters p(CellSizes(1.0f), "order1a");
+
+  auto historical = [&p](float depth, float vertical_error, float horizontal_error) {
+      double ratio = p.maxVarianceAllowed(depth) / vertical_error;
+      if(ratio <= 2.0) {
+        ratio = 2.0;
+      }
+      double max_radius = CONF_99PC * std::sqrt(horizontal_error);
+      double radius = p.distance_scale * std::pow(ratio - 1.0,
+          p.inverse_distance_exponent) - max_radius;
+      if(radius < 0.0) {
+        radius = p.distance_scale;
+      }
+      if(radius > max_radius) {
+        radius = max_radius;
+      }
+      if(radius < p.distance_scale) {
+        radius = p.distance_scale;
+      }
+      return radius;
+    };
+
+  // One case per branch: distance_scale floor / interior radius / max_radius clamp.
+  const struct {float depth, vertical_error, horizontal_error;} cases[] = {
+    {-10.0f, 0.5f, 0.1f},
+    {-10.0f, 1e-3f, 3.77f},
+    {-10.0f, 1e-4f, 3.77f},
+  };
+  for (const auto & c : cases) {
+    Sounding s(c.depth);
+    s.vertical_error = c.vertical_error;
+    s.horizontal_error = c.horizontal_error;
+    EXPECT_DOUBLE_EQ(
+      p.influenceRadius(s),
+      historical(c.depth, c.vertical_error, c.horizontal_error))
+      << "depth=" << c.depth << " ve=" << c.vertical_error
+      << " he=" << c.horizontal_error;
+  }
+
+  // Sanity on the branch coverage above: the three cases really do land on
+  // three distinct outcomes.
+  EXPECT_DOUBLE_EQ(historical(-10.0f, 0.5f, 0.1f), p.distance_scale);
+  const double interior = historical(-10.0f, 1e-3f, 3.77f);
+  // Match the production path's float-precision sqrt (horizontal_error is a
+  // float, so std::sqrt resolves to the float overload) -- a double sqrt
+  // differs in the last ulps.
+  const double clamp = CONF_99PC * static_cast<double>(std::sqrt(3.77f));
+  EXPECT_GT(interior, p.distance_scale);
+  EXPECT_LT(interior, clamp);
+  EXPECT_DOUBLE_EQ(historical(-10.0f, 1e-4f, 3.77f), clamp);
+
+  // Non-finite horizontal_error (NaN or negative) yields a non-finite radius --
+  // the callers' "no spread, no margin" sentinel.
+  Sounding nan_sounding(-10.0f);
+  nan_sounding.vertical_error = 0.5f;
+  nan_sounding.horizontal_error = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_FALSE(std::isfinite(p.influenceRadius(nan_sounding)));
+
+  Sounding negative_sounding(-10.0f);
+  negative_sounding.vertical_error = 0.5f;
+  negative_sounding.horizontal_error = -1.0f;
+  EXPECT_FALSE(std::isfinite(p.influenceRadius(negative_sounding)));
 }
 
 }  // namespace cube

@@ -1135,8 +1135,9 @@ private:
     // surface with only the freshly-accumulated cells.
     //
     // Key off the DIRTY set -- the grids insert() actually touched -- NOT the
-    // sounding centres: addSoundings expands the bounds by a cell and spills into
-    // neighbour tiles near a GGGS seam, so a centre-only check would miss an
+    // sounding centres: addSoundings expands the bounds by each sounding's
+    // influence radius (one-cell floor, #104) and spills into neighbour tiles
+    // near a GGGS seam, so a centre-only check would miss an
     // evicted neighbour and clobber it (review #70 round 2). Reseeding does not
     // mark dirty, so the grid stays dirty for the save (reloaded settled cells +
     // new cells); a resurveyed cell keeps the new value, others the reloaded one.
