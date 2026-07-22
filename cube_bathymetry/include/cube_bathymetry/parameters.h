@@ -108,9 +108,11 @@ namespace cube
   /// (Grid::insert, GeoGrid::insert) and the grid selection margin
   /// (GeoMapSheet's boundsForSoundings) can never disagree -- a selection
   /// margin narrower than the spread radius silently starves seam-neighbour
-  /// tiles of their spillover (cube_bathymetry#104). NaN in when
-  /// horizontal_error is NaN; negative horizontal_error also yields NaN
-  /// (callers treat non-finite as "no spread").
+  /// tiles of their spillover (cube_bathymetry#104). Degenerate soundings --
+  /// non-finite depth/vertical_error/horizontal_error, vertical_error <= 0, or
+  /// negative horizontal_error (the same non-positional set Grid::insert and
+  /// GeoGrid::insert door-gate) -- yield NaN, the "no spread, no margin"
+  /// sentinel callers skip on.
     double influenceRadius(const Sounding & sounding) const;
 
   /// Value used to indicate 'no data' (typ. FLT_MAX)

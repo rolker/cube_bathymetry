@@ -212,17 +212,26 @@ TEST(ParametersTest, InfluenceRadiusMatchesHistoricalSpreadFormula)
   EXPECT_LT(interior, clamp);
   EXPECT_DOUBLE_EQ(historical(-10.0f, 1e-4f, 3.77f), clamp);
 
-  // Non-finite horizontal_error (NaN or negative) yields a non-finite radius --
-  // the callers' "no spread, no margin" sentinel.
-  Sounding nan_sounding(-10.0f);
-  nan_sounding.vertical_error = 0.5f;
-  nan_sounding.horizontal_error = std::numeric_limits<float>::quiet_NaN();
-  EXPECT_FALSE(std::isfinite(p.influenceRadius(nan_sounding)));
-
-  Sounding negative_sounding(-10.0f);
-  negative_sounding.vertical_error = 0.5f;
-  negative_sounding.horizontal_error = -1.0f;
-  EXPECT_FALSE(std::isfinite(p.influenceRadius(negative_sounding)));
+  // Degenerate soundings yield a non-finite radius -- the callers' "no spread,
+  // no margin" sentinel. The set matches the grid door-gates (PR #105 review):
+  // without the sentinel, vertical_error <= 0 or a non-finite depth would ride
+  // the clamp chain to a FINITE radius and widen selection for data the
+  // inserts reject at the door.
+  auto expect_sentinel = [&p](float depth, float ve, float he, const char * what) {
+      Sounding s(depth);
+      s.vertical_error = ve;
+      s.horizontal_error = he;
+      EXPECT_FALSE(std::isfinite(p.influenceRadius(s))) << what;
+    };
+  const float kNan = std::numeric_limits<float>::quiet_NaN();
+  expect_sentinel(-10.0f, 0.5f, kNan, "NaN horizontal_error");
+  expect_sentinel(-10.0f, 0.5f, -1.0f, "negative horizontal_error");
+  expect_sentinel(-10.0f, 0.0f, 0.1f, "zero vertical_error");
+  expect_sentinel(-10.0f, -0.5f, 0.1f, "negative vertical_error");
+  expect_sentinel(-10.0f, kNan, 0.1f, "NaN vertical_error");
+  expect_sentinel(kNan, 0.5f, 0.1f, "NaN depth");
+  expect_sentinel(std::numeric_limits<float>::infinity(), 0.5f, 0.1f,
+    "infinite depth");
 }
 
 }  // namespace cube

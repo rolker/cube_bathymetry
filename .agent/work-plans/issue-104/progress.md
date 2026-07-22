@@ -95,15 +95,18 @@ plan-review findings folded in at `330ec08`
 **CI**: all-pass (ROS 2 Jazzy industrial_ci, copilot-pull-request-reviewer)
 
 ### Findings
-- [ ] (valid, Copilot) `influenceRadius` returns a FINITE radius for degenerate
+- [x] (valid, Copilot) `influenceRadius` returns a FINITE radius for degenerate
       inputs the grids door-gate (`vertical_error<=0` → ratio ∞ → clamped to
       finite `max_radius`; non-finite depth likewise), so selection/reload
       windows widen and tiles get created + LRU-touched for soundings that can
       never deposit. Fix: NaN sentinel for the door-gate's non-positional input
       set — `cube_bathymetry/src/parameters.cpp:71`
-- [ ] (valid, Copilot) `influenceRadius` doc comment must document the widened
+  → Addressed: sentinel added covering depth/vertical_error/horizontal_error
+    (finiteness + sign); 7-case sentinel test in test_parameters.cpp; 463/463.
+- [x] (valid, Copilot) `influenceRadius` doc comment must document the widened
       sentinel set (degenerate depth / vertical_error, not only
       horizontal_error) — `cube_bathymetry/include/cube_bathymetry/parameters.h:104`
+  → Addressed: doc rewritten to name the door-gate-parity sentinel set.
 
 ### False positives
 - (none)

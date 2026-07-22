@@ -23,6 +23,7 @@
 #include "cube_bathymetry/parameters.h"
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 #include "cube_bathymetry/sounding.h"
 
 namespace cube
@@ -70,6 +71,19 @@ double Parameters::maxVarianceAllowed(double depth) const
 
 double Parameters::influenceRadius(const Sounding & sounding) const
 {
+  // Degenerate soundings -- the same non-positional set the grid insert paths
+  // door-gate -- get a NaN sentinel: the clamp chain below would otherwise
+  // land on a FINITE radius for them (vertical_error <= 0 makes ratio infinite
+  // or clamps it to 2, and a non-finite depth rides the same clamps), and the
+  // selection margin would then widen tile selection / importer reload windows
+  // and bump LRU last-touch for data that can never deposit (PR #105 review).
+  if(!std::isfinite(sounding.depth) ||
+    !std::isfinite(sounding.vertical_error) || sounding.vertical_error <= 0.0 ||
+    !std::isfinite(sounding.horizontal_error) || sounding.horizontal_error < 0.0)
+  {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
   double max_variance_allowed = maxVarianceAllowed(sounding.depth);
   double ratio = max_variance_allowed / sounding.vertical_error;
 
