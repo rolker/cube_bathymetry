@@ -65,3 +65,19 @@ plan-review findings folded in at `330ec08`
 - [ ] Decide issue-close semantics: fix addresses the titled defect but not
       the field symptom — PR should reference, probably not auto-close, #104
 - [ ] `/review-code` (pre-push) before opening the PR
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-22 11:39 -0400
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-104 at `6b49539`
+**Mode**: pre-push
+**Depth**: Deep (reason: 200+ changed lines, 14 files, touches project ADR-0001)
+**Must-fix**: 0 | **Suggestions**: 1
+**Round**: 1 | **Ship**: recommended — no must-fix; clean static analysis, faithful refactor, strong tests, honestly-scoped
+
+### Findings
+- [ ] (suggestion) `GeoGrid::insert` guards only non-finite `radius`; the new comment says the planar `Grid::insert` "gates the same inputs at its door," but Grid also rejects `vertical_error<=0` and non-finite position/depth. Pre-existing asymmetry, out of the margin fix's scope — consider a matching door-guard in `GeoGrid::insert` for defense-in-depth — `cube_bathymetry/src/geo_grid.cpp:47`
+- [ ] (governance/scope) Bag verification shows the fix does NOT reproduce the 2026-07-21 field symptom (identical tile sets, 0 new cells). PR should **reference** #104 without a `Closes #104` keyword so the RCA (publish/transport over BEST_EFFORT udp_bridge) stays open — `progress.md` open items
