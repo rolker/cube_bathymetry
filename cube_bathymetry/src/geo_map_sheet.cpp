@@ -48,9 +48,10 @@ gz4d::BoundsDegrees boundsForSoundings(
   for (const auto & s  :  soundings) {
     bounds.expand(s);
     const double radius = parameters.influenceRadius(s.sounding);
-    // A non-finite radius (NaN/negative horizontal_error) must not poison the
-    // whole batch's bounds; that sounding spreads nowhere (GeoGrid::insert's
-    // distance < radius test is never true), so it needs no margin either.
+    // A non-finite radius (a degenerate sounding -- influenceRadius's NaN
+    // sentinel covers the same set the grid inserts door-gate) must not poison
+    // the whole batch's bounds; that sounding deposits nowhere, so it needs no
+    // margin either.
     if(std::isfinite(radius)) {
       const auto influence = gz4d::BoundsDegrees::radiusFromCenter(s, radius);
       bounds.expand(influence.minimum());

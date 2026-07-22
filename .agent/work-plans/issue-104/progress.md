@@ -121,15 +121,18 @@ plan-review findings folded in at `330ec08`
 failure; local industrial_ci replication in flight)
 
 ### Findings
-- [ ] (valid, Copilot) `influenceRadius` docstring claims a
+- [x] (valid, Copilot) `influenceRadius` docstring claims a
       `[distance_scale, max_radius]` clamp, but the `distance_scale` floor is
       applied last and wins when `max_radius < distance_scale` (sub-cell
       horizontal error) — doc must say cap-then-floor —
       `cube_bathymetry/include/cube_bathymetry/parameters.h:107`
-- [ ] (valid, Copilot) `boundsForSoundings` padding-skip comment still names
+  → Addressed: docstring rewritten as cap-then-floor with the floor-wins case
+    called out.
+- [x] (valid, Copilot) `boundsForSoundings` padding-skip comment still names
       only NaN/negative `horizontal_error`; stale after R1 widened the
       sentinel to all door-gated degeneracies —
       `cube_bathymetry/src/geo_map_sheet.cpp:53`
+  → Addressed: comment now points at influenceRadius's sentinel set.
 
 ### False positives
 - (none)

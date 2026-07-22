@@ -102,9 +102,12 @@ namespace cube
     double maxVarianceAllowed(double depth) const;
 
   /// Radius (m) over which a sounding spreads its influence on insertion:
-  /// distance_scale·(ratio-1)^(1/distance_exponent) - max_radius, clamped to
-  /// [distance_scale, max_radius = CONF_99PC·√(horizontal_error)] (Calder's
-  /// effect-region radius). Kept in one place so the spreading loops
+  /// distance_scale·(ratio-1)^(1/distance_exponent) - max_radius, capped at
+  /// max_radius = CONF_99PC·√(horizontal_error) and then floored at
+  /// distance_scale -- the floor is applied last and wins, so a sub-cell
+  /// horizontal error (max_radius < distance_scale) still yields a
+  /// distance_scale radius (Calder's effect-region behavior, preserved
+  /// verbatim). Kept in one place so the spreading loops
   /// (Grid::insert, GeoGrid::insert) and the grid selection margin
   /// (GeoMapSheet's boundsForSoundings) can never disagree -- a selection
   /// margin narrower than the spread radius silently starves seam-neighbour
