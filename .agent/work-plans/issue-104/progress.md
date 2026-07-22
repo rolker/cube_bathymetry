@@ -83,3 +83,27 @@ plan-review findings folded in at `330ec08`
   → Addressed: full door-gate added (position/depth/errors finite, vertical_error>0, horizontal_error>=0) + door-gate test cases in `NonFiniteHorizontalErrorDoesNotPoisonBatchBounds`; 463/463 tests pass.
 - [x] (governance/scope) Bag verification shows the fix does NOT reproduce the 2026-07-21 field symptom (identical tile sets, 0 new cells). PR should **reference** #104 without a `Closes #104` keyword so the RCA (publish/transport over BEST_EFFORT udp_bridge) stays open — `progress.md` open items
   → Addressed: user-confirmed — #104 stays open, PR body references without `Closes`.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-22 12:35 -0400
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #105 at `02a02b0`
+**Sources**: 3 (Copilot R1 @ `02a02b0`, Local Review (Pre-Push) @ `6b49539` — both prior findings addressed, CI rollup)
+**Cross-source confirmations**: 0 (Copilot's finding is the selection-side residual of the local review's door-gate theme, not a duplicate)
+**CI**: all-pass (ROS 2 Jazzy industrial_ci, copilot-pull-request-reviewer)
+
+### Findings
+- [ ] (valid, Copilot) `influenceRadius` returns a FINITE radius for degenerate
+      inputs the grids door-gate (`vertical_error<=0` → ratio ∞ → clamped to
+      finite `max_radius`; non-finite depth likewise), so selection/reload
+      windows widen and tiles get created + LRU-touched for soundings that can
+      never deposit. Fix: NaN sentinel for the door-gate's non-positional input
+      set — `cube_bathymetry/src/parameters.cpp:71`
+- [ ] (valid, Copilot) `influenceRadius` doc comment must document the widened
+      sentinel set (degenerate depth / vertical_error, not only
+      horizontal_error) — `cube_bathymetry/include/cube_bathymetry/parameters.h:104`
+
+### False positives
+- (none)
