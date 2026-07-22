@@ -108,5 +108,31 @@ plan-review findings folded in at `330ec08`
       horizontal_error) — `cube_bathymetry/include/cube_bathymetry/parameters.h:104`
   → Addressed: doc rewritten to name the door-gate-parity sentinel set.
 
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-22 13:40 -0400
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #105 at `65d4033`
+**Sources**: 3 (Copilot R2 @ `65d4033`, prior Integrated Review R1 @ `02a02b0`
+— both R1 findings addressed at `65d4033`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (hosted rerun green after a transient Ubuntu-mirror init
+failure; local industrial_ci replication in flight)
+
+### Findings
+- [ ] (valid, Copilot) `influenceRadius` docstring claims a
+      `[distance_scale, max_radius]` clamp, but the `distance_scale` floor is
+      applied last and wins when `max_radius < distance_scale` (sub-cell
+      horizontal error) — doc must say cap-then-floor —
+      `cube_bathymetry/include/cube_bathymetry/parameters.h:107`
+- [ ] (valid, Copilot) `boundsForSoundings` padding-skip comment still names
+      only NaN/negative `horizontal_error`; stale after R1 widened the
+      sentinel to all door-gated degeneracies —
+      `cube_bathymetry/src/geo_map_sheet.cpp:53`
+
+### False positives
+- (none)
+
 ### False positives
 - (none)
