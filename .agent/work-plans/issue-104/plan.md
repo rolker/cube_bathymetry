@@ -62,11 +62,16 @@ Desk verification closed the issue's open questions:
 5. **Existing-suite pass** — `test_batch_regen`, `test_store_import`,
    `test_publish_equivalence` must stay green (the bit-exact scatter/gather
    claim is preserved because scatter and live widen through the same code).
-6. **Bag verification** — replay the 2026-07-21 14:09 UTC gabby sonar session
+6. **Bag verification** — replay the 2026-07-21 gabby sonar sessions
    through `import_bag` pre- and post-fix into scratch stores (outputs under
-   the session scratchpad; bags read-only), diff the populated tile sets:
-   previously-stuck seam-neighbor tiles must appear post-fix. Record the
-   result on the issue.
+   the session scratchpad; bags read-only) at the live node's `-r 0.5`, and
+   diff the stores. **Result (2026-07-22, sessions 17:50 and 14:09 UTC)**:
+   identical tile sets, zero new cells; only 3 / ~200 seam-cell value
+   refinements respectively. The under-margin is real but, at Bizzy's 0.5 m
+   cells and Massabesic depths, `Node::insert`'s capture gate (see
+   Implementation Notes) bounds spillover to a hair past the old margin — so
+   this fix does NOT explain the 2026-07-21 live-coverage symptom; that RCA
+   continues downstream (publish/transport). Recorded on the issue.
 
 ## Files to Change
 
