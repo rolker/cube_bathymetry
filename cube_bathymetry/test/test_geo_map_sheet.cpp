@@ -440,7 +440,19 @@ TEST_F(GeoMapSheetTest, NonFiniteHorizontalErrorDoesNotPoisonBatchBounds)
   bad_negative.sounding.vertical_error = 0.5f;
   bad_negative.sounding.horizontal_error = -1.0f;
 
-  std::vector<GeoSounding> batch{good, bad_nan, bad_negative};
+  // Door-gate cases (parity with Grid::insert): zero vertical error and a
+  // non-finite position must also be contained.
+  GeoSounding bad_zero_vertical(gz4d::GeoPointLatLongDegrees(lat, lon, -10.0));
+  bad_zero_vertical.sounding.vertical_error = 0.0f;
+  bad_zero_vertical.sounding.horizontal_error = 0.1f;
+
+  GeoSounding bad_position(gz4d::GeoPointLatLongDegrees(
+      std::numeric_limits<double>::quiet_NaN(), lon, -10.0));
+  bad_position.sounding.vertical_error = 0.5f;
+  bad_position.sounding.horizontal_error = 0.1f;
+
+  std::vector<GeoSounding> batch{
+    good, bad_nan, bad_negative, bad_zero_vertical, bad_position};
 
   // Selection stays bounded by the finite sounding's influence...
   EXPECT_EQ(ms.gridIndicesForSoundings(batch).size(), 1u)

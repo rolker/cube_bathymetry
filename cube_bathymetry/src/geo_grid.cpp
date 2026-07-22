@@ -45,12 +45,28 @@ bool GeoGrid::insert(const std::vector<GeoSounding> & soundings)
 bool GeoGrid::insert(const GeoSounding & geo_sounding)
 {
   const Sounding & sounding = geo_sounding.sounding;
+  // Reject non-finite/degenerate soundings at the door (parity with the planar
+  // Grid::insert gate): a NaN position/depth or a non-positive vertical error
+  // propagates through the CUBE variance math into NaN hypothesis estimates
+  // that can blank cells, and horizontal_error feeds sqrt() in influenceRadius,
+  // where a negative value (not just NaN) reintroduces NaN. One bad sounding
+  // must never be able to empty the grid.
+  if(!std::isfinite(geo_sounding.latitude) || !std::isfinite(geo_sounding.longitude) ||
+    !std::isfinite(sounding.depth) ||
+    !std::isfinite(sounding.vertical_error) ||
+    !std::isfinite(sounding.horizontal_error) ||
+    sounding.vertical_error <= 0.0 ||
+    sounding.horizontal_error < 0.0)
+  {
+    return false;
+  }
+
   // Shared with Grid::insert and GeoMapSheet's grid-selection margin so the
   // spread region and the selected-tile set can never drift apart (#104).
   const double radius = parameters_.influenceRadius(sounding);
-  // A non-finite radius (NaN/negative horizontal_error) spreads nowhere -- bail
-  // before it poisons radiusFromCenter's corners and the cell iterator (#104;
-  // the planar Grid::insert gates the same inputs at its door).
+  // Defensive: with door-gated inputs the radius is finite (overflow clamps to
+  // max_radius), but a non-finite radius must never reach radiusFromCenter's
+  // corners and the cell iterator.
   if(!std::isfinite(radius)) {
     return false;
   }

@@ -78,7 +78,7 @@ Desk verification closed the issue's open questions:
 | File | Change |
 |------|--------|
 | `include/cube_bathymetry/parameters.h` | Add `influenceRadius(const Sounding &)` |
-| `src/geo_grid.cpp` | Use helper in `insert`; gate non-finite radius before the cell iterator |
+| `src/geo_grid.cpp` | Use helper in `insert`; door-gate degenerate soundings (parity with `Grid::insert`, review round-1) + non-finite radius backstop |
 | `src/grid.cpp` | Use helper in `insert` (keep non-finite gate) |
 | `src/geo_map_sheet.cpp` | Radius-based padding in `boundsForSoundings`; comment |
 | `include/cube_bathymetry/batch_regen.h`, `src/batch_regen.cpp`, `src/store_import.cpp` | Doc comments only |
@@ -134,6 +134,7 @@ Single PR.
   (step 6) is therefore the arbiter of how much of the 2026-07-21 symptom
   this fix explains; the selection fix is correct regardless (selection must
   cover everything the insert path can deposit).
-- `GeoGrid::insert` also gained a non-finite-radius gate (not only the bounds
-  padding): a NaN radius previously flowed into `radiusFromCenter` and the
-  cell iterator.
+- `GeoGrid::insert` also gained a full door-gate matching `Grid::insert`
+  (non-finite position/depth/errors, `vertical_error<=0`,
+  `horizontal_error<0` — review round-1 suggestion), plus a non-finite-radius
+  backstop before the cell iterator.

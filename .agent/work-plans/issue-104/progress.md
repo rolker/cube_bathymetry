@@ -79,5 +79,7 @@ plan-review findings folded in at `330ec08`
 **Round**: 1 | **Ship**: recommended — no must-fix; clean static analysis, faithful refactor, strong tests, honestly-scoped
 
 ### Findings
-- [ ] (suggestion) `GeoGrid::insert` guards only non-finite `radius`; the new comment says the planar `Grid::insert` "gates the same inputs at its door," but Grid also rejects `vertical_error<=0` and non-finite position/depth. Pre-existing asymmetry, out of the margin fix's scope — consider a matching door-guard in `GeoGrid::insert` for defense-in-depth — `cube_bathymetry/src/geo_grid.cpp:47`
-- [ ] (governance/scope) Bag verification shows the fix does NOT reproduce the 2026-07-21 field symptom (identical tile sets, 0 new cells). PR should **reference** #104 without a `Closes #104` keyword so the RCA (publish/transport over BEST_EFFORT udp_bridge) stays open — `progress.md` open items
+- [x] (suggestion) `GeoGrid::insert` guards only non-finite `radius`; the new comment says the planar `Grid::insert` "gates the same inputs at its door," but Grid also rejects `vertical_error<=0` and non-finite position/depth. Pre-existing asymmetry, out of the margin fix's scope — consider a matching door-guard in `GeoGrid::insert` for defense-in-depth — `cube_bathymetry/src/geo_grid.cpp:47`
+  → Addressed: full door-gate added (position/depth/errors finite, vertical_error>0, horizontal_error>=0) + door-gate test cases in `NonFiniteHorizontalErrorDoesNotPoisonBatchBounds`; 463/463 tests pass.
+- [x] (governance/scope) Bag verification shows the fix does NOT reproduce the 2026-07-21 field symptom (identical tile sets, 0 new cells). PR should **reference** #104 without a `Closes #104` keyword so the RCA (publish/transport over BEST_EFFORT udp_bridge) stays open — `progress.md` open items
+  → Addressed: user-confirmed — #104 stays open, PR body references without `Closes`.
