@@ -99,10 +99,13 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
     const double dlon = (cell.longitude - geo_sounding.longitude) * kDeg2Rad * cos_lat;
     const double distance = std::hypot(dlat, dlon) * kEarthRadiusM;
     if(distance < radius) {
-      if(!nodes_[*i]) {
-        nodes_[*i] = std::make_shared<Node>();
+      // Single hash-map probe (was three separate map descents per hit cell,
+      // each re-running the fat gggs::operator< -- cube#107).
+      auto & node = nodes_[nodeKey(*i)];
+      if(!node) {
+        node = std::make_shared<Node>();
       }
-      inserted = nodes_[*i]->insert(distance, sounding, parameters_) || inserted;
+      inserted = node->insert(distance, sounding, parameters_) || inserted;
     }
     i.next();
   }
@@ -114,11 +117,12 @@ void GeoGrid::setPredictedDepthAt(
   const gggs::CellIndex & cell, float depth, float variance)
 {
   // Lazy-create the Node so a warm-start prime can seed a cell that the live
-  // session has not yet touched. Mirrors insert()'s nodes_[*i] creation.
-  if(!nodes_[cell]) {
-    nodes_[cell] = std::make_shared<Node>();
+  // session has not yet touched. Mirrors insert()'s node creation.
+  auto & node = nodes_[nodeKey(cell)];
+  if(!node) {
+    node = std::make_shared<Node>();
   }
-  nodes_[cell]->setPredictedDepth(depth, variance);
+  node->setPredictedDepth(depth, variance);
 }
 
 void GeoGrid::setSettledDepthAt(
@@ -126,15 +130,16 @@ void GeoGrid::setSettledDepthAt(
 {
   // Lazy-create the Node (mirrors setPredictedDepthAt) so the reload can seed a
   // cell the live session has not yet touched this run.
-  if(!nodes_[cell]) {
-    nodes_[cell] = std::make_shared<Node>();
+  auto & node = nodes_[nodeKey(cell)];
+  if(!node) {
+    node = std::make_shared<Node>();
   }
-  nodes_[cell]->seedSettledDepth(depth, uncertainty, parameters_);
+  node->seedSettledDepth(depth, uncertainty, parameters_);
 }
 
 float GeoGrid::predictedDepthAt(const gggs::CellIndex & cell) const
 {
-  auto it = nodes_.find(cell);
+  auto it = nodes_.find(nodeKey(cell));
   if(it == nodes_.end() || !it->second) {
     return INVALID_DATA;
   }
@@ -153,7 +158,7 @@ std::vector<DepthAndUncertainty> GeoGrid::values() const
   gggs::CellAreaIterator i(index_);
 
   while(i.valid()) {
-    auto node = nodes_.find(*i);
+    auto node = nodes_.find(nodeKey(*i));
 
     if(node == nodes_.end() || !node->second) {
       // empty node, so default nan value
@@ -174,7 +179,7 @@ std::vector<NodeRecord> GeoGrid::nodeRecords() const
   gggs::CellAreaIterator i(index_);
 
   while(i.valid()) {
-    auto node = nodes_.find(*i);
+    auto node = nodes_.find(nodeKey(*i));
 
     if(node == nodes_.end() || !node->second) {
       // empty node, so default record (NaN depth + NaN intensity)
@@ -202,7 +207,12 @@ GeoGrid::nodeIntensityWelford() const
     entry.second->queueFlush(parameters_);
     const IntensityWelford w = entry.second->chosenIntensityWelford();
     if(w.n > 0) {
-      ret.emplace(entry.first, w);
+      // Reconstruct the CellIndex from the packed uint32 node key (cube#107):
+      // all nodes in this grid share index_, and the key packs (row<<16)|column.
+      const gggs::CellIndex cell(index_,
+        static_cast<uint16_t>(entry.first >> 16),
+        static_cast<uint16_t>(entry.first & 0xFFFF));
+      ret.emplace(cell, w);
     }
   }
   return ret;
@@ -211,7 +221,7 @@ GeoGrid::nodeIntensityWelford() const
 void GeoGrid::setSettledIntensityWelfordAt(
   const gggs::CellIndex & cell, const IntensityWelford & intensity)
 {
-  auto it = nodes_.find(cell);
+  auto it = nodes_.find(nodeKey(cell));
   if(it == nodes_.end() || !it->second) {
     return;  // no node here (depth reload did not seed this cell) -- nothing to do
   }
