@@ -327,6 +327,17 @@ if(BUILD_TESTING)
     marine_bathymetry_store::marine_bathymetry_store
   )
 
+  # Anti-entropy phase 2 (#106): full catalog across eviction, disk-serve
+  # without LRU churn, cold-consumer convergence (+ resident-only-catalog
+  # negative control).
+  ament_add_gtest(test_anti_entropy_disk_serve test/test_anti_entropy_disk_serve.cpp)
+  target_link_libraries(test_anti_entropy_disk_serve
+    cube_bathymetry_store_import
+    cube_bathymetry_quantize_tile
+    marine_bathymetry_store::marine_bathymetry_store
+    marine_tiled_raster_store::marine_tiled_raster_store
+  )
+
   # Long-duration bounding (#70): resident tile count stays bounded under a long
   # track while the on-disk store keeps growing (bounded-RSS proxy).
   ament_add_gtest(test_tile_eviction_rss test/test_tile_eviction_rss.cpp)

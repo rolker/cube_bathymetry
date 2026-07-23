@@ -20,9 +20,12 @@
 // THE SOFTWARE.
 
 
+#include <sys/stat.h>
+
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <optional>
 #include <set>
@@ -100,6 +103,12 @@ public:
     // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
     // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
     evicted_indices_.clear();
+    // Same defense-in-depth for the disk-serve queue (#106 review r1):
+    // deactivate/cleanup already clear it on the normal path, but a stale
+    // queued index from a prior configure cycle must never survive into a
+    // fresh sheet's serving.
+    disk_serve_queue_.clear();
+    disk_serve_queued_.clear();
     // Reset the tile-version registry too (#78): a fresh sheet must not advertise
     // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
@@ -259,6 +268,36 @@ public:
           RCLCPP_INFO(get_logger(),
             "Primed GeoMapSheet from %zu survey tiles under %s",
             draft_tiles.size(), draft_dir_.c_str());
+          // Seed the tile-version registry from ALL persisted tiles BEFORE the
+          // trim (#106): the catalog advertises the full on-disk store, so
+          // tiles evicted by the trim below stay advertised and disk-servable.
+          // (Seeding from grids() AFTER the trim -- the previous order -- lost
+          // the just-evicted tiles from the catalog, and the consumer's
+          // prune-on-absence deleted valid coverage, ADR-0008 D4.)
+          //
+          // Version = the tile FILE's mtime, not now() (#106 review r1):
+          // stamping the prime time made every reboot advertise the whole
+          // store as fresh, so a warm consumer re-pulled everything over the
+          // link. mtime is stable across restarts and bumps only when a tile
+          // is re-saved (genuinely newer data); tiles carry no per-cell time
+          // raster since uma#248, so the file stamp is the durable version
+          // source. A stat failure falls back to now() -- worst case is one
+          // redundant refresh of that tile, never loss.
+          const std::string survey_dir = draft_dir_ + "/" +
+            marine_bathymetry_store::layerDirName(
+            marine_bathymetry_store::SourceLayer::Survey);
+          const std::int64_t fallback_version = now().nanoseconds();
+          for (const auto & [tile_index, tile] : draft_tiles) {
+            std::int64_t version = fallback_version;
+            struct stat st;
+            const std::string tile_path = survey_dir + "/" +
+              marine_bathymetry_store::tileFilename(tile_index);
+            if (::stat(tile_path.c_str(), &st) == 0) {
+              version = static_cast<std::int64_t>(st.st_mtim.tv_sec) *
+                1000000000LL + st.st_mtim.tv_nsec;
+            }
+            catalog_builder_.update(tile_index, version);
+          }
           // Bound the prime to the resident budget (must-fix): loadIntoSheet loads
           // the WHOLE store, so without this a restart mid-long-survey re-creates
           // the unbounded RAM #70 prevents. Primed tiles are clean and already on
@@ -267,15 +306,6 @@ public:
           // known limitation -- a windowed prime needs a startup position that is
           // not available at on_configure; tracked as a follow-up.)
           trimResidentToBudget();
-          // Seed the tile-version registry from the primed (reloaded) grids so
-          // they are advertised in the catalog from the first publish. Without
-          // this the consumer sees an empty catalog right after activate and
-          // prunes valid on-disk coverage (ADR-0008 D4). All primed tiles share
-          // one prime-time version; a resurvey bumps it via publishDirtyTiles.
-          const std::int64_t prime_version = now().nanoseconds();
-          for (const auto & grid : geo_map_sheet_->grids()) {
-            if (grid) {catalog_builder_.update(grid->index(), prime_version);}
-          }
         }
       } catch (const std::exception & e) {
         // A missing/empty store dir is normal on a first run; a genuine load
@@ -314,6 +344,54 @@ public:
     // COMPLETE snapshot that drives anti-entropy reconciliation, and
     // `~/coverage_requests` lets a consumer ask for tiles it is missing/stale on.
     catalog_interval_s_ = declare_parameter("catalog_interval", 5.0);
+    // Disk-serve drain queue (#106): rate-limited from-disk catch-up of
+    // evicted tiles requested by a consumer. interval x tiles_per_tick is the
+    // catch-up throughput knob an operator tunes against the link budget
+    // (the operator bridge rate-limits coverage_tiles to ~2/s); deliberately
+    // a separate timer from catalog_interval so a catalog retune cannot
+    // silently change catch-up rate.
+    rcl_interfaces::msg::ParameterDescriptor per_tick_desc;
+    per_tick_desc.description =
+      "Evicted tiles served from the draft store per drain tick "
+      "(disk_serve_interval). tiles_per_tick / interval = catch-up rate; "
+      "default 4 per 0.5s. Tune against the link budget.";
+    // Validate before the int -> size_t casts and the timer creation (PR
+    // review): a negative count would underflow to a huge size_t (defeating
+    // the pacing / unbounding the queue), and a <= 0 interval would make the
+    // wall timer fire continuously and starve the executor. A bad value falls
+    // back to the default with a WARN -- field configs change under pressure.
+    const std::int64_t per_tick_raw =
+      declare_parameter("disk_serve_tiles_per_tick", 4, per_tick_desc);
+    if (per_tick_raw < 1) {
+      RCLCPP_WARN_STREAM(get_logger(),
+        "disk_serve_tiles_per_tick=" << per_tick_raw <<
+          " is not positive; using default 4");
+    }
+    disk_serve_tiles_per_tick_ =
+      per_tick_raw < 1 ? 4u : static_cast<std::size_t>(per_tick_raw);
+    rcl_interfaces::msg::ParameterDescriptor depth_desc;
+    depth_desc.description =
+      "Max queued disk-serve entries; excess requests are dropped (the "
+      "consumer re-requests via the next catalog). Bounds boat-side memory "
+      "against a buggy or hostile consumer.";
+    const std::int64_t depth_raw =
+      declare_parameter("disk_serve_queue_max_depth", 64, depth_desc);
+    if (depth_raw < 1) {
+      RCLCPP_WARN_STREAM(get_logger(),
+        "disk_serve_queue_max_depth=" << depth_raw <<
+          " is not positive; using default 64");
+    }
+    disk_serve_queue_max_depth_ =
+      depth_raw < 1 ? 64u : static_cast<std::size_t>(depth_raw);
+    const double interval_raw = declare_parameter("disk_serve_interval", 0.5);
+    if (!(interval_raw > 0.0) || !std::isfinite(interval_raw)) {
+      RCLCPP_WARN(get_logger(),
+        "disk_serve_interval=%g is not a positive finite duration; "
+        "using default 0.5s", interval_raw);
+      disk_serve_interval_s_ = 0.5;
+    } else {
+      disk_serve_interval_s_ = interval_raw;
+    }
     sonar_tile_publisher_ =
       create_publisher<marine_interfaces::msg::SonarVisualizationTile>(
       "~/coverage_tiles", rclcpp::QoS(10).best_effort());
@@ -378,6 +456,13 @@ public:
         std::chrono::duration<double>(catalog_interval_s_),
         std::bind(&CubeBathymetry::publishCatalog, this));
     }
+    // Disk-serve drain (#106): trickle from-disk catch-up of requested
+    // evicted tiles. Only meaningful with a draft store to serve from.
+    if (!draft_dir_.empty() && !disk_serve_timer_) {
+      disk_serve_timer_ = create_wall_timer(
+        std::chrono::duration<double>(disk_serve_interval_s_),
+        std::bind(&CubeBathymetry::drainDiskServeQueue, this));
+    }
     return LifecycleNode::on_activate(state);
   }
 
@@ -395,6 +480,15 @@ public:
       catalog_timer_->cancel();
       catalog_timer_.reset();
     }
+    if (disk_serve_timer_) {
+      disk_serve_timer_->cancel();
+      disk_serve_timer_.reset();
+    }
+    // Pending catch-up work is dropped with the timer: requests are only
+    // accepted while ACTIVE, and a consumer re-requests via the catalog
+    // after the next activate (#106).
+    disk_serve_queue_.clear();
+    disk_serve_queued_.clear();
     return LifecycleNode::on_deactivate(state);
   }
 
@@ -413,6 +507,12 @@ public:
       catalog_timer_->cancel();
       catalog_timer_.reset();
     }
+    if (disk_serve_timer_) {
+      disk_serve_timer_->cancel();
+      disk_serve_timer_.reset();
+    }
+    disk_serve_queue_.clear();
+    disk_serve_queued_.clear();
     // Symmetric teardown for the one conditionally-created subscription
     // (#102): its callback has no lifecycle-state gate, so it must not
     // outlive the configured state and touch the stale sheet.
@@ -523,9 +623,21 @@ private:
     tile_request_subscription_;
   rclcpp::TimerBase::SharedPtr catalog_timer_;
   double catalog_interval_s_ = 5.0;
-  // Source-side tile->version registry (#230) backing the periodic complete
-  // catalog; updated whenever a tile is pushed.
+  // Source-side tile->version registry (#230/#106) backing the periodic
+  // complete catalog; seeded from the whole draft store at startup, bumped
+  // whenever a tile is pushed. Evicted tiles stay registered (they remain
+  // servable from disk), so the catalog reflects the store, not RAM.
   marine_tiled_raster_store::TileCatalogBuilder catalog_builder_;
+
+  // Disk-serve drain queue (#106): evicted tiles a consumer requested, served
+  // from the draft store at a bounded rate (see drainDiskServeQueue). The set
+  // is the queue's dedup companion -- always mutate the two together.
+  std::deque<gggs::GridIndex> disk_serve_queue_;
+  std::set<gggs::GridIndex> disk_serve_queued_;
+  rclcpp::TimerBase::SharedPtr disk_serve_timer_;
+  std::size_t disk_serve_tiles_per_tick_ = 4;
+  std::size_t disk_serve_queue_max_depth_ = 64;
+  double disk_serve_interval_s_ = 0.5;
 
   // Long-duration bounding parameters (#70, ADR-0001).
   std::size_t max_resident_tiles_ = 64;
@@ -703,32 +815,34 @@ private:
     msg.header.stamp = gen;
     msg.header.frame_id = "gggs";
 
-    // The catalog is the COMPLETE set of tiles the boat can SERVE right now: the
-    // currently-resident grids that carry data (a tracked version). Building from
-    // grids() rather than the version registry keeps it D4-complete against the
-    // resident-serving TileRequest path (ADR-0008 D4): evicted tiles are no
-    // longer resident, so they drop out (a request couldn't be served anyway),
-    // and primed tiles seeded at startup are included. A resident grid with no
-    // tracked version has no servable data yet, so it is skipped.
-    for (const auto & grid : geo_map_sheet_->grids()) {
-      if (!grid) {continue;}
-      const auto version = catalog_builder_.versionOf(grid->index());
-      if (!version) {continue;}
+    // The catalog is the COMPLETE set of SERVABLE tiles: everything in the
+    // version registry -- resident grids AND tiles evicted to the draft store
+    // (#106; evicted tiles are served from disk via the drain queue). Building
+    // from the registry rather than grids() keeps evicted coverage advertised,
+    // so the consumer's prune-on-absence (ADR-0008 D4) converges to the full
+    // store instead of eroding to the boat's resident window. The registry is
+    // seeded from the whole store at startup and bumped on every push, so a
+    // tile absent from it has no servable data yet.
+    const marine_tiled_raster_store::TileCatalog catalog =
+      catalog_builder_.buildCatalog(gen.nanoseconds());
+    for (const auto & e : catalog.entries) {
       marine_interfaces::msg::TileCatalogEntry entry;
-      entry.index.level = grid->index().level();
-      entry.index.row = grid->index().row();
-      entry.index.col = grid->index().column();
-      entry.version.sec = static_cast<std::int32_t>(*version / 1000000000LL);
-      entry.version.nanosec = static_cast<std::uint32_t>(*version % 1000000000LL);
+      entry.index.level = e.index.level();
+      entry.index.row = e.index.row();
+      entry.index.col = e.index.column();
+      entry.version.sec = static_cast<std::int32_t>(e.version / 1000000000LL);
+      entry.version.nanosec = static_cast<std::uint32_t>(e.version % 1000000000LL);
       msg.entries.push_back(entry);
     }
     tile_catalog_publisher_->publish(msg);
   }
 
-  // Serve a consumer's TileRequest (#78/#230). v1 serves RESIDENT tiles in full
-  // (3-band, via quantizeTile). A requested tile that has been evicted to disk is
-  // not re-served here -- from-disk catch-up for evicted tiles is a follow-up; the
-  // live push + periodic catalog already cover the common (resident) case.
+  // Serve a consumer's TileRequest (#78/#230/#106). Resident tiles are served
+  // immediately in full (3-band, via quantizeTile). A requested tile that has
+  // been evicted to the draft store is QUEUED for the rate-limited disk-serve
+  // drain (drainDiskServeQueue) rather than silently dropped, so a cold or
+  // stale consumer can catch up on the whole store, not just the resident
+  // window (ADR-0008 D4 completeness; #104 field symptom).
   void tileRequestCallback(const marine_interfaces::msg::TileRequest::SharedPtr msg)
   {
     // Serving publishes on the lifecycle tile publisher, which only emits while
@@ -739,25 +853,129 @@ private:
     {
       return;
     }
+    // The wire TileIndex cannot construct a gggs::GridIndex directly (the
+    // (level,row,col) ctor is private), so requests are matched field-wise
+    // against the indices the node already holds: resident grids for the
+    // immediate serve, evicted_indices_ for the disk-serve queue. Both sets
+    // are boat-local and small (resident <= max_resident_tiles; evicted =
+    // this session's overflow), so the linear scans are cheap.
+    const auto matches = [](const gggs::GridIndex & idx,
+      const marine_interfaces::msg::TileIndex & ti) {
+        return idx.level() == ti.level && idx.row() == ti.row &&
+               idx.column() == ti.col;
+      };
     const builtin_interfaces::msg::Time stamp = now();
     std::size_t served = 0;
+    std::size_t queued = 0;
+    std::size_t overflow = 0;
     for (const auto & ti : msg->tiles) {
+      bool handled = false;
       for (const auto & grid : geo_map_sheet_->grids()) {
-        if (grid && grid->index().level() == ti.level &&
-          grid->index().row() == ti.row && grid->index().column() == ti.col)
-        {
+        if (grid && matches(grid->index(), ti)) {
           if (auto vt = cube::quantizeTile(*grid, stamp)) {
             sonar_tile_publisher_->publish(*vt);
             ++served;
           }
+          handled = true;
           break;
         }
       }
+      if (handled) {
+        continue;
+      }
+      // Not resident: queue evicted tiles for the disk-serve drain, bounded
+      // and dedup'd. An index that is neither resident nor evicted has no
+      // servable data (never surveyed this store) and is skipped.
+      for (const auto & index : evicted_indices_) {
+        if (!matches(index, ti)) {
+          continue;
+        }
+        if (!disk_serve_queued_.count(index)) {
+          if (disk_serve_queue_.size() >= disk_serve_queue_max_depth_) {
+            ++overflow;
+          } else {
+            disk_serve_queue_.push_back(index);
+            disk_serve_queued_.insert(index);
+            ++queued;
+          }
+        }
+        break;
+      }
     }
-    if (served < msg->tiles.size()) {
+    if (overflow > 0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "TileRequest: disk-serve queue full (%zu); dropped %zu request(s) -- "
+        "the consumer re-requests via the next catalog. Raise "
+        "disk_serve_queue_max_depth or drain rate if this persists.",
+        disk_serve_queue_max_depth_, overflow);
+    }
+    if (served + queued < msg->tiles.size()) {
       RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 5000,
-        "TileRequest: served %zu of %zu (the rest are not resident; "
-        "from-disk catch-up is a follow-up)", served, msg->tiles.size());
+        "TileRequest: served %zu, queued %zu of %zu (the rest have no "
+        "servable data or overflowed the disk-serve queue)",
+        served, queued, msg->tiles.size());
+    }
+  }
+
+  // Drain the disk-serve queue (#106): serve up to disk_serve_tiles_per_tick_
+  // queued evicted tiles per tick from the draft store, pacing a cold
+  // consumer's catch-up onto spare link bandwidth. READ-ONLY by design: each
+  // tile is loaded into a SCRATCH store/sheet, quantized, published, and
+  // discarded -- deliberately NOT inserted into geo_map_sheet_. Do not merge
+  // this with reloadEvictedTile (the revisit path): reloading into the live
+  // sheet here would let a bulk catch-up churn the LRU and evict the tiles
+  // the survey is actively updating.
+  void drainDiskServeQueue()
+  {
+    if (disk_serve_queue_.empty() || draft_dir_.empty()) {
+      return;
+    }
+    // The per-tick budget counts ATTEMPTS, not published tiles (#106 review
+    // r1): pacing on publishes would let a run of empty/absent entries turn
+    // one tick into up to queue-depth loadWindow reads, defeating the I/O
+    // pacing the budget exists for.
+    const builtin_interfaces::msg::Time stamp = now();
+    std::size_t attempts = 0;
+    while (attempts < disk_serve_tiles_per_tick_ && !disk_serve_queue_.empty()) {
+      ++attempts;
+      const gggs::GridIndex index = disk_serve_queue_.front();
+      disk_serve_queue_.pop_front();
+      disk_serve_queued_.erase(index);
+
+      // Became resident again since it was queued (revisit reload): serve the
+      // live grid, which is at least as fresh as the on-disk copy.
+      if (auto grid = geo_map_sheet_->gridAt(index)) {
+        if (auto vt = cube::quantizeTile(*grid, stamp)) {
+          sonar_tile_publisher_->publish(*vt);
+        }
+        continue;
+      }
+      try {
+        marine_bathymetry_store::BathymetryStore scratch =
+          marine_bathymetry_store::BathymetryStore::fromCellSize(
+          static_cast<float>(cell_size_));
+        marine_bathymetry_store::loadWindow(
+          scratch, draft_dir_, index.southWestPosition(),
+          index.northEastPosition(), nullptr);
+        const auto & tiles =
+          scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
+        const auto it = tiles.find(index);
+        if (it == tiles.end()) {
+          continue;  // absent on disk after all; nothing to serve
+        }
+        cube::GeoMapSheet scratch_sheet(static_cast<float>(cell_size_));
+        cube::primeFromTile(it->second, scratch_sheet);
+        if (auto grid = scratch_sheet.gridAt(index)) {
+          if (auto vt = cube::quantizeTile(*grid, stamp)) {
+            sonar_tile_publisher_->publish(*vt);
+          }
+        }
+        // scratch store/sheet destroyed here; geo_map_sheet_ untouched.
+      } catch (const std::exception & e) {
+        RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+          "Disk-serve: could not load requested evicted tile: " << e.what() <<
+          " (skipping; the consumer re-requests via the next catalog)");
+      }
     }
   }
 
