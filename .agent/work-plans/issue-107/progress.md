@@ -98,3 +98,41 @@ Lifecycle: **Plan Review** → **implement** → **review-code**. Verdict is
 approve-with-suggestions: implementation may proceed, addressing the (must-fix)
 `nodeIntensityWelford` reconstruction and amending the plan inline per plan-task's
 "During implementation" rules.
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-23 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-107
+**Plan**: `.agent/work-plans/issue-107/plan.md` (amended inline; see `[impl amendment]`/`[impl note]` markers)
+
+### Commits (7 code commits, oldest→newest)
+- `b8db746` perf(geo_grid): packed-uint32 unordered_map node container — triple map-descent fold + `nodeKey()` at all sites + `nodeIntensityWelford` CellIndex reconstruction (the review must-fix).
+- `1855c08` test(geo_grid): bit-exact bulk-insert regression, golden captured from the pre-refactor build.
+- `9cc5ba0` perf(geo_grid): equirectangular insert bounds, drop ellipsoidal `radiusFromCenter` (+ last gz4d_geo.h use).
+- `df4dac4` perf(import_bag): per-bag topic→type cache (both `Message` ctor sites).
+- `20f1083` perf(import_bag): main-pass `StorageFilter` plumbed through `Bag::open`, built from each bag's real topics via `/tf`+`/tf_static` suffix match (namespaced-safe, transient-local survives).
+- `02608c8` perf(import_bag): per-ping KDL-frame hoist out of the per-sounding transform.
+- `d80c4d3` perf(import_bag): prune stale `speed_by_ns` samples (30 s window) + `odom_samples_total` diagnostic.
+- (this progress + plan-sync entry commits on top.)
+
+### Test results
+- `./sensors_ws/build.sh cube_bathymetry` — clean build.
+- `./sensors_ws/test.sh cube_bathymetry` — **464 tests, 0 errors, 0 failures, 61 skipped** (colcon aggregate incl. linters; uncrustify/cpplint/cppcheck/copyright all green). Underlying gtest: **183 tests, 0 failures**.
+- New `GeoGridTest.BulkInsertBitExactRegression` passes: `values()`, `nodeRecords()` (backscatter), and `nodeIntensityWelford()` reproduce the pre-refactor golden byte-for-byte across BOTH the container and the bounds change.
+- Dependency layers were not pre-built in this container; built `core_ws` (`marine_autonomy` + stores) `--packages-up-to` first (geodesy/grid_map/marine_acoustic_msgs are apt). 
+
+### Plan amendments (folded into plan.md)
+1. **`<map>` retained** (step 2) — `nodeIntensityWelford()` still returns `std::map<gggs::CellIndex, IntensityWelford>`. Added `<unordered_map>`+`<cstdint>`; audited every `nodes_` site (`values`/`nodeRecords`/`predictedDepthAt`/`setSettledIntensityWelfordAt`/the range-loop), not just `insert`.
+2. **doTransform hoist MUST use KDL, not `tf2::Transform`** (item 6) — `tf2::doTransform` for a point is KDL-based (`gmTransformToKDL(t) * KDL::Vector`); a `tf2::Transform` matvec builds the rotation differently and would NOT be bit-exact (unexplained host-A/B tile diff). Implemented `tf2::gmTransformToKDL` + `KDL::Frame*KDL::Vector` — the exact same op, hoisted. Added `kdl/frames.hpp`, dropped unused `point_stamped.hpp`.
+3. **Bit-exact bounds invariant documented** (step 3, review suggestion 1) — box ⊇ gate, same equirectangular metric, in-code + plan.
+4. **StorageFilter design** (item 5, review suggestions 2/3) — plumbed through `Bag::open`; built from each bag's real topic list by tf/tf_static suffix match so namespaced `/bizzy/tf` and transient-local `/tf_static` survive; empty→read-all fallback.
+5. **`odom_samples_total`** added (item 7) so the end-of-run diagnostic reports the true total after pruning.
+
+### Deferred / not done here (by design)
+- gggs `operator<` change → split to **uma#270** (do not touch gggs headers).
+- Live **32-bag wall-clock + RSS A/B run** is a HOST task (out of container scope); the import_bag Phase B items are validated by build + the #63 "identical tiles or explained diffs" discipline, and item 6 is bit-exact by construction (KDL path preserved).
+
+### Next step
+Lifecycle: **implement** → **review-code**.
