@@ -132,7 +132,7 @@ review-issue's three actions (comment L706–711, ADR addendum, startup-prime
 reorder) are all addressed. Suggestions below are non-blocking.
 
 ### Findings
-- [ ] (suggestion) Step 6 test guards the *invariant* via library primitives, not
+- [x] (suggestion) Step 6 test guards the *invariant* via library primitives, not
   the *changed node methods*. `CubeBathymetry::publishCatalog()`,
   `tileRequestCallback()`, `trimResidentToBudget()`, the startup prime, and the new
   drain queue are all `private` in `cube_bathymetry_node.cpp` (after `private:` at
@@ -141,16 +141,16 @@ reorder) are all addressed. Suggestions below are non-blocking.
   regresses (e.g. someone re-introduces the `grids()`-based catalog). Acknowledge
   this limitation in the plan/test, or add a launch_testing assertion on the real
   node path. — `plan.md` Step 6 (L157–178)
-- [ ] (suggestion) Step 3 adds a new `disk_serve_timer_`, but review-issue
+- [x] (suggestion) Step 3 adds a new `disk_serve_timer_`, but review-issue
   explicitly recommended reusing an existing maintenance-cycle tick "if timing
   requirements allow" to keep the timer count bounded. The plan neither adopts nor
   justifies the divergence — add a one-line rationale (independent rate control)
   or reuse the catalog/maintenance tick. — `plan.md` Step 3 (L124–128)
-- [ ] (suggestion) review-issue recommended a bag-replay acceptance check against
+- [x] (suggestion) review-issue recommended a bag-replay acceptance check against
   the 2026-07-21 Gabby sessions (#104 stuck-tile symptom). The hermetic test does
   not cover field validation and the plan omits any manual acceptance step — note
   it as post-merge validation or explicitly defer. — `plan.md` Step 6
-- [ ] (suggestion, minor) Precision: Step 3's "New members" block omits an
+- [x] (suggestion, minor) Precision: Step 3's "New members" block omits an
   interval member though `disk_serve_interval` is declared in prose (L106), and
   Step 6 says "call `trimResidentToBudget(max=2)`" — a node-private method the
   library test cannot call; it must replicate the trim via

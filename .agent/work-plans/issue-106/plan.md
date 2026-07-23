@@ -87,14 +87,25 @@ Add a **bounded, rate-limited drain queue** so a cold CAMP's burst of
 TileRequests trickles out on spare bandwidth rather than flooding the
 best-effort topic.
 
-**New members:**
+**New members** (plan-review S4: interval member included):
 ```cpp
 std::deque<gggs::GridIndex>  disk_serve_queue_;
 std::set<gggs::GridIndex>    disk_serve_queued_;  // dedup companion
 rclcpp::TimerBase::SharedPtr disk_serve_timer_;
 std::size_t disk_serve_tiles_per_tick_{4};
 std::size_t disk_serve_queue_max_depth_{64};
+double      disk_serve_interval_{0.5};  // s, drain timer period
 ```
+
+**Why a separate timer, not the catalog/maintenance tick** (plan-review S2):
+the drain cadence is a bandwidth-pacing knob — `disk_serve_interval` ×
+`disk_serve_tiles_per_tick` is the catch-up rate an operator tunes against
+the link budget (bridge rate limit is 2 tiles/s). Coupling it to
+`catalog_interval` (5 s) would tie catch-up throughput to the catalog
+cadence: 4 tiles per 5 s = 0.8 tiles/s ceiling, and any catalog retune
+would silently change catch-up rate. Independent rate control justifies
+the extra timer; the node's timer count stays small (catalog, save,
+drain).
 
 **New ROS parameters** (declared in `on_configure`, with
 `declare_parameter` + descriptor):
@@ -158,11 +169,23 @@ Add a project ADR-0001 addendum (§ Anti-entropy phase 2 — disk-serve,
 
 Pure library test (no ROS node spin).  Tests the complete loop:
 
+**Known limitation (plan-review S1, acknowledged):** the changed node
+methods (`publishCatalog`, `tileRequestCallback`, the startup prime, the
+drain queue) are private to `cube_bathymetry_node.cpp` with no test
+harness, so this test guards the *invariants* via the same library
+primitives the node composes — it cannot catch a regression in the node
+wiring itself (e.g. re-introducing a `grids()`-based catalog). A
+launch_testing assertion on the real node path is out of proportion for
+this PR; the limitation is stated in the test's header comment, and the
+node-wiring acceptance is the post-merge field validation (below) plus
+review. Revisit if the node grows a testable seam.
+
 1. **Populate**: insert soundings into `GeoMapSheet` for N > `max_resident`
    tiles; save all (via the same `saveDirtyTiles` helper pattern as
    `test_persistence.cpp`).
-2. **Trim**: call `trimResidentToBudget(max=2)` so most tiles are evicted
-   to disk.
+2. **Trim**: replicate the trim via the library primitives the node uses —
+   `GeoMapSheet::coldTiles(max=2)` + `dropTile()` (plan-review S4:
+   `trimResidentToBudget()` is node-private and not callable here).
 3. **Catalog prime (fix 1+2)**: seed `catalog_builder_` from full
    `draft_tiles` (before trim in production, replicated here).  Verify
    `catalog_builder_.size() == N` (all tiles, not just residents).
@@ -176,6 +199,20 @@ Pure library test (no ROS node spin).  Tests the complete loop:
    - Assert resident count of main sheet is **unchanged** (no LRU churn).
 6. **Consumer convergence**: mark all requested tiles as `markHave()` in
    the reconciler; reconcile again; verify `to_request` is empty.
+
+### Step 7 — Post-merge field validation (plan-review S3; tracked under #104, not this PR)
+
+The hermetic test cannot validate against the field symptom. After merge
+and the gabby rebuild:
+1. **Bag-replay check**: replay the 2026-07-21 gabby sonar sessions
+   through the fixed node; verify the catalog advertises the full store
+   (count vs draft dir) across eviction.
+2. **Cold-CAMP catch-up**: against a store populated past
+   `max_resident_tiles`, enable a fresh CAMP source (empty cache) and
+   verify it converges to the full tile set (no erosion to the resident
+   window).
+Record results on #104; that issue stays open until this validation
+passes.
 
 ## Files to Change
 
