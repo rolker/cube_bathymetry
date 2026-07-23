@@ -266,10 +266,12 @@ public:
     }
   };
 
-  explicit BagReaders(const std::vector<std::string> & bagfile_names)
+  BagReaders(
+    const std::vector<std::string> & bagfile_names,
+    const std::vector<std::string> & filter_topics)
   {
     for (const auto & bagfile_name : bagfile_names) {
-      readers_[bagfile_name].open(bagfile_name);
+      readers_[bagfile_name].open(bagfile_name, filter_topics);
     }
   }
 
@@ -326,7 +328,9 @@ private:
     // topic -> type for this bag, built once at open (cube#107).
     std::unordered_map<std::string, std::string> topic_types_;
 
-    void open(const std::string & file_name)
+    void open(
+      const std::string & file_name,
+      const std::vector<std::string> & filter_topics)
     {
       rosbag2_storage::StorageOptions storage_options;
       storage_options.uri = file_name;
@@ -334,6 +338,28 @@ private:
       reader->open(storage_options);
       for (const auto & topic_info : reader->get_all_topics_and_types()) {
         topic_types_[topic_info.name] = topic_info.type;
+      }
+      // Restrict reads to the topics the import consumes: the requested exact
+      // topics (detections / odom) plus every /tf and /tf_static topic present
+      // in THIS bag. The tf topics are matched by namespaced suffix because the
+      // exact names (e.g. /bizzy/tf, /bizzy/tf_static) can't be predicted; the
+      // filter is built from the bag's real topic list so transient-local
+      // /tf_static survives. This skips the sidescan imagery that is the bulk of
+      // bag bytes (cube#107). Set only when non-empty -- an empty StorageFilter
+      // means "read everything" in rosbag2, the correct fallback for a bag that
+      // has none of the wanted topics (it contributes nothing to the import).
+      rosbag2_storage::StorageFilter filter;
+      for (const auto & entry : topic_types_) {
+        const std::string & name = entry.first;
+        if (ends_with(name, "/tf") || ends_with(name, "/tf_static") ||
+          std::find(filter_topics.begin(), filter_topics.end(), name) !=
+          filter_topics.end())
+        {
+          filter.topics.push_back(name);
+        }
+      }
+      if (!filter.topics.empty()) {
+        reader->set_filter(filter);
       }
       if (reader->has_next()) {
         next_message = std::make_shared<Message>(reader->read_next(), topic_types_);
@@ -553,7 +579,15 @@ int main(int argc, char * argv[])
   size_t proj_missing_heave = 0;
   size_t proj_dropped_georef = 0;  // pings with no earth transform at their stamp
 
-  BagReaders bag_readers(bagfile_names);
+  // Main-pass read filter (cube#107): restrict each reader to the topics the
+  // projection consumes. /tf and /tf_static are added per-bag inside Bag::open
+  // by namespaced suffix; here we pass the exact detections/odom topic names.
+  std::vector<std::string> filter_topics;
+  filter_topics.push_back(detections_topic);
+  if (!odom_topic.empty()) {
+    filter_topics.push_back(odom_topic);
+  }
+  BagReaders bag_readers(bagfile_names, filter_topics);
 
   std::cout << "calculating total time..." << std::endl;
   auto begin_time = bag_readers.start_time();
