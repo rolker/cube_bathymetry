@@ -69,3 +69,32 @@ the plan.
 ### Open questions
 - [ ] Use `unordered_map<uint32_t>` (O(1), recommended) or `map<uint32_t>` (O(log n), simpler swap) for `nodes_`?
 - [ ] Bundle Phase B (`import_bag_main.cpp` secondaries) in same PR as Phase A (`geo_grid.cpp` hotspot fixes), or split? Recommendation: same PR.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-23 14:56 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-107/plan.md` at `1634d7e`
+**PR**: PR-less (--issue mode)
+**Verdict**: approve-with-suggestions
+
+Plan is technically sound, evidence-backed, and aligned with the issue and all
+operator checkpoint-1 decisions (2a chosen, uma#270 split, all four finding-4
+sub-items in scope, bit-exact via committed synthetic test). The
+`unordered_map<uint32_t>` approach was validated against the real `CellIndex`
+type: `uint16_t row_/column_` and a single shared `grid_index_` per `GeoGrid`, so
+the `(row<<16)|column` packing round-trips losslessly. One must-fix omission plus
+three consequence/plumbing tightenings; none change the approach.
+
+### Findings
+- [ ] (must-fix) Step 2 omits the `nodes_` range-iteration site in `nodeIntensityWelford()` — `ret.emplace(entry.first, w)` into a `std::map<gggs::CellIndex,...>` breaks once the key is `uint32_t`; needs a reverse helper `gggs::CellIndex(index_, key>>16, key & 0xFFFF)` at `geo_grid.cpp:207` — `plan.md:41`
+- [ ] (suggestion) State the "bounds box ⊇ distance-gate" invariant that keeps step 3 bit-exact (box uses the same equirectangular metric as the in-loop gate) — `plan.md:45`
+- [ ] (suggestion) Consequences table misses: `Message` ctor change affects both construction sites (`Bag::open` `import_bag_main.cpp:331` + `pop_next` `:351`); `StorageFilter` must be plumbed through `Bag::open`, not only `BagReaders` ctor + `main()` `:547` — `plan.md:134`
+- [ ] (suggestion) Confirm `/tf_static` (transient-local) survives `StorageFilter`; check dropped-georef counts don't change in the 32-bag timing run — `plan.md:70`
+
+### Next step
+Lifecycle: **Plan Review** → **implement** → **review-code**. Verdict is
+approve-with-suggestions: implementation may proceed, addressing the (must-fix)
+`nodeIntensityWelford` reconstruction and amending the plan inline per plan-task's
+"During implementation" rules.
