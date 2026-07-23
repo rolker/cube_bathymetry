@@ -264,3 +264,52 @@ output is **bit-exact** vs a whole-survey-in-RAM build (depth, uncertainty, and 
 This is the authoritative off-boat product; the bounded-RAM `import_bag` remains the
 live/streaming path. Enforced by `test_batch_regen` (byte-exact vs a single-pass
 unbounded `ImportAccumulator`).
+
+## Addendum — Anti-entropy phase 2: catalog + serving from disk (#106, 2026-07-23)
+
+The original design served TileRequests from RAM-resident grids only and built
+the catalog from the resident set, with from-disk catch-up deferred as a
+follow-up. That deferral broke the anti-entropy design's paired invariant
+(uma ADR-0008 D4): the consumer converges its cache to *exactly the catalog
+set* (prune-on-absence), which is only safe when the catalog is complete
+against everything the source can serve. With a resident-only catalog, any
+survey exceeding `max_resident_tiles` silently dropped evicted coverage from
+the catalog, and the consumer's gen-time-gated prune then **deleted** it from
+the operator cache — the operator view eroded toward the boat's resident
+window (prime suspect for the 2026-07-21 stuck-tiles field symptom, #104).
+
+Phase 2 restores the pair:
+
+1. **The catalog reflects the store, not RAM.** `publishCatalog()` builds from
+   the `TileCatalogBuilder` registry, which is seeded from the **whole**
+   persisted store at startup (before the prime trim — seeding after the trim
+   lost the just-evicted tiles) and bumped on every push. Eviction never
+   removes a registry entry: an evicted tile remains advertised because it
+   remains servable.
+
+2. **Requests for evicted tiles are served from disk, read-only.**
+   `tileRequestCallback()` queues non-resident requested tiles;
+   `drainDiskServeQueue()` loads each into a **scratch** store/sheet
+   (`loadWindow` → `primeFromTile`), quantizes, publishes, and discards.
+   `reloadEvictedTile()` is deliberately NOT reused here: it inserts into the
+   live `geo_map_sheet_`, which is correct for the sounding-revisit path but
+   would let a bulk catch-up churn the LRU and evict the tiles the survey is
+   actively updating. The two paths must stay separate.
+
+3. **Catch-up is paced, bounded, and dedup'd.** The drain queue serves
+   `disk_serve_tiles_per_tick` (default 4) per `disk_serve_interval` (default
+   0.5 s) — a catch-up throughput knob tuned against the link budget (the
+   operator bridge rate-limits `coverage_tiles` to ~2/s) and deliberately
+   independent of `catalog_interval`. Queue depth is capped
+   (`disk_serve_queue_max_depth`, default 64); overflow is dropped and heals
+   via the consumer's next catalog reconcile. Pending work is cleared on
+   deactivate (requests are only accepted while ACTIVE).
+
+Without a `draft_dir` nothing changes: no eviction happens, the registry
+equals the pushed set, and the drain timer is never created.
+
+Enforced by `test_anti_entropy_disk_serve`: full-catalog-across-eviction,
+disk-serve with zero live-sheet churn, cold-consumer convergence, and a
+negative control proving a resident-only catalog prunes a warm consumer's
+valid coverage. Field validation against the #104 symptom (07-21 bag replay +
+cold-CAMP catch-up) is tracked on #104.
