@@ -92,3 +92,15 @@ in `cube_bathymetry` (project repo, correct placement).
   keep the timer count bounded.
 - Bag-replay acceptance check should specifically confirm the 2026-07-21 Gabby
   sonar sessions no longer show the stuck-tile symptom described in #104.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-07-23 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-106/plan.md` at `04620fd`
+**Branch**: feature/issue-106 at `04620fd`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
