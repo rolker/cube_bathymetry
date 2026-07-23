@@ -51,7 +51,6 @@
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/store_import.h"
-#include "geometry_msgs/msg/point_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "marine_autonomy/gz4d_geo.h"
 #include "nav_msgs/msg/odometry.hpp"
@@ -133,6 +132,7 @@ bool loadCurveFromBagSonarInfo(
 #include "tf2_msgs/msg/tf_message.hpp"
 #include "tf2/time.h"
 #include "tf2_ros/buffer.h"
+#include "kdl/frames.hpp"  // KDL::Frame/Vector for the per-ping transform hoist
 
 [[noreturn]] void usage()
 {
@@ -823,22 +823,29 @@ int main(int argc, char * argv[])
         const double prime_vertical = kA / w;                     // N(lat0)
         const double meridional = kA * (1.0 - kE2) / (w * w * w);  // M(lat0)
 
+        // Hoist the quaternion->matrix conversion out of the per-sounding loop:
+        // tf2::doTransform(PointStamped, ...) rebuilds the KDL::Frame (quaternion
+        // -> rotation matrix) from `transform` for EVERY sounding. Build it once
+        // per ping and apply the frame as a matvec. Bit-identical to the
+        // per-sounding doTransform -- the exact same KDL::Frame * KDL::Vector,
+        // just hoisted (cube#107). This MUST stay on the KDL path
+        // (tf2::gmTransformToKDL), NOT a tf2::Transform matvec: doTransform for a
+        // point is KDL-based, and a different rotation build would perturb the
+        // ECEF output in its low bits and shift boundary soundings between cells.
+        const KDL::Frame ping_frame = tf2::gmTransformToKDL(transform);
+
         std::vector<cube::GeoSounding> soundings;
         soundings.reserve(projection.soundings.size());
         for (const auto & s : projection.soundings) {
-          geometry_msgs::msg::PointStamped sounding_re_sensor;
-          sounding_re_sensor.point.x = s.sonar_relative_position.x;
-          sounding_re_sensor.point.y = s.sonar_relative_position.y;
-          sounding_re_sensor.point.z = s.sonar_relative_position.z;
-          sounding_re_sensor.header = detections.header;
-
-          geometry_msgs::msg::PointStamped sounding_ecef;
-          tf2::doTransform(sounding_re_sensor, sounding_ecef, transform);
+          const KDL::Vector sounding_ecef = ping_frame * KDL::Vector(
+            s.sonar_relative_position.x,
+            s.sonar_relative_position.y,
+            s.sonar_relative_position.z);
 
           // ECEF -> local ENU (East, North, Up), then linearize ENU -> geodetic
           // delta about the per-ping reference latitude.
           const gz4d::Point<double> local = enu.toLocal(gz4d::GeoPointECEF(
-            sounding_ecef.point.x, sounding_ecef.point.y, sounding_ecef.point.z));
+            sounding_ecef.x(), sounding_ecef.y(), sounding_ecef.z()));
           const double lat_deg = ref_lat_deg + (local[1] / meridional) * kRad2Deg;
           const double lon_deg =
             ref_lon_deg + (local[0] / (prime_vertical * cos_lat0)) * kRad2Deg;
