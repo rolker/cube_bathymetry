@@ -22,7 +22,6 @@
 
 #include "cube_bathymetry/geo_grid.h"
 #include <cmath>
-#include "marine_autonomy/gz4d_geo.h"
 
 namespace cube
 {
@@ -71,15 +70,6 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
     return false;
   }
 
-  auto bounds = gz4d::BoundsDegrees::radiusFromCenter(geo_sounding, radius);
-
-  // The GGGS CellAreaIterator now takes geographic_msgs GeoPoint corners
-  // (gz4d retired from the GGGS API, unh_marine_autonomy#144). cube keeps
-  // gz4d internally for radiusFromCenter and converts the corners here.
-  gggs::CellAreaIterator i(index_,
-    gggs::geoPoint(bounds.minimum().latitude, bounds.minimum().longitude),
-    gggs::geoPoint(bounds.maximum().latitude, bounds.maximum().longitude));
-
   // Local-planar (equirectangular) cell->sounding distance in metres. This runs
   // per cell x per sounding x per ping; the #144 gz4d->GeoPoint refactor had put
   // a WGS84 Vincenty inverse here -- a full iterative ellipsoidal solver -- for
@@ -89,8 +79,26 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
   // live node (cube_bathymetry#63). Latitude scale is fixed at the sounding (the
   // cells span only metres around it).
   static constexpr double kDeg2Rad = M_PI / 180.0;
+  static constexpr double kRad2Deg = 180.0 / M_PI;
   static constexpr double kEarthRadiusM = 6378137.0;  // WGS84 semi-major axis
   const double cos_lat = std::cos(geo_sounding.latitude * kDeg2Rad);
+
+  // Search box derived with the SAME equirectangular metric as the in-loop gate
+  // below, replacing gz4d::BoundsDegrees::radiusFromCenter -- an ellipsoidal
+  // tan()/reduced-latitude solve that was itself a profiler sample (cube#107).
+  // INVARIANT that keeps the change bit-exact: the box must be a SUPERSET of the
+  // gate region. A cell passes the gate only when hypot(dlat_m, dlon_m) < radius,
+  // which forces |dlat_m| < radius AND |dlon_m| < radius; dividing by the gate's
+  // own metres-per-degree (kEarthRadiusM*kDeg2Rad in latitude, times cos_lat in
+  // longitude) yields exactly the half-widths below. So every cell the gate would
+  // accept lies inside the box -- the box never clips a kept cell.
+  const double delta_lat_deg = radius / kEarthRadiusM * kRad2Deg;
+  const double delta_lon_deg = radius / (kEarthRadiusM * cos_lat) * kRad2Deg;
+  gggs::CellAreaIterator i(index_,
+    gggs::geoPoint(geo_sounding.latitude - delta_lat_deg,
+                   geo_sounding.longitude - delta_lon_deg),
+    gggs::geoPoint(geo_sounding.latitude + delta_lat_deg,
+                   geo_sounding.longitude + delta_lon_deg));
 
   bool inserted = false;
   while(i.valid()) {
