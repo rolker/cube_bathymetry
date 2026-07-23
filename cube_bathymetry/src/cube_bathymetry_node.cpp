@@ -355,16 +355,43 @@ public:
       "Evicted tiles served from the draft store per drain tick "
       "(disk_serve_interval). tiles_per_tick / interval = catch-up rate; "
       "default 4 per 0.5s. Tune against the link budget.";
-    disk_serve_tiles_per_tick_ = static_cast<std::size_t>(
-      declare_parameter("disk_serve_tiles_per_tick", 4, per_tick_desc));
+    // Validate before the int -> size_t casts and the timer creation (PR
+    // review): a negative count would underflow to a huge size_t (defeating
+    // the pacing / unbounding the queue), and a <= 0 interval would make the
+    // wall timer fire continuously and starve the executor. A bad value falls
+    // back to the default with a WARN -- field configs change under pressure.
+    const std::int64_t per_tick_raw =
+      declare_parameter("disk_serve_tiles_per_tick", 4, per_tick_desc);
+    if (per_tick_raw < 1) {
+      RCLCPP_WARN_STREAM(get_logger(),
+        "disk_serve_tiles_per_tick=" << per_tick_raw <<
+          " is not positive; using default 4");
+    }
+    disk_serve_tiles_per_tick_ =
+      per_tick_raw < 1 ? 4u : static_cast<std::size_t>(per_tick_raw);
     rcl_interfaces::msg::ParameterDescriptor depth_desc;
     depth_desc.description =
       "Max queued disk-serve entries; excess requests are dropped (the "
       "consumer re-requests via the next catalog). Bounds boat-side memory "
       "against a buggy or hostile consumer.";
-    disk_serve_queue_max_depth_ = static_cast<std::size_t>(
-      declare_parameter("disk_serve_queue_max_depth", 64, depth_desc));
-    disk_serve_interval_s_ = declare_parameter("disk_serve_interval", 0.5);
+    const std::int64_t depth_raw =
+      declare_parameter("disk_serve_queue_max_depth", 64, depth_desc);
+    if (depth_raw < 1) {
+      RCLCPP_WARN_STREAM(get_logger(),
+        "disk_serve_queue_max_depth=" << depth_raw <<
+          " is not positive; using default 64");
+    }
+    disk_serve_queue_max_depth_ =
+      depth_raw < 1 ? 64u : static_cast<std::size_t>(depth_raw);
+    const double interval_raw = declare_parameter("disk_serve_interval", 0.5);
+    if (!(interval_raw > 0.0) || !std::isfinite(interval_raw)) {
+      RCLCPP_WARN(get_logger(),
+        "disk_serve_interval=%g is not a positive finite duration; "
+        "using default 0.5s", interval_raw);
+      disk_serve_interval_s_ = 0.5;
+    } else {
+      disk_serve_interval_s_ = interval_raw;
+    }
     sonar_tile_publisher_ =
       create_publisher<marine_interfaces::msg::SonarVisualizationTile>(
       "~/coverage_tiles", rclcpp::QoS(10).best_effort());

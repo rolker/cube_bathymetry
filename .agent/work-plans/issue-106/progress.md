@@ -175,3 +175,19 @@ reorder) are all addressed. Suggestions below are non-blocking.
 - [x] (suggestion, deferred: profiling-gated — revisit if field runs show executor starvation; noted, no code change) Disk-serve I/O shares the single executor thread with sounding ingest and has no result cache; consider a served-tile LRU if field profiling shows starvation — `cube_bathymetry_node.cpp:882`
 - [x] (suggestion) Test "no LRU churn" guard is near-trivially true — disk-serve loop never touches `sheet`, so it documents intent but doesn't guard the node's live-sheet behavior — `test_anti_entropy_disk_serve.cpp:224`
 - [x] (suggestion) `on_configure` resets `evicted_indices_`/`catalog_builder_` but not `disk_serve_queue_`/`disk_serve_queued_` (defense-in-depth; deactivate+cleanup already cover normal flow) — `cube_bathymetry_node.cpp:103`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-23 11:09 -0400
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: rolker/cube_bathymetry#108
+**Inputs**: hosted CI (industrial_ci: PASS 4m46s), Copilot review (2 inline comments)
+**Open findings**: none — both accepted and fixed (host-inline triage)
+
+### Findings
+- [x] (accepted, fixed) Copilot: `disk_serve_tiles_per_tick` / `disk_serve_queue_max_depth` cast int -> size_t without validation; a negative value underflows and defeats pacing / unbounds the queue. Fixed: validate raw values, fall back to defaults with WARN.
+- [x] (accepted, fixed) Copilot: `disk_serve_interval` <= 0 (or non-finite) would make the wall timer fire continuously and starve the executor. Fixed: enforce positive finite, fall back to 0.5 s with WARN.
+
+Both are the "field configs change under pressure" class the Quality Standard
+forbids dismissing. Full suite re-run after fixes: 470 tests, 0 failures.
