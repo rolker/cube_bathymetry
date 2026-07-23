@@ -156,3 +156,22 @@ reorder) are all addressed. Suggestions below are non-blocking.
   library test cannot call; it must replicate the trim via
   `GeoMapSheet::coldTiles(max)` / `dropTile()`. Align the member list and the test
   wording. — `plan.md` L90–106, L170–172
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-07-23 14:50 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-106 at `f549027`
+**Mode**: pre-push
+**Depth**: Deep (reason: ~500 LoC touching concurrency/timers, lifecycle, anti-entropy protocol semantics, ADR addendum)
+**Must-fix**: 0 | **Suggestions**: 5
+**Round**: 1 | **Ship**: recommended — no must-fix; concurrency/lifecycle/security verified sound, 27/27 tests + all linters pass; suggestions non-blocking
+
+### Findings
+- [ ] (suggestion) Restart re-stamps all persisted tiles with fresh `prime_version=now()` → warm consumer re-requests the whole store each reboot (broadened blast radius); persist versions or document the trade — `cube_bathymetry_node.cpp:271`
+- [ ] (suggestion) Drain per-tick budget counts published tiles, not disk loads; empty/absent tiles let one tick issue up to queue-depth `loadWindow` reads — pace by attempts — `cube_bathymetry_node.cpp:882`
+- [ ] (suggestion) Disk-serve I/O shares the single executor thread with sounding ingest and has no result cache; consider a served-tile LRU if field profiling shows starvation — `cube_bathymetry_node.cpp:882`
+- [ ] (suggestion) Test "no LRU churn" guard is near-trivially true — disk-serve loop never touches `sheet`, so it documents intent but doesn't guard the node's live-sheet behavior — `test_anti_entropy_disk_serve.cpp:224`
+- [ ] (suggestion) `on_configure` resets `evicted_indices_`/`catalog_builder_` but not `disk_serve_queue_`/`disk_serve_queued_` (defense-in-depth; deactivate+cleanup already cover normal flow) — `cube_bathymetry_node.cpp:103`
