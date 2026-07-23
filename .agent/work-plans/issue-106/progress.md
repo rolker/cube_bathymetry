@@ -104,3 +104,55 @@ in `cube_bathymetry` (project repo, correct placement).
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-23 14:13 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-106/plan.md` at `04620fd`
+**PR**: PR-less (`--issue 106`, layer worktree)
+**Verdict**: approve-with-suggestions
+
+<!-- Independence: Plan Authored is stamped "Claude Code Agent (Claude Sonnet)";
+     this review is "Claude Code Agent (Claude Opus)" from a separate fresh-context
+     dispatch. The name portion collides (shared bot identity) but the model and
+     context differ, so this is a genuinely independent review, not an author
+     self-review — no self-review annotation applied. -->
+
+Plan is technically sound and its load-bearing code claims were verified against
+source: `trimResidentToBudget()` drops via `dropTile()` and never calls
+`catalog_builder_.remove()` (so evicted versions persist in the builder — the
+premise of Steps 1–2 holds); `TileCatalogBuilder::buildCatalog(generation_time)`,
+`TileCatalogEntry{index, version}`, and the `TileCatalogReconciler`
+`reconcile`/`markHave`/`to_request` API used by Steps 2 and 6 all exist as the
+plan describes; `reloadEvictedTile()` confirms the `fromCellSize` → `loadWindow`
+→ `primeFromTile` scratch-serve primitive Step 3 reuses. Scope fits one PR;
+review-issue's three actions (comment L706–711, ADR addendum, startup-prime
+reorder) are all addressed. Suggestions below are non-blocking.
+
+### Findings
+- [ ] (suggestion) Step 6 test guards the *invariant* via library primitives, not
+  the *changed node methods*. `CubeBathymetry::publishCatalog()`,
+  `tileRequestCallback()`, `trimResidentToBudget()`, the startup prime, and the new
+  drain queue are all `private` in `cube_bathymetry_node.cpp` (after `private:` at
+  L423) with no header — unreachable from tests (`test_node.cpp` includes a
+  different `node.h`). A pure-library replica test can pass while the node wiring
+  regresses (e.g. someone re-introduces the `grids()`-based catalog). Acknowledge
+  this limitation in the plan/test, or add a launch_testing assertion on the real
+  node path. — `plan.md` Step 6 (L157–178)
+- [ ] (suggestion) Step 3 adds a new `disk_serve_timer_`, but review-issue
+  explicitly recommended reusing an existing maintenance-cycle tick "if timing
+  requirements allow" to keep the timer count bounded. The plan neither adopts nor
+  justifies the divergence — add a one-line rationale (independent rate control)
+  or reuse the catalog/maintenance tick. — `plan.md` Step 3 (L124–128)
+- [ ] (suggestion) review-issue recommended a bag-replay acceptance check against
+  the 2026-07-21 Gabby sessions (#104 stuck-tile symptom). The hermetic test does
+  not cover field validation and the plan omits any manual acceptance step — note
+  it as post-merge validation or explicitly defer. — `plan.md` Step 6
+- [ ] (suggestion, minor) Precision: Step 3's "New members" block omits an
+  interval member though `disk_serve_interval` is declared in prose (L106), and
+  Step 6 says "call `trimResidentToBudget(max=2)`" — a node-private method the
+  library test cannot call; it must replicate the trim via
+  `GeoMapSheet::coldTiles(max)` / `dropTile()`. Align the member list and the test
+  wording. — `plan.md` L90–106, L170–172
