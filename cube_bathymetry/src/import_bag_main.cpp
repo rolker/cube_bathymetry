@@ -42,6 +42,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -251,14 +252,16 @@ public:
 
     Message(
       rosbag2_storage::SerializedBagMessageSharedPtr message,
-      const rosbag2_cpp::Reader & reader)
+      const std::unordered_map<std::string, std::string> & topic_types)
     : message(message)
     {
-      for (auto & topic_info : reader.get_all_topics_and_types()) {
-        if (topic_info.name == message->topic_name) {
-          data_type = topic_info.type;
-          break;
-        }
+      // Look the type up in the bag's cached topic->type map (built once per bag
+      // in Bag::open). Previously this called reader.get_all_topics_and_types()
+      // -- which walks and copies the whole metadata topic list -- for EVERY
+      // message popped (cube#107).
+      auto it = topic_types.find(message->topic_name);
+      if (it != topic_types.end()) {
+        data_type = it->second;
       }
     }
   };
@@ -320,6 +323,8 @@ private:
   {
     std::unique_ptr<rosbag2_cpp::Reader> reader;
     Message::ConstPtr next_message;
+    // topic -> type for this bag, built once at open (cube#107).
+    std::unordered_map<std::string, std::string> topic_types_;
 
     void open(const std::string & file_name)
     {
@@ -327,8 +332,11 @@ private:
       storage_options.uri = file_name;
       reader = rosbag2_transport::ReaderWriterFactory::make_reader(storage_options);
       reader->open(storage_options);
+      for (const auto & topic_info : reader->get_all_topics_and_types()) {
+        topic_types_[topic_info.name] = topic_info.type;
+      }
       if (reader->has_next()) {
-        next_message = std::make_shared<Message>(reader->read_next(), *reader);
+        next_message = std::make_shared<Message>(reader->read_next(), topic_types_);
       }
     }
 
@@ -346,7 +354,7 @@ private:
     {
       auto return_value = next_message;
       if (reader->has_next()) {
-        next_message = std::make_shared<Message>(reader->read_next(), *reader);
+        next_message = std::make_shared<Message>(reader->read_next(), topic_types_);
       } else {
         next_message.reset();
       }
