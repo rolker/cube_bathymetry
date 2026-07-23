@@ -43,3 +43,16 @@ the plan.
 - [ ] Verify finding 4 sub-items individually during planning: some (StorageFilter, doTransform hoist)
   are directly on the hot path; others (speed_by_ns pruning) are memory-management changes.
   Scope the plan explicitly.
+
+### Operator decisions (checkpoint 1, 2026-07-23)
+
+- **Finding 2 = option 2a in this repo** (packed uint32 `(row,column)` key for GeoGrid's
+  single-grid node map). Option 2b (gggs `operator<` field-lexicographic, no `valid()`
+  pre-checks) is deliberately split out and filed as
+  [unh_marine_autonomy#270](https://github.com/rolker/unh_marine_autonomy/issues/270) —
+  do NOT change gggs headers in this PR.
+- **Finding 4 = ALL FOUR sub-items in scope** for this PR: per-bag topic→type map cache,
+  rosbag2 StorageFilter on the main-pass readers, `speed_by_ns` pruning, per-ping
+  doTransform hoist.
+- Review action "reproducible verification subset" stands: plan must pin a small committed
+  bag subset for the bit-exact check, not only the live 32-bag Massabesic set.
