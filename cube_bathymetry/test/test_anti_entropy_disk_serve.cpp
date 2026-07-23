@@ -221,6 +221,10 @@ TEST(AntiEntropyDiskServe, ColdConsumerConvergesToFullStoreAcrossEviction)
     EXPECT_FALSE(vt->bands.empty());
     ++served;
 
+    // Documents the read-only contract rather than guarding the node's own
+    // loop (this replica never touches `sheet` by construction — see the
+    // known-limitation note in the header; the node-side guarantee rests on
+    // drainDiskServeQueue's scratch-sheet structure and review).
     EXPECT_EQ(sheet.residentTileCount(), resident_before)
       << "disk-serve must NOT insert into the live sheet (no LRU churn)";
   }

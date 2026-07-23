@@ -20,6 +20,8 @@
 // THE SOFTWARE.
 
 
+#include <sys/stat.h>
+
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -101,6 +103,12 @@ public:
     // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
     // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
     evicted_indices_.clear();
+    // Same defense-in-depth for the disk-serve queue (#106 review r1):
+    // deactivate/cleanup already clear it on the normal path, but a stale
+    // queued index from a prior configure cycle must never survive into a
+    // fresh sheet's serving.
+    disk_serve_queue_.clear();
+    disk_serve_queued_.clear();
     // Reset the tile-version registry too (#78): a fresh sheet must not advertise
     // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
@@ -265,12 +273,30 @@ public:
           // tiles evicted by the trim below stay advertised and disk-servable.
           // (Seeding from grids() AFTER the trim -- the previous order -- lost
           // the just-evicted tiles from the catalog, and the consumer's
-          // prune-on-absence deleted valid coverage, ADR-0008 D4.) All primed
-          // tiles share one prime-time version; a resurvey bumps it via
-          // publishDirtyTiles.
-          const std::int64_t prime_version = now().nanoseconds();
+          // prune-on-absence deleted valid coverage, ADR-0008 D4.)
+          //
+          // Version = the tile FILE's mtime, not now() (#106 review r1):
+          // stamping the prime time made every reboot advertise the whole
+          // store as fresh, so a warm consumer re-pulled everything over the
+          // link. mtime is stable across restarts and bumps only when a tile
+          // is re-saved (genuinely newer data); tiles carry no per-cell time
+          // raster since uma#248, so the file stamp is the durable version
+          // source. A stat failure falls back to now() -- worst case is one
+          // redundant refresh of that tile, never loss.
+          const std::string survey_dir = draft_dir_ + "/" +
+            marine_bathymetry_store::layerDirName(
+            marine_bathymetry_store::SourceLayer::Survey);
+          const std::int64_t fallback_version = now().nanoseconds();
           for (const auto & [tile_index, tile] : draft_tiles) {
-            catalog_builder_.update(tile_index, prime_version);
+            std::int64_t version = fallback_version;
+            struct stat st;
+            const std::string tile_path = survey_dir + "/" +
+              marine_bathymetry_store::tileFilename(tile_index);
+            if (::stat(tile_path.c_str(), &st) == 0) {
+              version = static_cast<std::int64_t>(st.st_mtim.tv_sec) *
+                1000000000LL + st.st_mtim.tv_nsec;
+            }
+            catalog_builder_.update(tile_index, version);
           }
           // Bound the prime to the resident budget (must-fix): loadIntoSheet loads
           // the WHOLE store, so without this a restart mid-long-survey re-creates
@@ -877,9 +903,14 @@ private:
     if (disk_serve_queue_.empty() || draft_dir_.empty()) {
       return;
     }
+    // The per-tick budget counts ATTEMPTS, not published tiles (#106 review
+    // r1): pacing on publishes would let a run of empty/absent entries turn
+    // one tick into up to queue-depth loadWindow reads, defeating the I/O
+    // pacing the budget exists for.
     const builtin_interfaces::msg::Time stamp = now();
-    std::size_t sent = 0;
-    while (sent < disk_serve_tiles_per_tick_ && !disk_serve_queue_.empty()) {
+    std::size_t attempts = 0;
+    while (attempts < disk_serve_tiles_per_tick_ && !disk_serve_queue_.empty()) {
+      ++attempts;
       const gggs::GridIndex index = disk_serve_queue_.front();
       disk_serve_queue_.pop_front();
       disk_serve_queued_.erase(index);
@@ -889,7 +920,6 @@ private:
       if (auto grid = geo_map_sheet_->gridAt(index)) {
         if (auto vt = cube::quantizeTile(*grid, stamp)) {
           sonar_tile_publisher_->publish(*vt);
-          ++sent;
         }
         continue;
       }
@@ -911,7 +941,6 @@ private:
         if (auto grid = scratch_sheet.gridAt(index)) {
           if (auto vt = cube::quantizeTile(*grid, stamp)) {
             sonar_tile_publisher_->publish(*vt);
-            ++sent;
           }
         }
         // scratch store/sheet destroyed here; geo_map_sheet_ untouched.
