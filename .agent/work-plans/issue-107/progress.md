@@ -180,14 +180,14 @@ be tracked without another review round.
 **CI**: all-pass (ROS 2 Jazzy industrial_ci: success)
 
 ### Findings
-- [ ] (cross-confirmed: Copilot + Local Review) Equirectangular bounds degenerate
+- [x] (cross-confirmed: Copilot + Local Review) Equirectangular bounds degenerate
   at extreme latitude — Copilot: `delta_lon_deg` divides by `cos_lat`, 0 at the
   poles (inf bounds) and negative for |lat|>90; Local Review: bounds box may
   differ from the old ellipsoidal box at high latitude. Pre-refactor ellipsoidal
   solve was equally singular at ±90 and no GPS fix produces |lat|≥90, but the
   hardening (`abs(cos_lat)` + pole-safe fallback) is bit-exact-neutral for all
   valid inputs — `cube_bathymetry/src/geo_grid.cpp:96`
-- [ ] (low, Copilot) Bit-exact regression's welford golden asserts in `std::map`
+- [x] (low, Copilot) Bit-exact regression's welford golden asserts in `std::map`
   iteration order — brittle to a legitimate future `gggs::CellIndex` comparator
   change (uma#270); assert by key lookup instead —
   `cube_bathymetry/test/test_geo_grid.cpp:296`
@@ -204,3 +204,9 @@ be tracked without another review round.
   `cell.grid() == index_` holds by construction at every `GeoGrid` boundary; no
   direct-`GeoGrid` caller with a foreign cell exists. Optional hardening: a
   debug `assert(cell.grid() == index_)` — non-blocking.
+
+### Fix round (2026-07-23 22:25 -0400)
+Both open code findings fixed inline (`5b2f862` hardening + asserts,
+`fe82477` by-lookup golden); 464 tests, 0 failures, bit-exact regression
+green. Remaining open item: the host-side A/B run (post-merge, before #107
+close).
