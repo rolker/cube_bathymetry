@@ -21,6 +21,8 @@
 
 
 #include "cube_bathymetry/geo_grid.h"
+#include <algorithm>
+#include <cassert>
 #include <cmath>
 
 namespace cube
@@ -92,8 +94,13 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
   // own metres-per-degree (kEarthRadiusM*kDeg2Rad in latitude, times cos_lat in
   // longitude) yields exactly the half-widths below. So every cell the gate would
   // accept lies inside the box -- the box never clips a kept cell.
+  // abs+clamp keep the half-width finite and positive when cos_lat degenerates
+  // (0 at the poles, negative for out-of-range latitudes); for any survey
+  // latitude cos_lat > 0 and the half-width is degrees-tiny, so both are
+  // identity and the box stays bit-exact.
   const double delta_lat_deg = radius / kEarthRadiusM * kRad2Deg;
-  const double delta_lon_deg = radius / (kEarthRadiusM * cos_lat) * kRad2Deg;
+  const double delta_lon_deg = std::min(360.0,
+    radius / (kEarthRadiusM * std::abs(cos_lat)) * kRad2Deg);
   gggs::CellAreaIterator i(index_,
     gggs::geoPoint(geo_sounding.latitude - delta_lat_deg,
                    geo_sounding.longitude - delta_lon_deg),
@@ -124,6 +131,9 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
 void GeoGrid::setPredictedDepthAt(
   const gggs::CellIndex & cell, float depth, float variance)
 {
+  // The packed node key drops the grid, so a foreign-grid CellIndex with a
+  // matching (row,column) would silently alias this grid's state.
+  assert(cell.grid() == index_);
   // Lazy-create the Node so a warm-start prime can seed a cell that the live
   // session has not yet touched. Mirrors insert()'s node creation.
   auto & node = nodes_[nodeKey(cell)];
@@ -136,6 +146,7 @@ void GeoGrid::setPredictedDepthAt(
 void GeoGrid::setSettledDepthAt(
   const gggs::CellIndex & cell, float depth, float uncertainty)
 {
+  assert(cell.grid() == index_);
   // Lazy-create the Node (mirrors setPredictedDepthAt) so the reload can seed a
   // cell the live session has not yet touched this run.
   auto & node = nodes_[nodeKey(cell)];
@@ -147,6 +158,7 @@ void GeoGrid::setSettledDepthAt(
 
 float GeoGrid::predictedDepthAt(const gggs::CellIndex & cell) const
 {
+  assert(cell.grid() == index_);
   auto it = nodes_.find(nodeKey(cell));
   if(it == nodes_.end() || !it->second) {
     return INVALID_DATA;
@@ -229,6 +241,7 @@ GeoGrid::nodeIntensityWelford() const
 void GeoGrid::setSettledIntensityWelfordAt(
   const gggs::CellIndex & cell, const IntensityWelford & intensity)
 {
+  assert(cell.grid() == index_);
   auto it = nodes_.find(nodeKey(cell));
   if(it == nodes_.end() || !it->second) {
     return;  // no node here (depth reload did not seed this cell) -- nothing to do
