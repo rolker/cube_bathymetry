@@ -168,3 +168,39 @@ Lifecycle: **Local Review** → push / open PR → **triage-reviews**. Verdict i
 **approved** (0 must-fix); the two suggestions are non-blocking. The diff is
 shippable — remaining suggestions (host A/B perf run, high-lat writeup note) can
 be tracked without another review round.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-07-23 22:12 -0400
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #109 at `ce84e4f`
+**Sources**: 3 (Copilot R1 @ `ce84e4f`, Local Review (Pre-Push) @ `dc73380`, CI rollup)
+**Cross-source confirmations**: 1
+**CI**: all-pass (ROS 2 Jazzy industrial_ci: success)
+
+### Findings
+- [ ] (cross-confirmed: Copilot + Local Review) Equirectangular bounds degenerate
+  at extreme latitude — Copilot: `delta_lon_deg` divides by `cos_lat`, 0 at the
+  poles (inf bounds) and negative for |lat|>90; Local Review: bounds box may
+  differ from the old ellipsoidal box at high latitude. Pre-refactor ellipsoidal
+  solve was equally singular at ±90 and no GPS fix produces |lat|≥90, but the
+  hardening (`abs(cos_lat)` + pole-safe fallback) is bit-exact-neutral for all
+  valid inputs — `cube_bathymetry/src/geo_grid.cpp:96`
+- [ ] (low, Copilot) Bit-exact regression's welford golden asserts in `std::map`
+  iteration order — brittle to a legitimate future `gggs::CellIndex` comparator
+  change (uma#270); assert by key lookup instead —
+  `cube_bathymetry/test/test_geo_grid.cpp:296`
+- [x] (suggestion, Local Review) High-latitude equirect caveat folded into the
+  writeup — done: PR #109 body documents it — `cube_bathymetry/src/geo_grid.cpp:73`
+- [ ] (suggestion, Local Review) Wall-clock + RSS A/B run (plan Phase C step 9)
+  deferred to host post-merge; record on #107 before close — `plan.md:153`
+
+### False positives
+- (Copilot, ×4 sites + 3 suppressed dups) Cross-grid aliasing via packed
+  `(row,column)` node key (`geo_grid.cpp:129,141,150,232`) — unreachable: every
+  production caller routes through `GeoMapSheet::*(cell)`, which selects the grid
+  via `getOrCreateGrid(cell.grid())` (`geo_map_sheet.cpp:144,208,215`), so
+  `cell.grid() == index_` holds by construction at every `GeoGrid` boundary; no
+  direct-`GeoGrid` caller with a foreign cell exists. Optional hardening: a
+  debug `assert(cell.grid() == index_)` — non-blocking.
