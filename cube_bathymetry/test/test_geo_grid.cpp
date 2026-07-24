@@ -282,17 +282,21 @@ TEST_F(GeoGridTest, BulkInsertBitExactRegression)
     {925, 691, 25, -18.800000000000001, 12.999998092658647},
     {925, 695, 25, -19.800000000000001, 12.999998092658647},
   };
+  // Assert by key lookup, not iteration order, so a legitimate future
+  // gggs::CellIndex comparator change (uma#270) cannot break the golden; a
+  // successful find() still proves the packed-key -> CellIndex round-trip.
   auto welford = g.nodeIntensityWelford();
   ASSERT_EQ(welford.size(), std::size(welford_golden));
-  size_t wi = 0;
-  for (const auto & kv : welford) {
-    const auto & gw = welford_golden[wi];
-    EXPECT_EQ(kv.first.row(), gw.row) << "welford entry " << wi;
-    EXPECT_EQ(kv.first.column(), gw.column) << "welford entry " << wi;
-    EXPECT_EQ(kv.second.n, gw.n) << "welford entry " << wi;
-    EXPECT_DOUBLE_EQ(kv.second.mean, gw.mean) << "welford entry " << wi;
-    EXPECT_DOUBLE_EQ(kv.second.m2, gw.m2) << "welford entry " << wi;
-    ++wi;
+  for (const auto & gw : welford_golden) {
+    const gggs::CellIndex cell(grid_index, gw.row, gw.column);
+    auto it = welford.find(cell);
+    ASSERT_NE(it, welford.end())
+      << "missing welford cell (" << gw.row << "," << gw.column << ")";
+    EXPECT_EQ(it->second.n, gw.n) << "cell (" << gw.row << "," << gw.column << ")";
+    EXPECT_DOUBLE_EQ(it->second.mean, gw.mean)
+      << "cell (" << gw.row << "," << gw.column << ")";
+    EXPECT_DOUBLE_EQ(it->second.m2, gw.m2)
+      << "cell (" << gw.row << "," << gw.column << ")";
   }
 }
 
