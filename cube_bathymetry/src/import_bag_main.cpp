@@ -42,6 +42,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -50,7 +51,6 @@
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/store_import.h"
-#include "geometry_msgs/msg/point_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "marine_autonomy/gz4d_geo.h"
 #include "nav_msgs/msg/odometry.hpp"
@@ -132,6 +132,7 @@ bool loadCurveFromBagSonarInfo(
 #include "tf2_msgs/msg/tf_message.hpp"
 #include "tf2/time.h"
 #include "tf2_ros/buffer.h"
+#include "kdl/frames.hpp"  // KDL::Frame/Vector for the per-ping transform hoist
 
 [[noreturn]] void usage()
 {
@@ -251,22 +252,26 @@ public:
 
     Message(
       rosbag2_storage::SerializedBagMessageSharedPtr message,
-      const rosbag2_cpp::Reader & reader)
+      const std::unordered_map<std::string, std::string> & topic_types)
     : message(message)
     {
-      for (auto & topic_info : reader.get_all_topics_and_types()) {
-        if (topic_info.name == message->topic_name) {
-          data_type = topic_info.type;
-          break;
-        }
+      // Look the type up in the bag's cached topic->type map (built once per bag
+      // in Bag::open). Previously this called reader.get_all_topics_and_types()
+      // -- which walks and copies the whole metadata topic list -- for EVERY
+      // message popped (cube#107).
+      auto it = topic_types.find(message->topic_name);
+      if (it != topic_types.end()) {
+        data_type = it->second;
       }
     }
   };
 
-  explicit BagReaders(const std::vector<std::string> & bagfile_names)
+  BagReaders(
+    const std::vector<std::string> & bagfile_names,
+    const std::vector<std::string> & filter_topics)
   {
     for (const auto & bagfile_name : bagfile_names) {
-      readers_[bagfile_name].open(bagfile_name);
+      readers_[bagfile_name].open(bagfile_name, filter_topics);
     }
   }
 
@@ -320,15 +325,44 @@ private:
   {
     std::unique_ptr<rosbag2_cpp::Reader> reader;
     Message::ConstPtr next_message;
+    // topic -> type for this bag, built once at open (cube#107).
+    std::unordered_map<std::string, std::string> topic_types_;
 
-    void open(const std::string & file_name)
+    void open(
+      const std::string & file_name,
+      const std::vector<std::string> & filter_topics)
     {
       rosbag2_storage::StorageOptions storage_options;
       storage_options.uri = file_name;
       reader = rosbag2_transport::ReaderWriterFactory::make_reader(storage_options);
       reader->open(storage_options);
+      for (const auto & topic_info : reader->get_all_topics_and_types()) {
+        topic_types_[topic_info.name] = topic_info.type;
+      }
+      // Restrict reads to the topics the import consumes: the requested exact
+      // topics (detections / odom) plus every /tf and /tf_static topic present
+      // in THIS bag. The tf topics are matched by namespaced suffix because the
+      // exact names (e.g. /bizzy/tf, /bizzy/tf_static) can't be predicted; the
+      // filter is built from the bag's real topic list so transient-local
+      // /tf_static survives. This skips the sidescan imagery that is the bulk of
+      // bag bytes (cube#107). Set only when non-empty -- an empty StorageFilter
+      // means "read everything" in rosbag2, the correct fallback for a bag that
+      // has none of the wanted topics (it contributes nothing to the import).
+      rosbag2_storage::StorageFilter filter;
+      for (const auto & entry : topic_types_) {
+        const std::string & name = entry.first;
+        if (ends_with(name, "/tf") || ends_with(name, "/tf_static") ||
+          std::find(filter_topics.begin(), filter_topics.end(), name) !=
+          filter_topics.end())
+        {
+          filter.topics.push_back(name);
+        }
+      }
+      if (!filter.topics.empty()) {
+        reader->set_filter(filter);
+      }
       if (reader->has_next()) {
-        next_message = std::make_shared<Message>(reader->read_next(), *reader);
+        next_message = std::make_shared<Message>(reader->read_next(), topic_types_);
       }
     }
 
@@ -346,7 +380,7 @@ private:
     {
       auto return_value = next_message;
       if (reader->has_next()) {
-        next_message = std::make_shared<Message>(reader->read_next(), *reader);
+        next_message = std::make_shared<Message>(reader->read_next(), topic_types_);
       } else {
         next_message.reset();
       }
@@ -545,7 +579,15 @@ int main(int argc, char * argv[])
   size_t proj_missing_heave = 0;
   size_t proj_dropped_georef = 0;  // pings with no earth transform at their stamp
 
-  BagReaders bag_readers(bagfile_names);
+  // Main-pass read filter (cube#107): restrict each reader to the topics the
+  // projection consumes. /tf and /tf_static are added per-bag inside Bag::open
+  // by namespaced suffix; here we pass the exact detections/odom topic names.
+  std::vector<std::string> filter_topics;
+  filter_topics.push_back(detections_topic);
+  if (!odom_topic.empty()) {
+    filter_topics.push_back(odom_topic);
+  }
+  BagReaders bag_readers(bagfile_names, filter_topics);
 
   std::cout << "calculating total time..." << std::endl;
   auto begin_time = bag_readers.start_time();
@@ -726,7 +768,18 @@ int main(int argc, char * argv[])
   const int64_t total_ns =
     std::chrono::duration_cast<std::chrono::nanoseconds>(total_duration).count();
 
+  // Speed-over-ground samples, pruned to a rolling window as pings drain (see
+  // drain_pending) so the map stays bounded across a long multi-bag run instead
+  // of retaining every odom sample for the whole survey (cube#107).
   std::map<int64_t, double> speed_by_ns;
+  // Total odom samples ingested; speed_by_ns is pruned, so its size() no longer
+  // reflects the total for the end-of-run diagnostic.
+  size_t odom_samples_total = 0;
+  // Drop speed samples older than this behind the drain frontier. Generously
+  // larger than speedAt's kSpeedMaxAgeNs (5 s) staleness gate, so a prune can
+  // never remove a sample speedAt would still pick as the nearest for a current
+  // or future (chronological) ping -- the pruning is output-neutral.
+  constexpr int64_t kSpeedStalenessNs = 30LL * 1000000000LL;
   size_t tf_count = 0;
   int64_t tf_frontier_ns = std::numeric_limits<int64_t>::min();
 
@@ -781,22 +834,29 @@ int main(int argc, char * argv[])
         const double prime_vertical = kA / w;                     // N(lat0)
         const double meridional = kA * (1.0 - kE2) / (w * w * w);  // M(lat0)
 
+        // Hoist the quaternion->matrix conversion out of the per-sounding loop:
+        // tf2::doTransform(PointStamped, ...) rebuilds the KDL::Frame (quaternion
+        // -> rotation matrix) from `transform` for EVERY sounding. Build it once
+        // per ping and apply the frame as a matvec. Bit-identical to the
+        // per-sounding doTransform -- the exact same KDL::Frame * KDL::Vector,
+        // just hoisted (cube#107). This MUST stay on the KDL path
+        // (tf2::gmTransformToKDL), NOT a tf2::Transform matvec: doTransform for a
+        // point is KDL-based, and a different rotation build would perturb the
+        // ECEF output in its low bits and shift boundary soundings between cells.
+        const KDL::Frame ping_frame = tf2::gmTransformToKDL(transform);
+
         std::vector<cube::GeoSounding> soundings;
         soundings.reserve(projection.soundings.size());
         for (const auto & s : projection.soundings) {
-          geometry_msgs::msg::PointStamped sounding_re_sensor;
-          sounding_re_sensor.point.x = s.sonar_relative_position.x;
-          sounding_re_sensor.point.y = s.sonar_relative_position.y;
-          sounding_re_sensor.point.z = s.sonar_relative_position.z;
-          sounding_re_sensor.header = detections.header;
-
-          geometry_msgs::msg::PointStamped sounding_ecef;
-          tf2::doTransform(sounding_re_sensor, sounding_ecef, transform);
+          const KDL::Vector sounding_ecef = ping_frame * KDL::Vector(
+            s.sonar_relative_position.x,
+            s.sonar_relative_position.y,
+            s.sonar_relative_position.z);
 
           // ECEF -> local ENU (East, North, Up), then linearize ENU -> geodetic
           // delta about the per-ping reference latitude.
           const gz4d::Point<double> local = enu.toLocal(gz4d::GeoPointECEF(
-            sounding_ecef.point.x, sounding_ecef.point.y, sounding_ecef.point.z));
+            sounding_ecef.x(), sounding_ecef.y(), sounding_ecef.z()));
           const double lat_deg = ref_lat_deg + (local[1] / meridional) * kRad2Deg;
           const double lon_deg =
             ref_lon_deg + (local[0] / (prime_vertical * cos_lat0)) * kRad2Deg;
@@ -839,6 +899,7 @@ int main(int argc, char * argv[])
   // guard interval past the ping stamp). With flush=true, project whatever
   // remains at end-of-stream against the available coverage.
   auto drain_pending = [&](bool flush) {
+      int64_t last_drained_ns = std::numeric_limits<int64_t>::min();
       while (!pending.empty() && !limit_reached) {
         const int64_t ping_ns = pending.front().first;
         if (!flush && (tf_frontier_ns == std::numeric_limits<int64_t>::min() ||
@@ -847,10 +908,19 @@ int main(int argc, char * argv[])
           break;
         }
         process_detection(pending.front().second, ping_ns);
+        last_drained_ns = ping_ns;
         pending.pop_front();
         if (ping_count_limit > 0 && ping_count >= ping_count_limit) {
           limit_reached = true;
         }
+      }
+      // Prune speed samples that can no longer be the nearest for any current or
+      // future ping (pings drain chronologically, and speedAt only ever looks
+      // within kSpeedMaxAgeNs of a ping). Bounds speed_by_ns across a multi-bag
+      // run without affecting output (cube#107).
+      if (last_drained_ns != std::numeric_limits<int64_t>::min()) {
+        const int64_t cutoff = last_drained_ns - kSpeedStalenessNs;
+        speed_by_ns.erase(speed_by_ns.begin(), speed_by_ns.lower_bound(cutoff));
       }
     };
 
@@ -895,6 +965,7 @@ int main(int argc, char * argv[])
         const int64_t ns = static_cast<int64_t>(odom.header.stamp.sec) * 1000000000LL +
           odom.header.stamp.nanosec;
         speed_by_ns[ns] = std::hypot(odom.twist.twist.linear.x, odom.twist.twist.linear.y);
+        ++odom_samples_total;
       } catch (const std::exception & e) {
         std::cerr << e.what() << '\n';
       }
@@ -929,7 +1000,7 @@ int main(int argc, char * argv[])
     std::cout << "\nPing count limit of " << ping_count_limit << " reached" << std::endl;
   }
   std::cout << "\n  buffered " << tf_count << " transforms";
-  if (!odom_topic.empty()) {std::cout << ", " << speed_by_ns.size() << " odometry samples";}
+  if (!odom_topic.empty()) {std::cout << ", " << odom_samples_total << " odometry samples";}
   std::cout << "; projected " << ping_count << " pings in " << phase_secs() << "s." << std::endl;
 
   std::cout << "\ndone." << std::endl;

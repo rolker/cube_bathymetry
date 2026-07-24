@@ -23,8 +23,10 @@
 #ifndef CUBE_BATHYMETRY__GEO_GRID_H_
 #define CUBE_BATHYMETRY__GEO_GRID_H_
 
+#include <cstdint>
 #include <map>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #include "cube_bathymetry/node.h"
 #include "cube_bathymetry/parameters.h"
@@ -151,12 +153,26 @@ public:
       const gggs::CellIndex & cell, const IntensityWelford & intensity);
 
 private:
+  /// Pack a cell's (row, column) into a single uint32 hash-map key. Every node
+  /// in this grid shares `index_` as its `gggs::CellIndex::grid()`, and row/
+  /// column are `uint16_t`, so `(row << 16) | column` is a lossless,
+  /// collision-free key within one GeoGrid (cube#107). This replaces
+  /// `std::map<gggs::CellIndex>` keyed on the fat `gggs::operator<` -- which
+  /// re-ran `valid()` -> `GridIndex::valid()` -> `columnCount()`/
+  /// `latitudeScaleFactor()` ~20x per red-black descent and dominated
+  /// `GeoGrid::insert` (8/8 profiler samples). The reverse mapping is
+  /// `gggs::CellIndex(index_, key >> 16, key & 0xFFFF)`.
+    static uint32_t nodeKey(const gggs::CellIndex & cell) noexcept
+    {
+      return (static_cast < uint32_t > (cell.row()) << 16) | cell.column();
+    }
+
     gggs::GridIndex index_;
 
     const Parameters & parameters_;
 
   // std::vector<std::shared_ptr<Node> > nodes_;
-    std::map < gggs::CellIndex, std::shared_ptr < Node >> nodes_;
+    std::unordered_map < uint32_t, std::shared_ptr < Node >> nodes_;
   };
 
 }  // namespace cube
