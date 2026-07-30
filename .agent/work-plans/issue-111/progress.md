@@ -103,3 +103,9 @@ and will be consumed as a library. Consumer script changes land in
 - [ ] Plan the feature in at least two PRs: index integration first, then rebuild + swap
 - [ ] Confirm `batch_regen` correction-mode propagation through the per-tile rebuild path (no `auto` mode, explicit curve/none must round-trip correctly)
 - [ ] Include `unh_echoboats_project11/scripts/build_bathy_store.sh` (#382) update in scope
+
+**Operator decision (2026-07-30 checkpoint)**: accept ALL review actions — plan a
+2-PR sequence under this issue (PR1 index-integration query only; PR2 rebuild +
+atomic swap + staleness fingerprint + build_bathy_store.sh consumer update),
+author both project ADRs (footprint math; staleness fingerprint schema/location)
+during plan-task, and make the bit-exact A/B a required test.
