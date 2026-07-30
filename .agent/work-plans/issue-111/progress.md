@@ -109,3 +109,15 @@ and will be consumed as a library. Consumer script changes land in
 atomic swap + staleness fingerprint + build_bathy_store.sh consumer update),
 author both project ADRs (footprint math; staleness fingerprint schema/location)
 during plan-task, and make the bit-exact A/B a required test.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-07-30 00:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-111/plan.md` at `6857d1c`
+**Branch**: feature/issue-111 at `6857d1c`
+**Phases**: 2 (PR1: dirty-tile query; PR2: rebuild + atomic swap + fingerprint + consumer)
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
