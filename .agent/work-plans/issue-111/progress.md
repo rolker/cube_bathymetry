@@ -165,3 +165,66 @@ The plan is well-structured, faithfully addresses every accepted review-issue ac
 - [x] Fix ADR-0002 step 3 to use `gggs::parent()` iterated to the L10 level (no `parentAt`).
 - [x] Add the `build_fingerprint.json` `.gitignore` entry to PR2's Files to Change.
 - [x] Note PR2's cross-repo (`unh_echoboats_project11`) worktree/PR strategy.
+
+## Implementation
+**Status**: complete
+**When**: 2026-07-31 22:10 +00:00
+**By**: Claude Opus
+
+**Scope**: PR1 only (plan Approach steps 1–5) — survey-index dirty-tile query +
+`--index-db` dry-run. No PR2 work (no rebuild path, fingerprint, atomic swap, or
+`build_bathy_store.sh`).
+**Branch**: feature/issue-111
+**PR**: PR-less (layer worktree `issue-cube_bathymetry-111`; host performs pushes)
+
+### Commits
+- `e034ad3` feat(batch_regen): survey-index dirty-tile query library (#111) —
+  `survey_index_query.h/.cpp` (`cube::dirtyL10Tiles`, `cube::DirtyTile`), the
+  scoped `cube_bathymetry_survey_index_query` CMake target + `package.xml` deps,
+  and `test_survey_index_query.cpp` (in-memory SQLite fixture).
+- `5fa12ac` feat(batch_regen): --index-db dry-run dirty-tile query mode (#111) —
+  `batch_regen_main.cpp` flag + `dirtyTileDryRun()` (human + `DIRTY_TILES_JSON:`
+  output; index-absent → full-regen fallback; builds nothing, ignores `-o`/`-d`).
+- `485ad54` docs(#111): README `--index-db` subsection; ADR-0002 margin corrected
+  to one L14 tile; plan.md PR1 as-built sync.
+
+### What was implemented (steps 1–5)
+1. `marine_survey_index` dependency added (build+link) — declared `<depend>` (not
+   `<exec_depend>`: the query is compiled/linked; the *soft* part is the
+   `survey_index.db` file at runtime → full-regen fallback). `sqlite3` added too.
+2. ADR-0002 already authored in plan-task; corrected here (margin, `parentAt`, impl).
+3. `dirtyL10Tiles(db, new_bag_paths, store_level, sensor_filter="")` → distinct
+   L10 `DirtyTile`s (tile + contributing `PassRow`s). Footprint read from the
+   `passes`/`bags` join, expanded one L14 tile via `tilesForBoundingBox`, rolled
+   up with iterated `gggs::parent()` (four applications), passes via `queryPasses`.
+4. `--index-db` dry-run mode in `batch_regen_main` (store level derived exactly as
+   the real build does). No `--index-db` ⇒ full-regen path unchanged.
+5. `test_survey_index_query.cpp`: 5 cases — L14→L10 rollup, one-tile margin marks
+   adjacent L10 tiles, contributing passes include old bags, no-new-bags empty,
+   bag-not-in-index empty.
+
+### Deviations from plan (synced inline into plan.md + ADR-0002)
+- **Margin = one L14 tile, not one L14 cell.** An L14 cell is ~6 cm (960×960 cells
+  / ~54 m grid) — smaller than the ≤3 m influence radius the margin must cover, so
+  one cell would let the dirty set MISS boundary tiles (the exact correctness
+  failure ADR-0002 forbids). One L14 tile (~54 m) is a safe conservative superset.
+  ADR-0002 Decision/Rationale/Consequences updated; a note records the correction.
+- **`<depend>` not `<exec_depend>`** for `marine_survey_index` (build+link needed).
+- **Own library target** `cube_bathymetry_survey_index_query` (not compiled only
+  into the tool) so the unit test can link the query while the survey-index/SQLite
+  dependency stays out of the core `cube_bathymetry` library.
+
+### Verification
+- `./sensors_ws/build.sh cube_bathymetry` — passed (had to build the dependency
+  layers first: underlay `geodesy` from source — apt's lacks `geodesics.h` needed
+  by `marine_sidescan_mosaic` — then the core `unh_marine_autonomy` packages).
+- `./sensors_ws/test.sh cube_bathymetry` — **489 tests, 0 errors, 0 failures, 65
+  skipped**. New `DirtyTileQuery` gtest: 5/5 pass. All linters (uncrustify, cpplint,
+  copyright, etc.) pass on the new/changed files.
+- CLI smoke test: `--index-db` on a missing DB logs the full-regen fallback; on a
+  populated DB prints the L14→L10 rollup, the one-tile margin (2 adjacent L14 tiles
+  → 2×2 L10 block), contributing passes, and valid `DIRTY_TILES_JSON:`.
+
+### Next step
+PR2 (separate PR under #111): tile-scoped rebuild + `build_fingerprint.json` +
+atomic swap (ADR-0003), then PR2b `build_bathy_store.sh` in `unh_echoboats_project11`.
