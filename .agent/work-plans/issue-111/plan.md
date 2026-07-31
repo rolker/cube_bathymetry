@@ -56,8 +56,10 @@ plan-task (operator decision, 2026-07-30).
 
 8. **Add time-window bag seeking** in the `BagReaders` helper inside
    `batch_regen_main.cpp`: accept optional `{t_start_ns, t_end_ns}` per-bag interval
-   from the contributing-bag query and use `rosbag2`'s `SeekOptions` (or filter) to
-   read only those windows. Full-bag read (current behavior) is the fallback when no
+   from the contributing-bag query and seek/read only those windows via
+   `rosbag2_cpp::Reader` (`seek(t_start)` + stop at `t_end`, or storage filter —
+   the exact API is confirmed at implementation; "SeekOptions" is not asserted
+   as a real type). Full-bag read (current behavior) is the fallback when no
    intervals are provided (full regen path).
 
 9. **Add `--incremental` flag to `batch_regen_main`** (requires `--index-db`):
@@ -106,7 +108,24 @@ plan-task (operator decision, 2026-07-30).
 | `cube_bathymetry/test/test_batch_regen.cpp` | Add bit-exact A/B test (PR2) |
 | `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md` | New ADR (plan-task) |
 | `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md` | New ADR (plan-task) |
-| `unh_echoboats_project11/scripts/build_bathy_store.sh` | Incremental default + `--fresh` (PR2) |
+| `cube_bathymetry/.gitignore` | Ignore `build_fingerprint.json` (ADR-0003 consequence: never committed with checked-in test-fixture stores) (PR2) |
+| `unh_echoboats_project11/scripts/build_bathy_store.sh` | Incremental default + `--fresh` (PR2b — see cross-repo note) |
+
+**Cross-repo note (PR2b)**: `build_bathy_store.sh` lives in
+`unh_echoboats_project11` (platforms layer), a different repo and layer than
+this worktree. It gets its **own small PR in that repo** (PR2b), from its own
+worktree, opened after PR2 merges in cube_bathymetry — the script change is
+purely additive (`--incremental` default with `--fresh` passthrough) and is
+inert until the cube side exists, so sequencing is safe and neither PR blocks
+the other's review.
+
+## Documentation & Instruction Impact
+
+| Doc | Staled by | Update in |
+|---|---|---|
+| `cube_bathymetry/README.md` (batch_regen usage, ~lines 36–38) | New `--index-db` flag (PR1); `--incremental` default semantics + `--fresh` (PR2) | Each PR updates the README alongside its flags — PR1 documents the dry-run query mode, PR2 rewrites the regen workflow section (incremental default, fallback rules, fingerprint) |
+| `.agents/README.md` (repo agent guide) | Regen workflow change (incremental default) | PR2 — one-paragraph update to the store-regeneration description |
+| `unh_echoboats_project11` docs referencing `build_bathy_store.sh` | Incremental default | PR2b, with the script change |
 
 ## Principles Self-Check
 

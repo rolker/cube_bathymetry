@@ -38,8 +38,10 @@ The dirty L10 set for a new bag is computed as follows:
    a ping whose influence radius reaches the edge of its L14 tile is also attributed
    to the adjacent L14 tile.
 
-3. Roll up the expanded L14 tile set to L10 via the GGGS parent hierarchy
-   (`gggs::GridIndex::parentAt(L10_level)`). Deduplicate.
+3. Roll up the expanded L14 tile set to L10 via the GGGS parent hierarchy:
+   iterate the free function `gggs::parent(index)` (one level up per call,
+   L14 → L10 = four applications; there is no multi-level `parentAt`).
+   Deduplicate.
 
 4. The resulting L10 set is the dirty set. It is a provably conservative superset of
    the L10 tiles `batch_regen::addBatch` would scatter to for the new bag's soundings,
