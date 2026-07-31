@@ -39,6 +39,24 @@ share `bag_to_geotiff`'s projection pipeline and write the **`survey`** layer
 gathers each tile in a single unbounded pass (no eviction) — so no tile is ever
 evicted mid-disambiguation. Its scratch scatter directory is cleaned up at the end.
 
+### Incremental regen: dirty-tile query (`--index-db`, dry-run)
+
+`batch_regen_bag --index-db <survey_index.db> <bag> [<bag> ...]` runs a **dry-run**
+that reports which store tiles a tile-scoped incremental rebuild *would* touch for
+the given bags — it builds nothing and does not need `-o` or `-d`. This is the
+query half of the incremental-regen work (cube_bathymetry#111, PR1; the rebuild +
+atomic swap land in PR2).
+
+Using the `marine_survey_index` sidecar (`survey_index.db`, unh_marine_autonomy#259),
+it takes the L14 tile footprint the new bags ensonified, expands it by a one-tile
+conservative margin, rolls it up to the store's L10 tiles via the GGGS parent
+hierarchy, and lists each dirty L10 tile with the bags + pass intervals that
+contribute to it (see [`docs/decisions/0002-dirty-tile-footprint-math.md`](docs/decisions/0002-dirty-tile-footprint-math.md)).
+Output is a human-readable summary plus a machine-parseable `DIRTY_TILES_JSON:`
+line. If `survey_index.db` is absent, it says so and notes that a real run falls
+back to full regen (the index is a **soft** dependency). Without `--index-db`, the
+full-regen path is unchanged.
+
 ### Seed precedence (`--reference-store`)
 
 On the first touch of each tile, both tools seed it with a two-rung precedence:

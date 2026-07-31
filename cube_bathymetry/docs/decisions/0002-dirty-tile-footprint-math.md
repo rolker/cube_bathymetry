@@ -33,10 +33,20 @@ The dirty L10 set for a new bag is computed as follows:
    against the bag's `PassRow` entries, or equivalently `tilesForBoundingBox` over
    the per-pass geographic bounds already stored in the index).
 
-2. Expand the L14 tile set by **one L14 cell** in each cardinal direction. This
-   mirrors the one-cell floor `boundsForSoundings` adds at L10 and ensures that
-   a ping whose influence radius reaches the edge of its L14 tile is also attributed
-   to the adjacent L14 tile.
+2. Expand the L14 tile set by **one L14 tile (grid)** in each cardinal direction —
+   i.e. take the bounding box of the hit tiles, pad it by one L14 tile span, and
+   re-enumerate. This ensures that a ping whose influence radius reaches the edge
+   of its L14 tile is also attributed to the adjacent L14 tile.
+
+   > **Margin sizing (corrected during PR1 implementation, cube#111).** An earlier
+   > draft said "one L14 *cell*". At the standard GGGS geometry an L14 grid spans
+   > ~54 m (8°/2¹⁴ at the equator) and holds 960×960 cells, so one L14 *cell* is
+   > only ~5–6 cm — far smaller than the ≤3 m per-sounding influence radius this
+   > margin exists to cover, which would make the dirty set miss boundary tiles (a
+   > correctness failure). One L14 *tile* (~54 m) comfortably covers any realistic
+   > influence radius, so the margin is one tile. It is still expressed in GGGS
+   > units (not metres) so it uses only grid arithmetic and stays correct as the
+   > grid resolution changes.
 
 3. Roll up the expanded L14 tile set to L10 via the GGGS parent hierarchy:
    iterate the free function `gggs::parent(index)` (one level up per call,
@@ -50,10 +60,11 @@ The dirty L10 set for a new bag is computed as follows:
 ## Rationale
 
 A bounding-box approach (step 1 without expansion) might miss tiles when a sounding's
-influence radius extends into a neighbouring L14 cell that rolls up to a different L10
-tile. Adding one L14 margin (step 2) covers this safely. The margin is deliberately
-expressed in L14 units (not in metres) so the implementation uses only GGGS arithmetic,
-not geodetic distance — it stays correct as grid resolution changes.
+influence radius extends into a neighbouring L14 tile that rolls up to a different L10
+tile. Adding a one-L14-tile margin (step 2) covers this safely (the margin, ~54 m, is
+much larger than the ≤3 m influence radius). The margin is deliberately expressed in
+L14 units (not in metres) so the implementation uses only GGGS arithmetic, not
+geodetic distance — it stays correct as grid resolution changes.
 
 Influence-radius expansion at L10 (matching `boundsForSoundings` exactly) was
 considered but rejected: it would require either replaying sonar parameters at
@@ -66,9 +77,12 @@ construction (same scatter-gather path, same reference gating). The only cost is
 
 ## Consequences
 
-- `survey_index_query.cpp::dirtyL10Tiles()` implements steps 1–3 above. The L14
-  expansion is a simple neighbour enumeration using `gggs::GridAreaIterator` over a
-  one-cell-padded bounding box of the hit tiles.
+- `survey_index_query.cpp::dirtyL10Tiles()` implements steps 1–4 above. The L14
+  expansion pads the hit tiles' geographic bounding box by one L14 tile span and
+  re-enumerates it with `marine_survey_index::tilesForBoundingBox` (footprint tiles
+  are grouped by level first, so a mixed-level index footprint is handled). The
+  rollup applies `gggs::parent()` iteratively (L14 → L10 = four applications;
+  there is no multi-level `parentAt`).
 - If `marine_survey_index` is absent (no DB file) the dirty set cannot be computed
   and the caller falls back to full regen (explicitly logged).
 - A changed sonar TPU model (new `Parameters` that changes `influenceRadius`) does

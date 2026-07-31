@@ -40,8 +40,32 @@ plan-task (operator decision, 2026-07-30).
    `--index-db` is absent → normal full-regen path unchanged.
 
 5. **Add `test_survey_index_query.cpp`**: in-memory SQLite DB, insert synthetic
-   passes spanning known L14 tiles, verify L14→L10 rollup and one-cell margin;
+   passes spanning known L14 tiles, verify L14→L10 rollup and the margin;
    verify no dirty tiles returned when no new bags.
+
+### PR1 implementation notes (as-built, cube#111)
+
+Minor deviations from the steps above, applied during implementation (plan-first sync):
+
+- **Dependency declaration.** `package.xml` gets `<depend>marine_survey_index</depend>`
+  + `<depend>sqlite3</depend>` (not `<exec_depend>`): the query is compiled and
+  linked into the tool, so it is a build dependency. The *soft* part of the contract
+  is the `survey_index.db` **file** at runtime (absent ⇒ full regen), not the package.
+- **Query library scoping.** `survey_index_query.cpp` builds into its own small target
+  `cube_bathymetry_survey_index_query` (links `marine_autonomy` + `marine_survey_index_core`
+  + `SQLite3`), consumed only by `batch_regen_bag` and `test_survey_index_query`. This
+  keeps the survey-index/SQLite dependency out of the core `cube_bathymetry` library
+  (the "batch_regen target only" intent) while still letting the unit test link it.
+- **Margin = one L14 tile, not one L14 cell.** An L14 *cell* is ~6 cm (960×960 cells
+  per ~54 m grid), far below the ≤3 m influence radius the margin covers; one L14
+  *tile* (~54 m) covers it safely. ADR-0002 corrected accordingly; the enumeration
+  uses `tilesForBoundingBox` over a one-tile-padded bounding box (grouped per level).
+- **API shape.** `std::vector<cube::DirtyTile> dirtyL10Tiles(sqlite3*, new_bag_paths,
+  const gggs::Level & store_level, sensor_filter="")`, where
+  `DirtyTile{gggs::GridIndex tile; std::vector<marine_survey_index::PassRow> passes;}`.
+  The `--index-db` dry-run derives `store_level` exactly as the real build does
+  (`Level::fromCellSize(GeoMapSheet::nominalCellSizeMeters())`) and, when the DB file
+  is absent, logs the full-regen fallback and exits 0 (builds nothing, ignores `-o`).
 
 ### PR2 — Tile-scoped rebuild + atomic swap + staleness fingerprint + consumer update
 
@@ -97,9 +121,9 @@ plan-task (operator decision, 2026-07-30).
 
 | File | Change |
 |------|--------|
-| `cube_bathymetry/package.xml` | Add `<exec_depend>marine_survey_index</exec_depend>` |
-| `cube_bathymetry/CMakeLists.txt` | Link `marine_survey_index` into `batch_regen` target |
-| `cube_bathymetry/include/cube_bathymetry/survey_index_query.h` | New: `dirtyL10Tiles()` |
+| `cube_bathymetry/package.xml` | Add `<depend>marine_survey_index</depend>` + `<depend>sqlite3</depend>` (build+link dep; see PR1 as-built note) |
+| `cube_bathymetry/CMakeLists.txt` | New `cube_bathymetry_survey_index_query` lib (links `marine_survey_index_core` + `SQLite3`); linked into `batch_regen_bag` + its test |
+| `cube_bathymetry/include/cube_bathymetry/survey_index_query.h` | New: `DirtyTile` + `dirtyL10Tiles()` |
 | `cube_bathymetry/src/survey_index_query.cpp` | New: implementation |
 | `cube_bathymetry/src/batch_regen_main.cpp` | `--index-db` (PR1), `--incremental` + BagReaders seek + atomic swap (PR2) |
 | `cube_bathymetry/include/cube_bathymetry/build_fingerprint.h` | New: fingerprint struct + I/O (PR2) |
