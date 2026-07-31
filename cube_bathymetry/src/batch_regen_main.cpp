@@ -34,7 +34,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <deque>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -42,6 +44,8 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -53,6 +57,8 @@
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/store_import.h"
+#include "cube_bathymetry/survey_index_query.h"   // --index-db dirty-tile query (#111)
+#include "marine_survey_index/schema.hpp"          // openIndexDb (#111)
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "marine_autonomy/gz4d_geo.h"
@@ -110,6 +116,14 @@
     "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
     "curve (header '# tl_removed: true' + '# absorption_db_per_m: <a>') also makes "
     "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
+  std::cout << "  --index-db <path>: DRY-RUN dirty-tile query (cube#111, ADR-0002). "
+    "Given the marine_survey_index sidecar (survey_index.db) and the bags treated "
+    "as newly-added, prints the store-level (L10) tiles a tile-scoped rebuild would "
+    "touch (footprint + one-tile margin, rolled up from the L14 index) and their "
+    "contributing bags/pass-intervals -- as a human-readable summary plus a "
+    "'DIRTY_TILES_JSON:' line. Builds NOTHING and ignores -o. If the DB file is "
+    "absent, reports that a real run falls back to full regen. Without --index-db "
+    "the normal full-regen path is unchanged.\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
@@ -286,6 +300,140 @@ private:
 };
 
 
+// Minimal JSON string escaper for the machine-parseable dry-run line (bag paths
+// may contain characters that must be escaped). Handles the JSON control set.
+std::string jsonEscape(const std::string & s)
+{
+  std::string out;
+  out.reserve(s.size() + 2);
+  for (const char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
+// DRY-RUN dirty-tile query (cube#111, ADR-0002). Opens the survey index and
+// reports the store-level (L10) tiles a tile-scoped rebuild would touch for the
+// given bags (treated as newly-added), plus their contributing bags/intervals.
+// Builds nothing. Returns a process exit code. The survey_index.db file is a
+// SOFT dependency: when it is absent the function reports that a real run falls
+// back to full regen (the same graceful degradation PR2's rebuild path uses).
+int dirtyTileDryRun(
+  const std::string & index_db_path,
+  const std::vector<std::string> & bagfile_names,
+  double resolution,
+  const std::string & iho_order)
+{
+  // Store GGGS level, derived exactly as the real build derives it: the sheet
+  // snaps the requested resolution to a nominal cell size, and the store tiles
+  // at Level::fromCellSize of that snapped size (see main()/store_import.cpp).
+  cube::GeoMapSheet sheet(static_cast<float>(resolution), iho_order);
+  const gggs::Level store_level =
+    gggs::Level::fromCellSize(static_cast<float>(sheet.nominalCellSizeMeters()));
+
+  std::cout << "Dry-run dirty-tile query (--index-db " << index_db_path
+            << "); nothing will be built." << std::endl;
+  std::cout << "Store level: L" << static_cast<int>(store_level.level())
+            << " (nominal cell " << sheet.nominalCellSizeMeters() << " m)" << std::endl;
+  std::cout << "New bags (" << bagfile_names.size() << "):" << std::endl;
+  for (const auto & bag : bagfile_names) {
+    std::cout << "  " << bag << std::endl;
+  }
+
+  if (!std::filesystem::exists(index_db_path)) {
+    std::cerr << "note: survey index '" << index_db_path << "' not found -- a real "
+      "incremental run would fall back to FULL regen (index-absent contract, "
+      "ADR-0002)." << std::endl;
+    return 0;
+  }
+
+  std::vector<cube::DirtyTile> dirty;
+  try {
+    sqlite3 * db = marine_survey_index::openIndexDb(index_db_path);
+    try {
+      dirty = cube::dirtyL10Tiles(db, bagfile_names, store_level);
+    } catch (...) {
+      sqlite3_close(db);
+      throw;
+    }
+    sqlite3_close(db);
+  } catch (const std::exception & e) {
+    std::cerr << "note: could not query survey index (" << e.what() << ") -- a real "
+      "incremental run would fall back to FULL regen." << std::endl;
+    return 0;
+  }
+
+  // Human-readable summary.
+  std::set<std::string> contributing_bags;
+  std::cout << "\nDirty L" << static_cast<int>(store_level.level())
+            << " tiles: " << dirty.size() << std::endl;
+  for (const auto & dt : dirty) {
+    std::cout << "  tile L" << static_cast<int>(dt.tile.level())
+              << " row=" << dt.tile.row() << " col=" << dt.tile.column()
+              << " [" << dt.tile.southLatitude() << "," << dt.tile.westLongitude()
+              << " .. " << dt.tile.northLatitude() << "," << dt.tile.eastLongitude()
+              << "]  (" << dt.passes.size() << " contributing pass(es))" << std::endl;
+    for (const auto & p : dt.passes) {
+      contributing_bags.insert(p.bag_path);
+      std::cout << "      " << p.bag_path << "  " << p.sensor_type << "  " << p.topic
+                << "  [" << p.t_start_ns << ".." << p.t_end_ns << "]  pings="
+                << p.ping_count << std::endl;
+    }
+  }
+  std::cout << "Contributing bags (distinct): " << contributing_bags.size() << std::endl;
+  for (const auto & bag : contributing_bags) {
+    std::cout << "  " << bag << std::endl;
+  }
+
+  // Machine-parseable one-line JSON (prefixed marker so a consumer can grep it).
+  std::ostringstream json;
+  json << "{\"store_level\":" << static_cast<int>(store_level.level())
+       << ",\"dirty_tile_count\":" << dirty.size() << ",\"dirty_tiles\":[";
+  bool first_tile = true;
+  for (const auto & dt : dirty) {
+    if (!first_tile) {json << ",";}
+    first_tile = false;
+    json << "{\"level\":" << static_cast<int>(dt.tile.level())
+         << ",\"row\":" << dt.tile.row() << ",\"col\":" << dt.tile.column()
+         << ",\"south\":" << dt.tile.southLatitude()
+         << ",\"west\":" << dt.tile.westLongitude()
+         << ",\"north\":" << dt.tile.northLatitude()
+         << ",\"east\":" << dt.tile.eastLongitude() << ",\"passes\":[";
+    bool first_pass = true;
+    for (const auto & p : dt.passes) {
+      if (!first_pass) {json << ",";}
+      first_pass = false;
+      json << "{\"bag\":\"" << jsonEscape(p.bag_path)
+           << "\",\"sensor\":\"" << jsonEscape(p.sensor_type)
+           << "\",\"topic\":\"" << jsonEscape(p.topic)
+           << "\",\"t_start_ns\":" << p.t_start_ns
+           << ",\"t_end_ns\":" << p.t_end_ns
+           << ",\"ping_count\":" << p.ping_count << "}";
+    }
+    json << "]}";
+  }
+  json << "]}";
+  std::cout << "DIRTY_TILES_JSON: " << json.str() << std::endl;
+  return 0;
+}
+
+
 int main(int argc, char * argv[])
 {
   std::vector<std::string> arguments(argv + 1, argv + argc);
@@ -300,6 +448,8 @@ int main(int argc, char * argv[])
   std::string bs_store_dir;  // optional: MBES backscatter store output (#80)
   std::string detections_topic;  // required
   std::string odom_topic;  // optional: nav_msgs/Odometry for per-ping vessel speed
+  // optional: marine_survey_index sidecar -> DRY-RUN dirty-tile query (#111)
+  std::string index_db_path;
   double resolution = 1.0;
   std::string iho_order = "order1a";
   int ping_count_limit = 0;
@@ -376,6 +526,8 @@ int main(int argc, char * argv[])
       detections_topic = next_value("-d");
     } else if (*arg == "--odom-topic") {
       odom_topic = next_value("--odom-topic");
+    } else if (*arg == "--index-db") {
+      index_db_path = next_value("--index-db");
     } else if (*arg == "-r") {
       resolution = parse_double("-r", next_value("-r"));
     } else if (*arg == "--iho-order") {
@@ -418,6 +570,24 @@ int main(int argc, char * argv[])
     } else {
       bagfile_names.push_back(*arg);
     }
+  }
+
+  // DRY-RUN dirty-tile query gate (cube#111): with --index-db we only report the
+  // tiles a tile-scoped rebuild would touch and exit -- no store is written, so
+  // -o / -d are not required. Placed before the full-regen argument checks so the
+  // query can run standalone. The full-regen path below is unchanged when
+  // --index-db is absent.
+  if (!index_db_path.empty()) {
+    if (bagfile_names.empty()) {
+      std::cerr << "error: --index-db requires at least one bag (the newly-added "
+        "bags to query)\n";
+      usage();
+    }
+    if (!(resolution > 0.0)) {
+      std::cerr << "error: -r resolution must be > 0 (got " << resolution << ")\n";
+      usage();
+    }
+    return dirtyTileDryRun(index_db_path, bagfile_names, resolution, iho_order);
   }
 
   if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
