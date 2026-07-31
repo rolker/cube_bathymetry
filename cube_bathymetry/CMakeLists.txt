@@ -32,6 +32,8 @@ find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
 find_package(marine_interfaces REQUIRED)  # SonarVisualizationTile transport (#230)
 find_package(marine_tiled_raster_store REQUIRED)  # TileCatalogBuilder (#230)
 find_package(marine_mbes_backscatter_store REQUIRED)  # backscatter store layer (#80)
+find_package(marine_survey_index REQUIRED)  # dirty-tile query for incremental regen (#111)
+find_package(SQLite3 REQUIRED)  # survey_index.db handle (#111)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
@@ -101,6 +103,28 @@ target_link_libraries(cube_bathymetry_store_import
   marine_mbes_backscatter_store::marine_mbes_backscatter_store  # MbesCell (#80)
 )
 install(TARGETS cube_bathymetry_store_import EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# Survey-index dirty-tile query for incremental regen (#111, ADR-0002). Its OWN
+# target so the marine_survey_index + SQLite3 dependency stays scoped to the
+# batch_regen tool + its test and does NOT leak into the core cube_bathymetry
+# library. The DB itself is a runtime SOFT dependency: batch_regen falls back to
+# full regen when survey_index.db is absent (the package is a build dep, the file
+# is not required at runtime).
+add_library(cube_bathymetry_survey_index_query src/survey_index_query.cpp)
+target_include_directories(cube_bathymetry_survey_index_query PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_survey_index_query
+  marine_autonomy::marine_autonomy   # gggs (GridIndex, Level, parent, levels)
+  marine_survey_index::marine_survey_index_core  # PassRow, queryPasses, tilesForBoundingBox
+  SQLite::SQLite3
+)
+install(TARGETS cube_bathymetry_survey_index_query EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -253,6 +277,7 @@ install(TARGETS import_bag
 add_executable(batch_regen_bag src/batch_regen_main.cpp)
 target_link_libraries(batch_regen_bag
   cube_bathymetry_store_import   # BatchRegen + cube_bathymetry + marine_bathymetry_store
+  cube_bathymetry_survey_index_query  # --index-db dirty-tile query (#111)
   marine_mbes_backscatter_store::marine_mbes_backscatter_store  # --bs-store output (#80)
   ${geometry_msgs_TARGETS}
   ${marine_acoustic_msgs_TARGETS}
@@ -364,6 +389,16 @@ if(BUILD_TESTING)
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
     marine_mbes_backscatter_store::marine_mbes_backscatter_store
+  )
+
+  # Survey-index dirty-tile query (#111, ADR-0002): in-memory SQLite fixture,
+  # verifies the L14->L10 rollup, the one-tile conservative margin, contributing
+  # bags, and the no-new-bags / bag-not-indexed empty cases.
+  ament_add_gtest(test_survey_index_query test/test_survey_index_query.cpp)
+  target_link_libraries(test_survey_index_query
+    cube_bathymetry_survey_index_query
+    marine_survey_index::marine_survey_index_core
+    SQLite::SQLite3
   )
 endif()
 
