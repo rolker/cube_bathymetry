@@ -121,3 +121,47 @@ during plan-task, and make the bit-exact A/B a required test.
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-07-31 21:26 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-111/plan.md` at `6857d1c`
+**PR**: PR-less (`--issue 111`, layer worktree `issue-cube_bathymetry-111`)
+**Verdict**: approve-with-suggestions
+
+> Independence: fresh-context sub-agent, model Claude Opus, distinct from the
+> plan author (Claude Sonnet). Not annotated as author self-review — the
+> workspace's shared "Claude Code Agent" identity makes the name-based
+> self-review heuristic always match in the standard run-issue lifecycle
+> (review-plan is always a fresh sub-agent), so a name match here does not
+> indicate the author re-reading their own work.
+
+### Evaluation
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | 2-PR split already done per operator decision; PR1 ~6 files (cube_bathymetry only), PR2 rebuild+fingerprint+consumer. Each independently reviewable; full regen stays live until PR2 verified. |
+| Issue alignment | Good | All six review-issue actions addressed: ADR-0002 (footprint) + ADR-0003 (fingerprint) authored, bit-exact A/B required (step 10), ≥2 PRs, correction-mode/no-`auto` (step 11), `build_bathy_store.sh` #382 (step 12). |
+| File targeting | Good | Verified against real code: `BagReaders` helper exists (`batch_regen_main.cpp:169`); `finalize` gathers one bucket per tile (`batch_regen.h:67`), so "build only dirty tiles" holds by construction; `auto` mode rejected (`batch_regen_main.cpp:106`). Survey-index API is real: `tilesForBoundingBox`, `PassRow`, `queryPasses` all present in `marine_survey_index`. |
+| Consequences | Good | CLI→`build_bathy_store.sh`, fingerprint→ADR-0003 schema bump, index-absent→full-regen fallback, ADR-0007 deferral all captured. Two gaps folded into findings (doc-impact + `.gitignore`). |
+| Documentation & instruction impact | Concern | Plan has **no** `## Documentation & Instruction Impact` section — a required, non-silent section. `README.md:36-38` documents `batch_regen` and goes stale once `--incremental`/`--index-db`/`--fresh` land. |
+| Principle alignment | Good | Enforcement (bit-exact A/B is required CI), decisions captured (2 ADRs committed), consequences (consumer script in scope), only-what's-needed (reuses scatter-gather + merged index). |
+| ADR compliance | Good | ADR-0001 (atomic `std::filesystem::rename`, no partial-write), ADR-0007 addendum (`auto` rejection inherited + asserted). ADR-0002/0003 authored here and internally consistent. |
+| ROS conventions | N/A | C++ CLI tooling, not nodes/topics. Only ROS-adjacent point is rosbag2 time-window reads (see finding 5). |
+
+### Findings
+- [ ] (must-fix) Add the required `## Documentation & Instruction Impact` section — it is absent; make it non-silent. `README.md:36-38` (batch_regen docs) is staled by the new `--incremental`/`--index-db`/`--fresh` flags and the `build_fingerprint.json` artifact; either list it to update in-PR or state "None — <reason>". — `plan.md:94`
+- [ ] (suggestion) ADR-0002 step 3 names `gggs::GridIndex::parentAt(L10_level)`, which does not exist — the only rollup primitive is the free function `gggs::parent(child)` (one level up). L14→L10 needs iterating `parent()` 4× (or add a helper); correct the ADR so the implementer doesn't hunt for a nonexistent method. — `0002-dirty-tile-footprint-math.md:42`
+- [ ] (suggestion) ADR-0003's `.gitignore` consequence (build_fingerprint.json must never be committed with checked-in stores) is not in the Files to Change table — add the `.gitignore` entry to PR2 scope. — `plan.md:96`
+- [ ] (suggestion) PR2 spans two repos: `build_bathy_store.sh` lives in `unh_echoboats_project11`, not this worktree. Note the two-repo worktree setup and whether PR2 is one PR per repo. — `plan.md:109`
+- [ ] (suggestion) Step 8 names rosbag2 `SeekOptions` for per-bag time-window reads; confirm the actual `rosbag2_cpp::Reader` API (`seek(t)` + read-until-`t_end`, or `set_filter`) during implementation — "SeekOptions" as a time-window struct may not exist. Plan already hedges "(or filter)". — `plan.md:60`
+
+### Summary
+The plan is well-structured, faithfully addresses every accepted review-issue action, and its code-level assumptions were verified against the real `batch_regen`, `gggs`, and `marine_survey_index` sources — they hold. Both design ADRs are authored and sound; the bit-exact A/B test is correctly made a required CI gate. One must-fix: the required `## Documentation & Instruction Impact` section is missing (README `batch_regen` docs go stale). Remaining items are minor accuracy/scope suggestions. Approve with suggestions — address the doc-impact section (and ideally the ADR-0002 `parentAt` naming) before implementation.
+
+### Recommended Actions
+- [ ] Add a non-silent `## Documentation & Instruction Impact` section listing `README.md` (batch_regen usage) as staled by the new flags, or state "None — <reason>".
+- [ ] Fix ADR-0002 step 3 to use `gggs::parent()` iterated to the L10 level (no `parentAt`).
+- [ ] Add the `build_fingerprint.json` `.gitignore` entry to PR2's Files to Change.
+- [ ] Note PR2's cross-repo (`unh_echoboats_project11`) worktree/PR strategy.
