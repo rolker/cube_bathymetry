@@ -197,5 +197,52 @@ Implemented the approved plan WITH all 4 plan-review suggestions folded in.
 **Round**: 1 | **Ship**: continue — one must-fix reintroduces the silent gate-off class for boundary-flush tiles
 
 ### Findings
-- [ ] (must-fix) Phase-B fallback picks finest-*level* coarse tile without verifying it *contains* the survey tile; loadWindow overlap is inclusive (tile_io.cpp:139) so a boundary-flush survey tile also gets the edge-adjacent neighbor coarse tile, strict-`>` selection can pick it, and the grid-mismatch guard then skips every cell -> blunder gate silently OFF (reintroduces the #115 silent miss for boundary tiles) -- `cube_bathymetry/src/store_import.cpp:704-716`
-- [ ] (must-fix, test) Add regression test: survey tile flush against a coarse boundary with the neighbor coarse tile on disk (current test surveys a tile interior with only the containing coarse tile, so it cannot catch the above) -- `cube_bathymetry/test/test_import_eviction.cpp`
+- [x] (must-fix) Phase-B fallback picks finest-*level* coarse tile without verifying it *contains* the survey tile; loadWindow overlap is inclusive (tile_io.cpp:139) so a boundary-flush survey tile also gets the edge-adjacent neighbor coarse tile, strict-`>` selection can pick it, and the grid-mismatch guard then skips every cell -> blunder gate silently OFF (reintroduces the #115 silent miss for boundary tiles) -- `cube_bathymetry/src/store_import.cpp:704-716`
+- [x] (must-fix, test) Add regression test: survey tile flush against a coarse boundary with the neighbor coarse tile on disk (current test surveys a tile interior with only the containing coarse tile, so it cannot catch the above) -- `cube_bathymetry/test/test_import_eviction.cpp`
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-04 03:45 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-115 at `ca9c966`
+**Addressed**: `## Local Review (Pre-Push)` (2026-08-04 03:27, at `db5ca95`) — both must-fix findings
+**Commits**: `0973ec3` (fix), `ca9c966` (test)
+
+Closed the loop on the pre-push review's one must-fix class (silent gate-off for
+boundary-flush tiles) and its paired regression-test gap.
+
+### Actions
+- [x] (must-fix) Phase-B fallback now VERIFIES containment before selecting a coarse
+  tile, instead of picking the finest by level alone. `loadWindow`'s overlap test is
+  inclusive (`tile_io.cpp` `tileOverlapsBox`), so a survey tile flush against a
+  coarse-tile boundary also loads the edge-adjacent coarse neighbor; the old level-only
+  tie could pick that neighbor, whose grid shares no cell with the survey tile, and
+  `primeFromTileResample`'s grid-mismatch guard then skipped every fine cell — gate
+  silently OFF. Fix: compute the survey tile's center and accept a candidate only when
+  `Level(cand.level()).gridIndex(center) == cand` (GGGS nesting → the unique containing
+  coarse tile), rejecting any neighbor the inclusive window returned — `cube_bathymetry/src/store_import.cpp:704-729`
+- [x] (must-fix, test) Added `ImportEviction.BoundaryFlushCrossLevelReferenceRejectsDeepBlunder`:
+  the survey L10 tile is flush against the WEST edge of its containing L7 tile, and BOTH
+  the container and its west-neighbor L7 tiles are on disk (inclusive `loadWindow` returns
+  both). Asserts the deep (−150 m) blunder is still gated. Verified to FAIL against the
+  pre-fix level-only selection (map-ordered neighbor wins the tie, `primeFromTileResample`
+  skips every cell, deep cell settles) and PASS with the fix — `cube_bathymetry/test/test_import_eviction.cpp`
+
+### Build & test
+- `./sensors_ws/build.sh cube_bathymetry` — clean (warnings only: pre-existing `tmpnam`
+  note in an unrelated test). Dependency layers `underlay_ws` and `core_ws` were built
+  first in the `main` layer (their installs were empty this session).
+- `./sensors_ws/test.sh cube_bathymetry` — **473 tests, 0 errors, 0 failures, 62 skipped**
+  (up from 472: the new boundary-flush test). Revert-verify: neutralizing the containment
+  check made the new test fail with the deep cell settling, confirming it catches the bug;
+  restored and re-confirmed green.
+
+### Deferred / not-actionable
+- None — both findings were actioned.
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a
+fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 115 --skill review-code
