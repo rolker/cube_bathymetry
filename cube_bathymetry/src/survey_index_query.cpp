@@ -66,7 +66,9 @@ gggs::GridIndex ancestorAtLevel(gggs::GridIndex tile, std::uint8_t target_level)
 
 // The index-level (L14) footprint tiles the given new bags touched, read
 // straight from the passes/bags join. Returns distinct tiles. `sensor_filter`,
-// when non-empty, restricts the footprint to that exact sensor_type.
+// when non-empty, restricts the footprint to that sensor with the SAME semantics
+// as marine_survey_index::queryPasses: the literal "sidescan" expands to the
+// channel-split `LIKE 'sidescan%'`, any other value is an exact match.
 std::vector<gggs::GridIndex> newBagFootprint(
   sqlite3 * db,
   const std::vector<std::string> & new_bag_paths,
@@ -81,8 +83,17 @@ std::vector<gggs::GridIndex> newBagFootprint(
     "SELECT DISTINCT p.level, p.tile_row, p.tile_col"
     " FROM passes p JOIN bags b ON p.bag_id = b.id"
     " WHERE b.path = ?";
-  if (!sensor_filter.empty()) {
+  // Mirror marine_survey_index::appendSensorClause exactly so this footprint
+  // scopes sensors identically to queryPasses (dirtyL10Tiles step 5 below):
+  // "sidescan" expands to the channel-split LIKE and binds nothing; any other
+  // non-empty filter is an exact match with a bound value. Diverging (exact-only)
+  // would make a "sidescan"-scoped dirty query silently return an empty footprint.
+  std::string sensor_bind_value;
+  if (sensor_filter == "sidescan") {
+    sql += " AND p.sensor_type LIKE 'sidescan%'";
+  } else if (!sensor_filter.empty()) {
     sql += " AND p.sensor_type = ?";
+    sensor_bind_value = sensor_filter;
   }
 
   sqlite3_stmt * stmt = nullptr;
@@ -96,8 +107,8 @@ std::vector<gggs::GridIndex> newBagFootprint(
   std::set<gggs::GridIndex> distinct;
   for (const auto & path : new_bag_paths) {
     sqlite3_bind_text(stmt, 1, path.c_str(), -1, SQLITE_TRANSIENT);
-    if (!sensor_filter.empty()) {
-      sqlite3_bind_text(stmt, 2, sensor_filter.c_str(), -1, SQLITE_TRANSIENT);
+    if (!sensor_bind_value.empty()) {
+      sqlite3_bind_text(stmt, 2, sensor_bind_value.c_str(), -1, SQLITE_TRANSIENT);
     }
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
