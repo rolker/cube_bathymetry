@@ -244,7 +244,10 @@ The startup-prime (#21) and revisit-reload (#70) paths generalize into a single
    same-level lookup misses them) is handled by a level-walk fallback (#115): the
    finest coarser tile containing this survey tile is resampled (nearest-neighbour on
    cell center) onto the fine survey cells, and the fallback level is logged for
-   auditability. Enforced by
+   auditability. Trade-off: the widened gate exposes tiles previously ungated
+   (reference data only at non-survey levels) to the coarse/shallow-biased-prior
+   false-reject mode — legitimate deeper-than-charted returns can be rejected;
+   the margin is tunable via the `blunder_*` params. Enforced by
    `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData` (gate-only, not settled)
    and `test_import_eviction.CoarseLevelReferenceSeedRejectsDeepBlunder` (the
    cross-level fallback gates a deep blunder).
