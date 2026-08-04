@@ -120,3 +120,66 @@ Per the consequences map, the following should be updated in the same PR:
   per level — the plan's single-coarse-tile selection is correct (no straddle). All
   four `## Issue Review` action items (README, ADR, cross-level test, diagnostic) are
   addressed.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-04 03:18 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-115/plan.md` at `f28c117` (updated to fold the 4
+plan-review suggestions before implementing — plan-first workflow)
+**Branch**: feature/issue-115
+
+### What changed
+
+Implemented the approved plan WITH all 4 plan-review suggestions folded in.
+
+- **`f28c117`** — plan: fold the 4 plan-review suggestions into the plan (step 1
+  CellIndex SW-corner nit → fine-cell center + `Level::cellIndex()`; step 3 relocate
+  the cross-level test to `test_import_eviction.cpp`; step 5 name the enforcement test
+  in the ADR citation; consequences add `batch_regen_main.cpp` help + call-site and
+  `import_bag_main.cpp:704` call-site comment; both open questions resolved).
+- **`ac99078`** — fix(store_import): `seedNewTile` rung 2 gains a Phase B level-walk
+  fallback. When the same-level `tiles.find(index)` misses, it selects the FINEST
+  reference tile coarser than the survey level and calls the new anonymous-namespace
+  helper `primeFromTileResample`, which resamples the coarse shallow prior onto the
+  fine survey cells (nearest-neighbour on each fine cell's CENTER — `CellIndex::
+  position()` is the SW corner, so +0.5 cell, resolved via `Level::cellIndex()`),
+  predicted-only (never settled, no backscatter). Emits a `std::cerr` diagnostic
+  naming the fallback level for auditability. Helper kept internal (no
+  `store_import.h` change).
+- **`a07f1a2`** — test: `test_import_eviction.CoarseLevelReferenceSeedRejectsDeepBlunder`
+  builds a coarser (L7) reference tile filled shallow over the L7 tile containing an
+  L10 survey tile, runs a false-deep (−150 m) sounding through an `ImportAccumulator`
+  with that reference, and asserts the deep blunder is rejected (no settled cell)
+  WITH the cross-level reference but accepted (deep cell settles) WITHOUT any
+  reference. Reverting the level-walk makes the exact-level find miss the L7 tile →
+  deep cell reappears → the test fails (verified by inspection + the observed
+  pre-fix failure while iterating).
+- **`bec3308`** — docs: updated all seed-precedence sites to the level-walk behaviour
+  — README "Seed precedence" rung 2, ADR-0001 addendum rung 2 (+ enforcement-test
+  citation), `import_bag_main.cpp` help + the `:704` call-site "harmless no-op"
+  comment, `batch_regen_main.cpp` help + its call-site comment.
+
+### Build & test
+
+- `./sensors_ws/build.sh cube_bathymetry` — clean (warnings only, pre-existing GDAL
+  `warn_unused_result` in unrelated files). Dependency layers (`underlay_ws`
+  geographic_msgs, `core_ws` marine_autonomy/bathymetry_store/mbes_backscatter_store/
+  tiled_raster_store/interfaces) were built first in the `main` layer, as their
+  installs were empty.
+- `./sensors_ws/test.sh cube_bathymetry` — **472 tests, 0 errors, 0 failures, 62
+  skipped**. The new `CoarseLevelReferenceSeedRejectsDeepBlunder` passes; uncrustify
+  clean on all edited files.
+
+### Deviations from plan
+
+- **Test construction detail (not a scope change):** the plan sketched building the
+  coarse reference via a `GeoMapSheet` at a coarser cell size. In practice a handful
+  of synthetic soundings settle only a sparse, patchy set of coarse cells, so the
+  survey cell's coarse lookup could hit a NaN and skip gating. The test instead
+  constructs the coarse `BathymetryTile` DIRECTLY and fills the whole L7 tile with the
+  shallow prior — deterministic coverage, and closer to how a real ENC prior is a
+  dense filled surface. Same assertion and enforcement intent.
+- No other deviations. Helper kept internal and finest-available coarser level
+  chosen, per the resolved open questions.
