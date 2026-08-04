@@ -226,6 +226,113 @@ TEST_F(DirtyTileQuery, ContributingPassesIncludeOldBagInSeparateL14Subtile)
     << "old-bag pass in a separate L14 sub-tile of the dirty L10 tile must contribute";
 }
 
+// An exact sensor_filter scopes BOTH the new-bag footprint and the
+// contributing-pass set to that sensor_type. A new bag whose mbes and sidescan
+// passes fall in geographically separate L10 tiles marks only the mbes tile
+// dirty under an "mbes-bathy" filter, and that tile's contributing set excludes
+// the co-located sidescan pass. Without a filter, both tiles are dirty.
+TEST_F(DirtyTileQuery, SensorFilterExactScopesFootprintAndPasses)
+{
+  const gggs::GridIndex p10a = gggs::Level(kStoreLevel).gridIndex(kLat, kLon);
+  const gggs::GridIndex fp14a = gggs::Level(kIndexLevel).gridIndex(
+    0.5 * (p10a.southLatitude() + p10a.northLatitude()),
+    0.5 * (p10a.westLongitude() + p10a.eastLongitude()));
+
+  // A second L10 tile ~0.5° east — dozens of L10 tiles away, so its margin never
+  // reaches p10a and the two dirty sets stay disjoint.
+  const gggs::GridIndex p10b = gggs::Level(kStoreLevel).gridIndex(kLat, kLon + 0.5);
+  const gggs::GridIndex fp14b = gggs::Level(kIndexLevel).gridIndex(
+    0.5 * (p10b.southLatitude() + p10b.northLatitude()),
+    0.5 * (p10b.westLongitude() + p10b.eastLongitude()));
+  ASSERT_NE(p10a, p10b) << "the two regions must be distinct L10 tiles";
+
+  insertBag(1, "/data/bagNew");
+  insertPass(1, fp14a, "mbes-bathy", "/mbes", 100, 200, 40);       // region A, mbes
+  insertPass(1, fp14a, "sidescan_port", "/ss", 100, 200, 40);      // region A, sidescan
+  insertPass(1, fp14b, "sidescan_port", "/ss", 100, 200, 40);      // region B, sidescan
+
+  // Unfiltered: both regions are dirty.
+  const auto all = cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+  EXPECT_TRUE(contains(all, p10a));
+  EXPECT_TRUE(contains(all, p10b));
+
+  // Filtered to mbes: only region A is dirty, and its passes are mbes-only.
+  const auto mbes =
+    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "mbes-bathy");
+  EXPECT_TRUE(contains(mbes, p10a)) << "mbes footprint tile is dirty";
+  EXPECT_FALSE(contains(mbes, p10b)) << "sidescan-only region must be excluded";
+  const cube::DirtyTile * dt = find(mbes, p10a);
+  ASSERT_NE(dt, nullptr);
+  for (const auto & p : dt->passes) {
+    EXPECT_EQ(p.sensor_type, "mbes-bathy") << "contributing set must be mbes-only";
+  }
+}
+
+// The literal "sidescan" filter expands to the channel-split `LIKE 'sidescan%'`
+// (matching newBagFootprint to marine_survey_index::queryPasses), so a
+// "sidescan_port" pass is caught by both the "sidescan" alias and its exact
+// sensor_type, while an unrelated "mbes-bathy" filter matches nothing.
+TEST_F(DirtyTileQuery, SidescanFilterMatchesChannelSplitSensors)
+{
+  const gggs::GridIndex p10 = gggs::Level(kStoreLevel).gridIndex(kLat, kLon);
+  const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(
+    0.5 * (p10.southLatitude() + p10.northLatitude()),
+    0.5 * (p10.westLongitude() + p10.eastLongitude()));
+
+  insertBag(1, "/data/bagNew");
+  insertPass(1, fp14, "sidescan_port", "/ss", 100, 200, 40);
+
+  const auto alias =
+    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "sidescan");
+  EXPECT_TRUE(contains(alias, p10)) << "\"sidescan\" alias must match sidescan_port";
+
+  const auto exact =
+    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "sidescan_port");
+  EXPECT_TRUE(contains(exact, p10)) << "exact sensor_type must match";
+
+  const auto miss =
+    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "mbes-bathy");
+  EXPECT_TRUE(miss.empty()) << "non-matching filter yields no footprint";
+}
+
+// A new bag with passes recorded at two DIFFERENT index levels (L14 and L13, as a
+// per-sensor native-level index would) exercises expandFootprint's by-level
+// grouping and the multi-index-level contributing-pass re-enumeration: each level
+// rolls up independently to its L10 store tile and every dirty tile lands at the
+// store level.
+TEST_F(DirtyTileQuery, MixedLevelFootprintRollsEachLevelToStore)
+{
+  const gggs::GridIndex p10a = gggs::Level(kStoreLevel).gridIndex(kLat, kLon);
+  const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(
+    0.5 * (p10a.southLatitude() + p10a.northLatitude()),
+    0.5 * (p10a.westLongitude() + p10a.eastLongitude()));
+
+  const gggs::GridIndex p10b = gggs::Level(kStoreLevel).gridIndex(kLat, kLon + 0.5);
+  const gggs::GridIndex fp13 = gggs::Level(13).gridIndex(
+    0.5 * (p10b.southLatitude() + p10b.northLatitude()),
+    0.5 * (p10b.westLongitude() + p10b.eastLongitude()));
+  ASSERT_EQ(fp14.level(), kIndexLevel);
+  ASSERT_EQ(fp13.level(), 13u);
+  ASSERT_NE(p10a, p10b);
+
+  insertBag(1, "/data/bagNew");
+  insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);   // L14 pass
+  insertPass(1, fp13, "mbes-bathy", "/mbes", 100, 200, 40);   // L13 pass
+
+  const auto dirty =
+    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+
+  const cube::DirtyTile * dta = find(dirty, p10a);
+  const cube::DirtyTile * dtb = find(dirty, p10b);
+  ASSERT_NE(dta, nullptr) << "L14-level pass must produce its L10 dirty tile";
+  ASSERT_NE(dtb, nullptr) << "L13-level pass must produce its L10 dirty tile";
+  EXPECT_EQ(dta->passes.size(), 1u);
+  EXPECT_EQ(dtb->passes.size(), 1u);
+  for (const auto & dt : dirty) {
+    EXPECT_EQ(dt.tile.level(), kStoreLevel) << "every dirty tile rolls up to the store level";
+  }
+}
+
 // No new bags -> nothing is dirty (the incremental caller has no work to do).
 TEST_F(DirtyTileQuery, NoNewBagsYieldsNoDirtyTiles)
 {
