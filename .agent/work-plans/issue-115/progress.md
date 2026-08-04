@@ -183,3 +183,19 @@ Implemented the approved plan WITH all 4 plan-review suggestions folded in.
   dense filled surface. Same assertion and enforcement intent.
 - No other deviations. Helper kept internal and finest-available coarser level
   chosen, per the resolved open questions.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-04 03:27 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-115 at `db5ca95`
+**Mode**: pre-push
+**Depth**: Standard (reason: ~200 LOC single-package logic change; navigational-safety-relevant, not cross-layer/security)
+**Must-fix**: 1 | **Suggestions**: 0
+**Round**: 1 | **Ship**: continue — one must-fix reintroduces the silent gate-off class for boundary-flush tiles
+
+### Findings
+- [ ] (must-fix) Phase-B fallback picks finest-*level* coarse tile without verifying it *contains* the survey tile; loadWindow overlap is inclusive (tile_io.cpp:139) so a boundary-flush survey tile also gets the edge-adjacent neighbor coarse tile, strict-`>` selection can pick it, and the grid-mismatch guard then skips every cell -> blunder gate silently OFF (reintroduces the #115 silent miss for boundary tiles) -- `cube_bathymetry/src/store_import.cpp:704-716`
+- [ ] (must-fix, test) Add regression test: survey tile flush against a coarse boundary with the neighbor coarse tile on disk (current test surveys a tile interior with only the containing coarse tile, so it cannot catch the above) -- `cube_bathymetry/test/test_import_eviction.cpp`
