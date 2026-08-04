@@ -305,3 +305,29 @@ Specialists: static analysis (ament_cpplint clean, uncrustify PASS on all new/ch
 - [x] (suggestion) `ancestorAtLevel` has no L14>=L10 precondition / valid-tile post-condition guard; a finer store_level yields wrong-level dirty tiles, invalid index collapses to one map key (cross-confirmed) — `cube_bathymetry/src/survey_index_query.cpp:59`
 - [x] (suggestion) dry-run builds `GeoMapSheet`/`Level::fromCellSize` before the try/catch; invalid `--iho-order` aborts uncaught (nonzero, no marker) vs the exit-0 soft-dep contract; gate validates `-r>0` but not iho-order (pre-existing in full-regen path) — `cube_bathymetry/src/batch_regen_main.cpp:354`
 - [x] (suggestion) no test covers `sensor_filter` (exact or "sidescan") or a mixed-level footprint, leaving suggestion #1 and the by_level/multi-index_levels path untested — `cube_bathymetry/test/test_survey_index_query.cpp`
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-04 03:42 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-111 at `6d110e8`
+**Addressed**: Local Review (Pre-Push) (When 2026-08-04 03:25 +00:00, branch `55bcf15`) — all 1 must-fix + 5 suggestions
+**Commits**: `54ca447` `cf80d84` `c8a96ad` `ce4ae1a` `695c6e3` `6d110e8`
+
+Worked the latest review's fix plan. Each finding fixed and committed atomically
+(one logical fix per commit) with its box checked. Verified by compiling the three
+changed C++ translation units clean (`g++ -std=c++17`) and building + running the
+`survey_index_query` gtest suite standalone against the marine_survey_index sources
+(full colcon build not possible — the lower ROS layers are unbuilt in this offline
+env): **9/9 tests pass** (6 pre-existing + 3 new), confirming the F2/F3/F4 edits to
+`survey_index_query.cpp` don't regress the existing rollup/margin/contributing-pass
+tests. `ament_uncrustify` and `ament_cpplint` clean on all four changed files.
+
+### Actions
+- [x] (must-fix) ADR-0002 "one-L14-cell margin" → "one L14 tile" — also fixed the same defect on a third line (the ≤3 m radius is *larger* than a ~6 cm cell, so "cell" was backwards there too), making the doc internally consistent — `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md:58,72,102`
+- [x] (suggestion) Aligned `newBagFootprint` sensor clause with `marine_survey_index::appendSensorClause`: "sidescan" → `LIKE 'sidescan%'` (binds nothing), any other non-empty value exact-match — `cube_bathymetry/src/survey_index_query.cpp:69`
+- [x] (suggestion) Checked both `sqlite3_bind_text` return codes in `newBagFootprint`, throwing like the surrounding prepare/step handling — `cube_bathymetry/src/survey_index_query.cpp:97`
+- [x] (suggestion) Enforced `ancestorAtLevel` pre/postconditions — throw `std::invalid_argument` if the store level is finer than the footprint, `std::runtime_error` on an invalid rolled-up tile; documented both in the header `@throws` — `cube_bathymetry/src/survey_index_query.cpp:59`, `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:86`
+- [x] (suggestion) Validate `--iho-order` in the dry-run gate (cheap GeoMapSheet probe) so a bad order routes to a clean `usage()` error instead of aborting uncaught with no `DIRTY_TILES_JSON` marker; scoped to the dry-run path (the full-regen path is pre-existing and out of scope) — `cube_bathymetry/src/batch_regen_main.cpp:599`
+- [x] (suggestion) Added 3 tests: exact `sensor_filter` scopes footprint + contributing set; `"sidescan"` alias matches channel-split `sidescan_port` (and a wrong exact filter yields empty); mixed L14/L13 footprint rolls each level to its L10 store tile — `cube_bathymetry/test/test_survey_index_query.cpp`
