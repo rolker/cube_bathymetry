@@ -45,11 +45,17 @@ namespace
 // unambiguously inside that grid, so the lookup returns exactly it.
 gggs::GridIndex tileFromRowCol(std::uint8_t level, std::uint32_t row, std::uint32_t col)
 {
+  // Validate the DB-sourced level BEFORE indexing gggs::levels (a std::array of
+  // 21 specs whose operator[] is unchecked): gggs::Level's ctor throws
+  // std::out_of_range for level >= 21, so a corrupted index row surfaces as a
+  // catchable exception — the dry-run's catch falls back to full regen — rather
+  // than out-of-bounds undefined behaviour.
+  const gggs::Level tile_level(level);
   const gggs::LevelSpecs & spec = gggs::levels[level];
   const double center_lat = -96.0 + (static_cast<double>(row) + 0.5) * spec.grid_angular_span;
   const double center_lon =
     -180.0 + (static_cast<double>(col) + 0.5) * spec.gridLongitudinalSpan(row);
-  return gggs::Level(level).gridIndex(center_lat, center_lon);
+  return tile_level.gridIndex(center_lat, center_lon);
 }
 
 // Roll a tile up the GGGS quadtree to `target_level` by iterating gggs::parent()
