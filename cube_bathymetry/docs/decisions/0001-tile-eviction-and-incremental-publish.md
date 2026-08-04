@@ -238,8 +238,16 @@ The startup-prime (#21) and revisit-reload (#70) paths generalize into a single
 2. **reference** — else a `reference/` prior tile is primed with
    `seed_settled=false`: predicted-surface only (turns the blunder-rejection gate
    on) but **never settled**, so it produces no `values()` output, seeds no
-   backscatter, and is **not counted as measured data**. Enforced by
-   `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData`.
+   backscatter, and is **not counted as measured data**. A reference tile at the
+   survey level primes cell-for-cell; a **coarser** reference tile (a multi-level
+   prior — `loadWindow` returns tiles at any level, keyed by their own level, so the
+   same-level lookup misses them) is handled by a level-walk fallback (#115): the
+   finest coarser tile containing this survey tile is resampled (nearest-neighbour on
+   cell center) onto the fine survey cells, and the fallback level is logged for
+   auditability. Enforced by
+   `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData` (gate-only, not settled)
+   and `test_import_eviction.CoarseLevelReferenceSeedRejectsDeepBlunder` (the
+   cross-level fallback gates a deep blunder).
 3. else **blank**.
 
 `seed_settled` is thus the contract boundary between *measured* (survey: settled +

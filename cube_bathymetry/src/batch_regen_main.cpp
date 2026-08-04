@@ -82,8 +82,10 @@
     "`survey` layer (uma#248 collapsed the draft/processed split into one)\n";
   std::cout << "  --reference-store <store_dir>: seed the CUBE predicted surface "
     "lazily, per tile on first touch, from this store's `reference` (prior) layer "
-    "so blunder rejection drops false-deep detections (#89, #96). Only tiles at the "
-    "survey GGGS level gate. Predicted-only: the coarse prior is NEVER settled as "
+    "so blunder rejection drops false-deep detections (#89, #96). Tiles at the survey "
+    "GGGS level gate cell-for-cell; a coarser (multi-level) prior gates via a "
+    "level-walk fallback that resamples the finest coarser tile (#115). Predicted-"
+    "only: the coarse prior is NEVER settled as "
     "measured data and seeds no backscatter. NOTE: a coarse/shallow-biased prior "
     "can also reject LEGITIMATE deeper-than-charted returns; the rejection margin "
     "is tunable via the blunder_* params. (A `survey` tile already in -o takes "
@@ -559,8 +561,9 @@ int main(int argc, char * argv[])
   // Reference-prior seeding (#89, #96) is LAZY, per tile on first touch, driven by
   // the gather accumulator's seedNewTile: a `reference/` tile primes the CUBE
   // predicted surface only (seed_settled=false) so the blunder gate turns on WITHOUT
-  // settling coarse prior depths as measured data. Only tiles at the survey GGGS
-  // level coincide with a survey node and gate.
+  // settling coarse prior depths as measured data. A reference tile at the survey
+  // GGGS level gates cell-for-cell; a COARSER (multi-level) prior gates via the
+  // seedNewTile level-walk fallback that resamples the finest coarser tile (#115).
 
   // Store-level provenance (uma#248 StoreMetadata), written once at finalize.
   // Backscatter provenance mirrors the bathy platform/sensor with an MBES-specific

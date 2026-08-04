@@ -49,9 +49,15 @@ On the first touch of each tile, both tools seed it with a two-rung precedence:
 2. **reference** — else, if `--reference-store <dir>` is given, a `reference/`
    (prior/contour) tile primes the **predicted surface only**: it turns CUBE's
    blunder-rejection gate on so false-deep detections are dropped, but is **never
-   settled** as measured data and seeds **no** backscatter. Only tiles at the survey
-   GGGS level gate. (Replaces the pre-#96 `--prior` flag, which loaded the whole
-   prior into RAM up front and defeated eviction.)
+   settled** as measured data and seeds **no** backscatter. A reference tile at the
+   exact survey GGGS level gates cell-for-cell; a **coarser** reference tile (a
+   multi-level prior, e.g. ENC exports at L5/L7/L8 under an L10 survey) is picked up
+   by a level-walk fallback (#115) that resamples the finest available coarser tile's
+   shallow prior onto the fine survey cells — coarse ENC generalization is
+   shoal-biased, the conservative direction for a false-deep gate. The fallback logs
+   the reference level it used, so the import is auditable. (Replaces the pre-#96
+   `--prior` flag, which loaded the whole prior into RAM up front and defeated
+   eviction.)
 3. else **blank**.
 
 ### Backscatter fidelity
