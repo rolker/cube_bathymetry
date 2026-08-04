@@ -701,13 +701,33 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
         // level number below the survey level -- closest to the survey resolution,
         // still shoal-biased/conservative for a false-deep gate) and resample its
         // shallow prior onto the fine survey cells.
+        //
+        // Containment must be VERIFIED, not assumed from level alone: loadWindow's
+        // overlap test is inclusive (tile_io.cpp tileOverlapsBox -- a coarse tile
+        // whose edge merely touches the survey window counts as overlapping), so a
+        // survey tile flush against a coarse-tile boundary ALSO pulls in the
+        // edge-adjacent coarse neighbor. That neighbor shares no cell with the
+        // survey tile, and picking it would make primeFromTileResample's
+        // grid-mismatch guard skip every fine cell -- reinstating the #115 silent
+        // gate-off for boundary tiles. GGGS nesting gives the containing coarse
+        // tile at any level as the one holding the survey tile's CENTER, so match
+        // on that and reject any neighbor the inclusive window also returned.
+        const geographic_msgs::msg::GeoPoint survey_sw = index.southWestPosition();
+        const geographic_msgs::msg::GeoPoint survey_ne = index.northEastPosition();
+        const geographic_msgs::msg::GeoPoint survey_center = gggs::geoPoint(
+          0.5 * (survey_sw.latitude + survey_ne.latitude),
+          0.5 * (survey_sw.longitude + survey_ne.longitude));
         const marine_bathymetry_store::BathymetryTile * fallback = nullptr;
         for (const auto & entry : tiles) {
-          if (entry.first.level() >= index.level()) {
+          const gggs::GridIndex & cand = entry.first;
+          if (cand.level() >= index.level()) {
             continue;  // not coarser than the survey tile
           }
+          if (gggs::Level(cand.level()).gridIndex(survey_center) != cand) {
+            continue;  // edge-adjacent neighbor, not the tile that contains us
+          }
           if (fallback == nullptr ||
-            entry.first.level() > fallback->index().level())
+            cand.level() > fallback->index().level())
           {
             fallback = &entry.second;
           }
