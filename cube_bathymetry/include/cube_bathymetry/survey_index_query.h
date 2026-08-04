@@ -83,6 +83,12 @@ namespace cube
 ///   to the surface being rebuilt.
 /// @return The dirty tiles, ordered by `gggs::GridIndex`, each with its
 ///   contributing passes ordered by bag path then start time.
+/// @throws std::invalid_argument if a footprint (or a dirty tile's extent)
+///   spans more than 180° of longitude — an antimeridian-crossing box, which
+///   `marine_survey_index::tilesForBoundingBox` refuses rather than enumerate
+///   the long way around. Survey areas in this workspace never cross it; a
+///   caller (e.g. the CLI dry-run) should catch this and fall back to full
+///   regen, and PR2's rebuild path must replicate that catch.
   std::vector < DirtyTile > dirtyL10Tiles(
   sqlite3 * db,
   const std::vector < std::string > &new_bag_paths,
