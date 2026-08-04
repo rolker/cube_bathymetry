@@ -335,6 +335,13 @@ std::string jsonEscape(const std::string & s)
 // Builds nothing. Returns a process exit code. The survey_index.db file is a
 // SOFT dependency: when it is absent the function reports that a real run falls
 // back to full regen (the same graceful degradation PR2's rebuild path uses).
+//
+// Machine contract for consumers parsing stdout: the presence of a single
+// `DIRTY_TILES_JSON:` line is AUTHORITATIVE — it is emitted only on a successful
+// query and carries the complete dirty set. Its ABSENCE means "fall back to full
+// regen" (the index was absent, could not be opened/queried, or was not a valid
+// index). Every one of those outcomes still exits 0 (a soft-dependency miss is
+// not a failure), so consumers must key off the marker line, not the exit code.
 int dirtyTileDryRun(
   const std::string & index_db_path,
   const std::vector<std::string> & bagfile_names,

@@ -53,9 +53,13 @@ conservative margin, rolls it up to the store's L10 tiles via the GGGS parent
 hierarchy, and lists each dirty L10 tile with the bags + pass intervals that
 contribute to it (see [`docs/decisions/0002-dirty-tile-footprint-math.md`](docs/decisions/0002-dirty-tile-footprint-math.md)).
 Output is a human-readable summary plus a machine-parseable `DIRTY_TILES_JSON:`
-line. If `survey_index.db` is absent, it says so and notes that a real run falls
-back to full regen (the index is a **soft** dependency). Without `--index-db`, the
-full-regen path is unchanged.
+line. **Machine contract:** the `DIRTY_TILES_JSON:` line is authoritative and is
+emitted only on a successful query; its *absence* means "fall back to full regen"
+(index absent, unopenable, or not a valid index). All of those cases still exit 0
+— a missing soft dependency is not a failure — so a consumer must key off the
+marker line, not the exit code. If `survey_index.db` is absent, it says so and
+notes that a real run falls back to full regen (the index is a **soft**
+dependency). Without `--index-db`, the full-regen path is unchanged.
 
 ### Seed precedence (`--reference-store`)
 
