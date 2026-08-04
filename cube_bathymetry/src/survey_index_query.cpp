@@ -106,9 +106,15 @@ std::vector<gggs::GridIndex> newBagFootprint(
   // shared across the new bags.
   std::set<gggs::GridIndex> distinct;
   for (const auto & path : new_bag_paths) {
-    sqlite3_bind_text(stmt, 1, path.c_str(), -1, SQLITE_TRANSIENT);
-    if (!sensor_bind_value.empty()) {
-      sqlite3_bind_text(stmt, 2, sensor_bind_value.c_str(), -1, SQLITE_TRANSIENT);
+    // Check bind return codes like the prepare/step handling above and below:
+    // a silent bind failure would run the query with a stale/missing parameter.
+    if (sqlite3_bind_text(stmt, 1, path.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+      (!sensor_bind_value.empty() &&
+      sqlite3_bind_text(stmt, 2, sensor_bind_value.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK))
+    {
+      sqlite3_finalize(stmt);
+      throw std::runtime_error(
+        std::string("survey_index_query: bind footprint failed: ") + sqlite3_errmsg(db));
     }
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
