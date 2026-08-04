@@ -41,6 +41,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <map>
 #include <memory>
 #include <optional>
@@ -402,7 +403,12 @@ int dirtyTileDryRun(
   }
 
   // Machine-parseable one-line JSON (prefixed marker so a consumer can grep it).
+  // Classic locale (no locale-dependent digit grouping / decimal comma) and full
+  // round-trippable double precision so the emitted tile lat/lon reproduce the
+  // computed bounds exactly rather than truncating to the default 6 sig-figs.
   std::ostringstream json;
+  json.imbue(std::locale::classic());
+  json << std::setprecision(17);
   json << "{\"store_level\":" << static_cast<int>(store_level.level())
        << ",\"dirty_tile_count\":" << dirty.size() << ",\"dirty_tiles\":[";
   bool first_tile = true;
