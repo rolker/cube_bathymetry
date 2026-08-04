@@ -228,3 +228,25 @@ The plan is well-structured, faithfully addresses every accepted review-issue ac
 ### Next step
 PR2 (separate PR under #111): tile-scoped rebuild + `build_fingerprint.json` +
 atomic swap (ADR-0003), then PR2b `build_bathy_store.sh` in `unh_echoboats_project11`.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-04 02:56 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-111 at `f5b9878`
+**Mode**: pre-push
+**Depth**: Deep (reason: two new ADRs + new SQL/query subsystem + ~1.4k lines)
+**Must-fix**: 1 | **Suggestions**: 5
+**Round**: 1 | **Ship**: continue — one genuine correctness must-fix (per-tile pass set incomplete) warrants another read after the fix
+
+Specialists: static analysis (copyright/cpplint/uncrustify clean); Claude Adversarial x2 (Lens A + Lens B, both cross-confirmed must-fix #1); Copilot off (default); Local skipped (Ollama unavailable).
+
+### Findings
+- [ ] (must-fix) `DirtyTile.passes` omits interior old-bag passes for a partially-covered dirty L10 tile (`queryPasses` runs over `expanded`, not the tile's full L14 extent) — breaks PR2 byte-identity + under-reports dry-run contributing bags; test `ContributingPassesIncludeOldBags` can't catch it (same L14 tile) — `cube_bathymetry/src/survey_index_query.cpp:200`
+- [ ] (suggestion) `DIRTY_TILES_JSON` tile lat/lon truncated to 6 sig-fig; use `setprecision(17)` + classic locale (bounds recomputable from level/row/col, so low sev) — `cube_bathymetry/src/batch_regen_main.cpp:414`
+- [ ] (suggestion) `expandFootprint` merges disjoint footprints into one bbox, inflating the dirty set on multi-area campaigns (conservative; note trade-off in ADR-0002) — `cube_bathymetry/src/survey_index_query.cpp:141`
+- [ ] (suggestion) Document machine contract: presence of `DIRTY_TILES_JSON:` line is authoritative, absence ⇒ full regen (exit 0 on absent/failed/non-index file) — `cube_bathymetry/src/batch_regen_main.cpp:361`
+- [ ] (suggestion) Document `dirtyL10Tiles` antimeridian `std::invalid_argument` throw so PR2's rebuild path replicates the CLI's catch — `cube_bathymetry/src/survey_index_query.cpp:166`
+- [ ] (suggestion) `jsonEscape` passes signed char to `\u%04x`; use `static_cast<unsigned char>(c)` for obvious correctness — `cube_bathymetry/src/batch_regen_main.cpp:319`
