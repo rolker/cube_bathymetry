@@ -246,3 +246,33 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand of
 fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 115 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-04 03:54 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-115 at `bb26b58`
+**Mode**: pre-push
+**Depth**: Standard (reason: ~320 LOC single-package navigational-safety logic change; not cross-layer/security)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 2 | **Ship**: recommended — Round 1's sole must-fix (boundary-flush gate-off) is fixed with a dedicated regression test; this round finds no must-fix
+
+### Findings
+- [ ] (suggestion) Cross-level fallback diagnostic hardcodes `import_bag:` prefix (also drives batch_regen) and fires once per seeded tile — cosmetic; matches sibling diagnostics — `cube_bathymetry/src/store_import.cpp:739`
+- [ ] (suggestion) ADR-0001 could add a one-line note that the widened gate newly exposes previously-ungated tiles to the legitimate-deep false-reject mode (already covered operationally by the mains' help-text NOTE) — `cube_bathymetry/docs/decisions/0001-tile-eviction-and-incremental-publish.md:238`
+
+### Verification
+- Static analysis: ament_cpplint + ament_uncrustify clean on all 4 changed C++ files (store_import.cpp, import_bag_main.cpp, batch_regen_main.cpp, test_import_eviction.cpp).
+- Claude Adversarial: 2 passes (Lens A logic + Lens B systemic), both independent verdict "sound, no must-fix"; source-level check of GGGS geometry (SW-corner half-cell offset, Level::cellIndex composition, .get/band consistency, single-value gridIndex tie-break) confirmed correct. Both new tests verified as genuine regression guards (fail on revert).
+- Local Adversarial: skipped (Ollama not installed on this host). Copilot: off (default).
+- Code unchanged since the green test run at `ca9c966` (473 tests, 0 failures); only progress.md changed between there and HEAD.
+
+### Out of scope (awareness, not a finding against this PR)
+- `seeded_` is not cleared on eviction and `reloadEvictedTile` restores only the Survey layer, so a reference-only tile evicted and revisited loses its blunder gate on reload. Pre-existing; affects Phase A equally; the Phase-B widening makes it apply to more tiles.
+
+### Next step
+Lifecycle: **Local Review (approved)** → push / open PR → **triage-reviews**. Hand off to a fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 115 --skill triage-reviews
