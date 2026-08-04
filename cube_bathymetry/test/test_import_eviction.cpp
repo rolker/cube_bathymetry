@@ -475,4 +475,107 @@ TEST(ImportEviction, ReferenceSeedDoesNotAddMeasuredData)
   std::filesystem::remove_all(root);
 }
 
+// Cross-level reference blunder gate (#115): a reference store holding ONLY tiles at
+// a COARSER GGGS level than the survey (e.g. ENC exports at L5/L7/L8 under an L10
+// survey) must still gate a false-deep blunder. `loadWindow` returns the coarse tile
+// but keys it by its own (coarser) GridIndex, so the same-level `tiles.find(index)`
+// in seedNewTile rung 2 misses it; the level-walk fallback (Phase B) resamples the
+// coarse shallow prior onto the fine survey cells so the gate turns on. Without that
+// fallback the exact-level find misses, nothing gates, and the deep sounding enters
+// the survey layer unchallenged -- the exact silent-miss this issue fixes.
+TEST(ImportEviction, CoarseLevelReferenceSeedRejectsDeepBlunder)
+{
+  // A COARSER cell size -> a coarser GGGS level than the 1 m survey (L10). 8 m -> L7.
+  constexpr float kCoarseCellSize = 8.0f;
+  ASSERT_LT(gggs::Level::fromCellSize(kCoarseCellSize).level(),
+    gggs::Level::fromCellSize(kCellSize).level())
+    << "the reference must be at a coarser level to exercise the level-walk";
+
+  const std::string root = makeTempDir("xlevel_refseed");
+  const std::string ref_dir = root + "/reference_store";
+
+  // Survey the INTERIOR of a single L10 tile (its center), not a shared tile corner:
+  // a corner sounding routes ambiguously to one of four tiles and can settle in a
+  // near-corner cell. GGGS nesting puts this L10 tile wholly inside one L7 tile.
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // Build the coarse reference tile DIRECTLY (not via CUBE) so its coverage is
+  // deterministic: fill the ENTIRE L7 tile that contains the survey tile with a
+  // SHALLOW (-20 m) prior. Every fine survey cell then resamples to a finite shallow
+  // coarse cell -- a real ENC prior is likewise a dense filled surface, not the
+  // sparse point pattern a handful of synthetic soundings would settle.
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  const gggs::GridIndex coarse_grid = coarse_level.gridIndex(survey_lat, survey_lon);
+  ASSERT_LT(coarse_grid.level(), survey_grid.level())
+    << "the reference tile must be at a coarser level than the survey tile";
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore ref_store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/true);
+    ref_store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(ref_store, ref_dir);
+  }
+  ASSERT_GT(countReferenceFiniteCells(ref_dir), 1u)
+    << "the coarse reference tile should carry many finite cells";
+
+  // A clearly-too-deep blunder (~ -150 m) at the survey location, where the coarse
+  // prior says ~ -20 m -- unambiguously below any shallow-surface blunder limit.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+
+  // Run WITH the coarse reference seeding.
+  const std::string with_ref = root + "/with_ref";
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(with_ref, "", /*budget=*/0);
+    cfg.reference_store_dir = ref_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  // Baseline: no reference at all.
+  const std::string no_ref = root + "/no_ref";
+  runImport(batches, no_ref, "", /*budget=*/0);
+
+  const auto with = loadBathyCells(with_ref);
+  const auto without = loadBathyCells(no_ref);
+
+  // Without a prior, Node::insert skips the blunder gate: the deep sounding is
+  // accepted and settles a deep (< -100 m) cell.
+  ASSERT_FALSE(without.empty())
+    << "without a prior the deep sounding must settle a cell";
+  bool baseline_is_deep = false;
+  for (const auto & [cell, du] : without) {
+    if (du.first < -100.0) {baseline_is_deep = true;}
+  }
+  EXPECT_TRUE(baseline_is_deep)
+    << "the baseline deep sounding should settle a deep (< -100 m) cell";
+
+  // With the COARSER reference, the level-walk fallback seeds the shallow predicted
+  // surface and the blunder gate rejects the deep sounding -- so NO cell settles.
+  // (Revert the level-walk and the exact-level find misses the L7 tile, nothing
+  // gates, and `with` gains the deep cell -> this fails.)
+  EXPECT_TRUE(with.empty())
+    << "the cross-level reference must gate the deep blunder (level-walk fallback)";
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube
