@@ -286,9 +286,23 @@ std::vector<DirtyTile> dirtyL10Tiles(
     }
   }
 
+  // 6. Sort each dirty tile's passes by (bag path, start time) so the header's
+  //    ordering contract holds INDEPENDENTLY of queryPasses' internals:
+  //    queryPasses chunks its tile set (200 tiles per statement) and a dirty
+  //    L10 tile's L14 extent is 256 tiles, so its result is not guaranteed to
+  //    be globally ordered across chunks. Sorting here makes the dry-run's
+  //    per-tile output deterministic regardless of how the passes were fetched.
   std::vector<DirtyTile> result;
   result.reserve(dirty.size());
   for (auto & [tile, tile_passes] : dirty) {
+    std::sort(
+      tile_passes.begin(), tile_passes.end(),
+      [](const marine_survey_index::PassRow & a, const marine_survey_index::PassRow & b) {
+        if (a.bag_path != b.bag_path) {
+          return a.bag_path < b.bag_path;
+        }
+        return a.t_start_ns < b.t_start_ns;
+      });
     result.push_back(DirtyTile{tile, std::move(tile_passes)});
   }
   return result;
