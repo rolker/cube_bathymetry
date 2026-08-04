@@ -186,6 +186,46 @@ TEST_F(DirtyTileQuery, ContributingPassesIncludeOldBags)
   EXPECT_EQ(bags.count("/data/bagOld"), 1u) << "old bag over the tile must contribute";
 }
 
+// A dirty L10 tile's contributing set must include an old-bag pass that lives in
+// a DIFFERENT L14 sub-tile of that same L10 tile — one outside the new bag's
+// footprint and its one-tile margin. This is the case the whole-L10-extent pass
+// query exists for: querying passes over only the new-bag footprint (plus margin)
+// would silently drop this pass, under-reporting the contributing bags and
+// breaking a tile-scoped rebuild's byte-identity (cube#111 review must-fix).
+TEST_F(DirtyTileQuery, ContributingPassesIncludeOldBagInSeparateL14Subtile)
+{
+  const gggs::GridIndex p10 = gggs::Level(kStoreLevel).gridIndex(kLat, kLon);
+  const double center_lat = 0.5 * (p10.southLatitude() + p10.northLatitude());
+  const double center_lon = 0.5 * (p10.westLongitude() + p10.eastLongitude());
+  const gggs::GridIndex center14 =
+    gggs::Level(kIndexLevel).gridIndex(center_lat, center_lon);
+
+  // p10's south-west-most L14 sub-tile: same L10 parent as the centre footprint,
+  // but 16 L14 tiles away — far outside the centre footprint's 3x3 margin block.
+  const double eps = 1e-7;
+  const gggs::GridIndex corner14 = gggs::Level(kIndexLevel).gridIndex(
+    p10.southLatitude() + eps, p10.westLongitude() + eps);
+  ASSERT_NE(center14, corner14) << "test needs two distinct L14 sub-tiles of p10";
+
+  insertBag(1, "/data/bagNew");
+  insertBag(2, "/data/bagOld");
+  insertPass(1, center14, "mbes-bathy", "/mbes", 1000, 1100, 40);  // new, centre
+  insertPass(2, corner14, "mbes-bathy", "/mbes", 100, 200, 55);    // old, SW corner
+
+  const auto dirty =
+    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+
+  const cube::DirtyTile * dt = find(dirty, p10);
+  ASSERT_NE(dt, nullptr);
+  std::set<std::string> bags;
+  for (const auto & p : dt->passes) {
+    bags.insert(p.bag_path);
+  }
+  EXPECT_EQ(bags.count("/data/bagNew"), 1u);
+  EXPECT_EQ(bags.count("/data/bagOld"), 1u)
+    << "old-bag pass in a separate L14 sub-tile of the dirty L10 tile must contribute";
+}
+
 // No new bags -> nothing is dirty (the incremental caller has no work to do).
 TEST_F(DirtyTileQuery, NoNewBagsYieldsNoDirtyTiles)
 {

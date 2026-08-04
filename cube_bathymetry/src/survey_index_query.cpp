@@ -195,10 +195,40 @@ std::vector<DirtyTile> dirtyL10Tiles(
     dirty[ancestorAtLevel(tile, store_level.level())];
   }
 
-  // 4. Attach every contributing pass (all bags) over the expanded footprint,
-  //    grouped by the store-level tile its own footprint tile rolls up to.
+  // 4. Enumerate the COMPLETE index-level extent of every dirty store-level tile.
+  //    `expanded` is only the new bags' footprint plus one-tile margin, so it
+  //    covers a boundary dirty tile only partially — querying passes over it
+  //    would omit contributing passes (typically old bags) that fall in the
+  //    dirty tile's other index-level sub-tiles. That under-reports the
+  //    contributing-bag set here and, more seriously, would break PR2 byte-
+  //    identity (a tile-scoped rebuild must replay EVERY pass touching the tile).
+  //    So re-enumerate each dirty tile's full extent at each index level present
+  //    in the footprint (queryPasses matches (level,row,col) exactly, so the
+  //    query tiles must be at the passes' own level, not the store level) and
+  //    union — a conservative superset of the tiles' contributing passes.
+  std::set<std::uint8_t> index_levels;
+  for (const auto & tile : footprint) {
+    index_levels.insert(tile.level());
+  }
+  std::set<gggs::GridIndex> query_tiles;
+  for (const auto & entry : dirty) {
+    const gggs::GridIndex & dirty_tile = entry.first;
+    for (const auto index_level : index_levels) {
+      const auto cover = marine_survey_index::tilesForBoundingBox(
+        dirty_tile.southLatitude(), dirty_tile.westLongitude(),
+        dirty_tile.northLatitude(), dirty_tile.eastLongitude(),
+        gggs::Level(index_level));
+      query_tiles.insert(cover.begin(), cover.end());
+    }
+  }
+
+  // 5. Attach every contributing pass (all bags) over that full extent, grouped
+  //    by the store-level tile its own footprint tile rolls up to. A pass rolling
+  //    up to a tile outside the dirty set (an edge neighbour the bounding-box
+  //    enumeration picked up) has no map entry and is dropped.
+  const std::vector<gggs::GridIndex> query_vec(query_tiles.begin(), query_tiles.end());
   const std::vector<marine_survey_index::PassRow> passes =
-    marine_survey_index::queryPasses(db, expanded, sensor_filter);
+    marine_survey_index::queryPasses(db, query_vec, sensor_filter);
   for (const auto & pass : passes) {
     const gggs::GridIndex pass_tile =
       tileFromRowCol(pass.level, pass.tile_row, pass.tile_col);

@@ -59,8 +59,11 @@ namespace cube
 ///   3. Roll the expanded footprint up to @p store_level via iterated
 ///      `gggs::parent()` (L14 → L10 is four applications) and deduplicate — this
 ///      is the dirty set.
-///   4. Attach, to each dirty tile, the passes (all bags) overlapping its
-///      footprint via `marine_survey_index::queryPasses`.
+///   4. Attach, to each dirty tile, the passes (all bags) overlapping its FULL
+///      index-level extent via `marine_survey_index::queryPasses` — re-enumerated
+///      from each dirty tile's bounds, not just the new-bag footprint, so an
+///      old-bag pass in a sub-tile outside the footprint is not omitted (required
+///      for a tile-scoped rebuild to replay every contributing pass).
 ///
 /// The result is a provably conservative superset of the tiles a full regen
 /// would rebuild for the new soundings: a missed tile would be a correctness
