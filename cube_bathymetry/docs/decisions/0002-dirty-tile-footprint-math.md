@@ -55,7 +55,7 @@ The dirty L10 set for a new bag is computed as follows:
 
 4. The resulting L10 set is the dirty set. It is a provably conservative superset of
    the L10 tiles `batch_regen::addBatch` would scatter to for the new bag's soundings,
-   given that typical influence radii (≤3 m) are much smaller than one L14 cell.
+   given that typical influence radii (≤3 m) are much smaller than one L14 tile.
 
 ## Rationale
 
@@ -69,7 +69,7 @@ geodetic distance — it stays correct as grid resolution changes.
 Influence-radius expansion at L10 (matching `boundsForSoundings` exactly) was
 considered but rejected: it would require either replaying sonar parameters at
 query time (breaking the index's data independence) or baking a worst-case margin
-into the index (over-conservative and fragile). The one-L14-cell margin is simpler,
+into the index (over-conservative and fragile). The one-L14-tile margin is simpler,
 always safe given realistic TPU, and self-documenting.
 
 A tile rebuilt unnecessarily produces a bit-identical result to full regen by
@@ -99,7 +99,7 @@ construction (same scatter-gather path, same reference gating). The only cost is
 - If `marine_survey_index` is absent (no DB file) the dirty set cannot be computed
   and the caller falls back to full regen (explicitly logged).
 - A changed sonar TPU model (new `Parameters` that changes `influenceRadius`) does
-  not invalidate this decision — the one-cell L14 margin already covers realistic TPU
+  not invalidate this decision — the one-L14-tile margin already covers realistic TPU
   bounds. If TPU grows pathologically, a full regen is available via `--fresh`.
 - This ADR applies to the bathy dirty set; the backscatter store shares the same
   footprint and uses the same dirty L10 set (ADR-0007 addendum).
