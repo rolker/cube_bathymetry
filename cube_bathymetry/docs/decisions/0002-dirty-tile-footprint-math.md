@@ -83,6 +83,19 @@ construction (same scatter-gather path, same reference gating). The only cost is
   are grouped by level first, so a mixed-level index footprint is handled). The
   rollup applies `gggs::parent()` iteratively (L14 → L10 = four applications;
   there is no multi-level `parentAt`).
+- The expansion (step 2) pads the **single bounding box** of all hit tiles at a
+  level, not each connected component. For a campaign that ensonifies two or more
+  geographically disjoint areas in one incremental batch, the padded box spans the
+  gap between them, so tiles in the empty corridor enter the dirty set. This stays
+  a conservative superset — every genuinely-dirty tile is still included, and the
+  spurious ones rebuild bit-identically (only wasted time). It is accepted for
+  simplicity; if multi-area batches ever make the waste material, expand each
+  connected component's box separately instead of the global box.
+- The contributing-pass set attached to each dirty tile is re-queried over that
+  tile's **full** index-level extent (its own bounds re-enumerated), not just the
+  new-bag footprint, so an old-bag pass in a sub-tile the new bags did not touch
+  is still reported. This is required for a tile-scoped rebuild to replay every
+  pass that touches the tile (byte-identity with full regen).
 - If `marine_survey_index` is absent (no DB file) the dirty set cannot be computed
   and the caller falls back to full regen (explicitly logged).
 - A changed sonar TPU model (new `Parameters` that changes `influenceRadius`) does

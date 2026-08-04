@@ -138,6 +138,12 @@ std::vector<gggs::GridIndex> expandFootprint(const std::vector<gggs::GridIndex> 
     by_level[tile.level()].push_back(tile);
   }
 
+  // One bounding box per level over ALL hit tiles at that level. Disjoint
+  // footprints (e.g. two separate survey areas in one incremental batch) are
+  // merged into a single box, so the padded box spans the gap between them and
+  // marks the intervening tiles dirty. That stays a conservative superset (the
+  // extra tiles rebuild bit-identically); accepted for simplicity — see
+  // ADR-0002 Consequences.
   for (const auto & [level, tiles] : by_level) {
     double lat_min = std::numeric_limits<double>::max();
     double lat_max = std::numeric_limits<double>::lowest();
