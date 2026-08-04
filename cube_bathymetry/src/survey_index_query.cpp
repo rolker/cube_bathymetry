@@ -53,13 +53,31 @@ gggs::GridIndex tileFromRowCol(std::uint8_t level, std::uint32_t row, std::uint3
 }
 
 // Roll a tile up the GGGS quadtree to `target_level` by iterating gggs::parent()
-// one level per step (ADR-0002: L14 -> L10 is four applications). A tile already
-// at or coarser than the target is returned unchanged — the index footprint is
-// never coarser than the store level in practice (L14 >= L10).
+// one level per step (ADR-0002: L14 -> L10 is four applications). The index
+// footprint is never coarser than the store level in practice (L14 >= L10), so
+// the roll-up only ever moves toward the coarser target.
+//
+// Preconditions/postconditions are enforced, not just assumed: rolling a tile
+// that is already coarser than the target (store level finer than the index
+// footprint) can't reach `target_level` and would silently emit a wrong-level
+// dirty tile, and an invalid result tile collapses every such case onto one key
+// in the caller's dirty map (merging unrelated tiles). Both throw so the CLI
+// dry-run's catch falls back to full regen instead of trusting a mis-levelled
+// dirty set.
 gggs::GridIndex ancestorAtLevel(gggs::GridIndex tile, std::uint8_t target_level)
 {
+  if (tile.valid() && tile.level() < target_level) {
+    throw std::invalid_argument(
+      "survey_index_query: store level is finer than the index footprint level "
+      "(cannot roll a tile up to a finer level)");
+  }
   while (tile.valid() && tile.level() > target_level) {
     tile = gggs::parent(tile);
+  }
+  if (!tile.valid() || tile.level() != target_level) {
+    throw std::runtime_error(
+      "survey_index_query: could not roll tile up to the store level "
+      "(invalid tile in the index footprint)");
   }
   return tile;
 }
