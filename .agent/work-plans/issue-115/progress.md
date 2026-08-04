@@ -276,3 +276,27 @@ fresh-context sub-agent:
 Lifecycle: **Local Review (approved)** → push / open PR → **triage-reviews**. Hand off to a fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 115 --skill triage-reviews
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-04 12:59 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #117 at `5f085d9`
+**Sources**: 4 (Copilot review @ `5f085d9` — 0 comments; Local Review (Pre-Push) R1 @ `db5ca95`; Local Review (Pre-Push) R2 @ `bb26b58`; CI rollup @ `5f085d9`)
+**Cross-source confirmations**: 0
+**CI**: all-pass (ROS 2 Jazzy industrial_ci: success; copilot-pull-request-reviewer: success)
+
+### Findings
+- [ ] (suggestion, Local Review R2) ADR-0001 rung-2 paragraph does not note that the widened gate newly exposes previously-ungated tiles to the legitimate-deep false-reject mode; the mains' `--reference-store` help text carries the operational NOTE but the ADR does not — one-line addition — `cube_bathymetry/docs/decisions/0001-tile-eviction-and-incremental-publish.md:238`
+
+### False positives
+- (Local Review R2) "Cross-level fallback diagnostic hardcodes `import_bag:` prefix (also drives batch_regen)" — not a defect introduced by this PR and not fixable in isolation: all 9 `std::cerr` diagnostics in `store_import.cpp` use the same `import_bag:` prefix, including the sibling catch-block message three lines below. Changing only the new one would break the file-wide convention and make batch_regen output *less* consistent, not more. The per-seeded-tile firing rate is the intended auditability behavior requested by the same review round (one line per tile that actually took the fallback, bounded by resident-tile count, not per sounding). A repo-wide prefix cleanup is a separate concern.
+
+### Notes
+- Copilot reviewed 8/8 changed files and generated no comments; its summary describes the change accurately (cross-level containment-verified fallback + two regression tests + docs), so it neither confirms nor contradicts any local finding.
+- R1's two must-fix findings (boundary-flush containment gate-off; missing boundary-flush regression test) are both resolved in the code at head: `store_import.cpp` verifies containment via `gggs::Level(cand.level()).gridIndex(survey_center) != cand` rather than inferring it from level alone, and `test_import_eviction.cpp` carries the boundary-flush regression test.
+- No must-fix or cross-confirmed findings remain. The single open suggestion is documentation-only and does not gate merge.
+
+### Next step
+Lifecycle: **Integrated Review** → address-findings (1 doc-only suggestion) or merge. No must-fix findings remain; PR #117 is merge-ready on the technical gate. Recommendation: land the one-line ADR note first (cheap, and the ADR is the durable record of the widened gate's trade-off), then merge via `.agent/scripts/merge_pr.sh --issue 115`.
