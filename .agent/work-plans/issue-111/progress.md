@@ -349,3 +349,34 @@ tests. `ament_uncrustify` and `ament_cpplint` clean on all four changed files.
 
 ### False positives
 - (none)
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-04 23:52 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-111 at `ea7d4cc`
+**Addressed**: Integrated Review (When 2026-08-03 23:58 -04:00, PR #116 at `eeaa4cd`) — all 3 valid (Copilot) findings
+**Commits**: `8b29e71` `007031c` `ea7d4cc`
+
+Worked the Integrated Review's fix plan (3 valid Copilot findings; no false
+positives to dismiss). Each finding fixed and committed atomically with its box
+checked. Verified: `survey_index_query.cpp` (F1+F2) and `batch_regen_main.cpp`
+(F3) syntax-check clean (`g++ -std=c++17`); the F3 non-throwing-`exists` logic
+was compiled and exercised standalone (absent/error path → return 0, present →
+proceed); the `survey_index_query` gtest suite built against the
+`marine_survey_index` sources and run standalone → **9/9 pass** (full colcon
+build not possible — the lower ROS layers are unbuilt in this offline worktree,
+only `sensors_ws/install` exists). `ament_uncrustify`/`ament_cpplint`/copyright
+pre-commit hooks passed on every commit.
+
+### Actions
+- [x] (must-fix→valid, Copilot) `tileFromRowCol` now constructs `gggs::Level(level)` (which throws `std::out_of_range` for level ≥ 21) BEFORE indexing the unchecked `gggs::levels` array — a corrupted index row surfaces as a catchable exception the dry-run's catch turns into a full-regen fallback, not out-of-bounds UB — `cube_bathymetry/src/survey_index_query.cpp:46` (`8b29e71`)
+- [x] (valid, Copilot) `dirtyL10Tiles` now sorts each dirty tile's passes by (bag path, start time) before returning, honouring the header's ordering contract independently of `queryPasses`' 200-tile chunking (a dirty L10 tile's L14 extent is 256 tiles) — deterministic per-tile dry-run output — `cube_bathymetry/src/survey_index_query.cpp:283` (`007031c`)
+- [x] (valid, Copilot) `dirtyTileDryRun` now uses the `std::error_code` overload of `std::filesystem::exists` (added `#include <system_error>`); a path error (EACCES/ELOOP) on the index path routes to the index-absent full-regen fallback (exit 0, no marker) instead of aborting uncaught outside the soft-dep try/catch — `cube_bathymetry/src/batch_regen_main.cpp:367` (`ea7d4cc`)
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off
+to a fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 111 --skill review-code
