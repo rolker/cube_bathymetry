@@ -244,9 +244,42 @@ atomic swap (ADR-0003), then PR2b `build_bathy_store.sh` in `unh_echoboats_proje
 Specialists: static analysis (copyright/cpplint/uncrustify clean); Claude Adversarial x2 (Lens A + Lens B, both cross-confirmed must-fix #1); Copilot off (default); Local skipped (Ollama unavailable).
 
 ### Findings
-- [ ] (must-fix) `DirtyTile.passes` omits interior old-bag passes for a partially-covered dirty L10 tile (`queryPasses` runs over `expanded`, not the tile's full L14 extent) — breaks PR2 byte-identity + under-reports dry-run contributing bags; test `ContributingPassesIncludeOldBags` can't catch it (same L14 tile) — `cube_bathymetry/src/survey_index_query.cpp:200`
-- [ ] (suggestion) `DIRTY_TILES_JSON` tile lat/lon truncated to 6 sig-fig; use `setprecision(17)` + classic locale (bounds recomputable from level/row/col, so low sev) — `cube_bathymetry/src/batch_regen_main.cpp:414`
-- [ ] (suggestion) `expandFootprint` merges disjoint footprints into one bbox, inflating the dirty set on multi-area campaigns (conservative; note trade-off in ADR-0002) — `cube_bathymetry/src/survey_index_query.cpp:141`
-- [ ] (suggestion) Document machine contract: presence of `DIRTY_TILES_JSON:` line is authoritative, absence ⇒ full regen (exit 0 on absent/failed/non-index file) — `cube_bathymetry/src/batch_regen_main.cpp:361`
-- [ ] (suggestion) Document `dirtyL10Tiles` antimeridian `std::invalid_argument` throw so PR2's rebuild path replicates the CLI's catch — `cube_bathymetry/src/survey_index_query.cpp:166`
-- [ ] (suggestion) `jsonEscape` passes signed char to `\u%04x`; use `static_cast<unsigned char>(c)` for obvious correctness — `cube_bathymetry/src/batch_regen_main.cpp:319`
+- [x] (must-fix) `DirtyTile.passes` omits interior old-bag passes for a partially-covered dirty L10 tile (`queryPasses` runs over `expanded`, not the tile's full L14 extent) — breaks PR2 byte-identity + under-reports dry-run contributing bags; test `ContributingPassesIncludeOldBags` can't catch it (same L14 tile) — `cube_bathymetry/src/survey_index_query.cpp:200`
+- [x] (suggestion) `DIRTY_TILES_JSON` tile lat/lon truncated to 6 sig-fig; use `setprecision(17)` + classic locale (bounds recomputable from level/row/col, so low sev) — `cube_bathymetry/src/batch_regen_main.cpp:414`
+- [x] (suggestion) `expandFootprint` merges disjoint footprints into one bbox, inflating the dirty set on multi-area campaigns (conservative; note trade-off in ADR-0002) — `cube_bathymetry/src/survey_index_query.cpp:141`
+- [x] (suggestion) Document machine contract: presence of `DIRTY_TILES_JSON:` line is authoritative, absence ⇒ full regen (exit 0 on absent/failed/non-index file) — `cube_bathymetry/src/batch_regen_main.cpp:361`
+- [x] (suggestion) Document `dirtyL10Tiles` antimeridian `std::invalid_argument` throw so PR2's rebuild path replicates the CLI's catch — `cube_bathymetry/src/survey_index_query.cpp:166`
+- [x] (suggestion) `jsonEscape` passes signed char to `\u%04x`; use `static_cast<unsigned char>(c)` for obvious correctness — `cube_bathymetry/src/batch_regen_main.cpp:319`
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-04 03:15 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-111 at `fcb172f`
+**Addressed**: Local Review (Pre-Push) — 2026-08-04 02:56 +00:00, branch feature/issue-111 at `f5b9878` (1 must-fix + 5 suggestions)
+**Commits**: `50ed7bb`, `000377c`, `f1e9991`, `ed7fcea`, `26a7bf2`, `fcb172f`
+
+All six findings actioned (none deferred). Verified: `./sensors_ws/build.sh
+cube_bathymetry` builds clean; `./sensors_ws/test.sh cube_bathymetry` →
+**490 tests, 0 errors, 0 failures, 65 skipped** (up one from 489 — the new
+`ContributingPassesIncludeOldBagInSeparateL14Subtile` regression test). All six
+`DirtyTileQuery` cases pass. Pre-commit linters (uncrustify/cpplint/copyright)
+passed on every commit. Had to rebuild the dependency layers first (underlay
+`geodesy` from source for `geodesics.h`, then core `unh_marine_autonomy` up to
+`marine_survey_index`/`marine_bathymetry_store` et al.) — this environment
+started with empty layer installs.
+
+### Actions
+- [x] (must-fix) Query dirty-tile passes over each dirty L10 tile's FULL index-level extent, not just the new-bag footprint+margin (`expanded`) — old-bag passes in a dirty tile's other L14 sub-tiles were omitted, under-reporting contributing bags and breaking PR2 byte-identity. Added a regression test with an old-bag pass in a separate L14 sub-tile. — `cube_bathymetry/src/survey_index_query.cpp:201` (`50ed7bb`)
+- [x] (suggestion) `DIRTY_TILES_JSON` coords now emitted with `imbue(classic)` + `setprecision(17)` (round-trippable) — `cube_bathymetry/src/batch_regen_main.cpp:405` (`ed7fcea`)
+- [x] (suggestion) Documented the disjoint-footprint single-bbox trade-off in ADR-0002 Consequences + an `expandFootprint` code comment — `cube_bathymetry/src/survey_index_query.cpp:129` (`000377c`)
+- [x] (suggestion) Documented the `DIRTY_TILES_JSON:` machine contract (marker authoritative; absence ⇒ full regen; exit 0 on absent/failed/non-index) in `dirtyTileDryRun` + README — `cube_bathymetry/src/batch_regen_main.cpp:337` (`fcb172f`)
+- [x] (suggestion) Documented `dirtyL10Tiles` antimeridian `std::invalid_argument` throw in the header `@throws` — `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:81` (`f1e9991`)
+- [x] (suggestion) `jsonEscape` now casts to `unsigned char` for the `\u%04x` escape — `cube_bathymetry/src/batch_regen_main.cpp:321` (`26a7bf2`)
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off
+to a fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 111 --skill review-code
