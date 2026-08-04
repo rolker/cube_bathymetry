@@ -578,4 +578,110 @@ TEST(ImportEviction, CoarseLevelReferenceSeedRejectsDeepBlunder)
   std::filesystem::remove_all(root);
 }
 
+// Boundary-flush cross-level gate (#115 round 2): the level-walk fallback must pick
+// the coarse tile that CONTAINS the survey tile, not merely the finest coarse tile
+// the load window returned. `loadWindow`'s overlap test is inclusive (tile_io.cpp
+// tileOverlapsBox), so a survey tile flush against a coarse-tile boundary also pulls
+// in the edge-adjacent coarse NEIGHBOR (same level, shares only the boundary line).
+// A level-only selection can pick that neighbor; primeFromTileResample's
+// grid-mismatch guard then skips every fine cell -> the blunder gate silently OFF
+// again for boundary tiles. Here the survey L10 tile sits flush against the WEST
+// edge of its containing L7 tile, and BOTH the container and its west neighbor L7
+// tiles are on disk. The containment check must reject the neighbor and gate via the
+// container. (Revert the containment check and the map-ordered neighbor -- lower
+// column, iterated first -- wins the level-only tie, nothing gates, and the deep
+// sounding settles -> this fails.)
+TEST(ImportEviction, BoundaryFlushCrossLevelReferenceRejectsDeepBlunder)
+{
+  constexpr float kCoarseCellSize = 8.0f;  // L7, coarser than the 1 m survey (L10)
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  ASSERT_LT(coarse_level.level(), survey_level.level())
+    << "the reference must be at a coarser level to exercise the level-walk";
+
+  const std::string root = makeTempDir("flush_xlevel_refseed");
+  const std::string ref_dir = root + "/reference_store";
+
+  // The containing L7 tile, and a survey position inside its WESTMOST L10 sub-tile so
+  // the survey tile's west edge is flush with the L7 west boundary. Latitude sits at
+  // the L7 tile's mid-height so only the WEST neighbor (not a corner) is adjacent.
+  const gggs::GridIndex container = coarse_level.gridIndex(43.0, -70.0);
+  const double lat = container.southLatitude() + container.latitudinalSpan() * 0.5;
+  // container.longitudinalSpan()/8 == one L10 tile span; /16 lands mid-width of the
+  // westmost L10 sub-tile -> its west edge coincides with the L7 west boundary.
+  const double lon = container.westLongitude() + container.longitudinalSpan() / 16.0;
+  const gggs::GridIndex survey_grid = survey_level.gridIndex(lat, lon);
+  ASSERT_EQ(survey_grid.level(), survey_level.level());
+  ASSERT_NEAR(survey_grid.westLongitude(), container.westLongitude(), 1e-9)
+    << "the survey tile must be flush against the coarse west boundary";
+
+  // The L7 tile immediately WEST of the container (its east edge == the shared
+  // boundary). Inclusive overlap makes loadWindow return it for the flush survey tile.
+  const gggs::GridIndex west_neighbor = coarse_level.gridIndex(
+    lat, container.westLongitude() - container.longitudinalSpan() * 0.5);
+  ASSERT_EQ(west_neighbor.level(), container.level());
+  ASSERT_NE(west_neighbor, container)
+    << "the west neighbor must be a distinct coarse tile";
+
+  // Fill BOTH coarse tiles shallow (-20 m) and write them to the reference layer.
+  {
+    marine_bathymetry_store::BathymetryStore ref_store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/true);
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    for (const gggs::GridIndex & cg : {container, west_neighbor}) {
+      marine_bathymetry_store::BathymetryTile ctile(cg);
+      for (gggs::CellAreaIterator cit(cg); cit.valid(); cit.next()) {
+        ctile.set(
+          (*cit).row(), (*cit).column(),
+          marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+      }
+      tiles.emplace(cg, std::move(ctile));
+    }
+    ref_store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(ref_store, ref_dir);
+  }
+
+  // A clearly-too-deep blunder (~ -150 m) where the coarse prior says ~ -20 m.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(lat, lon, 150.0f, 40.0f));
+
+  const std::string with_ref = root + "/with_ref";
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(with_ref, "", /*budget=*/0);
+    cfg.reference_store_dir = ref_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  const std::string no_ref = root + "/no_ref";
+  runImport(batches, no_ref, "", /*budget=*/0);
+
+  const auto with = loadBathyCells(with_ref);
+  const auto without = loadBathyCells(no_ref);
+
+  // Baseline (no prior): the deep sounding is accepted and settles a deep cell.
+  ASSERT_FALSE(without.empty())
+    << "without a prior the deep sounding must settle a cell";
+  bool baseline_is_deep = false;
+  for (const auto & [cell, du] : without) {
+    if (du.first < -100.0) {baseline_is_deep = true;}
+  }
+  EXPECT_TRUE(baseline_is_deep)
+    << "the baseline deep sounding should settle a deep (< -100 m) cell";
+
+  // With the container coarse tile selected (neighbor rejected), the gate fires and
+  // no cell settles.
+  EXPECT_TRUE(with.empty())
+    << "the containing coarse tile must gate the deep blunder even when a flush "
+       "survey tile also loads the edge-adjacent coarse neighbor";
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube
