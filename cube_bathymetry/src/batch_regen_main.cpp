@@ -49,6 +49,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -364,10 +365,17 @@ int dirtyTileDryRun(
     std::cout << "  " << bag << std::endl;
   }
 
-  if (!std::filesystem::exists(index_db_path)) {
-    std::cerr << "note: survey index '" << index_db_path << "' not found -- a real "
-      "incremental run would fall back to FULL regen (index-absent contract, "
-      "ADR-0002)." << std::endl;
+  // Use the non-throwing std::error_code overload here: this check sits OUTSIDE
+  // the soft-dep try/catch below, so the throwing overload would let a path error
+  // (EACCES/ELOOP on the index path) abort the process uncaught -- a nonzero exit
+  // with no DIRTY_TILES_JSON marker, violating the exit-0 "index unavailable =>
+  // full regen" contract. Treat any such error the same as an absent index.
+  std::error_code exists_ec;
+  if (!std::filesystem::exists(index_db_path, exists_ec) || exists_ec) {
+    std::cerr << "note: survey index '" << index_db_path << "' not found"
+              << (exists_ec ? " (" + exists_ec.message() + ")" : "")
+              << " -- a real incremental run would fall back to FULL regen "
+                 "(index-absent contract, ADR-0002)." << std::endl;
     return 0;
   }
 
