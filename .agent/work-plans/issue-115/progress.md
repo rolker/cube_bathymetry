@@ -78,3 +78,45 @@ Per the consequences map, the following should be updated in the same PR:
 ### Open questions
 - [ ] Keep `primeFromTileResample` internal (anonymous namespace) vs. declared in `store_import.h` — no current caller outside `seedNewTile`; prefer internal unless a caller exists.
 - [ ] Level-walk selects finest available coarser level (highest level number below survey level) — confirm this aligns with issue's "finest→coarsest" walk intent.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-08-04 02:45 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independent review: fresh-context sub-agent, different model than the plan
+     author (Sonnet). The `## Plan Authored` By-name matches ($AGENT_NAME is the
+     generic "Claude Code Agent" for all agents here), but the annotation exists to
+     flag genuine in-context self-review; this is not one, so no annotation. -->
+
+**Plan**: `.agent/work-plans/issue-115/plan.md` at `eca426a`
+**PR**: PR-less (`--issue`/file-path invocation; no draft plan PR)
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (suggestion) Consequence completeness — the "Only tiles at the survey GGGS
+  level" restriction lives in **two** more sites the plan misses: `batch_regen_main.cpp:85-86`
+  (identical `--reference-store` help; batch-regen shares `seedNewTile`) and,
+  higher-priority, the call-site comment `import_bag_main.cpp:704` ("a reference tile
+  at another level primes a node the soundings never land on (harmless no-op)"),
+  which describes the exact bug as intentional and will actively contradict the fix.
+  Add both to the Consequences table — `plan.md:93-98`.
+- [ ] (suggestion) Test placement — the cross-level test needs an on-disk reference
+  store + `ImportAccumulator` harness that already exists in `test_import_eviction.cpp`
+  (helpers `makeTempDir`/`makeConfig`/`surveyCell`/`countReferenceFiniteCells`/`loadBathyCells`,
+  beside `ReferenceSeedDoesNotAddMeasuredData`). `test_store_import.cpp` (the plan's
+  target, `plan.md:69`) tests pure helpers and has none of it — placing it there
+  duplicates infra. Prefer `test_import_eviction.cpp`.
+- [ ] (suggestion) ADR citation — the ADR-0001 rung-2 addendum cites its enforcement
+  test by name (`test_import_eviction.ReferenceSeedDoesNotAddMeasuredData`); step 5
+  (`plan.md:57-62`) should likewise name the new cross-level enforcement test.
+- [ ] (suggestion) Implementation nit — `CellIndex::position()` returns the cell's
+  **SW corner**, not the center that step 1 (`plan.md:31-36`) assumes; add the +0.5-cell
+  offset or accept SW-corner nearest-neighbor explicitly. `Level::cellIndex(GeoPoint)`
+  already composes gridIndex+CellIndex in one call (simpler than the two-step sketch).
+- [ ] (validation) Root cause + approach verified against the code: `loadWindow`
+  (`tile_io.cpp:424-426`) stores coarse tiles keyed by their own level, so
+  `tiles.find(index)` at the L10 index misses them — the bug is real. GGGS is nested
+  (`gggs/core.h:49`), so a survey tile is fully contained in exactly one coarser tile
+  per level — the plan's single-coarse-tile selection is correct (no straddle). All
+  four `## Issue Review` action items (README, ADR, cross-level test, diagnostic) are
+  addressed.
