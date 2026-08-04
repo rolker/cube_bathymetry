@@ -331,3 +331,21 @@ tests. `ament_uncrustify` and `ament_cpplint` clean on all four changed files.
 - [x] (suggestion) Enforced `ancestorAtLevel` pre/postconditions — throw `std::invalid_argument` if the store level is finer than the footprint, `std::runtime_error` on an invalid rolled-up tile; documented both in the header `@throws` — `cube_bathymetry/src/survey_index_query.cpp:59`, `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:86`
 - [x] (suggestion) Validate `--iho-order` in the dry-run gate (cheap GeoMapSheet probe) so a bad order routes to a clean `usage()` error instead of aborting uncaught with no `DIRTY_TILES_JSON` marker; scoped to the dry-run path (the full-regen path is pre-existing and out of scope) — `cube_bathymetry/src/batch_regen_main.cpp:599`
 - [x] (suggestion) Added 3 tests: exact `sensor_filter` scopes footprint + contributing set; `"sidescan"` alias matches channel-split `sidescan_port` (and a wrong exact filter yields empty); mixed L14/L13 footprint rolls each level to its L10 store tile — `cube_bathymetry/test/test_survey_index_query.cpp`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-03 23:58 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #116 at `eeaa4cd`
+**Sources**: 3 (Copilot review @ `eeaa4cd`, Local Review (Pre-Push) R1 @ `f5b9878`, R2 @ `55bcf15`)
+**Cross-source confirmations**: 0 (both local rounds pre-date the head; their findings were all addressed before publish. Copilot's 3 comments are new sites, though #1 and #3 extend failure families R2 already hardened — ancestorAtLevel guards, --iho-order soft-dep contract)
+**CI**: pending — ROS 2 Jazzy (industrial_ci) in progress at triage time; copilot-pull-request-reviewer success
+
+### Findings
+- [ ] (valid, Copilot) `tileFromRowCol` indexes `gggs::levels[level]` with a DB-sourced level before any validation — level ≥ 21 from a corrupted index is out-of-bounds UB. Construct `gggs::Level(level)` first (it throws `std::out_of_range`) or bounds-check explicitly, so the dry-run's catch falls back to full regen — `cube_bathymetry/src/survey_index_query.cpp:46-53`
+- [ ] (valid, Copilot) `dirtyL10Tiles` header promises passes "ordered by bag path then start time", but `queryPasses` only ORDER-BYs per 200-tile chunk and one dirty L10 tile's L14 extent is 256 tiles — chunking always breaks global order, making dry-run output nondeterministic vs the documented contract. Sort each tile's passes before returning — `cube_bathymetry/src/survey_index_query.cpp:283-288`
+- [ ] (valid, Copilot) `dirtyTileDryRun` uses the throwing `std::filesystem::exists` overload outside the soft-dep try/catch (line 367 vs try at 375); an EACCES/ELOOP path error aborts uncaught — nonzero exit, no marker — violating the exit-0 "index unavailable ⇒ full regen" contract (same failure family as R2's --iho-order fix). Use the `std::error_code` overload and treat errors as index-absent — `cube_bathymetry/src/batch_regen_main.cpp:367-372`
+
+### False positives
+- (none)
