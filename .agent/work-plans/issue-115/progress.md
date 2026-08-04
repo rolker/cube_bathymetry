@@ -65,3 +65,16 @@ Per the consequences map, the following should be updated in the same PR:
 - [ ] Update ADR-0001 addendum Rung 2 text to describe the level-walk fallback behavior.
 - [ ] Add cross-level reference seeding test in `test_store_import.cpp` (reference at coarser level → blunder gate activates for survey tile at finer level).
 - [ ] Emit a diagnostic (stderr or ROS log) when the level-walk fallback fires, naming the reference level actually used — supports import-log auditability.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-04 14:30 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-115/plan.md` at `eca426a`
+**Branch**: feature/issue-115 at `eca426a`
+**Phases**: single
+
+### Open questions
+- [ ] Keep `primeFromTileResample` internal (anonymous namespace) vs. declared in `store_import.h` — no current caller outside `seedNewTile`; prefer internal unless a caller exists.
+- [ ] Level-walk selects finest available coarser level (highest level number below survey level) — confirm this aligns with issue's "finest→coarsest" walk intent.
