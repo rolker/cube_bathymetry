@@ -600,6 +600,22 @@ int main(int argc, char * argv[])
       std::cerr << "error: -r resolution must be > 0 (got " << resolution << ")\n";
       usage();
     }
+    // Validate --iho-order up front, like -r above. dirtyTileDryRun builds a
+    // GeoMapSheet (and its Parameters) BEFORE the soft-dependency try/catch, and
+    // Parameters' ctor throws std::invalid_argument on an unknown order. Left
+    // unvalidated that would abort the dry-run uncaught -- std::terminate, nonzero
+    // exit, and no DIRTY_TILES_JSON marker -- which a consumer keying off the
+    // marker's absence would misread as the exit-0 "index absent, full regen"
+    // soft-dep path. A bad --iho-order is a user error, so route it to a clean
+    // usage() error here instead. (GeoMapSheet's ctor is cheap: Parameters + Level,
+    // no grid allocation.)
+    try {
+      cube::GeoMapSheet probe(static_cast<float>(resolution), iho_order);
+      (void)probe;
+    } catch (const std::exception & e) {
+      std::cerr << "error: " << e.what() << "\n";
+      usage();
+    }
     return dirtyTileDryRun(index_db_path, bagfile_names, resolution, iho_order);
   }
 
