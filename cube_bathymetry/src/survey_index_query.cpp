@@ -311,10 +311,11 @@ std::vector<DirtyTile> dirtyL10Tiles(
   }
 
   // 6. Sort each dirty tile's passes so the header's ordering contract holds
-  //    INDEPENDENTLY of queryPasses' internals. queryPasses currently sorts its
-  //    merged result itself, so today this is a no-op — it decouples this
-  //    function's documented ordering from that implementation detail rather
-  //    than relying on it.
+  //    INDEPENDENTLY of queryPasses' internals. This sort is load-bearing, not
+  //    a formality: queryPasses orders its merged result on (bag_path,
+  //    t_start_ns) ONLY, with a non-stable std::sort, so every row pair tying
+  //    on that prefix reaches us in an unspecified relative order. Do not
+  //    delete this as redundant with queryPasses.
   //
   //    The key is (bag_path, t_start_ns, topic, t_end_ns, tile_row, tile_col):
   //    std::sort is NOT stable, so any tie left unbroken has a toolchain- and
