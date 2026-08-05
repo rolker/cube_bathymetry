@@ -88,6 +88,31 @@ gggs::GridIndex ancestorAtLevel(gggs::GridIndex tile, std::uint8_t target_level)
   return tile;
 }
 
+// RAII owner for a prepared statement. Every exit path from the step loop below
+// — including a throw out of tileFromRowCol on a corrupt (level >= 21) index row
+// — must finalize the statement: an unfinalized statement makes the caller's
+// sqlite3_close(db) return SQLITE_BUSY and leak the db handle too. The dry-run
+// CLI is process-exit-bounded, but PR2 reuses dirtyL10Tiles from a long-lived
+// rebuild path, so the invariant is enforced structurally rather than by
+// remembering a finalize call at each throw site.
+class StmtGuard
+{
+public:
+  explicit StmtGuard(sqlite3_stmt * stmt)
+  : stmt_(stmt) {}
+  ~StmtGuard()
+  {
+    if (stmt_ != nullptr) {
+      sqlite3_finalize(stmt_);
+    }
+  }
+  StmtGuard(const StmtGuard &) = delete;
+  StmtGuard & operator=(const StmtGuard &) = delete;
+
+private:
+  sqlite3_stmt * stmt_;
+};
+
 // The index-level (L14) footprint tiles the given new bags touched, read
 // straight from the passes/bags join. Returns distinct tiles. `sensor_filter`,
 // when non-empty, restricts the footprint to that sensor with the SAME semantics
@@ -125,6 +150,8 @@ std::vector<gggs::GridIndex> newBagFootprint(
     throw std::runtime_error(
       std::string("survey_index_query: prepare footprint failed: ") + sqlite3_errmsg(db));
   }
+  // Owns `stmt` from here on: every return/throw below finalizes it.
+  StmtGuard stmt_guard(stmt);
 
   // A set keyed by GridIndex dedups tiles a bag touched more than once and tiles
   // shared across the new bags.
@@ -136,7 +163,6 @@ std::vector<gggs::GridIndex> newBagFootprint(
       (!sensor_bind_value.empty() &&
       sqlite3_bind_text(stmt, 2, sensor_bind_value.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK))
     {
-      sqlite3_finalize(stmt);
       throw std::runtime_error(
         std::string("survey_index_query: bind footprint failed: ") + sqlite3_errmsg(db));
     }
@@ -148,13 +174,11 @@ std::vector<gggs::GridIndex> newBagFootprint(
       distinct.insert(tileFromRowCol(level, row, col));
     }
     if (rc != SQLITE_DONE) {
-      sqlite3_finalize(stmt);
       throw std::runtime_error(
         std::string("survey_index_query: step footprint failed: ") + sqlite3_errmsg(db));
     }
     sqlite3_reset(stmt);
   }
-  sqlite3_finalize(stmt);
 
   footprint.assign(distinct.begin(), distinct.end());
   return footprint;
