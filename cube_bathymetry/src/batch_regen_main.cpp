@@ -390,10 +390,24 @@ int dirtyTileDryRun(
     try {
       dirty = cube::dirtyL10Tiles(db, bagfile_names, store_level);
     } catch (...) {
-      sqlite3_close(db);
+      // close_v2 on the throw path: an exception can escape mid-query with a
+      // statement still live, and plain sqlite3_close would then return
+      // SQLITE_BUSY and LEAK the handle. close_v2 defers the free until the
+      // last statement finalizes, so the handle is always reclaimed.
+      sqlite3_close_v2(db);
       throw;
     }
-    sqlite3_close(db);
+    // Checked on the success path: SQLITE_BUSY here means the query left a
+    // prepared statement unfinalized (the leak StmtGuard exists to prevent).
+    // It does not invalidate the dirty set already computed, so warn rather
+    // than change the marker contract -- but never fail silently.
+    const int close_rc = sqlite3_close(db);
+    if (close_rc != SQLITE_OK) {
+      std::cerr << "warning: survey index did not close cleanly ("
+                << sqlite3_errstr(close_rc)
+                << ") -- a prepared statement was leaked by the query; the "
+        "dirty-tile result below is still valid." << std::endl;
+    }
   } catch (const std::exception & e) {
     std::cerr << "note: could not query survey index (" << e.what() << ") -- a real "
       "incremental run would fall back to FULL regen." << std::endl;

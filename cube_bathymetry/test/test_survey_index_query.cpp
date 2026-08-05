@@ -84,10 +84,20 @@ class IndexFixture : public testing::Test
 protected:
   void openIndex(const std::string & path) {db_ = marine_survey_index::openIndexDb(path);}
 
+  // The close is CHECKED, not fire-and-forget: sqlite3_close returns SQLITE_BUSY
+  // while any prepared statement or blob handle on the connection is still open,
+  // so a future statement leak in the query code -- precisely the bug class
+  // StmtGuard exists to prevent -- would otherwise pass silently. Asserting
+  // SQLITE_OK here makes every test in this file a standing leak guard.
+  // sqlite3_errstr(rc), not sqlite3_errmsg(db_): on success the handle is freed,
+  // so reading a message off it afterwards would be use-after-free.
   void TearDown() override
   {
-    sqlite3_close(db_);
+    if (db_ == nullptr) {return;}
+    const int rc = sqlite3_close(db_);
     db_ = nullptr;
+    EXPECT_EQ(rc, SQLITE_OK) << "sqlite3_close: " << sqlite3_errstr(rc) <<
+      " -- a prepared statement or blob handle was leaked by the query code";
   }
 
   void exec(const std::string & sql)
