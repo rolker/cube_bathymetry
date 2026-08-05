@@ -82,7 +82,12 @@ namespace cube
 ///   Empty (default) = all sensors. Use the bathy sensor to scope the dirty set
 ///   to the surface being rebuilt.
 /// @return The dirty tiles, ordered by `gggs::GridIndex`, each with its
-///   contributing passes ordered by bag path then start time.
+///   contributing passes in a total, reproducible order: by bag path, then
+///   start time, then topic, then end time, then index tile row and column.
+///   The keys past (bag path, start time) exist so rows a single bag can tie on
+///   (several sonar topics, or several index-level sub-tiles of one store tile)
+///   are still ordered deterministically — the CLI's `DIRTY_TILES_JSON` is
+///   expected to be byte-stable across toolchains and index row orders.
 /// @throws std::invalid_argument if a footprint (or a dirty tile's extent)
 ///   spans more than 180° of longitude — an antimeridian-crossing box, which
 ///   `marine_survey_index::tilesForBoundingBox` refuses rather than enumerate

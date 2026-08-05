@@ -310,11 +310,19 @@ std::vector<DirtyTile> dirtyL10Tiles(
     }
   }
 
-  // 6. Sort each dirty tile's passes by (bag path, start time) so the header's
-  //    ordering contract holds INDEPENDENTLY of queryPasses' internals.
-  //    queryPasses currently sorts its merged result itself, so today this is
-  //    a no-op — it decouples this function's documented ordering from that
-  //    implementation detail rather than relying on it.
+  // 6. Sort each dirty tile's passes so the header's ordering contract holds
+  //    INDEPENDENTLY of queryPasses' internals. queryPasses currently sorts its
+  //    merged result itself, so today this is a no-op — it decouples this
+  //    function's documented ordering from that implementation detail rather
+  //    than relying on it.
+  //
+  //    The key is (bag_path, t_start_ns, topic, t_end_ns, tile_row, tile_col):
+  //    std::sort is NOT stable, so any tie left unbroken has a toolchain- and
+  //    input-order-dependent relative order, and one bag can contribute several
+  //    passes to the same store tile (multiple sonar topics, several index-level
+  //    sub-tiles). Those extra keys make the emitted order — and therefore the
+  //    CLI's DIRTY_TILES_JSON bytes, which PR2's byte-identity check leans on —
+  //    a total, reproducible order over the rows a tile can hold.
   std::vector<DirtyTile> result;
   result.reserve(dirty.size());
   for (auto & [tile, tile_passes] : dirty) {
@@ -324,7 +332,19 @@ std::vector<DirtyTile> dirtyL10Tiles(
         if (a.bag_path != b.bag_path) {
           return a.bag_path < b.bag_path;
         }
-        return a.t_start_ns < b.t_start_ns;
+        if (a.t_start_ns != b.t_start_ns) {
+          return a.t_start_ns < b.t_start_ns;
+        }
+        if (a.topic != b.topic) {
+          return a.topic < b.topic;
+        }
+        if (a.t_end_ns != b.t_end_ns) {
+          return a.t_end_ns < b.t_end_ns;
+        }
+        if (a.tile_row != b.tile_row) {
+          return a.tile_row < b.tile_row;
+        }
+        return a.tile_col < b.tile_col;
       });
     result.push_back(DirtyTile{tile, std::move(tile_passes)});
   }
