@@ -132,6 +132,7 @@ Minor deviations from the steps above, applied during implementation (plan-first
 | `cube_bathymetry/test/test_batch_regen.cpp` | Add bit-exact A/B test (PR2) |
 | `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md` | New ADR (plan-task) |
 | `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md` | New ADR (plan-task) |
+| `README.md` (repo root) | Document the `--index-db` dry-run mode + the `DIRTY_TILES_JSON:` marker contract (PR1); regen-workflow rewrite (PR2) |
 | `cube_bathymetry/.gitignore` | Ignore `build_fingerprint.json` (ADR-0003 consequence: never committed with checked-in test-fixture stores) (PR2) |
 | `unh_echoboats_project11/scripts/build_bathy_store.sh` | Incremental default + `--fresh` (PR2b — see cross-repo note) |
 
@@ -147,8 +148,7 @@ the other's review.
 
 | Doc | Staled by | Update in |
 |---|---|---|
-| `cube_bathymetry/README.md` (batch_regen usage, ~lines 36–38) | New `--index-db` flag (PR1); `--incremental` default semantics + `--fresh` (PR2) | Each PR updates the README alongside its flags — PR1 documents the dry-run query mode, PR2 rewrites the regen workflow section (incremental default, fallback rules, fingerprint) |
-| `README.md` § "Offline store import & rebuild" (the repo's agent-facing regen description) | Regen workflow change (incremental default) | PR2 — one-paragraph update to the store-regeneration description. This repo has **no** `.agents/README.md`; its only agent guide is the thin ADR-0017 `AGENTS.md`, which references the workspace rules and deliberately carries no workflow prose, so the regen description lives in `README.md`. Creating an `.agents/README.md` from the workspace template is its own task, not a side-effect of this issue |
+| `README.md` § "Offline store import & rebuild" (batch_regen usage — the repo's only agent-facing regen description; there is no `cube_bathymetry/README.md`) | New `--index-db` flag (PR1); `--incremental` default semantics + `--fresh` (PR2) | Each PR updates the README alongside its flags — PR1 documents the dry-run query mode and the `DIRTY_TILES_JSON:` marker contract, PR2 rewrites the regen workflow section (incremental default, fallback rules, fingerprint). This repo has **no** `.agents/README.md`; its only agent guide is the thin ADR-0017 `AGENTS.md`, which references the workspace rules and deliberately carries no workflow prose, so the regen description lives in `README.md`. Creating an `.agents/README.md` from the workspace template is its own task, not a side-effect of this issue |
 | `unh_echoboats_project11` docs referencing `build_bathy_store.sh` | Incremental default | PR2b, with the script change |
 
 ## Principles Self-Check
