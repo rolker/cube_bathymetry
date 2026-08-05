@@ -380,3 +380,25 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand of
 to a fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 111 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-05 00:07 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-111 at `4821172`
+**Mode**: pre-push
+**Depth**: Deep (reason: new SQLite/query subsystem + 2 ADRs; incremental 3-fix diff reviewed in full subsystem context)
+**Must-fix**: 1 | **Suggestions**: 5
+**Round**: 3 | **Ship**: recommended — sole must-fix is a mechanical ament_uncrustify divergence (will fail CI) on the F3 line; the 3 Integrated-Review fixes are functionally correct & complete, count not rising vs R1/R2. Address the lint fix and ship.
+
+Specialists: static analysis (ament_cpplint clean; ament_uncrustify 1 divergence at batch_regen_main.cpp:378 — must-fix #1); Claude Adversarial x2 (Lens A logic + Lens B systemic, fresh-context); Copilot off (default); Local off (--no-local, workspace#590 too-slow). Verified the 3 Integrated-Review (Copilot) fixes against real deps: F1 gggs::Level(uint8_t) genuinely throws std::out_of_range for level>=21 (gggs/level.h:51-56) and is caught -> exit-0 full-regen; F3 non-throwing exists correct (main() has no top-level catch, so throwing overload really would terminate); F2 sort key matches header:85 but queryPasses ALREADY globally sorts (query.cpp:240-250), so the added sort is a correct no-op and its comment's premise is wrong.
+
+### Findings
+- [ ] (must-fix) ament_uncrustify continuation-line over-indentation; wants 6-space indent -- will fail industrial_ci despite the impl entry's "uncrustify clean" claim (F3 line) -- `cube_bathymetry/src/batch_regen_main.cpp:378`
+- [ ] (suggestion) F2 comment asserts queryPasses "not guaranteed globally ordered across chunks" -- false; queryPasses std::sorts its merged result (marine_survey_index query.cpp:240-250). Sort is a correct no-op; reword rationale to defensive-decoupling -- `cube_bathymetry/src/survey_index_query.cpp:289`
+- [ ] (suggestion) F1 throw path leaks prepared stmt (cascades to unfreed db via unchecked sqlite3_close BUSY) on a level>=21 corrupt row; process-exit-bounded in dry-run but breaks the finalize-on-throw invariant (cf. lines 139/151); add finalize-on-throw/RAII -- `cube_bathymetry/src/survey_index_query.cpp:148`
+- [ ] (suggestion) F3 "not found" note text also fires for EACCES/ELOOP (not "not found"); cosmetic, ec.message() discloses cause -- `cube_bathymetry/src/batch_regen_main.cpp:375`
+- [ ] (suggestion) F2 std::sort non-stable -- identical (bag_path,t_start_ns) ties (different topic) unpinned; not a regression (contract promises 2 keys) but add topic tiebreaker for cross-toolchain byte-stable JSON -- `cube_bathymetry/src/survey_index_query.cpp:300`
+- [ ] (suggestion) No regression test for the 3 defensive paths (level>=21, error_code exists branch, cross-chunk/tie ordering); genuinely awkward to unit-test, low priority -- `cube_bathymetry/test/test_survey_index_query.cpp`
