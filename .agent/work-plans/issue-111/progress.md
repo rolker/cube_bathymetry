@@ -422,12 +422,41 @@ rationale reword `59d2bdd`) — `ament_uncrustify` verified clean locally on all
 four touched files.
 
 ### Findings
-- [ ] (cross-confirmed: Copilot R3 suppressed `survey_index_query.cpp:149` + Local Review @ `4821172`) `newBagFootprint` leaks the prepared statement when `tileFromRowCol` throws inside the step loop (the level>=21 guard added in `8b29e71` created this throw site). The unfinalized stmt makes the caller's `sqlite3_close(db)` return `SQLITE_BUSY` — return code unchecked — so the db handle leaks too. Process-exit-bounded in today's dry-run, but PR2 reuses `dirtyL10Tiles` from a long-lived rebuild path. Fix: RAII stmt guard (or try/catch finalize-and-rethrow around the loop) — `cube_bathymetry/src/survey_index_query.cpp:132-157`
-- [ ] (cross-confirmed: Copilot R3 suppressed `survey_index_query.cpp:304` + Local Review @ `4821172`) Per-tile pass comparator keys only on `(bag_path, t_start_ns)` and `std::sort` is not stable, so rows tying on both keys (same bag, different `topic`/`sensor_type`) have toolchain-dependent relative order — non-byte-stable `DIRTY_TILES_JSON`, which PR2's byte-identity claim leans on. Cannot prove ties unreachable (multi-topic passes from one bag). Fix: add `topic` (and `t_end_ns`/`tile_row`/`tile_col`) tie-breakers; update the header's ordering contract to match — `cube_bathymetry/src/survey_index_query.cpp:296-305`
-- [ ] (cosmetic, cross-confirmed: Copilot R3 suppressed `batch_regen_main.cpp:378` + Local Review @ `4821172`) The index-absent note says "not found" on the `exists_ec` (EACCES/ELOOP) branch too. `ec.message()` is appended so the cause is disclosed, but the lead wording is wrong. Fix: say "unavailable" — `cube_bathymetry/src/batch_regen_main.cpp:375-379`
-- [ ] (trivial, Copilot R3 suppressed) Plan's Doc-Impact table routes the PR2 workflow update to `.agents/README.md`, which does not exist in this repo (only the ADR-0017 thin `AGENTS.md`). Either retarget the row at `cube_bathymetry/README.md` or make PR2 create `.agents/README.md` per the workspace template — `.agent/work-plans/issue-111/plan.md:151`
-- [ ] (suggestion, Local Review @ `4821172`, not raised by Copilot) No regression test for the three defensive paths added in R2 triage (level>=21 corrupt row, `error_code` exists branch, ordering determinism). Awkward to unit-test; low priority for PR1 — `cube_bathymetry/test/test_survey_index_query.cpp`
+- [x] (cross-confirmed: Copilot R3 suppressed `survey_index_query.cpp:149` + Local Review @ `4821172`) `newBagFootprint` leaks the prepared statement when `tileFromRowCol` throws inside the step loop (the level>=21 guard added in `8b29e71` created this throw site). The unfinalized stmt makes the caller's `sqlite3_close(db)` return `SQLITE_BUSY` — return code unchecked — so the db handle leaks too. Process-exit-bounded in today's dry-run, but PR2 reuses `dirtyL10Tiles` from a long-lived rebuild path. Fix: RAII stmt guard (or try/catch finalize-and-rethrow around the loop) — `cube_bathymetry/src/survey_index_query.cpp:132-157`
+- [x] (cross-confirmed: Copilot R3 suppressed `survey_index_query.cpp:304` + Local Review @ `4821172`) Per-tile pass comparator keys only on `(bag_path, t_start_ns)` and `std::sort` is not stable, so rows tying on both keys (same bag, different `topic`/`sensor_type`) have toolchain-dependent relative order — non-byte-stable `DIRTY_TILES_JSON`, which PR2's byte-identity claim leans on. Cannot prove ties unreachable (multi-topic passes from one bag). Fix: add `topic` (and `t_end_ns`/`tile_row`/`tile_col`) tie-breakers; update the header's ordering contract to match — `cube_bathymetry/src/survey_index_query.cpp:296-305`
+- [x] (cosmetic, cross-confirmed: Copilot R3 suppressed `batch_regen_main.cpp:378` + Local Review @ `4821172`) The index-absent note says "not found" on the `exists_ec` (EACCES/ELOOP) branch too. `ec.message()` is appended so the cause is disclosed, but the lead wording is wrong. Fix: say "unavailable" — `cube_bathymetry/src/batch_regen_main.cpp:375-379`
+- [x] (trivial, Copilot R3 suppressed) Plan's Doc-Impact table routes the PR2 workflow update to `.agents/README.md`, which does not exist in this repo (only the ADR-0017 thin `AGENTS.md`). Either retarget the row at `cube_bathymetry/README.md` or make PR2 create `.agents/README.md` per the workspace template — `.agent/work-plans/issue-111/plan.md:151`
+- [x] (suggestion, Local Review @ `4821172`, not raised by Copilot) No regression test for the three defensive paths added in R2 triage (level>=21 corrupt row, `error_code` exists branch, ordering determinism). Awkward to unit-test; low priority for PR1 — `cube_bathymetry/test/test_survey_index_query.cpp` (deferred: operator-confirmed scope for this pass covers findings 1-4 only; the R2 defensive-path regression tests are deliberately held for a follow-up)
 
 ### False positives
 - (Copilot R3 suppressed, `survey_index_query.h:49` and `:102`, `test_survey_index_query.cpp:184`) "Formatting is likely to fail ament_uncrustify/cpplint and is inconsistent with the surrounding code style." Both claims are false: `ament_uncrustify` run locally over all four touched files reports "No code style divergence", industrial_ci is green at `59d2bdd`, and the spaced-template form (`std::vector < X >`) is the prevailing style in this repo's existing public headers (`geo_map_sheet.h`, `map_sheet.h`) — the new header matches its neighbours rather than diverging. The over-indented brace at `test_survey_index_query.cpp:184` is a readability wart only; the linter that gates CI accepts it.
 - (Copilot R3 suppressed, `batch_regen_main.cpp:378`, formatting half) "The line break/indentation looks like an ament_uncrustify divergence (likely CI-failing)." That divergence was real at `4821172` and was fixed in `8375ae7`; uncrustify is clean at head. Only the "not found" wording half of that comment survives (listed as a finding above).
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-05 09:15 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #116 at `ffd1faa` (branch `feature/issue-111`)
+**Addressed**: `## Integrated Review` (2026-08-05 07:33 -04:00, PR #116 @ `59d2bdd`)
+**Commits**: `08f7007`, `774e631`, `a0bb8d0`, `ffd1faa`
+
+Operator-confirmed scope for this pass: findings 1-4. Finding 5 (regression tests
+for the three R2 defensive paths) was explicitly deferred by the operator and is
+checked-with-annotation rather than implemented.
+
+### Actions
+- [x] RAII guard so the footprint prepared statement is finalized on every exit path, including a `tileFromRowCol` throw inside the step loop (`StmtGuard` in the anonymous namespace; the three manual `sqlite3_finalize` calls are now redundant and removed) — `cube_bathymetry/src/survey_index_query.cpp:91-114,153-154` (`08f7007`)
+- [x] Per-tile pass comparator now keys on `(bag_path, t_start_ns, topic, t_end_ns, tile_row, tile_col)` — a total order over the rows one store tile can hold, so `DIRTY_TILES_JSON` is byte-stable under non-stable `std::sort`; the header's `@return` ordering contract was rewritten to match, and the step-6 comment explains why the extra keys exist — `cube_bathymetry/src/survey_index_query.cpp:296-330`, `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:84-90` (`774e631`)
+- [x] Index-absent note now reads "unavailable" instead of "not found", with a comment noting the `exists_ec` (EACCES/ELOOP) branch shares this message and that `ec.message()` names the real cause — `cube_bathymetry/src/batch_regen_main.cpp:375-382` (`a0bb8d0`)
+- [x] Plan doc-impact row retargeted from the nonexistent `.agents/README.md` to `README.md` § "Offline store import & rebuild", noting that this repo's only agent guide is the thin ADR-0017 `AGENTS.md` and that creating an `.agents/README.md` is its own task — `.agent/work-plans/issue-111/plan.md:151` (`ffd1faa`)
+- [x] No regression test for the three R2 defensive paths — `cube_bathymetry/test/test_survey_index_query.cpp` (deferred: operator-confirmed scope excludes it; awkward to unit-test, low priority for PR1, to be revisited with PR2's rebuild path)
+
+### Verification
+`./sensors_ws/build.sh cube_bathymetry` clean; `./sensors_ws/test.sh cube_bathymetry`
+= 493 tests, 0 errors, 0 failures, 65 skipped (linters, including
+`ament_uncrustify`/`cpplint`, included in that run).
+
+### Next step
+Re-review the fixes: `.agent/scripts/dispatch_subagent.sh --mode in-process --issue 111 --skill review-code`.
+Not pushed — the host performs the push.
