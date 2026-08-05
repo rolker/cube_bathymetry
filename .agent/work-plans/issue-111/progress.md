@@ -589,3 +589,28 @@ ADR-0018's gate is satisfied at head by the hosted signal: **ROS 2 Jazzy
 commits back" caveat is discharged — no `ci_local.sh` re-run is needed. Reminder
 for whoever merges: the PR body says "Part of #111" and **must not** close the
 issue (PR1 of a multi-PR sequence).
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-05 10:54 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-111 at `a551945`
+**PR**: #116
+**Addressed**: `## Integrated Review` (2026-08-05 10:16 -04:00, PR #116 @ `4479e57`) — all four open actions, including the two the operator un-deferred at the round-5 checkpoint
+**Commits**: `dee6df5`, `9f68fae`, `0a1ba15`, `a551945`
+
+### Actions
+- [x] [MED] `dirtyTileDryRun` no longer emits `DIRTY_TILES_JSON:` on an index miss — `cube_bathymetry/src/batch_regen_main.cpp:401-421` (`dee6df5`)
+      Guard: `dirty.empty() && !bagfile_names.empty()` ⇒ stderr `note:` naming both causes (never indexed / no passes; paths matched exactly) + `return 0`, marker suppressed. Absence of the marker is the documented "fall back to FULL regen" signal, conservative in both cases. Contract comment (`batch_regen_main.cpp:340-347`), `README.md:55-64`, and the ADR-0002 fallback list (`docs/decisions/0002-dirty-tile-footprint-math.md:99-108`, index-miss bullet added) all aligned. The `BagNotInIndexYieldsNoDirtyTiles` comment no longer claims a fallback the CLI didn't have — it now describes the exact-match miss and points at the new CLI test.
+- [x] New `DryRunCliContract` fixture pins both halves of the marker contract by running the real `batch_regen_bag` against an on-disk index — `cube_bathymetry/test/test_survey_index_query.cpp:395-490`, `cube_bathymetry/CMakeLists.txt:397-412` (`dee6df5`)
+      `IndexedBagEmitsTheMarker` (marker present, non-zero `dirty_tile_count`) and `IndexMissEmitsNoMarker` (marker ABSENT, "FULL regen" note present, exit 0). The binary path is compiled in via `BATCH_REGEN_BAG_EXE="$<TARGET_FILE:batch_regen_bag>"` with an explicit `add_dependencies`; the fixture body is shared with the in-memory query tests through a new `IndexFixture` base.
+- [x] [TRIVIAL] plan margin wording "one-cell L14" → "one-tile L14" — `.agent/work-plans/issue-111/plan.md:28,33` (`9f68fae`)
+      Matches ADR-0002 (corrected round 2), the README, the code, and the plan's own line 62. Line 59 keeps "cell" deliberately — it is the sentence contrasting an L14 *cell* (~6 cm) with an L14 *tile* (~54 m).
+- [x] [TRIVIAL] Doc-Impact table: the nonexistent `cube_bathymetry/README.md` row removed, its PR1/PR2 content merged into the root `README.md` row; `README.md` added to the PR1 Files-to-Change table — `.agent/work-plans/issue-111/plan.md:120-136,149-151` (`0a1ba15`)
+- [x] [LOW] Fixture `TearDown` now checks `sqlite3_close` — `cube_bathymetry/test/test_survey_index_query.cpp:74-88` (`a551945`)
+      `EXPECT_EQ(rc, SQLITE_OK)` with `sqlite3_errstr(rc)` (not `sqlite3_errmsg(db_)` — the handle is freed on success, so reading a message off it would be use-after-free). Every test in the file is now a standing statement-leak guard. The companion CLI-side close the finding named is fixed in the same commit: `sqlite3_close_v2` on the throw path (a plain close there would return BUSY and *leak* the handle) and a checked close with a stderr `warning:` on the success path — a warning, not a contract change, since a leaked statement does not invalidate the already-computed dirty set.
+
+**Verification**: `./sensors_ws/build.sh cube_bathymetry` clean; `./sensors_ws/test.sh cube_bathymetry` → **496 tests, 0 errors, 0 failures, 65 skipped** (includes cpplint/uncrustify/cppcheck; the two new `DryRunCliContract` cases are in `test_survey_index_query.gtest.xml` and pass).
+
+**Next step**: re-review (`review-code`) on the new head, then the ADR-0018 merge gate — the green attestation is now four commits stale, so `ci_local.sh` must be re-run (or hosted CI awaited) at `a551945` before merge. Not pushed: the host performs pushes.
