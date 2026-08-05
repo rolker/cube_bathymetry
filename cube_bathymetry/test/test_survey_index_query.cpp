@@ -23,14 +23,24 @@
 // SQLite survey index is populated with synthetic L14 passes spanning known
 // tiles; the tests assert the L14->L10 rollup (four gggs::parent() applications),
 // the one-tile conservative margin, the contributing-bag set (old + new bags),
-// and the no-op cases (no new bags / a bag not in the index).
+// and the no-op cases (no new bags / a bag not in the index). A second fixture
+// runs the real batch_regen_bag dry-run against an on-disk index to pin the
+// DIRTY_TILES_JSON marker contract (emitted on a hit, suppressed on a miss).
 
 #include <gtest/gtest.h>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
 #include <set>
 #include <string>
+#include <system_error>
 #include <tuple>
 #include <vector>
 
@@ -67,11 +77,18 @@ const cube::DirtyTile * find(
   return nullptr;
 }
 
-class DirtyTileQuery : public testing::Test
+// Shared survey-index fixture: opens an index (in-memory for the pure query
+// tests, on disk for the CLI-contract tests) and fills it with synthetic rows.
+class IndexFixture : public testing::Test
 {
 protected:
-  void SetUp() override {db_ = marine_survey_index::openIndexDb(":memory:");}
-  void TearDown() override {sqlite3_close(db_);}
+  void openIndex(const std::string & path) {db_ = marine_survey_index::openIndexDb(path);}
+
+  void TearDown() override
+  {
+    sqlite3_close(db_);
+    db_ = nullptr;
+  }
 
   void exec(const std::string & sql)
   {
@@ -100,6 +117,12 @@ protected:
   }
 
   sqlite3 * db_ = nullptr;
+};
+
+class DirtyTileQuery : public IndexFixture
+{
+protected:
+  void SetUp() override {openIndex(":memory:");}
 };
 
 // A single new bag whose L14 footprint sits in the MIDDLE of an L10 tile rolls up
@@ -346,8 +369,11 @@ TEST_F(DirtyTileQuery, NoNewBagsYieldsNoDirtyTiles)
   EXPECT_TRUE(dirty.empty());
 }
 
-// A bag path not present in the index contributes no footprint (the CLI then
-// falls back to full regen); the query itself just returns an empty set.
+// A bag path not present in the index contributes no footprint -- `bags.path` is
+// matched EXACTLY, so a never-indexed (or differently-spelled) path selects no
+// rows. The query itself just returns an empty set; distinguishing that miss from
+// "indexed, nothing dirty" is the CLI's job, and it does so by suppressing the
+// DIRTY_TILES_JSON marker (see DryRunCliContract.IndexMissEmitsNoMarker).
 TEST_F(DirtyTileQuery, BagNotInIndexYieldsNoDirtyTiles)
 {
   const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(kLat, kLon);
@@ -392,5 +418,100 @@ TEST_F(DirtyTileQuery, TiedPassesComeBackInADeterministicOrder)
       expected[i]) << "pass " << i << " out of contract order";
   }
 }
+
+#ifdef BATCH_REGEN_BAG_EXE
+// CLI stdout contract (cube#111, ADR-0002). The dry-run's DIRTY_TILES_JSON marker
+// is documented as AUTHORITATIVE, so its presence/absence -- not the exit code --
+// is what a PR2 consumer keys off. These tests run the real batch_regen_bag
+// binary against an on-disk survey index and pin both halves of that contract.
+class DryRunCliContract : public IndexFixture
+{
+protected:
+  void SetUp() override
+  {
+    dir_ = std::filesystem::temp_directory_path() /
+      ("cube111_dryrun_" + std::to_string(static_cast<std::int64_t>(::getpid())));
+    std::filesystem::remove_all(dir_);
+    ASSERT_TRUE(std::filesystem::create_directories(dir_));
+    db_path_ = (dir_ / "survey_index.db").string();
+    openIndex(db_path_);
+  }
+
+  void TearDown() override
+  {
+    IndexFixture::TearDown();  // checked sqlite3_close
+    std::error_code ec;
+    std::filesystem::remove_all(dir_, ec);
+  }
+
+  // Run the dry-run CLI for one bag path; returns merged stdout+stderr and
+  // reports the process exit status through @p exit_status.
+  std::string runDryRun(const std::string & bag_path, int * exit_status)
+  {
+    const std::string command =
+      std::string(BATCH_REGEN_BAG_EXE) + " --index-db '" + db_path_ + "' '" +
+      bag_path + "' 2>&1";
+    std::string output;
+    FILE * pipe = popen(command.c_str(), "r");
+    EXPECT_NE(pipe, nullptr) << "could not run " << command;
+    if (pipe == nullptr) {
+      *exit_status = -1;
+      return output;
+    }
+    std::array<char, 4096> buffer{};
+    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+      output += buffer.data();
+    }
+    const int status = pclose(pipe);
+    *exit_status = (status != -1 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1;
+    return output;
+  }
+
+  std::filesystem::path dir_;
+  std::string db_path_;
+};
+
+// Positive half of the contract: a bag that IS in the index, with a pass, gets a
+// marker carrying a non-empty dirty set.
+TEST_F(DryRunCliContract, IndexedBagEmitsTheMarker)
+{
+  const gggs::GridIndex p10 = gggs::Level(kStoreLevel).gridIndex(kLat, kLon);
+  const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(
+    0.5 * (p10.southLatitude() + p10.northLatitude()),
+    0.5 * (p10.westLongitude() + p10.eastLongitude()));
+  insertBag(1, "/data/bagIndexed");
+  insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
+
+  int exit_status = -1;
+  const std::string output = runDryRun("/data/bagIndexed", &exit_status);
+
+  EXPECT_EQ(exit_status, 0) << output;
+  EXPECT_NE(output.find("DIRTY_TILES_JSON:"), std::string::npos)
+    << "an indexed bag must emit the authoritative marker\n" << output;
+  EXPECT_EQ(output.find("\"dirty_tile_count\":0"), std::string::npos)
+    << "an indexed bag with a pass must report a non-empty dirty set\n" << output;
+}
+
+// Negative half, the finding this test exists for: a bag the index does not know
+// (paths are matched exactly) must NOT emit the marker. Emitting it with an empty
+// set would read as "indexed, nothing dirty" and a consumer would skip the full
+// regen it actually needs. Exit stays 0 -- a soft-dependency miss is not an error,
+// which is exactly why the marker, not the exit code, is the signal.
+TEST_F(DryRunCliContract, IndexMissEmitsNoMarker)
+{
+  const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(kLat, kLon);
+  insertBag(1, "/data/bagIndexed");
+  insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
+
+  int exit_status = -1;
+  const std::string output = runDryRun("/data/bagNeverIndexed", &exit_status);
+
+  EXPECT_EQ(exit_status, 0) << output;
+  EXPECT_EQ(output.find("DIRTY_TILES_JSON:"), std::string::npos)
+    << "an index miss must suppress the authoritative marker\n" << output;
+  EXPECT_NE(output.find("FULL regen"), std::string::npos)
+    << "an index miss must say a real run falls back to full regen\n" << output;
+}
+#endif  // BATCH_REGEN_BAG_EXE
 
 }  // namespace

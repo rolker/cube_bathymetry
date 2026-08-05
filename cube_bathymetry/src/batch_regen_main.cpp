@@ -339,10 +339,12 @@ std::string jsonEscape(const std::string & s)
 //
 // Machine contract for consumers parsing stdout: the presence of a single
 // `DIRTY_TILES_JSON:` line is AUTHORITATIVE — it is emitted only on a successful
-// query and carries the complete dirty set. Its ABSENCE means "fall back to full
-// regen" (the index was absent, could not be opened/queried, or was not a valid
-// index). Every one of those outcomes still exits 0 (a soft-dependency miss is
-// not a failure), so consumers must key off the marker line, not the exit code.
+// query that found an indexed footprint, and it then carries the complete dirty
+// set. Its ABSENCE means "fall back to full regen" (the index was absent, could
+// not be opened/queried, was not a valid index, or answered with an EMPTY dirty
+// set for a non-empty bag list — an index miss; see the guard below). Every one
+// of those outcomes still exits 0 (a soft-dependency miss is not a failure), so
+// consumers must key off the marker line, not the exit code.
 int dirtyTileDryRun(
   const std::string & index_db_path,
   const std::vector<std::string> & bagfile_names,
@@ -395,6 +397,28 @@ int dirtyTileDryRun(
   } catch (const std::exception & e) {
     std::cerr << "note: could not query survey index (" << e.what() << ") -- a real "
       "incremental run would fall back to FULL regen." << std::endl;
+    return 0;
+  }
+
+  // Index-miss guard (cube#111). An EMPTY dirty set for a NON-EMPTY new-bag list
+  // means the index answered with no footprint at all for the given bags.
+  // `dirtyL10Tiles` matches `bags.path` EXACTLY, so a bag that was never indexed
+  // -- or whose path is merely spelled differently than it was at index time
+  // (relative vs absolute, a symlinked mount, a trailing slash) -- produces zero
+  // rows, and is INDISTINGUISHABLE here from the legitimate "bag is indexed but
+  // recorded no passes" case. Emitting the marker with `dirty_tile_count: 0`
+  // would tell a PR2 consumer "nothing to rebuild" in the index-miss case, where
+  // a FULL regen is actually required -- a silent correctness failure, since the
+  // marker is documented as authoritative. Suppress the marker instead: its
+  // absence is the documented "fall back to FULL regen" signal, which is
+  // conservative in both cases (correct on an index miss, merely a wasted
+  // rebuild for a genuinely pass-less indexed bag). Exit stays 0 -- this is a
+  // soft-dependency miss, not a failure.
+  if (dirty.empty() && !bagfile_names.empty()) {
+    std::cerr << "note: the survey index reports no dirty tiles for the given "
+      "bag(s) -- they are not in the index (paths are matched exactly) or "
+      "recorded no passes. No DIRTY_TILES_JSON marker is emitted; a real "
+      "incremental run would fall back to FULL regen (ADR-0002)." << std::endl;
     return 0;
   }
 

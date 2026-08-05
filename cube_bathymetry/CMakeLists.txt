@@ -393,13 +393,19 @@ if(BUILD_TESTING)
 
   # Survey-index dirty-tile query (#111, ADR-0002): in-memory SQLite fixture,
   # verifies the L14->L10 rollup, the one-tile conservative margin, contributing
-  # bags, and the no-new-bags / bag-not-indexed empty cases.
+  # bags, and the no-new-bags / bag-not-indexed empty cases. The DryRunCliContract
+  # tests additionally execute the built batch_regen_bag binary against an on-disk
+  # index, so its path is compiled in and the dependency is explicit.
   ament_add_gtest(test_survey_index_query test/test_survey_index_query.cpp)
   target_link_libraries(test_survey_index_query
     cube_bathymetry_survey_index_query
     marine_survey_index::marine_survey_index_core
     SQLite::SQLite3
   )
+  target_compile_definitions(test_survey_index_query PRIVATE
+    BATCH_REGEN_BAG_EXE="$<TARGET_FILE:batch_regen_bag>"
+  )
+  add_dependencies(test_survey_index_query batch_regen_bag)
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers

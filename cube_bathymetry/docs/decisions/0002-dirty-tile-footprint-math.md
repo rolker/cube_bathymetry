@@ -96,8 +96,15 @@ construction (same scatter-gather path, same reference gating). The only cost is
   new-bag footprint, so an old-bag pass in a sub-tile the new bags did not touch
   is still reported. This is required for a tile-scoped rebuild to replay every
   pass that touches the tile (byte-identity with full regen).
-- If `marine_survey_index` is absent (no DB file) the dirty set cannot be computed
-  and the caller falls back to full regen (explicitly logged).
+- If `marine_survey_index` is absent (no DB file), unopenable, or not a valid
+  index, the dirty set cannot be computed and the caller falls back to full regen
+  (explicitly logged).
+- An **index miss** — an empty dirty set for a non-empty new-bag list — is treated
+  the same way. Bag paths are matched exactly against `bags.path`, so a bag that
+  was never indexed (or is spelled differently than at index time) yields zero
+  rows and is indistinguishable from an indexed bag that recorded no passes. The
+  caller therefore falls back to full regen rather than reporting "nothing dirty":
+  conservative in both cases, and correct in the one that matters.
 - A changed sonar TPU model (new `Parameters` that changes `influenceRadius`) does
   not invalidate this decision — the one-L14-tile margin already covers realistic TPU
   bounds. If TPU grows pathologically, a full regen is available via `--fresh`.

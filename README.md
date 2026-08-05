@@ -54,12 +54,15 @@ hierarchy, and lists each dirty L10 tile with the bags + pass intervals that
 contribute to it (see [`cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md`](cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md)).
 Output is a human-readable summary plus a machine-parseable `DIRTY_TILES_JSON:`
 line. **Machine contract:** the `DIRTY_TILES_JSON:` line is authoritative and is
-emitted only on a successful query; its *absence* means "fall back to full regen"
-(index absent, unopenable, or not a valid index). All of those cases still exit 0
-— a missing soft dependency is not a failure — so a consumer must key off the
-marker line, not the exit code. If `survey_index.db` is absent, it says so and
-notes that a real run falls back to full regen (the index is a **soft**
-dependency). Without `--index-db`, the full-regen path is unchanged.
+emitted only on a successful query that found an indexed footprint; its *absence*
+means "fall back to full regen" (index absent, unopenable, not a valid index, or
+an *index miss* — an empty dirty set for a non-empty bag list, which cannot be
+told apart from a bag that was never indexed, since bag paths are matched
+exactly). All of those cases still exit 0 — a missing soft dependency is not a
+failure — so a consumer must key off the marker line, not the exit code. Each
+case prints a `note:` on stderr saying a real run falls back to full regen (the
+index is a **soft** dependency). Without `--index-db`, the full-regen path is
+unchanged.
 
 ### Seed precedence (`--reference-store`)
 
