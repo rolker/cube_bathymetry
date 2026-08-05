@@ -460,3 +460,44 @@ checked-with-annotation rather than implemented.
 ### Next step
 Re-review the fixes: `.agent/scripts/dispatch_subagent.sh --mode in-process --issue 111 --skill review-code`.
 Not pushed — the host performs the push.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-05 09:34 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-111 at `8ab2eb3`
+**Mode**: pre-push
+**Depth**: Deep (reason: 200+ lines / 10+ files / two new project ADRs; adversarial passes scoped to the unpushed delta `59d2bdd..HEAD` with full-file + cross-repo horizon)
+**Must-fix**: 2 | **Suggestions**: 7
+**Round**: 4 | **Ship**: recommended — both must-fixes are single-line documentation corrections with obvious fixes (stale comment, broken link); the delta's actual code came back clean from both adversarial lenses, no design or correctness concern remains
+
+Specialists: Static Analysis (ament_uncrustify + ament_cpplint clean on all four
+touched C++ files; ament_cppcheck self-skips on 2.13.0), Governance, Plan Drift,
+Claude Adversarial Lens A + Lens B. Copilot off (default). Local Adversarial
+skipped: request timed out (900s limit). Independently verified: `build.sh
+cube_bathymetry` clean, `test.sh cube_bathymetry` = 493 tests, 0 errors, 0
+failures, 65 skipped.
+
+The four round-4 fixes are functionally correct and complete. Lens B verified
+`StmtGuard` covers every exit path including the `tileFromRowCol` throw that
+motivated it, with no reachable double-finalize and a correctly noexcept
+destructor; the comparator is a valid strict weak ordering (no std::sort UB);
+the reworded stderr message is accurate for both branches of the condition and
+nothing downstream parses it. The plan doc-impact retarget was verified true
+(`.agents/README.md` absent from tree, ls-files, and origin/jazzy; `AGENTS.md`
+is the thin ADR-0017 instantiation; README section exists at line 25). The
+operator-deferred R2 defensive-path test gap is recorded as context, not
+re-raised.
+
+### Findings
+- [ ] (must-fix) Step-6 comment still claims "queryPasses ... so today this is a no-op" -- now false and contradicts the paragraph below it; queryPasses sorts only on (bag_path, t_start_ns) and is non-stable, so the added keys DO reorder tied rows. Invites a future reader to delete the sort as dead work -- `cube_bathymetry/src/survey_index_query.cpp:314-317`
+- [ ] (must-fix) New ADR markdown link is broken: repo root has no `docs/`; ADRs live at `cube_bathymetry/docs/decisions/`, and the repo's own convention at line 146 uses the prefixed form. 404s on GitHub -- `README.md:54`
+- [ ] (suggestion, cross-pass confirmed Lens A + Lens B) Comparator key set misaligned with the serialized fields: `sensor_type`/`ping_count` are emitted in DIRTY_TILES_JSON but unkeyed, `tile_row`/`tile_col` are keyed but never emitted -- so the new "total order" wording overclaims and byte-stability rests on an unstated cross-repo invariant. Add `sensor_type`/`ping_count` as final tiebreakers -- `cube_bathymetry/src/survey_index_query.cpp:329-348`, `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:84-90`
+- [ ] (suggestion) The delta's headline behaviour -- deterministic tie ordering -- has zero coverage; no test asserts pass ordering at all (bag assertions use an order-insensitive std::set). Distinct from the deferred R2 finding and cheap here: the `insertPass` fixture helper makes it ~8 lines -- `cube_bathymetry/test/test_survey_index_query.cpp`
+- [ ] (suggestion) Only the statement half of the leak was made structural: the db handle is still a hand-rolled try/catch(...) close, and both `sqlite3_close` return codes stay unchecked. Use `sqlite3_close_v2` (or check the return) and add `EXPECT_EQ(sqlite3_close(db_), SQLITE_OK)` to the fixture TearDown as a standing leak guard -- `cube_bathymetry/src/batch_regen_main.cpp:386-394`, `cube_bathymetry/test/test_survey_index_query.cpp:72`
+- [ ] (suggestion) `StmtGuard` near-duplicates an existing guard in the package that owns the DB (`marine_survey_index/src/survey_index_bag_main.cpp:252-271`); nothing is left inconsistent inside cube_bathymetry (one prepare site), but queryPasses/distinctLevels/queryNavTrack still use manual finalize with throwing calls in between. Follow-up issue in unh_marine_autonomy to upstream the guard -- `cube_bathymetry/src/survey_index_query.cpp:91-114`
+- [ ] (suggestion) ADR-0002 cites "(ADR-0007 addendum)" for a decision ADR-0007 never records (no mention of #111, dirty, or incremental). Reword as forward-looking or add the addendum -- `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md:104-105`
+- [ ] (suggestion) ADR-0018 merge gate: the green Integrated-Review/CI signal is at `59d2bdd`, four commits back. Before merge, push for hosted CI or run `ci_local.sh` and confirm `scope: full` / `ci-local: pass` at the new head
+- [ ] (suggestion) Plan doc-impact table now has two rows for the same file (`cube_bathymetry/README.md`, which does not exist, and `README.md`); collapse to one and add `README.md` to the PR1 Files-to-Change table -- `.agent/work-plans/issue-111/plan.md:120-136,150-151`
