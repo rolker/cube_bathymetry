@@ -51,7 +51,7 @@ Using the `marine_survey_index` sidecar (`survey_index.db`, unh_marine_autonomy#
 it takes the L14 tile footprint the new bags ensonified, expands it by a one-tile
 conservative margin, rolls it up to the store's L10 tiles via the GGGS parent
 hierarchy, and lists each dirty L10 tile with the bags + pass intervals that
-contribute to it (see [`docs/decisions/0002-dirty-tile-footprint-math.md`](docs/decisions/0002-dirty-tile-footprint-math.md)).
+contribute to it (see [`cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md`](cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md)).
 Output is a human-readable summary plus a machine-parseable `DIRTY_TILES_JSON:`
 line. **Machine contract:** the `DIRTY_TILES_JSON:` line is authoritative and is
 emitted only on a successful query; its *absence* means "fall back to full regen"
