@@ -317,13 +317,16 @@ std::vector<DirtyTile> dirtyL10Tiles(
   //    on that prefix reaches us in an unspecified relative order. Do not
   //    delete this as redundant with queryPasses.
   //
-  //    The key is (bag_path, t_start_ns, topic, t_end_ns, tile_row, tile_col):
-  //    std::sort is NOT stable, so any tie left unbroken has a toolchain- and
-  //    input-order-dependent relative order, and one bag can contribute several
-  //    passes to the same store tile (multiple sonar topics, several index-level
-  //    sub-tiles). Those extra keys make the emitted order — and therefore the
-  //    CLI's DIRTY_TILES_JSON bytes, which PR2's byte-identity check leans on —
-  //    a total, reproducible order over the rows a tile can hold.
+  //    The key is (bag_path, t_start_ns, topic, t_end_ns, tile_row, tile_col,
+  //    sensor_type, ping_count) — every PassRow field except `level`, which is
+  //    the fixed index level for all rows here. std::sort is NOT stable, so any
+  //    tie left unbroken has a toolchain- and input-order-dependent relative
+  //    order, and one bag can contribute several passes to the same store tile
+  //    (multiple sonar topics, several index-level sub-tiles). Keying on the
+  //    full field set means the only rows that can still tie are ones that
+  //    serialize identically, so the CLI's DIRTY_TILES_JSON bytes — which PR2's
+  //    byte-identity check leans on — are reproducible whatever order the index
+  //    hands the rows over in.
   std::vector<DirtyTile> result;
   result.reserve(dirty.size());
   for (auto & [tile, tile_passes] : dirty) {
@@ -345,7 +348,13 @@ std::vector<DirtyTile> dirtyL10Tiles(
         if (a.tile_row != b.tile_row) {
           return a.tile_row < b.tile_row;
         }
-        return a.tile_col < b.tile_col;
+        if (a.tile_col != b.tile_col) {
+          return a.tile_col < b.tile_col;
+        }
+        if (a.sensor_type != b.sensor_type) {
+          return a.sensor_type < b.sensor_type;
+        }
+        return a.ping_count < b.ping_count;
       });
     result.push_back(DirtyTile{tile, std::move(tile_passes)});
   }

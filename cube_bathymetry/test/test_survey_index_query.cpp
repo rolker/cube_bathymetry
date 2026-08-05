@@ -28,8 +28,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "cube_bathymetry/survey_index_query.h"
@@ -355,6 +357,40 @@ TEST_F(DirtyTileQuery, BagNotInIndexYieldsNoDirtyTiles)
   const auto dirty =
     cube::dirtyL10Tiles(db_, {"/data/bagNeverIndexed"}, gggs::Level(kStoreLevel));
   EXPECT_TRUE(dirty.empty());
+}
+
+// Rows of one bag that tie on (bag_path, t_start_ns) -- all queryPasses itself
+// orders on, with a non-stable sort -- still come back in a deterministic order,
+// broken by topic, then sensor type, then ping count. Inserted in reverse of the
+// expected order so a pass-through of index/insert order would fail. This is the
+// property the CLI's byte-stable DIRTY_TILES_JSON rests on.
+TEST_F(DirtyTileQuery, TiedPassesComeBackInADeterministicOrder)
+{
+  const gggs::GridIndex p10 = gggs::Level(kStoreLevel).gridIndex(kLat, kLon);
+  const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(
+    0.5 * (p10.southLatitude() + p10.northLatitude()),
+    0.5 * (p10.westLongitude() + p10.eastLongitude()));
+
+  insertBag(1, "/data/bagNew");
+  insertPass(1, fp14, "sonarB", "/mbes", 100, 200, 40);
+  insertPass(1, fp14, "sonarA", "/mbes", 100, 200, 40);
+  insertPass(1, fp14, "sonarA", "/mbes", 100, 200, 10);
+  insertPass(1, fp14, "mbes-bathy", "/alpha", 100, 200, 40);
+
+  const auto dirty =
+    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+
+  ASSERT_EQ(dirty.size(), 1u);
+  const auto & passes = dirty[0].passes;
+  ASSERT_EQ(passes.size(), 4u);
+  const std::vector<std::tuple<std::string, std::string, std::int64_t>> expected{
+    {"/alpha", "mbes-bathy", 40}, {"/mbes", "sonarA", 10},
+    {"/mbes", "sonarA", 40}, {"/mbes", "sonarB", 40}};
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(
+      std::make_tuple(passes[i].topic, passes[i].sensor_type, passes[i].ping_count),
+      expected[i]) << "pass " << i << " out of contract order";
+  }
 }
 
 }  // namespace
