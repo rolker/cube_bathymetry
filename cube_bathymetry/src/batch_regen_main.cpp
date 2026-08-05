@@ -372,7 +372,10 @@ int dirtyTileDryRun(
   // full regen" contract. Treat any such error the same as an absent index.
   std::error_code exists_ec;
   if (!std::filesystem::exists(index_db_path, exists_ec) || exists_ec) {
-    std::cerr << "note: survey index '" << index_db_path << "' not found"
+    // "unavailable", not "not found": this branch also fires when the path
+    // check itself failed (EACCES/ELOOP), where the index may well exist.
+    // The appended ec.message() names the actual cause.
+    std::cerr << "note: survey index '" << index_db_path << "' unavailable"
               << (exists_ec ? " (" + exists_ec.message() + ")" : "")
               << " -- a real incremental run would fall back to FULL regen "
       "(index-absent contract, ADR-0002)." << std::endl;
