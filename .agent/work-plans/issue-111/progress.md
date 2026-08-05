@@ -402,3 +402,32 @@ Specialists: static analysis (ament_cpplint clean; ament_uncrustify 1 divergence
 - [ ] (suggestion) F3 "not found" note text also fires for EACCES/ELOOP (not "not found"); cosmetic, ec.message() discloses cause -- `cube_bathymetry/src/batch_regen_main.cpp:375`
 - [ ] (suggestion) F2 std::sort non-stable -- identical (bag_path,t_start_ns) ties (different topic) unpinned; not a regression (contract promises 2 keys) but add topic tiebreaker for cross-toolchain byte-stable JSON -- `cube_bathymetry/src/survey_index_query.cpp:300`
 - [ ] (suggestion) No regression test for the 3 defensive paths (level>=21, error_code exists branch, cross-chunk/tie ordering); genuinely awkward to unit-test, low priority -- `cube_bathymetry/test/test_survey_index_query.cpp`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-05 07:33 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #116 at `59d2bdd`
+**Sources**: 3 (Copilot R3 @ `59d2bdd` — 0 new inline, 7 suppressed; Local Review (Pre-Push) @ `4821172`; CI rollup @ `59d2bdd`)
+**Cross-source confirmations**: 3
+**CI**: all-pass (ROS 2 Jazzy industrial_ci: success; copilot-pull-request-reviewer: success)
+
+Copilot R2's three inline comments (@ `eeaa4cd`) are all confirmed fixed at head:
+level bounds-check (`8b29e71`), per-tile pass sort (`007031c`), non-throwing
+`filesystem::exists` (`ea7d4cc`). R3 raised no new inline comments; its 7
+suppressed comments were triaged below. The two must-fix items from the
+`4821172` pre-push review are also resolved (uncrustify `8375ae7`, sort
+rationale reword `59d2bdd`) — `ament_uncrustify` verified clean locally on all
+four touched files.
+
+### Findings
+- [ ] (cross-confirmed: Copilot R3 suppressed `survey_index_query.cpp:149` + Local Review @ `4821172`) `newBagFootprint` leaks the prepared statement when `tileFromRowCol` throws inside the step loop (the level>=21 guard added in `8b29e71` created this throw site). The unfinalized stmt makes the caller's `sqlite3_close(db)` return `SQLITE_BUSY` — return code unchecked — so the db handle leaks too. Process-exit-bounded in today's dry-run, but PR2 reuses `dirtyL10Tiles` from a long-lived rebuild path. Fix: RAII stmt guard (or try/catch finalize-and-rethrow around the loop) — `cube_bathymetry/src/survey_index_query.cpp:132-157`
+- [ ] (cross-confirmed: Copilot R3 suppressed `survey_index_query.cpp:304` + Local Review @ `4821172`) Per-tile pass comparator keys only on `(bag_path, t_start_ns)` and `std::sort` is not stable, so rows tying on both keys (same bag, different `topic`/`sensor_type`) have toolchain-dependent relative order — non-byte-stable `DIRTY_TILES_JSON`, which PR2's byte-identity claim leans on. Cannot prove ties unreachable (multi-topic passes from one bag). Fix: add `topic` (and `t_end_ns`/`tile_row`/`tile_col`) tie-breakers; update the header's ordering contract to match — `cube_bathymetry/src/survey_index_query.cpp:296-305`
+- [ ] (cosmetic, cross-confirmed: Copilot R3 suppressed `batch_regen_main.cpp:378` + Local Review @ `4821172`) The index-absent note says "not found" on the `exists_ec` (EACCES/ELOOP) branch too. `ec.message()` is appended so the cause is disclosed, but the lead wording is wrong. Fix: say "unavailable" — `cube_bathymetry/src/batch_regen_main.cpp:375-379`
+- [ ] (trivial, Copilot R3 suppressed) Plan's Doc-Impact table routes the PR2 workflow update to `.agents/README.md`, which does not exist in this repo (only the ADR-0017 thin `AGENTS.md`). Either retarget the row at `cube_bathymetry/README.md` or make PR2 create `.agents/README.md` per the workspace template — `.agent/work-plans/issue-111/plan.md:151`
+- [ ] (suggestion, Local Review @ `4821172`, not raised by Copilot) No regression test for the three defensive paths added in R2 triage (level>=21 corrupt row, `error_code` exists branch, ordering determinism). Awkward to unit-test; low priority for PR1 — `cube_bathymetry/test/test_survey_index_query.cpp`
+
+### False positives
+- (Copilot R3 suppressed, `survey_index_query.h:49` and `:102`, `test_survey_index_query.cpp:184`) "Formatting is likely to fail ament_uncrustify/cpplint and is inconsistent with the surrounding code style." Both claims are false: `ament_uncrustify` run locally over all four touched files reports "No code style divergence", industrial_ci is green at `59d2bdd`, and the spaced-template form (`std::vector < X >`) is the prevailing style in this repo's existing public headers (`geo_map_sheet.h`, `map_sheet.h`) — the new header matches its neighbours rather than diverging. The over-indented brace at `test_survey_index_query.cpp:184` is a readability wart only; the linter that gates CI accepts it.
+- (Copilot R3 suppressed, `batch_regen_main.cpp:378`, formatting half) "The line break/indentation looks like an ament_uncrustify divergence (likely CI-failing)." That divergence was real at `4821172` and was fixed in `8375ae7`; uncrustify is clean at head. Only the "not found" wording half of that comment survives (listed as a finding above).
