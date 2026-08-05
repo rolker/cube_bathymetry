@@ -375,7 +375,7 @@ int dirtyTileDryRun(
     std::cerr << "note: survey index '" << index_db_path << "' not found"
               << (exists_ec ? " (" + exists_ec.message() + ")" : "")
               << " -- a real incremental run would fall back to FULL regen "
-                 "(index-absent contract, ADR-0002)." << std::endl;
+      "(index-absent contract, ADR-0002)." << std::endl;
     return 0;
   }
 
