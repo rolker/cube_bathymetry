@@ -148,7 +148,7 @@ the other's review.
 | Doc | Staled by | Update in |
 |---|---|---|
 | `cube_bathymetry/README.md` (batch_regen usage, ~lines 36–38) | New `--index-db` flag (PR1); `--incremental` default semantics + `--fresh` (PR2) | Each PR updates the README alongside its flags — PR1 documents the dry-run query mode, PR2 rewrites the regen workflow section (incremental default, fallback rules, fingerprint) |
-| `.agents/README.md` (repo agent guide) | Regen workflow change (incremental default) | PR2 — one-paragraph update to the store-regeneration description |
+| `README.md` § "Offline store import & rebuild" (the repo's agent-facing regen description) | Regen workflow change (incremental default) | PR2 — one-paragraph update to the store-regeneration description. This repo has **no** `.agents/README.md`; its only agent guide is the thin ADR-0017 `AGENTS.md`, which references the workspace rules and deliberately carries no workflow prose, so the regen description lives in `README.md`. Creating an `.agents/README.md` from the workspace template is its own task, not a side-effect of this issue |
 | `unh_echoboats_project11` docs referencing `build_bathy_store.sh` | Incremental default | PR2b, with the script change |
 
 ## Principles Self-Check
