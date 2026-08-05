@@ -23,6 +23,12 @@
   <depend>marine_interfaces</depend>  <!-- SonarVisualizationTile transport (#230) -->
   <depend>marine_tiled_raster_store</depend>  <!-- TileCatalogBuilder (#230) -->
   <depend>marine_mbes_backscatter_store</depend>  <!-- backscatter store layer (#80) -->
+  <!-- Dirty-tile query for incremental regen (#111, ADR-0002). Build+link dep of
+       the batch_regen tool (survey_index_query); the survey_index.db FILE is a
+       runtime SOFT dep (absent -> full regen), but the library is required to
+       build. sqlite3 is the DB handle type passed to the query API. -->
+  <depend>marine_survey_index</depend>
+  <depend>sqlite3</depend>
   <!-- The store is a static lib that propagates nlohmann_json::nlohmann_json as a
        LINK_ONLY interface dep, so a consumer's CMake still needs its config present
        at configure time. rosdep installs it from this declaration; UMA#203 removed
