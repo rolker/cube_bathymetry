@@ -25,12 +25,12 @@ plan-task (operator decision, 2026-07-30).
    full regen.
 
 2. **Author ADR-0002** (`docs/decisions/0002-dirty-tile-footprint-math.md`): decide
-   that the dirty L10 set = survey-index L14 footprint + one-cell L14 margin →
+   that the dirty L10 set = survey-index L14 footprint + one-tile L14 margin →
    L14→L10 GGGS parent rollup. Done in plan-task (see committed ADR file).
 
 3. **Add `survey_index_query.h/cpp`**: `dirtyL10Tiles(db, new_bag_paths, level)`
    — opens the index, queries `queryPasses` for each new bag's L14 footprint (with
-   one-cell margin from `tilesForBoundingBox`-expanded bounds), returns the distinct
+   one-tile margin from `tilesForBoundingBox`-expanded bounds), returns the distinct
    set of L10 `gggs::GridIndex` values and, for each, all contributing bag paths +
    pass intervals (`PassRow` vectors). No rebuild; pure query.
 
