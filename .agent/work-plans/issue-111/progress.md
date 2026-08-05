@@ -547,3 +547,45 @@ every pre-existing key and separate only on the newly added `sensor_type` /
 - [x] ADR-0002's "(ADR-0007 addendum)" citation reworded — `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md:104-105` (deferred: outside the operator-confirmed scope for this pass)
 - [x] ADR-0018 merge gate re-run at the new head (deferred: host action, not a code change — the orchestrator runs it before merge)
 - [x] Plan doc-impact table duplicate-row collapse — `.agent/work-plans/issue-111/plan.md:120-136,150-151` (deferred: outside the operator-confirmed scope for this pass)
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-05 10:16 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #116 at `4479e57`
+**Sources**: 3 (Copilot R4 @ `4479e57` — 0 new inline, 7 suppressed; Local Review (Pre-Push) round 4 @ `8ab2eb3`; CI rollup @ `4479e57`)
+**Cross-source confirmations**: 3
+**CI**: all-pass (ROS 2 Jazzy industrial_ci: success; copilot-pull-request-reviewer: success — both at head `4479e57`)
+
+Round 5 (final triage before the merge gate). Copilot R4 posted no new inline
+comments; its 7 suppressed comments were triaged below (they collapse to 4
+distinct findings). All three round-4 must-fix/scoped fixes were verified present
+in the code at head: the step-6 comment no longer claims a no-op (`ec1f25c`), the
+README ADR link carries the `cube_bathymetry/docs/decisions/` prefix (`8cdad8f`),
+and the comparator keys on all eight serialized `PassRow` fields with the
+`TiedPassesComeBackInADeterministicOrder` regression test (`462a4c6`). The three
+Copilot R2 inline comments (level bounds check, per-tile sort, non-throwing
+`filesystem::exists`) remain resolved at head.
+
+One genuinely **new** finding surfaced this round (finding 1) — Copilot raised it
+from three angles (code, contract comment, README) and the repo's own test comment
+at `test_survey_index_query.cpp:349-350` independently asserts the behaviour the
+CLI does *not* implement. The other three findings are re-raises of items the
+operator explicitly deferred at the round-4 checkpoint.
+
+### Findings
+- [ ] (valid, medium — Copilot R4 suppressed `batch_regen_main.cpp:405`, `:345`, `README.md:60`; corroborated by this PR's own test comment) `dirtyTileDryRun` emits the `DIRTY_TILES_JSON:` marker unconditionally, including when `dirty` is empty with a non-empty bag list. An unindexed bag (`newBagFootprint` matches `bags.path` exactly, so a never-indexed or differently-spelled path yields zero rows) is then indistinguishable from "indexed, nothing dirty", and the documented contract makes the marker AUTHORITATIVE — a PR2 consumer keying off marker presence would rebuild nothing where a full regen is required. The contradiction is already in the tree: `BagNotInIndexYieldsNoDirtyTiles`'s comment says "the CLI then falls back to full regen", which it does not. Fix: when `dirty.empty() && !bagfile_names.empty()`, print an index-miss note and `return 0` **without** the marker (conservative fallback is safe even for the legitimate "indexed bag, no passes" case), then align the contract comment (`batch_regen_main.cpp:340-345`), `README.md:~60`, ADR-0002's fallback list, and the test comment — `cube_bathymetry/src/batch_regen_main.cpp:398-405`, `cube_bathymetry/src/survey_index_query.cpp:126-131`, `cube_bathymetry/test/test_survey_index_query.cpp:349-360`
+- [ ] (valid, trivial, Copilot R4 suppressed `plan.md:29`, `:31`, `:34`) The plan still describes the ADR-0002 margin as "one-**cell** L14", the exact wording corrected as a must-fix in ADR-0002 (round 2) and used correctly in README and code ("one-tile"). The plan even contradicts itself — line 62 says "one-tile-padded". Mechanical cell->tile fix on three lines; keeps the plan-first artifact in sync per AGENTS.md § Plan-first workflow — `.agent/work-plans/issue-111/plan.md:28,31,33`
+- [ ] (valid, trivial, **cross-confirmed**: Copilot R4 suppressed `plan.md:151` + Local Review (Pre-Push) round 4 @ `8ab2eb3`) The Doc-Impact table still carries a row for `cube_bathymetry/README.md`, which does not exist (the repo README is at the root, and `ffd1faa` added the correct `README.md` row without removing the old one). Collapse the two rows into one and add `README.md` to the PR1 Files-to-Change table — `.agent/work-plans/issue-111/plan.md:120-136,150-151` (previously deferred by the operator at the round-4 checkpoint)
+- [ ] (valid, low, **cross-confirmed**: Copilot R4 suppressed `test_survey_index_query.cpp:74` + Local Review (Pre-Push) round 4 @ `8ab2eb3`) The fixture's `TearDown` calls `sqlite3_close(db_)` without checking the return, so a future statement/handle leak (`SQLITE_BUSY`) passes silently — precisely the class of bug `StmtGuard` was added to prevent. `EXPECT_EQ(sqlite3_close(db_), SQLITE_OK)` turns the whole suite into a standing leak guard; the companion `sqlite3_close_v2`/return-check in `batch_regen_main.cpp:386-394` is the same finding on the CLI side — `cube_bathymetry/test/test_survey_index_query.cpp:72-74`, `cube_bathymetry/src/batch_regen_main.cpp:386-394` (previously deferred by the operator at the round-4 checkpoint)
+
+### False positives
+- None this round. Copilot R4's 7 suppressed comments all describe real (if small) divergences; they collapse to the 4 findings above. Nothing from R4 was dismissed as a misread of the code.
+
+### Merge-gate note
+ADR-0018's gate is satisfied at head by the hosted signal: **ROS 2 Jazzy
+(industrial_ci) success at `4479e57`**, so the round-4 "green signal is four
+commits back" caveat is discharged — no `ci_local.sh` re-run is needed. Reminder
+for whoever merges: the PR body says "Part of #111" and **must not** close the
+issue (PR1 of a multi-PR sequence).
