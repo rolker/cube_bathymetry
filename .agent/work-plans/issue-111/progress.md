@@ -492,12 +492,58 @@ operator-deferred R2 defensive-path test gap is recorded as context, not
 re-raised.
 
 ### Findings
-- [ ] (must-fix) Step-6 comment still claims "queryPasses ... so today this is a no-op" -- now false and contradicts the paragraph below it; queryPasses sorts only on (bag_path, t_start_ns) and is non-stable, so the added keys DO reorder tied rows. Invites a future reader to delete the sort as dead work -- `cube_bathymetry/src/survey_index_query.cpp:314-317`
-- [ ] (must-fix) New ADR markdown link is broken: repo root has no `docs/`; ADRs live at `cube_bathymetry/docs/decisions/`, and the repo's own convention at line 146 uses the prefixed form. 404s on GitHub -- `README.md:54`
-- [ ] (suggestion, cross-pass confirmed Lens A + Lens B) Comparator key set misaligned with the serialized fields: `sensor_type`/`ping_count` are emitted in DIRTY_TILES_JSON but unkeyed, `tile_row`/`tile_col` are keyed but never emitted -- so the new "total order" wording overclaims and byte-stability rests on an unstated cross-repo invariant. Add `sensor_type`/`ping_count` as final tiebreakers -- `cube_bathymetry/src/survey_index_query.cpp:329-348`, `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:84-90`
-- [ ] (suggestion) The delta's headline behaviour -- deterministic tie ordering -- has zero coverage; no test asserts pass ordering at all (bag assertions use an order-insensitive std::set). Distinct from the deferred R2 finding and cheap here: the `insertPass` fixture helper makes it ~8 lines -- `cube_bathymetry/test/test_survey_index_query.cpp`
-- [ ] (suggestion) Only the statement half of the leak was made structural: the db handle is still a hand-rolled try/catch(...) close, and both `sqlite3_close` return codes stay unchecked. Use `sqlite3_close_v2` (or check the return) and add `EXPECT_EQ(sqlite3_close(db_), SQLITE_OK)` to the fixture TearDown as a standing leak guard -- `cube_bathymetry/src/batch_regen_main.cpp:386-394`, `cube_bathymetry/test/test_survey_index_query.cpp:72`
-- [ ] (suggestion) `StmtGuard` near-duplicates an existing guard in the package that owns the DB (`marine_survey_index/src/survey_index_bag_main.cpp:252-271`); nothing is left inconsistent inside cube_bathymetry (one prepare site), but queryPasses/distinctLevels/queryNavTrack still use manual finalize with throwing calls in between. Follow-up issue in unh_marine_autonomy to upstream the guard -- `cube_bathymetry/src/survey_index_query.cpp:91-114`
-- [ ] (suggestion) ADR-0002 cites "(ADR-0007 addendum)" for a decision ADR-0007 never records (no mention of #111, dirty, or incremental). Reword as forward-looking or add the addendum -- `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md:104-105`
-- [ ] (suggestion) ADR-0018 merge gate: the green Integrated-Review/CI signal is at `59d2bdd`, four commits back. Before merge, push for hosted CI or run `ci_local.sh` and confirm `scope: full` / `ci-local: pass` at the new head
-- [ ] (suggestion) Plan doc-impact table now has two rows for the same file (`cube_bathymetry/README.md`, which does not exist, and `README.md`); collapse to one and add `README.md` to the PR1 Files-to-Change table -- `.agent/work-plans/issue-111/plan.md:120-136,150-151`
+- [x] (must-fix) Step-6 comment still claims "queryPasses ... so today this is a no-op" -- now false and contradicts the paragraph below it; queryPasses sorts only on (bag_path, t_start_ns) and is non-stable, so the added keys DO reorder tied rows. Invites a future reader to delete the sort as dead work -- `cube_bathymetry/src/survey_index_query.cpp:314-317`
+- [x] (must-fix) New ADR markdown link is broken: repo root has no `docs/`; ADRs live at `cube_bathymetry/docs/decisions/`, and the repo's own convention at line 146 uses the prefixed form. 404s on GitHub -- `README.md:54`
+- [x] (suggestion, cross-pass confirmed Lens A + Lens B) Comparator key set misaligned with the serialized fields: `sensor_type`/`ping_count` are emitted in DIRTY_TILES_JSON but unkeyed, `tile_row`/`tile_col` are keyed but never emitted -- so the new "total order" wording overclaims and byte-stability rests on an unstated cross-repo invariant. Add `sensor_type`/`ping_count` as final tiebreakers -- `cube_bathymetry/src/survey_index_query.cpp:329-348`, `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:84-90`
+- [x] (suggestion) The delta's headline behaviour -- deterministic tie ordering -- has zero coverage; no test asserts pass ordering at all (bag assertions use an order-insensitive std::set). Distinct from the deferred R2 finding and cheap here: the `insertPass` fixture helper makes it ~8 lines -- `cube_bathymetry/test/test_survey_index_query.cpp`
+- [x] (suggestion) Only the statement half of the leak was made structural: the db handle is still a hand-rolled try/catch(...) close, and both `sqlite3_close` return codes stay unchecked. Use `sqlite3_close_v2` (or check the return) and add `EXPECT_EQ(sqlite3_close(db_), SQLITE_OK)` to the fixture TearDown as a standing leak guard -- `cube_bathymetry/src/batch_regen_main.cpp:386-394`, `cube_bathymetry/test/test_survey_index_query.cpp:72` (deferred: out of scope — operator checkpoint after this round scoped the pass to both must-fixes plus the cross-confirmed comparator suggestion and its test only)
+- [x] (suggestion) `StmtGuard` near-duplicates an existing guard in the package that owns the DB (`marine_survey_index/src/survey_index_bag_main.cpp:252-271`); nothing is left inconsistent inside cube_bathymetry (one prepare site), but queryPasses/distinctLevels/queryNavTrack still use manual finalize with throwing calls in between. Follow-up issue in unh_marine_autonomy to upstream the guard -- `cube_bathymetry/src/survey_index_query.cpp:91-114` (deferred: out of scope — operator checkpoint after this round scoped the pass to both must-fixes plus the cross-confirmed comparator suggestion and its test only)
+- [x] (suggestion) ADR-0002 cites "(ADR-0007 addendum)" for a decision ADR-0007 never records (no mention of #111, dirty, or incremental). Reword as forward-looking or add the addendum -- `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md:104-105` (deferred: out of scope — operator checkpoint after this round scoped the pass to both must-fixes plus the cross-confirmed comparator suggestion and its test only)
+- [x] (suggestion) ADR-0018 merge gate: the green Integrated-Review/CI signal is at `59d2bdd`, four commits back. Before merge, push for hosted CI or run `ci_local.sh` and confirm `scope: full` / `ci-local: pass` at the new head (deferred: host action, not a code change — the merge gate is re-run by the orchestrator at the final head, after this fix pass)
+- [x] (suggestion) Plan doc-impact table now has two rows for the same file (`cube_bathymetry/README.md`, which does not exist, and `README.md`); collapse to one and add `README.md` to the PR1 Files-to-Change table -- `.agent/work-plans/issue-111/plan.md:120-136,150-151` (deferred: out of scope — operator checkpoint after this round scoped the pass to both must-fixes plus the cross-confirmed comparator suggestion and its test only)
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-05 09:49 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-111 at `462a4c6`
+**Addressed**: `## Local Review (Pre-Push)` (round 4, 2026-08-05 09:34 -04:00, branch at `8ab2eb3`, verdict changes-requested)
+**Commits**: `ec1f25c`, `8cdad8f`, `462a4c6`
+
+Scope for this pass was set by the operator at the post-round-4 checkpoint:
+fix both must-fixes plus the cross-confirmed comparator suggestion **including
+its regression test**; every other suggestion is deferred to a follow-up, not
+dropped. The operator has elected to publish after this pass with no further
+full review round.
+
+Verified in the worktree after the last fix: `./sensors_ws/build.sh
+cube_bathymetry` clean, `./sensors_ws/test.sh cube_bathymetry` = **494 tests, 0
+errors, 0 failures, 65 skipped** (up from 493 — the new
+`DirtyTileQuery.TiedPassesComeBackInADeterministicOrder` case is present in the
+gtest XML and passes). Pre-commit hooks ran on all three commits; no
+`--no-verify`. Not pushed — the host performs pushes.
+
+Notes on the comparator change: the sort key is now
+`(bag_path, t_start_ns, topic, t_end_ns, tile_row, tile_col, sensor_type,
+ping_count)` — every `marine_survey_index::PassRow` field except `level`, which
+is the constant index level for these rows. That makes the key set a superset of
+what `DIRTY_TILES_JSON` serializes, so the only rows the comparator can still
+leave tied are rows that serialize to identical bytes; the header's ordering
+contract was reworded to claim exactly that rather than a bare "total order".
+The new test inserts four rows of one bag that tie on `(bag_path, t_start_ns)`
+— the entire key `queryPasses` itself sorts on — in reverse of the expected
+order, so a pass-through of index/insert order fails it; two of the pairs tie on
+every pre-existing key and separate only on the newly added `sensor_type` /
+`ping_count` tiebreakers.
+
+### Actions
+- [x] Step-6 comment's stale "today this is a no-op" claim corrected — it now states the sort is load-bearing (queryPasses orders on `(bag_path, t_start_ns)` only, non-stable) and warns against deleting it — `cube_bathymetry/src/survey_index_query.cpp:314-319` (`ec1f25c`)
+- [x] Broken ADR-0002 markdown link repointed to `cube_bathymetry/docs/decisions/…`, matching the repo's existing prefixed convention — `README.md:54` (`8cdad8f`)
+- [x] Comparator keyed on `sensor_type` + `ping_count` as final tiebreakers; header ordering-contract wording aligned with what the key set actually guarantees — `cube_bathymetry/src/survey_index_query.cpp:329-356`, `cube_bathymetry/include/cube_bathymetry/survey_index_query.h:84-93` (`462a4c6`)
+- [x] Tie-order regression test added via the `insertPass` fixture helper — `cube_bathymetry/test/test_survey_index_query.cpp` (`462a4c6`)
+- [x] sqlite db-handle close hardening (`sqlite3_close_v2` + TearDown leak guard) — `cube_bathymetry/src/batch_regen_main.cpp:386-394` (deferred: outside the operator-confirmed scope for this pass)
+- [x] Upstream `StmtGuard` to `marine_survey_index` via a follow-up issue — `cube_bathymetry/src/survey_index_query.cpp:91-114` (deferred: outside the operator-confirmed scope; cross-repo follow-up)
+- [x] ADR-0002's "(ADR-0007 addendum)" citation reworded — `cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md:104-105` (deferred: outside the operator-confirmed scope for this pass)
+- [x] ADR-0018 merge gate re-run at the new head (deferred: host action, not a code change — the orchestrator runs it before merge)
+- [x] Plan doc-impact table duplicate-row collapse — `.agent/work-plans/issue-111/plan.md:120-136,150-151` (deferred: outside the operator-confirmed scope for this pass)
