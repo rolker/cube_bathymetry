@@ -77,7 +77,7 @@ issue: 91
 **CI**: all-pass (ROS 2 Jazzy industrial_ci success, copilot-pull-request-reviewer success)
 
 ### Findings
-- [ ] (medium, integrator) README "Seed precedence (`--reference-store`)" still documents only the two rungs survey -> reference; the #119 fix adds an exact-level `Chart`-layer rung inside rung 2 (no cross-level fallback for Chart), so the user-facing description of `--reference-store` behavior is now incomplete — `README.md:67-86`
+- [x] (medium, integrator) README "Seed precedence (`--reference-store`)" still documents only the two rungs survey -> reference; the #119 fix adds an exact-level `Chart`-layer rung inside rung 2 (no cross-level fallback for Chart), so the user-facing description of `--reference-store` behavior is now incomplete — `README.md:67-86`
 - [ ] (low, integrator) New live-node `prior_store_dir` parameter is undocumented outside the source comments; the README describes the offline prior-gate path in detail but not its live equivalent — `README.md`
 - [ ] (low, Copilot) Doxygen `@ref primeFromTileResample` in the public header points to a symbol that is not declared in any header (it is a `namespace cube` definition local to `store_import.cpp`), so readers cannot resolve it from the public API surface; reword to describe the cross-level resample path without an `@ref` — `cube_bathymetry/include/cube_bathymetry/store_import.h:253`
 
