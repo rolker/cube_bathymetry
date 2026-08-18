@@ -557,6 +557,86 @@ TEST(ImportEviction, ChartLayerSeedRejectsDeepBlunder)
   std::filesystem::remove_all(root);
 }
 
+// Evict/revisit keeps the prior gate (#118): a tile whose predicted surface came
+// only from the reference prime used to return from eviction with the gate OFF —
+// reloadEvictedTile restored the Survey layer only, so a cell never surveyed
+// (prior-gated only) accepted a false-deep sounding on revisit. The fix re-primes
+// the prior FIRST on reload (then the survey restore overwrites where measured
+// data exists). Here: survey one cell of a reference-gated tile, force its
+// eviction with spread batches, revisit with a deep blunder at a DIFFERENT cell
+// of the same tile — the blunder must still be rejected. (Revert the reload
+// re-prime and the deep cell settles -> this fails.)
+TEST(ImportEviction, ReferenceOnlyTileEvictRevisitKeepsGate)
+{
+  const std::string root = makeTempDir("revisit_gate");
+  const std::string ref_dir = root + "/reference_store";
+  const std::string store_dir = root + "/store";
+
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // Dense SHALLOW (-20 m) reference tile at the survey level covering the tile.
+  {
+    marine_bathymetry_store::BathymetryTile rtile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      rtile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(rtile));
+    marine_bathymetry_store::BathymetryStore ref_store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    ref_store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(ref_store, ref_dir);
+  }
+
+  // Visit 1: a gate-passing shallow sounding on cell A. Then spread batches over
+  // 6 other tiles (budget 3) to force the tile's eviction. Revisit: a deep
+  // (~ -150 m) blunder at cell B, ~3 m away — a different, never-surveyed cell
+  // of the same tile, whose only predicted surface was the reference prime.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 20.0f, 30.0f));
+  for (int i = 0; i < 6; ++i) {
+    batches.push_back(surveyCell(43.0 + 0.02 * i, -71.0, 15.0f + i, 25.0f + i));
+  }
+  batches.push_back(surveyCell(survey_lat + 3e-5, survey_lon, 150.0f, 40.0f));
+
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(store_dir, "", /*budget=*/3);
+    cfg.reference_store_dir = ref_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  const auto cells = loadBathyCells(store_dir);
+  // The visit-1 shallow survey survived the evict/reload round-trip...
+  bool shallow_found = false;
+  bool deep_found = false;
+  for (const auto & [cell, du] : cells) {
+    if (du.first < -100.0) {deep_found = true;}
+    if (du.first > -30.0 && du.first < -10.0) {shallow_found = true;}
+  }
+  EXPECT_TRUE(shallow_found)
+    << "the shallow visit-1 survey should survive eviction and reload";
+  // ...and the revisit blunder was rejected by the re-primed gate.
+  EXPECT_FALSE(deep_found)
+    << "the revisit deep blunder must be rejected -- the prior gate must be "
+    "re-primed on reload (#118)";
+
+  std::filesystem::remove_all(root);
+}
+
 // Cross-level reference blunder gate (#115): a reference store holding ONLY tiles at
 // a COARSER GGGS level than the survey (e.g. ENC exports at L5/L7/L8 under an L10
 // survey) must still gate a false-deep blunder. `loadWindow` returns the coarse tile

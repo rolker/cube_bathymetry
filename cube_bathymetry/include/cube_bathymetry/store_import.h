@@ -402,6 +402,10 @@ private:
     void persistBackscatterTile(const gggs::GridIndex & index);
     void spillIntensitySamples(const gggs::GridIndex & index);
     void restoreSpilledSamples(const gggs::GridIndex & index);
+  /// Revisit reload: re-primes the reference/chart prior FIRST (#118, so a
+  /// prior-gated tile never returns from eviction ungated), then restores the
+  /// survey settled state (which overwrites the predicted surface where survey
+  /// data exists) and the spilled backscatter samples.
     bool reloadEvictedTile(const gggs::GridIndex & index);
   /// @brief Seed a tile the batch is touching for the FIRST time (seed precedence
   ///        #96), then mark it @ref seeded_. Two-rung precedence:
