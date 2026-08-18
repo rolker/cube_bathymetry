@@ -83,9 +83,8 @@ boat-side recording change first"). No open issue blocks *this* one.
   (per the workspace's Documentation Accuracy / progress.md conventions) and
   not only visible to agents/humans with GitHub read access.
 - When inspecting a representative bag, prefer a recent Massabesic or Lewes
-  survey day already referenced in project memory (e.g. the 2026-08-05/06
-  Lewes deployments) so the finding is grounded in current recording
-  configuration rather than a stale one.
+  survey day (e.g. the 2026-08-05/06 Lewes deployments) so the finding is
+  grounded in the current recording configuration rather than a stale one.
 
 ### Actions
 - [x] Persist audit findings to progress.md as a typed entry (not only a GitHub comment) once the investigation phase runs. (satisfied — findings persisted as the corrected `## Implementation` entry below)
@@ -140,12 +139,22 @@ boat-side recording change first"). No open issue blocks *this* one.
 **When**: 2026-08-17 23:21 -04:00
 **By**: Claude Code Agent (Claude Fable 5)
 
-**Branch**: feature/issue-121 at `eb5aaf7`
-**Corrected**: rewritten in place 2026-08-17 23:45 -04:00 by the `address-findings`
-pass for the `## Local Review (Pre-Push)` at `707392c` — the original text
-generalized from an undisclosed leading-50-message sample and several of its
-claims were falsified by full-bag scans. All numbers below are now **bag-wide**
-(every message read, both bags; bags opened read-only — data of record).
+**Branch**: feature/issue-121 at `9438b15`
+**Entry role**: this is the spike **deliverable** — the audit itself. The later
+`## Implementation` entries in this file are `address-findings` remediation logs
+about it; a consumer taking the *last* `## Implementation` entry gets the log,
+not the deliverable. ADR-0013 has no distinct type for an investigation result,
+so the heading is reused (flagged, not worked around).
+**Revision history** (times from git, not hand-typed):
+- first written at `eb5aaf7` (2026-08-17 23:21 -04:00) — round-0 text,
+  generalized from an undisclosed leading-50-message sample.
+- rewritten at `57d15a8` (2026-08-17 23:40) for the round-1
+  `## Local Review (Pre-Push)` (2026-08-17 23:30, branch head `eb5aaf7`) —
+  several round-0 claims were falsified by full-bag scans; all figures became
+  **bag-wide** (every message read; bags opened read-only — data of record).
+- operator corrections folded in at `6043cee` (2026-08-18 00:08).
+- rescoped and re-verified at `4d63366`…`9438b15` (2026-08-18 00:29–00:32) for
+  the round-2 review (2026-08-18 00:20, branch head `6043cee`).
 **Operator corrections folded in 2026-08-18**: (1) only `bizzyboat_sonar/` bags
 are sonar survey data-of-record — source-verified in the launch, not the yaml:
 the `sonar_logger` node's `storage.uri` from
@@ -451,7 +460,9 @@ past sounding construction:
 - [x] Timing — data-of-record bag probed for the #338 integer-second skew despite sitting in the post-2026-06-24 window: histogram `+0 s: 124375` (no skew), `/tf_static` already at the corrected `(-0.29, 0.0, -0.28)`, no `.orig` — read-only `retrofit_m3_bag.py --report-only`; per-bag precondition recorded in Limits
 - [x] Secondary — 1469.0 m/s is a 38-ping sonar startup transient; the in-bag SV feed reads 1528.102 from t+1.3 s (AML healthy) — Lewes bag full scan
 - [x] Operator corrections (Roland, 2026-08-18) — `bizzyboat_sonar/` = sonar data-of-record (launch-verified: `perception_launch.py:275-278` + `:34-41`, **not** the overridden `bizzyboat.yaml:765` uri); `bizzy_m3/` etc. = temp engineering captures; `.all` files = debug-purpose, sparse by design (operator-stated intent; the launch comment reads differently — see Q3) — folded into Q1/Q3/Limits above
-- [x] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. Done by host 2026-08-17: comment rewritten in place (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal posted (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922).
+- [x] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. Done by host 2026-08-18 (posted 2026-08-17, refreshed 2026-08-18 with the operator corrections): comment rewritten in place (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal posted (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922).
+- [ ] Owed (host, **outstanding**): both published comments predate this round's corrections and must be refreshed again — the epic signal still says "two deployment recordings" where the evidence is **one** 74-min data-of-record bag (0.83% of the archive's M3 messages, June-2026-onward window), and neither comment carries the launch-override citation, the `tx_delays` correction, the clock-skew probe result, or the operator-intent attribution on `.all`. No `gh` writes were performed by this pass.
+- [x] Knowledge-capture candidates (**proposal only — operator decides**; not written to any instruction file from this branch): (a) `bizzyboat_sonar/` = sonar data-of-record vs `bizzy_m3/`/`m3_all/` engineering captures, and the launch override that sets the path; (b) `skip_invalid_beams` defaults true ⇒ bags carry no rejected-beam population and no `nrx`/`nvalid` count; (c) the M3's ~38-ping startup sound-speed default. Surface these in the PR body.
 
 No follow-up recording-change issue is filed: the observables required by the
 epic are present. The limits above are recording-*configuration* facts (raw
@@ -494,12 +505,12 @@ no-unprompted-scope rule.
 
 ## Implementation
 **Status**: complete
-**When**: 2026-08-17 23:52 -04:00
+**When**: 2026-08-17 23:41 -04:00 (commit time of `cb62a2c`)
 **By**: Claude Code Agent (Claude Opus)
 
-**Branch**: feature/issue-121 at `57d15a8`
+**Branch**: feature/issue-121 at `cb62a2c`
 **Addressed**: `## Local Review (Pre-Push)` (2026-08-17 23:30 -04:00, branch head `eb5aaf7`, verdict changes-requested, round 1) — 8 must-fix + 10 suggestions
-**Commits**: `2db77bf` (plan.md importer-source correction), `57d15a8` (spike `## Implementation` entry rewritten from full-bag scans + ADR-0013 conformance), plus this progress commit (checkbox reconciliation)
+**Commits**: `2db77bf` (plan.md importer-source correction), `57d15a8` (spike `## Implementation` entry rewritten from full-bag scans + ADR-0013 conformance), `cb62a2c` (this entry + checkbox reconciliation). Two later commits belong to the same round-1 arc but landed after this entry was written: `2900bf1` (host GitHub sync recorded) and `6043cee` (operator corrections folded into the spike entry + plan).
 
 **Method**: every corrected number comes from a **full-bag** `rosbag2_py` scan
 (all messages, not a head sample) of the two bags named in the corrected entry,

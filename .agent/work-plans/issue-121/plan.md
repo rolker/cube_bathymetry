@@ -70,6 +70,10 @@ is still needed for:
    bag sample only as an empirical cross-check (discriminator: sampled
    `two_way_travel_times` should be genuine two-way seconds, i.e.
    ≈ 2·depth/sound_speed at nadir, not pre-ray-traced ranges).
+   *(Implementation note: this "discriminator" was **demoted to context** in the
+   findings — a pre-ray-traced range divided the same way also yields a
+   plausible nadir depth, so it discriminates nothing; the Q2 verdict rests on
+   the driver source read alone.)*
 3. Whether the ROS-side recording is a reduced product relative to the
    M3's full output flowing to QINSy on mercat — partly source-answerable
    too: `kongsberg_em_bridge`'s `~/set_recording` raw-`.all` service
@@ -167,14 +171,14 @@ plan and progress files are the only files this branch touches structurally
 | Workspace ADR-0002 (worktree isolation) | Yes | Already satisfied — plan committed inside the issue's layer worktree on `feature/issue-121`. |
 | Workspace ADR-0013 (progress.md entry-type vocabulary) | Yes | `## Plan Authored` entry now; `## Investigation Findings`-style entry at the deliverable step. |
 | cube_bathymetry ADR-0001/0002/0003/0007 | No | Govern tile eviction/staleness/backscatter-store lifecycle; not implicated by a read-only sensor-data audit. |
-| ADR-0009 (`marine_interfaces/SonarInfo` as local prototype, cited in `SonarInfo.msg`) | No (informational) | Confirms `SonarInfo` and `PingInfo` are deliberately separate messages with a documented division of fields — relevant context for question 2, not a compliance obligation here. |
+| `unh_marine_autonomy` ADR-0009 (`marine_interfaces/SonarInfo` as local prototype, cited in `SonarInfo.msg`) — distinct from workspace ADR-0009 (dev-tool venv policy) | No (informational) | Confirms `SonarInfo` and `PingInfo` are deliberately separate messages with a documented division of fields — relevant context for question 2, not a compliance obligation here. |
 
 ## Consequences
 
 | If we change... | Also update... | Included in plan? |
 |---|---|---|
 | Findings show fields insufficient/unpopulated | File follow-up recording-change issue in `rolker/unh_echoboats_project11` | Yes — step 5 |
-| Findings show fields sufficient | Unblocks rolker/unh_marine_autonomy#300 phases 1+ (sim harness, inversion MVP) — no plan action needed here, epic owner acts on the comment | N/A (informational, out of this issue's scope) |
+| Findings show fields sufficient | Unblocks rolker/unh_marine_autonomy#300 phases 1+ (sim harness, inversion MVP) — epic owner acts on the comment | **Done** — epic signal posted 2026-08-17 (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922); a refresh with this round's scope corrections is owed (see the findings entry's open host item) |
 | Findings surface a related but secondary gap (e.g. `SonarInfo` not published in current deployment config) | Note in the comment as a secondary finding, do not scope new work unprompted | Yes — step 3, called out as secondary/non-blocking |
 
 ## Documentation & Instruction Impact
@@ -202,5 +206,7 @@ plan and progress files are the only files this branch touches structurally
 
 ## Estimated Scope
 
-Single pass — no PR needed beyond the plan/progress commits and the
-findings comment; this is an investigation deliverable, not a code change.
+Single pass — the deliverable is the findings comment plus the typed
+progress.md entry, not a code change. *(Updated: the branch's docs-only
+plan/progress commits do go up as a PR, per the workspace's
+all-changes-via-PR rule; "no PR needed" meant no implementation PR.)*
