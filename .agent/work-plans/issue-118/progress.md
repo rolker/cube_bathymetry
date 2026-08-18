@@ -160,3 +160,25 @@ Note: build/gtest NOT run here (shared underlay unbuilt, symlinked into main/ �
 
 ### Findings
 - [ ] (note, no action) Live-node revisit re-prime is exact-level-only (no cross-level fallback), unlike the offline path — accepted: matches the live node's own on_configure prime, introduces no gap first-touch didn't have; operator-adjudicated per plan open question — `cube_bathymetry/src/cube_bathymetry_node.cpp:1176`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-18 06:12 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #132 at `05d55ce`
+**Sources**: 3 (Copilot review @ `05d55ce`, Local Review (Pre-Push) @ `5f34bb5` + @ `71cc1c3`, CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass (ROS 2 Jazzy industrial_ci success; copilot-pull-request-reviewer success)
+
+### Findings
+- [ ] (minor, Copilot) Stale doc contract on `primePriorLayersForTile`: the header comment claims "a prior read failure must never drop soundings", but the #118 reload path now returns `read_ok=false`, `reloadEvictedTile` returns false, and `ImportAccumulator::addBatch` drops this batch's soundings on that tile (`reload_failed` -> `dropTile`). Reword to the real per-caller contract: seedNewTile = warn-and-continue ungated; reloadEvictedTile = keep evicted + drop this batch's soundings, retry on a later revisit. — `cube_bathymetry/src/store_import.cpp:679-687`
+- [ ] (minor, Copilot) Prior-seed failure log omits the tile index, so a corrupt/missing prior tile can't be located on a long import run. The live node's analogous WARN (`cube_bathymetry_node.cpp:1222`) already names the index; make the offline line match. — `cube_bathymetry/src/store_import.cpp:781-782`
+- [ ] (minor, integrator addendum) `reloadEvictedTile` has no `@return` doc in the header, unlike `seedNewTile` — the prior-read-failure-keeps-evicted contract that Copilot's first finding is about is undocumented at the API surface. Add an `@return` clause while fixing finding 1. — `cube_bathymetry/include/cube_bathymetry/store_import.h:404-409`
+
+### False positives
+- (none)
+
+### Notes
+- All five findings from the two prior `## Local Review (Pre-Push)` entries are already closed on this branch (both must-fixes fixed in `6301463`/`fdb3816`, regression test in `1c488b4`); the live-node-test suggestion remains explicitly deferred (needs `CubeBathymetryNode` extracted from behind `main()` — structural refactor, out of scope).
+- No cross-source confirmation: Copilot's two findings are documentation/observability items the local reviews did not raise; the local reviews' behavioural findings were already fixed before Copilot ran at the current head.
