@@ -96,11 +96,15 @@ they are decided now rather than left implicit:
 ## Approach
 
 1. **Header** `cube_bathymetry/include/cube_bathymetry/ssp_ray_tracer.h`:
-   - `struct SoundSpeedProfilePoint { float depth; float sound_speed; };`
+   - `struct SoundSpeedProfilePoint { double depth_below_surface;
+     double sound_speed; };`
+     (shipped as `double` per the all-scalars-are-`double` decision above,
+     and named `depth_below_surface` to match the result field's datum)
      and `using SoundSpeedProfile = std::vector<SoundSpeedProfilePoint>;`
      with the sign/ordering doc comments from decision 1–2 above.
    - `enum class RayTraceStatus { kOk, kInvalidInput, kEvanescentLaunch,
-     kExtrapolationLimit };` — the full validity contract (per plan review:
+     kExtrapolationLimit, kStepLimit };` — the full validity contract (per
+     plan review:
      the phase-2 inversion iterates *perturbed* candidate profiles, so
      invalid input is the normal case, not the pathological one):
      - `kInvalidInput`: empty profile; non-strictly-increasing profile
@@ -122,11 +126,27 @@ they are decided now rather than left implicit:
        (a documented floor, e.g. 1 m/s) before the travel time was
        exhausted; the result carries the endpoint at the floor point with
        `extrapolated = true` so a consumer sees how far the trace got.
+     - `kStepLimit` (**added in review round 1**): the internal cap on
+       segment traversals was reached before the travel time was consumed.
+       The input is well formed, so reporting the tracer's own safety cap
+       as `kInvalidInput` blamed the caller; a pathological finely-sampled
+       duct is a distinct outcome and gets a distinct status. NaN
+       sentinels.
+     - **Joint (profile, transducer depth) constraint (round 1)**: the
+       profile — extended if the transducer lies outside its span — must
+       give a sound speed `≥ kMinSoundSpeed` at the transducer.
+       Otherwise `kInvalidInput`: there is no water column to launch into,
+       and admitting a sliver above zero ran the floor branches backwards
+       (negative consumed time, endpoint above the transducer).
    - `struct RayTraceResult` — `RayTraceStatus status`,
      `double across_track_offset`, `double depth_below_surface`,
      `double end_angle`, `double effective_sound_speed` (defined as
      straight-line distance from transducer to endpoint, divided by the
-     one-way travel time — the constant speed that would reproduce the same
+     travel time actually **consumed** — equal to `one_way_travel_time` on
+     `kOk`, less on `kExtrapolationLimit`, NaN when nothing was consumed;
+     the round-1 review caught the header claiming `one_way_travel_time`
+     where the code already used consumed time — the constant speed that
+     would reproduce the same
      **slant range** for the given time; the header states explicitly that
      substituting it into `range = twtt·c/2` with the original rx angle
      does NOT reproduce the endpoint position), `bool turned`,
@@ -242,7 +262,7 @@ they are decided now rather than left implicit:
 |------|--------|
 | `cube_bathymetry/include/cube_bathymetry/ssp_ray_tracer.h` | New: profile type, result type, `traceRay()` declaration, full sign/unit doc comments |
 | `cube_bathymetry/src/ssp_ray_tracer.cpp` | New: constant-gradient ray integration |
-| `cube_bathymetry/test/test_ssp_ray_tracer.cpp` | New: GTest suite (9 cases above) |
+| `cube_bathymetry/test/test_ssp_ray_tracer.cpp` | New: GTest suite — 11 cases as first shipped, 21 after the round-1 review closed the contract-clause gaps (array-face Snell correction with `array_sound_speed ≠ c(z_tx)`, transducer above the profile, inclined extrapolation floor, multi-segment turning, above-surface ascent, near-nadir cancellation regression, step limit, degenerate gradient) |
 | `cube_bathymetry/CMakeLists.txt` | New `cube_bathymetry_ssp_ray_tracer` library target + gtest registration |
 
 ## Principles Self-Check
@@ -250,7 +270,7 @@ they are decided now rather than left implicit:
 | Principle | Consideration |
 |---|---|
 | Only what's needed | No `Sounding` wiring, no file I/O, no TPU — matches the issue's stated non-goals exactly. |
-| Test what breaks | The 6 GTest cases target the tracer's actual failure modes (turning, extrapolation, degenerate input) plus a strong regression tie to the existing straight-ray formula, not coverage-chasing. |
+| Test what breaks | The GTest cases target the tracer's actual failure modes (turning, extrapolation, degenerate input) plus a strong regression tie to the existing straight-ray formula, not coverage-chasing. |
 | Capture decisions, not just implementations | The sign/unit/target-isolation decisions above are recorded in this plan (durable, committed) rather than only in code comments. |
 | A change includes its consequences | No existing call site changes in this PR (non-goal), so no dependent references need updating yet; the header doc comments are the consequence-bearing artifact for the two downstream repos. |
 | Numerical/statistical code — watch signs and units (this repo's `AGENTS.md`) | Directly addressed by design decision 1 (explicit, cross-referenced, single internal convention) and by the Snell-invariant and analytic-case tests, which would catch a sign error in the gradient/turning logic. |
@@ -296,3 +316,39 @@ inferred from the implementation.
 ## Estimated Scope
 
 Single PR (4 new/changed files, no existing call sites touched).
+
+## Implementation notes (added during implementation / review)
+
+- **Independent test oracle**: analytic expectations are generated by an
+  RK4 integration of the ray equations (`dy/ds = sin θ`, `dz/ds = cos θ`,
+  `dθ/ds = p·g(z)`, `dt/ds = 1/c(z)`) written into the test file, sharing
+  no closed-form algebra with the implementation. Decided during
+  implementation to satisfy the plan review's requirement that expectations
+  be derived independently of the code under test; a hand-derived table
+  would have re-used the same arc formulas the implementation evaluates.
+- **Half-angle arc displacement (review round 1)**: the textbook
+  `dy = R(cos θ₀ − cos θ₁)` catastrophically cancels near nadir with a
+  near-flat gradient (R ~ 1e12 m, both cosines within 1e-15 of 1), returning
+  a hard zero offset. Shipped form is `dy = 2R·sin(m)·sin(d)`,
+  `dz = 2R·cos(m)·sin(d)` with `m = (θ₀+θ₁)/2`, `d = (θ₁−θ₀)/2`, and `d`
+  itself formed via `atan`/`expm1` on the tan-half ratio in the
+  time-limited branch so it never comes from subtracting two nearly equal
+  angles.
+- **No sea surface (review round 1)**: the tracer models no boundary at
+  depth 0. An ascending ray may cross it and continue on the upward
+  extrapolated profile, returning `kOk` with a negative
+  `depth_below_surface`. Documented in the header and pinned by a test;
+  deliberately not clamped, since a silent clamp would corrupt the geometry
+  the inversion differentiates through.
+- **Consumability (review round 1)**: headers install to
+  `include/${PROJECT_NAME}/`, so the exported target's
+  `INSTALL_INTERFACE` is `include/${PROJECT_NAME}` (a bare `include` left
+  `#include "cube_bathymetry/ssp_ray_tracer.h"` unresolvable for a
+  target-only consumer). `POSITION_INDEPENDENT_CODE ON` so the archive
+  links into the consumers' shared libraries and Python extension module.
+- **Performance shape (deferred)**: `traceRay()` revalidates the profile and
+  locates the transducer segment per call (O(n), ~5 µs on a 200-sample
+  profile). A prepared-profile overload that amortises this is a real
+  option, but should be designed against the inversion's actual inner-loop
+  access pattern (unh_marine_autonomy#300) rather than guessed at now. Noted
+  in the header so the next reader does not rediscover it.
