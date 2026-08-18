@@ -267,7 +267,11 @@ public:
           // Bound the prime to the resident budget (#70 pattern, same as the
           // draft prime below). Evicted prior-primed tiles lose their gate
           // until re-priming lands (#118); bounded RAM outranks gate coverage
-          // on a long survey.
+          // on a long survey. As with the draft prime, the WHOLE store is
+          // loaded before this trim, so a very large prior spikes RAM
+          // transiently at configure -- point prior_store_dir at a
+          // region-scoped store (a windowed prime needs a startup position
+          // not available at on_configure; same known limitation).
           trimResidentToBudget();
         }
       } catch (const std::exception & e) {
