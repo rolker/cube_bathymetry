@@ -90,3 +90,25 @@ The issue is in the right repo (`cube_bathymetry`), in the right worktree (`feat
 - Core interpolation (Steps 4-5) + insert sounding-copy wiring are correctly designed and faithful to `cube_grid.c:2360-2403`. The `INVALID_DATA` sentinel (vs. the original's `0.0f`) is verified correct against `node.cpp:201-204` and is better than the original.
 - ADR-0008 slot is free; existing project ADRs are 0001/0002/0003/0007. ADR-first geometry decision is the right call.
 - Must-fix findings are scoped to the prior-load half (Steps 3, 6); the interpolation core may proceed. Verified against source in the `feature/issue-59` worktree — existing API (`setPredictedDepth`, `addHypothesis`, `Sounding::predicted_depth_at_touchdown`, `GeoGrid`/`GeoMapSheet::setPredictedDepthAt`, `setSettledDepthAt`) all present.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-18 02:52 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-59 at `94b5345`
+**Mode**: pre-push
+**Depth**: Deep (reason: ADR add + correctness-sensitive interpolation math on the insert hot path)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 1 | **Ship**: recommended — no must-fix findings; both adversarial lenses and static analysis clean, 11/11 new tests pass.
+
+### Findings
+- [ ] (suggestion) Add the no-`var_pred` divergence to the canonical registry (recorded in ADR-0008, missing from the doc) — `cube_bathymetry/docs/divergences_from_calder.md`
+- [ ] (suggestion) `ScatterRecord::predicted_depth_at_touchdown` is now recomputed on replay insert — redundant serialized payload; document or drop (pre-existing, follow-up) — `cube_bathymetry/src/batch_regen.cpp:63`
+
+### Notes
+- Static analysis: ament_cpplint clean; cppcheck clean on changed lines (remaining hits are pre-existing untouched lines).
+- Claude Adversarial Lens A (logic) and Lens B (systemic): no must-fix. Bilinear corner-order/axis mapping, boundary gates, signed/unsigned promotion, and sentinel/NaN paths independently verified correct; per-sounding copy hoisted above the node loop (O(1), hot path respected); gates-not-fills invariant upheld.
+- Local Adversarial skipped: ollama not installed. Copilot off (default).
+- Tests: 6 GridPredictedSurfaceTest + 5 GeoGridPredictedSurfaceTest all pass (log/test_2026-08-17_22-42-00).
