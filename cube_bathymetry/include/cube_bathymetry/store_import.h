@@ -406,6 +406,11 @@ private:
   /// prior-gated tile never returns from eviction ungated), then restores the
   /// survey settled state (which overwrites the predicted surface where survey
   /// data exists) and the spilled backscatter samples.
+  /// @return true when the resident grid is consistent with disk (reloaded, or
+  ///   genuinely absent on disk). false on a survey OR prior read failure: the
+  ///   caller must drop the partial grid and keep the tile evicted, so this
+  ///   batch's soundings on the tile are dropped and the reload (including the
+  ///   prior re-prime) retries on the next revisit.
     bool reloadEvictedTile(const gggs::GridIndex & index);
   /// @brief Seed a tile the batch is touching for the FIRST time (seed precedence
   ///        #96), then mark it @ref seeded_. Two-rung precedence:

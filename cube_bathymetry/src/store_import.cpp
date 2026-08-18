@@ -680,10 +680,15 @@ void primeFromTileResample(
 // (predicted-only at every rung -- the prior gates, never fills): windowed load,
 // Chart exact-level first (#119, lowest-priority layer), Reference exact-level
 // on top (overwrites where both cover a cell), else the #115 containment-checked
-// cross-level Reference fallback resample. Warn-and-continue on any load error
-// (the tile simply runs ungated; a prior read failure must never drop
-// soundings). Shared by seedNewTile (first touch) and reloadEvictedTile (#118
-// revisit re-prime); @p context names the caller in the audit/error lines.
+// cross-level Reference fallback resample. A load error WARNs here and reports
+// via @p read_ok; what happens next is the CALLER's contract:
+//   - seedNewTile (first touch): continue ungated -- the tile accumulates
+//     normally, it just has no prior gate.
+//   - reloadEvictedTile (#118 revisit): return false, keeping the tile evicted
+//     so the re-prime retries on the next revisit; this batch's soundings on
+//     the tile ARE dropped (the offline import is single-pass) -- gate
+//     integrity over one batch's coverage.
+// @p context names the caller in the audit/error lines.
 // Returns true when any rung primed something.
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
@@ -778,8 +783,9 @@ bool primePriorLayersForTile(
     if (read_ok != nullptr) {
       *read_ok = false;  // transient read failure -- caller may keep the tile evicted
     }
-    std::cerr << "import_bag: could not prior-seed tile on " << context << ": "
-              << e.what() << " (no prior gate for this tile)" << std::endl;
+    std::cerr << "import_bag: could not prior-seed tile " << index << " on " <<
+      context << ": " << e.what() << " (no prior gate for this tile)" <<
+      std::endl;
   }
   return primed;
 }
