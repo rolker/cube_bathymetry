@@ -357,11 +357,27 @@ past sounding construction:
   consequence is the opposite one: **the first tens of pings of a run carry an
   applied sound speed that does not match the measured surface SV**, and must be
   either corrected or discarded.
-- **Bag variant (echoboats#342 retrofit): not retrofitted.** No `.orig` backup
-  exists beside `bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (the retrofit
-  script's in-place marker), so the June bag is an original recording. Independent
-  of that, the retrofit rewrites `/tf_static` offsets and `header.stamp` skew, not
-  `twtt`/angle payloads.
+- **Clock skew and bag variant (echoboats#342 retrofit): the data-of-record bag
+  is clean — measured, not assumed.** This matters beyond the payload: an
+  inversion georeferences beams through `/bizzy/odom` and TF, so a one-second
+  `header.stamp` skew is ~1.5 m of along-track position error at 3 kn — enough
+  to swamp the effect being inverted for. The Lewes bag (2026-08-05) sits
+  **inside** the skew window `retrofit_m3_bag.py:19-22` describes (integer-second
+  jumps from 2026-06-24 onward), so it was probed directly with
+  `retrofit_m3_bag.py --report-only` — the script's non-destructive path: pass 1
+  measures and prints, and it returns before any writer is opened
+  (`retrofit_m3_bag.py:506-517`). Result: **integer-second offset histogram
+  `+0 s: 124375`** — every ping already time-aligned, zero timing corrections.
+  The accompanying "would correct: 1 tf_static" is a frame-presence count, not a
+  value mismatch (`measure_pass`, `:301-304`); reading that transform out of the
+  bag shows it already at the corrected measured offset `(-0.29, 0.0, -0.28)`,
+  so the geometry fix would be a no-op too. No `.orig` backup exists beside
+  either bag (the retrofit's in-place marker), so both are original recordings
+  that never needed it. The 2026-06-09 engineering capture predates the skew
+  onset and so is uninformative about it — the earlier round's `.orig` check on
+  that bag alone did not settle the question. Independent of all this, the
+  retrofit rewrites `/tf_static` offsets and `header.stamp`, never `twtt`/angle
+  payloads.
 - **June bag site label removed.** The bag was previously called
   "Massabesic-era"; that is unverified — its bag-wide max `twtt` of 75.46 ms
   implies a ~56 m slant range, deeper than Lake Massabesic. Date (2026-06-09) is
@@ -384,6 +400,12 @@ past sounding construction:
   raw `.all` capture is a debug facility (sparse by design — 2026-06-16/17 only),
   so for survey days the `SonarDetections` stream is the record.
 - Startup pings carry a stale applied sound speed (38 pings in the Lewes bag).
+- **Timing is not a limit for this bag, but is a per-bag precondition.** The
+  data-of-record bag measures zero integer-second skew, so its beams georeference
+  as recorded. Other in-window bags (2026-06-24 onward) are *not* covered by that
+  measurement: an inversion consuming them must run
+  `retrofit_m3_bag.py --report-only` per bag first, since ~1 s of skew is ~1.5 m
+  of along-track error at 3 kn.
 
 ### Findings
 - [x] Q1 — in the data-of-record bag, `two_way_travel_times[]` / `rx_angles[]` populated in all 124,375 messages and `ping_info.sound_speed` non-zero and non-NaN in all of them; the non-of-record engineering capture agrees except for 306 empty messages — full scans, scope stated under "Evidence scope"
@@ -395,6 +417,7 @@ past sounding construction:
 - [x] Q3b — raw `.all` capture is opt-in (`record_on_start` default false) and on disk covers 2026-06-16/17 only; neither scanned bag's date is covered — `perception_launch.py:107-146`, `node.py:205`
 - [x] Q3c — M3 topics ride in the `sonar_logger` bag (self-sufficient: also carries odom, TF and the SV feed), not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`; destination set by `perception_launch.py:275-278` (`:34-41`), not the yaml `uri`
 - [x] Q4 — observables reach the importer but `Sounding` retains only derived values; inversion must read `SonarDetections` at import time — `include/cube_bathymetry/sounding.h:43`, `src/error_model.cpp:277`, `src/detections_projector.cpp:134`
+- [x] Timing — data-of-record bag probed for the #338 integer-second skew despite sitting in the post-2026-06-24 window: histogram `+0 s: 124375` (no skew), `/tf_static` already at the corrected `(-0.29, 0.0, -0.28)`, no `.orig` — read-only `retrofit_m3_bag.py --report-only`; per-bag precondition recorded in Limits
 - [x] Secondary — 1469.0 m/s is a 38-ping sonar startup transient; the in-bag SV feed reads 1528.102 from t+1.3 s (AML healthy) — Lewes bag full scan
 - [x] Operator corrections (Roland, 2026-08-18) — `bizzyboat_sonar/` = sonar data-of-record (launch-verified: `perception_launch.py:275-278` + `:34-41`, **not** the overridden `bizzyboat.yaml:765` uri); `bizzy_m3/` etc. = temp engineering captures; `.all` files = debug-purpose, sparse by design (operator-stated intent; the launch comment reads differently — see Q3) — folded into Q1/Q3/Limits above
 - [x] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. Done by host 2026-08-17: comment rewritten in place (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal posted (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922).
