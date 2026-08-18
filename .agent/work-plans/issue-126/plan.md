@@ -40,9 +40,25 @@ they are decided now rather than left implicit:
      **positive-down** (0 at surface, increasing with depth) — the standard
      oceanographic/CTD-cast convention, and the one a future `#299` cast
      loader will read naturally. This is the **opposite sign** of
-     `Sounding::depth`. The header states this explicitly and cross-
-     references `sounding.h`, with an explicit note that a future phase-2
-     caller wiring a `RayTraceResult` into `Sounding::depth` must negate it.
+     `Sounding::depth` (which is really an elevation: positive-up). Per the
+     plan review, documentation alone is insufficient against this repo's
+     known sign-bug risk, so the convention is **enforced in the names**:
+     the result field is `depth_below_surface` (never bare `depth`), so a
+     copy-paste into `Sounding::depth` reads wrong at the call site, and a
+     dedicated sign-assertion test locks the direction. Supporting
+     precedent cited in the header: positive-down matches
+     `Sounding::sonar_relative_position.z`, and
+     `original_cube/docs/CUBE_Development_Notes.md:53` documents the same
+     positive-down-inside / positive-up-outside split in the original CUBE
+     library. The header still cross-references `sounding.h` and notes that
+     phase-2 wiring into `Sounding::depth` must negate.
+   - **Depth semantics are absolute, not transducer-relative** (explicit
+     divergence from the issue's "relative to the transducer" wording,
+     chosen deliberately: profile lookups need absolute depths anyway):
+     `depth_below_surface` and `transducer_depth_below_surface` are both
+     measured below the **same surface datum as the profile's depths** —
+     the caller owes all three on one shared datum. Across-track offset
+     remains relative to the transducer.
    - Across-track offset: meters, positive-to-starboard (same sign as
      `rx_angles`, so a positive launch angle produces a positive offset for
      a non-turning ray — directly comparable to `Sounding::sonar_relative_position.y`,
@@ -53,10 +69,16 @@ they are decided now rather than left implicit:
    phase-2 wiring site).
 
 2. **Profile type**: monotonic-by-depth `std::vector` of `{depth, sound_speed}`
-   samples (strictly increasing depth; duplicate depths rejected as
-   ambiguous-gradient input). A single-point profile is valid and
-   degenerates to a straight ray at that point's sound speed — this is the
-   uniform-profile parity test.
+   samples (strictly increasing depth; duplicate/non-monotonic depths are
+   `kInvalidInput` — the rejection has an assigned status, not just a
+   mention). A single-point profile is valid and degenerates to a straight
+   ray at that point's sound speed — this is the uniform-profile parity
+   test. **All API scalars are `double`** (params, profile fields, result
+   fields) and the integration runs in `double` throughout — per the plan
+   review's cancellation analysis (`R = 1/(p·g)` reaches ~77 km at
+   g ≈ 0.02 s⁻¹ while offsets are metres; `float` arc differences
+   catastrophically cancel). `float` inputs from `SonarDetections` promote
+   losslessly.
 
 3. **Own CMake target, no new dependencies.** The module depends only on
    `<cmath>`/`<vector>` — no `marine_acoustic_msgs`, no Eigen, no tf2. Per
@@ -77,31 +99,53 @@ they are decided now rather than left implicit:
    - `struct SoundSpeedProfilePoint { float depth; float sound_speed; };`
      and `using SoundSpeedProfile = std::vector<SoundSpeedProfilePoint>;`
      with the sign/ordering doc comments from decision 1–2 above.
-   - `enum class RayTraceStatus { kOk, kInvalidInput };` — `kInvalidInput`
-     covers empty profile and zero/negative travel time (returns NaN-
-     sentinel fields, matching this file's existing NaN-for-invalid
-     convention, e.g. `Sounding::beam_angle`).
+   - `enum class RayTraceStatus { kOk, kInvalidInput, kEvanescentLaunch,
+     kExtrapolationLimit };` — the full validity contract (per plan review:
+     the phase-2 inversion iterates *perturbed* candidate profiles, so
+     invalid input is the normal case, not the pathological one):
+     - `kInvalidInput`: empty profile; non-strictly-increasing profile
+       depths; any non-finite or ≤ 0 profile sound speed; non-finite
+       `transducer_depth_below_surface`; non-finite launch angle or
+       `|launch_angle| ≥ π/2`; non-finite or ≤ 0 `array_sound_speed`;
+       non-finite or ≤ 0 `one_way_travel_time`. NaN-sentinel fields,
+       matching this repo's existing NaN-for-invalid convention.
+     - `kEvanescentLaunch`: the array-face Snell correction has no real
+       solution — `p · c_profile(z_tx) ≥ 1` (the cast's sound speed at the
+       transducer is high enough, relative to the applied
+       `array_sound_speed`, that the steered beam cannot refract into the
+       water column). This is reachable in practice: #121 found startup
+       pings carry a stale applied sound speed. NaN sentinels; the
+       inversion can penalize the candidate profile distinctly from
+       malformed input.
+     - `kExtrapolationLimit`: extrapolation past the profile's boundary
+       gradient drove the local sound speed to ≤ `kMinSoundSpeed`
+       (a documented floor, e.g. 1 m/s) before the travel time was
+       exhausted; the result carries the endpoint at the floor point with
+       `extrapolated = true` so a consumer sees how far the trace got.
    - `struct RayTraceResult` — `RayTraceStatus status`,
-     `float across_track_offset`, `float depth`, `float end_angle`,
-     `float effective_sound_speed` (defined as straight-line distance from
-     transducer to endpoint, divided by the one-way travel time — the
-     constant speed that would reproduce the same slant range for the given
-     time, directly comparable to today's `ping_info.sound_speed`),
-     `bool turned` (a turning point — total internal refraction — was
-     passed en route; endpoint is still valid), `bool extrapolated`
-     (travel time ran past the shallowest/deepest profile sample; the
-     boundary segment's gradient was extended).
+     `double across_track_offset`, `double depth_below_surface`,
+     `double end_angle`, `double effective_sound_speed` (defined as
+     straight-line distance from transducer to endpoint, divided by the
+     one-way travel time — the constant speed that would reproduce the same
+     **slant range** for the given time; the header states explicitly that
+     substituting it into `range = twtt·c/2` with the original rx angle
+     does NOT reproduce the endpoint position), `bool turned`,
+     `bool extrapolated`.
+   - **`end_angle` convention (settled per plan review)**: radians from
+     nadir, positive-to-starboard, **continuous through a turning point**
+     — it grows monotonically in magnitude along a turning arc, so an
+     ascending ray has `|end_angle| > π/2`; the sign always gives the
+     across-track direction of travel. Stated in the header with the
+     turning-ray test asserting it.
    - `RayTraceResult traceRay(const SoundSpeedProfile & profile,
-     float transducer_depth, float launch_angle, float array_sound_speed,
-     float one_way_travel_time);`
-     `array_sound_speed` (`ping_info.sound_speed`) is used only to compute
-     the initial ray parameter when it differs from the profile's own
-     sound speed at `transducer_depth` (the array-face Snell correction
-     named in the issue) — i.e. the launch angle is defined relative to
-     the array's assumed sound speed, and the ray parameter
-     `p = sin(launch_angle) / array_sound_speed` is what's actually
-     invariant through the water column, not
-     `sin(launch_angle) / profile_sound_speed_at(transducer_depth)`.
+     double transducer_depth_below_surface, double launch_angle,
+     double array_sound_speed, double one_way_travel_time);`
+     `array_sound_speed` (`ping_info.sound_speed`) defines the invariant
+     ray parameter `p = sin(launch_angle) / array_sound_speed` (the
+     array-face Snell correction: the sonar steered the beam using its
+     applied sound speed, so that pair defines `p`); the true initial
+     water-column angle is `asin(p · c_profile(z_tx))`, with the
+     no-real-solution case handled by `kEvanescentLaunch` above.
 
 2. **Implementation** `cube_bathymetry/src/ssp_ray_tracer.cpp`:
    - Per-layer constant-gradient (isogradient) integration: for a layer
@@ -110,10 +154,13 @@ they are decided now rather than left implicit:
      same reference as the launch-angle convention — this is the geometric
      equivalent of the issue's "cos θ/c" invariant stated for the
      complementary from-horizontal angle; same physics). When `|g|` is
-     below a small epsilon, integrate the segment as a straight ray at
-     constant `c0`; otherwise the ray follows the closed-form circular arc
-     of radius `R = 1/(p*g)`, standard for piecewise-linear-profile ray
-     tracing.
+     below `kStraightGradientEpsilon`, integrate the segment as a straight
+     ray at constant `c0` — the epsilon is chosen and documented **in terms
+     of the resulting position error** (arc-vs-chord sagitta ≤ ~1 µm over a
+     100 m segment), not as an arbitrary small number; otherwise the ray
+     follows the closed-form circular arc of radius `R = 1/(p*g)`, standard
+     for piecewise-linear-profile ray tracing, computed in `double`
+     throughout (decision 2's cancellation rationale).
    - Walk layers from the transducer's starting depth, accumulating
      horizontal offset and elapsed travel time per layer/partial-layer,
      until the accumulated time reaches `one_way_travel_time` (exhaustion
@@ -129,8 +176,10 @@ they are decided now rather than left implicit:
      deepest profile sample with travel time remaining, continue using that
      boundary segment's gradient (or constant speed, if the boundary is the
      single-point/edge case) and set `extrapolated = true`.
-   - Degenerate inputs: empty profile or `one_way_travel_time <= 0` return
-     `kInvalidInput` immediately with NaN sentinel fields.
+   - Degenerate/invalid inputs: the full `kInvalidInput` /
+     `kEvanescentLaunch` / `kExtrapolationLimit` contract from Approach 1 —
+     validation runs before any integration; NaN sentinel fields on every
+     non-`kOk`/non-`kExtrapolationLimit` status.
 
 3. **Tests** `cube_bathymetry/test/test_ssp_ray_tracer.cpp` (GTest), per the
    issue's explicit plan:
@@ -145,9 +194,24 @@ they are decided now rather than left implicit:
      expected `across_track_offset`/`depth`/`end_angle` computed
      independently (by hand/spreadsheet, not by calling the code under
      test) and compared with a tight tolerance.
-   - **Snell invariant across boundaries**: for a 3+ layer profile, verify
-     `sin(theta_i)/c_i` computed from `end_angle` at each layer crossing
-     matches the initial `p` to floating-point tolerance.
+   - **Snell invariant across boundaries** (redesigned per plan review —
+     the API returns only an endpoint, so the naive form can't be built):
+     for a 3-layer profile, analytically compute the travel time to each
+     layer boundary, call `traceRay` once **per boundary-crossing time**,
+     and verify each call's `sin(end_angle)/c_at_that_boundary` matches the
+     initial `p` to tolerance.
+   - **Port/starboard mirror symmetry**: identical profile and travel time
+     traced at `+launch_angle` and `-launch_angle` must give mirrored
+     `across_track_offset`/`end_angle` and identical `depth_below_surface`
+     — one test covering the entire negative-`p`/negative-`R` sign family
+     (half the real swath).
+   - **Sign-assertion test** (decision 1 enforcement): a steep downward ray
+     from a shallow transducer ends **deeper** than the transducer with
+     `depth_below_surface > transducer_depth_below_surface > 0` — locks the
+     positive-down convention against a silent flip.
+   - **Evanescent launch**: `array_sound_speed` well below the cast's
+     surface value at a wide launch angle so `p·c(z_tx) ≥ 1`; assert
+     `kEvanescentLaunch` + NaN fields (the #121 stale-startup-SS case).
    - **Turning ray**: a profile/launch-angle/gradient combination chosen so
      the ray turns before exhausting travel time; assert `turned == true`
      and the endpoint is shallower than the turning depth (i.e. genuinely
@@ -158,10 +222,19 @@ they are decided now rather than left implicit:
    - **Degenerate inputs**: empty profile and zero/negative travel time each
      return `status == kInvalidInput`.
 
-4. **CMakeLists.txt**: add the new target per decision 3, and register
+4. **CMakeLists.txt**: add the new target per decision 3, register
    `ament_add_gtest(test_ssp_ray_tracer test/test_ssp_ray_tracer.cpp)`
    linking only `cube_bathymetry_ssp_ray_tracer` (no `cube_bathymetry`
-   link — proves the isolation).
+   link — proves the isolation), **and add
+   `install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT …)`** following
+   the repo's existing exported-target pattern — without the install/export
+   neither external consumer can link it (plan-review catch). Header
+   install is covered by the existing `install(DIRECTORY include/ …)`.
+   Scope honesty (decision 3 amendment): the isolation is **link-level**,
+   not package-level — `find_package(cube_bathymetry)` still resolves the
+   package's full `<depend>` set; true package isolation would need a
+   separate package and is not warranted for two consumers that already
+   depend on this package.
 
 ## Files to Change
 
@@ -169,7 +242,7 @@ they are decided now rather than left implicit:
 |------|--------|
 | `cube_bathymetry/include/cube_bathymetry/ssp_ray_tracer.h` | New: profile type, result type, `traceRay()` declaration, full sign/unit doc comments |
 | `cube_bathymetry/src/ssp_ray_tracer.cpp` | New: constant-gradient ray integration |
-| `cube_bathymetry/test/test_ssp_ray_tracer.cpp` | New: GTest suite (6 cases above) |
+| `cube_bathymetry/test/test_ssp_ray_tracer.cpp` | New: GTest suite (9 cases above) |
 | `cube_bathymetry/CMakeLists.txt` | New `cube_bathymetry_ssp_ray_tracer` library target + gtest registration |
 
 ## Principles Self-Check
