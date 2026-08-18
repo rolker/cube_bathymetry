@@ -54,3 +54,17 @@ The issue is in the right repo (`cube_bathymetry`), in the right worktree (`feat
 - [ ] Clarify prior bathymetry load mechanism (data source and format) before plan finalization — this drives the interface design.
 - [ ] Capture the Grid-vs-GeoGrid interpolation geometry decision in an ADR before implementation begins.
 - [ ] Plan tests for the new interpolation paths: bilinear blend accuracy, no-data corner sentinel, `GeoGrid` cell-geometry handling.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-18 12:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-59/plan.md` at `604d4b5`
+**Branch**: feature/issue-59 at `604d4b5`
+**Phases**: single
+
+### Open questions
+- [ ] Prior-load mechanism: plan proposes `prior_bathymetry_dir` (existing tile-store format). Operator to confirm or redirect to GeoTIFF/ENC import.
+- [ ] GeoGrid GGGS cell-corner convention: confirm fractional-position convention within a GGGS cell for the bilinear blend. Pinned during implementation.
+- [ ] Variance convention for prior load: fixed-metres vs. percentage-of-depth — expose one or both as a node parameter?
