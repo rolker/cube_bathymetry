@@ -191,3 +191,40 @@ live consequence:
 - Uniform-profile parity formulas match `sounding.h:52-54` exactly at `tx_angle = 0` (`y = r sin(rx)`, `z = r cos(rx)`), and the across-track sign claim vs `sonar_relative_position.y` is correct.
 - Turning condition (`c(z)` reaching `1/p`) is the correct total-internal-refraction criterion.
 - Requiring analytic test expectations be derived independently of the code under test is the right call for this module.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-18 02:35 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-126 at `c21cc27`
+**Mode**: pre-push
+**Depth**: Deep (reason: 910 lines of new numerical geometry establishing a cross-repo API contract for two external consumers)
+**Must-fix**: 6 | **Suggestions**: 15
+**Round**: 1 | **Ship**: continue — two lead-verified numerical/sign bugs (near-nadir across-track cancellation; negative elapsed time from an under-validated start sound speed) plus four contract holes; re-review after fixes.
+
+Specialists: Static Analysis (ament_cpplint + ament_uncrustify clean), Governance, Plan Drift, Claude Adversarial Lens A + Lens B, Local Adversarial (qwen3.5:35b — 1 of 6 findings partially corroborated, rest discarded per low-trust weighting). Copilot off (default). All must-fix findings below were reproduced by the lead reviewer with a compiled probe harness, not accepted on assertion.
+
+### Findings
+- [ ] (must-fix) Catastrophic cancellation in `dy = R*(cos th0 - cos th1)` near nadir with a near-flat gradient: launch 0.001 rad, g=5e-9, 10 m range returns `across_track_offset` == exactly 0.0 vs true 0.0100 m; use the half-angle forms or raise `kStraightGradientEpsilon` (~1e-6), plus a regression test — `cube_bathymetry/src/ssp_ray_tracer.cpp:307,329,341` (rationale at :59-64)
+- [ ] (must-fix) `c_start` validation admits `0 < c_start < kMinSoundSpeed` and non-finite gradients: transducer at 249.95 m over profile {{100,1500},{110,1400}} with launch 0 returns kExtrapolationLimit, endpoint 5 cm ABOVE the transducer, negative consumed time, NaN effective speed; a denormal depth separation yields NaN y/z under kExtrapolationLimit. Require `isfinite(c_start) && c_start >= kMinSoundSpeed`, guard `t_exit <= 0` in both floor branches — `cube_bathymetry/src/ssp_ray_tracer.cpp:379-383` (+ :213-226, :295-313)
+- [ ] (must-fix) Status taxonomy contradicts the header in 3 places: `kMaxSegmentSteps` exhaustion returns kInvalidInput for valid input (reproduced with a ducted profile); the extrapolated `c_start <= 0` path returns kInvalidInput though every documented constraint holds; `effective_sound_speed` divides by CONSUMED time, not `one_way_travel_time` as documented, and is NaN when consumed == 0 (reproduced) — `cube_bathymetry/src/ssp_ray_tracer.cpp:397,422 / :379-383 / :409-413` vs `include/cube_bathymetry/ssp_ray_tracer.h:75-89,109-113`
+- [ ] (must-fix) A turned ray traced above the sea surface returns `depth_below_surface` negative (reproduced: -219.8 m) with status kOk and no surface model documented; header must state no surface interaction is modelled and negative depths are possible, plus a test — `cube_bathymetry/include/cube_bathymetry/ssp_ray_tracer.h:96-120`
+- [ ] (must-fix) Test gaps leaving documented contract clauses unpinned: the array-face Snell correction is never exercised (every value-asserting test passes `array_sound_speed == c(z_tx)`); transducer above the shallowest sample / outside the profile span (the whole `segmentAt(index<0)` family, where two of the bugs above live); the inclined extrapolation-floor branch; multi-segment turning — `cube_bathymetry/test/test_ssp_ray_tracer.cpp`
+- [ ] (must-fix) Exported target is not consumable as the PR's central design decision claims: header installs to `include/cube_bathymetry/cube_bathymetry/ssp_ray_tracer.h` while the target exports `$<INSTALL_INTERFACE:include>` (verified against the install tree), and it builds as a non-PIC static archive; use `include/${PROJECT_NAME}` + `POSITION_INDEPENDENT_CODE ON` — `cube_bathymetry/CMakeLists.txt:187-190`
+- [ ] (suggestion) `extrapolated` is always false for a single-point profile, contradicting the header's definition — document the carve-out — `include/cube_bathymetry/ssp_ray_tracer.h:117-119`
+- [ ] (suggestion) `end_angle` "grows monotonically in magnitude along a turning arc" is false for ducted/multi-turn rays (reproduced) — scope the claim — `include/cube_bathymetry/ssp_ray_tracer.h:104-108`
+- [ ] (suggestion) "All result fields NaN" is imprecise — `turned`/`extrapolated` are defined-false — `include/cube_bathymetry/ssp_ray_tracer.h:76,82`
+- [ ] (suggestion) Default-initialise `RayTraceResult` members (status = kInvalidInput, doubles NaN) against aggregate default-init in a consumer loop — `include/cube_bathymetry/ssp_ray_tracer.h:96-120`
+- [ ] (suggestion) Mark `traceRay` `noexcept` — verified pure, reentrant, allocation-free — `include/cube_bathymetry/ssp_ray_tracer.h:146`
+- [ ] (suggestion) Missing `#include <algorithm>` for `std::min` — `cube_bathymetry/src/ssp_ray_tracer.cpp:293-294`
+- [ ] (suggestion) Above-profile segment stores `c_top = kNaN` guarded only by another field's finiteness; anchor at `profile.front()` instead — `cube_bathymetry/src/ssp_ray_tracer.cpp:133-134`
+- [ ] (suggestion) Per-call O(n) revalidation + linear segment scan + per-traversal gradient recomputation (measured ~5 us/trace on a 200-sample profile, so not urgent); the raw-vector signature forecloses amortisation for the inversion's inner loop — consider a prepared-profile overload or a header note — `cube_bathymetry/src/ssp_ray_tracer.cpp:86-104,168-183`
+- [ ] (suggestion) Floor branch recomputes `tan/tan/log` identically on fall-through; two copies that can drift — `cube_bathymetry/src/ssp_ray_tracer.cpp:299-301,319-321`
+- [ ] (suggestion) `EffectiveSoundSpeedReproducesSlantRange` is tautological (asserts `(slant/t)*t == slant`) — pin the endpoint independently or assert the header's negative claim — `cube_bathymetry/test/test_ssp_ray_tracer.cpp:260-270`
+- [ ] (suggestion) `PortStarboardMirror` doesn't compare `status`/`turned`/`extrapolated` and uses a non-turning profile — `cube_bathymetry/test/test_ssp_ray_tracer.cpp:164-178`
+- [ ] (suggestion) plan.md stale vs shipped code: still declares `float depth` for `SoundSpeedProfilePoint`, says "6 GTest cases" (9 listed, 11 shipped), and never records the RK4-reference decision — `.agent/work-plans/issue-126/plan.md:99,245,253`
+- [ ] (suggestion) No `## Implementation` entry in progress.md (ADR-0013 typed-entry chain stops at Plan Review) — `.agent/work-plans/issue-126/progress.md`
+- [ ] (suggestion) Consider a short cube ADR and/or a 3-line README "Exported libraries" entry — this contract outlives the issue and two external repos build on it — `README.md`
+- [ ] (suggestion) Header should state the `kVerticalRayParameter` shortcut (exact +/-0 offset and end angle below ~1.5e-9 rad launch) — relevant if the inversion differentiates numerically w.r.t. launch angle — `include/cube_bathymetry/ssp_ray_tracer.h:104-107`
