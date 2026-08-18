@@ -557,6 +557,192 @@ TEST(ImportEviction, ChartLayerSeedRejectsDeepBlunder)
   std::filesystem::remove_all(root);
 }
 
+// Evict/revisit keeps the prior gate (#118): a tile whose predicted surface came
+// only from the reference prime used to return from eviction with the gate OFF —
+// reloadEvictedTile restored the Survey layer only, so a cell never surveyed
+// (prior-gated only) accepted a false-deep sounding on revisit. The fix re-primes
+// the prior FIRST on reload (then the survey restore overwrites where measured
+// data exists). Here: survey one cell of a reference-gated tile, force its
+// eviction with spread batches, revisit with a deep blunder at a DIFFERENT cell
+// of the same tile — the blunder must still be rejected. (Revert the reload
+// re-prime and the deep cell settles -> this fails.)
+TEST(ImportEviction, ReferenceOnlyTileEvictRevisitKeepsGate)
+{
+  const std::string root = makeTempDir("revisit_gate");
+  const std::string ref_dir = root + "/reference_store";
+  const std::string store_dir = root + "/store";
+
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // Dense SHALLOW (-20 m) reference tile at the survey level covering the tile.
+  {
+    marine_bathymetry_store::BathymetryTile rtile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      rtile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(rtile));
+    marine_bathymetry_store::BathymetryStore ref_store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    ref_store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(ref_store, ref_dir);
+  }
+
+  // Visit 1: a gate-passing shallow sounding on cell A. Then spread batches over
+  // 6 other tiles (budget 3) to force the tile's eviction. Revisit: a deep
+  // (~ -150 m) blunder at cell B, ~3 m away — a different, never-surveyed cell
+  // of the same tile, whose only predicted surface was the reference prime.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 20.0f, 30.0f));
+  for (int i = 0; i < 6; ++i) {
+    batches.push_back(surveyCell(43.0 + 0.02 * i, -71.0, 15.0f + i, 25.0f + i));
+  }
+  batches.push_back(surveyCell(survey_lat + 3e-5, survey_lon, 150.0f, 40.0f));
+
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(store_dir, "", /*budget=*/3);
+    cfg.reference_store_dir = ref_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  const auto cells = loadBathyCells(store_dir);
+  // The visit-1 shallow survey survived the evict/reload round-trip...
+  bool shallow_found = false;
+  bool deep_found = false;
+  for (const auto & [cell, du] : cells) {
+    if (du.first < -100.0) {deep_found = true;}
+    if (du.first > -30.0 && du.first < -10.0) {shallow_found = true;}
+  }
+  EXPECT_TRUE(shallow_found)
+    << "the shallow visit-1 survey should survive eviction and reload";
+  // ...and the revisit blunder was rejected by the re-primed gate.
+  EXPECT_FALSE(deep_found)
+    << "the revisit deep blunder must be rejected -- the prior gate must be "
+    "re-primed on reload (#118)";
+
+  std::filesystem::remove_all(root);
+}
+
+// Prior READ failure on revisit keeps the tile EVICTED for retry (#118). The
+// offline analog of the live-node must-fix (CubeBathymetryNode::reloadEvictedTile,
+// which is not unit-test-exposed -- it lives in cube_bathymetry_node.cpp behind
+// main(), no header/library target -- so this exercises the SHARED reload logic
+// instead): when the reload's prior re-prime READ throws (corrupt/transient prior
+// store) but the survey restore succeeds, reloadEvictedTile must NOT erase the
+// evicted_ marker. Before the fix it returned "did I prime" (false, swallowed) and
+// fell through to `return true`, so the caller erased the marker with no retry and
+// the tile's prior-only cells ran ungated for the rest of the run -- a false-deep
+// blunder settled. primePriorLayersForTile now reports read-success separately, so
+// reloadEvictedTile returns false on a prior read error: the caller drops the tile
+// (protecting the intact on-disk survey surface) and keeps it evicted to retry.
+// Here: survey one cell of a reference-gated tile, evict it, CORRUPT the reference
+// tile so the revisit re-prime read throws, then revisit with a deep blunder at a
+// DIFFERENT never-surveyed cell -- the blunder must NOT settle (its sounding is
+// dropped with the tile). (Restore `return true` unconditionally and the deep cell
+// settles -> this fails.)
+TEST(ImportEviction, PriorReadFailureOnRevisitKeepsTileEvicted)
+{
+  const std::string root = makeTempDir("prior_readfail");
+  const std::string ref_dir = root + "/reference_store";
+  const std::string store_dir = root + "/store";
+
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // Dense SHALLOW (-20 m) reference tile at the survey level covering the tile.
+  {
+    marine_bathymetry_store::BathymetryTile rtile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      rtile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(rtile));
+    marine_bathymetry_store::BathymetryStore ref_store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    ref_store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(ref_store, ref_dir);
+  }
+
+  // Visit 1: a gate-passing shallow sounding on cell A. Then spread over 6 other
+  // tiles (budget 3) to force the reference-gated tile's eviction.
+  std::vector<std::vector<GeoSounding>> pre_batches;
+  pre_batches.push_back(surveyCell(survey_lat, survey_lon, 20.0f, 30.0f));
+  for (int i = 0; i < 6; ++i) {
+    pre_batches.push_back(surveyCell(43.0 + 0.02 * i, -71.0, 15.0f + i, 25.0f + i));
+  }
+  // Revisit: a deep (~ -150 m) blunder at cell B, ~3 m from cell A -- a different,
+  // never-surveyed cell whose only predicted surface was the (now unreadable) prior.
+  const std::vector<GeoSounding> revisit_batch =
+    surveyCell(survey_lat + 3e-5, survey_lon, 150.0f, 40.0f);
+
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(store_dir, "", /*budget=*/3);
+    cfg.reference_store_dir = ref_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : pre_batches) {
+      acc.addBatch(b);
+    }
+    // Corrupt the reference tile so the revisit's prior re-prime READ throws (GDAL
+    // cannot open a non-GeoTIFF file -> loadTile throws -> loadWindow throws). The
+    // survey restore (from store_dir) still succeeds, so ONLY the prior read fails
+    // -- exactly the failed-prior + successful-survey case the fix guards.
+    const std::string ref_tile = ref_dir + "/" +
+      marine_bathymetry_store::layerDirName(
+        marine_bathymetry_store::SourceLayer::Reference) + "/" +
+      marine_bathymetry_store::tileFilename(survey_grid);
+    ASSERT_TRUE(std::filesystem::is_regular_file(ref_tile))
+      << "reference tile should exist at " << ref_tile;
+    {
+      std::ofstream corrupt(ref_tile, std::ios::binary | std::ios::trunc);
+      corrupt << "not a geotiff";
+    }
+    acc.addBatch(revisit_batch);
+    acc.finalize();
+  }
+
+  const auto cells = loadBathyCells(store_dir);
+  bool shallow_found = false;
+  bool deep_found = false;
+  for (const auto & [cell, du] : cells) {
+    if (du.first < -100.0) {deep_found = true;}
+    if (du.first > -30.0 && du.first < -10.0) {shallow_found = true;}
+  }
+  // Visit-1 shallow survived eviction (persisted to disk before the drop).
+  EXPECT_TRUE(shallow_found)
+    << "the shallow visit-1 survey should survive eviction";
+  // The revisit deep blunder must NOT settle: with the prior read failed, the tile
+  // is kept evicted and its (ungated) revisit soundings are dropped rather than
+  // erasing the marker and accepting the blunder (#118).
+  EXPECT_FALSE(deep_found)
+    << "a failed prior re-prime read must keep the tile evicted (dropping the "
+    "revisit blunder), not erase the marker and accept the deep sounding (#118)";
+
+  std::filesystem::remove_all(root);
+}
+
 // Cross-level reference blunder gate (#115): a reference store holding ONLY tiles at
 // a COARSER GGGS level than the survey (e.g. ENC exports at L5/L7/L8 under an L10
 // survey) must still gate a false-deep blunder. `loadWindow` returns the coarse tile
