@@ -300,4 +300,167 @@ TEST_F(GeoGridTest, BulkInsertBitExactRegression)
   }
 }
 
+// ---- Predicted-surface touchdown interpolation (#59, ADR-0008) ----
+//
+// GGGS nodes sit on the cells' SW-corner (row, column) lattice, so a 2x2 block
+// of adjacent cells forms the interpolation stencil. Seeded pattern:
+//   node (row,   col) = -10   node (row,   col+1) = -12
+//   node (row+1, col) = -11   node (row+1, col+1) = -13
+
+class GeoGridPredictedSurfaceTest : public GeoGridTest
+{
+protected:
+  static constexpr uint16_t kRow = 480;
+  static constexpr uint16_t kCol = 480;
+
+  void seedStencil(
+    GeoGrid & g, const gggs::GridIndex & grid_index,
+    uint16_t row = kRow, uint16_t col = kCol)
+  {
+    g.setPredictedDepthAt(gggs::CellIndex(grid_index, row, col), -10.0f, 0.25f);
+    g.setPredictedDepthAt(gggs::CellIndex(grid_index, row, col + 1), -12.0f, 0.25f);
+    g.setPredictedDepthAt(gggs::CellIndex(grid_index, row + 1, col), -11.0f, 0.25f);
+    g.setPredictedDepthAt(gggs::CellIndex(grid_index, row + 1, col + 1), -13.0f, 0.25f);
+  }
+
+  // Geographic position of the fractional lattice coordinate (row_f, col_f).
+  static double latAt(const gggs::GridIndex & grid_index, double row_f)
+  {
+    return grid_index.southLatitude() +
+           row_f / gggs::cell_rows_per_grid * grid_index.latitudinalSpan();
+  }
+  static double lonAt(const gggs::GridIndex & grid_index, double col_f)
+  {
+    return grid_index.westLongitude() +
+           col_f / gggs::cell_columns_per_grid * grid_index.longitudinalSpan();
+  }
+};
+
+TEST_F(GeoGridPredictedSurfaceTest, InterpolateBilinearInteriorOffCenter)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+  seedStencil(g, grid_index);
+
+  // Off-center on BOTH axes (dr=0.75, dc=0.25) to catch axis mix-ups:
+  // -10*0.75*0.25 + -12*0.25*0.25 + -11*0.75*0.75 + -13*0.25*0.75 = -11.25
+  const double lat = latAt(grid_index, kRow + 0.75);
+  const double lon = lonAt(grid_index, kCol + 0.25);
+  EXPECT_NEAR(g.interpolatePredictedDepth(lat, lon), -11.25f, 1e-4);
+
+  // At exactly the SW node the weights collapse to that node's value.
+  EXPECT_NEAR(
+    g.interpolatePredictedDepth(latAt(grid_index, kRow), lonAt(grid_index, kCol)),
+    -10.0f, 1e-4);
+}
+
+TEST_F(GeoGridPredictedSurfaceTest, InterpolateNoDataCornerSentinel)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  const double lat = latAt(grid_index, kRow + 0.75);
+  const double lon = lonAt(grid_index, kCol + 0.25);
+  // Fully unseeded grid: sentinel.
+  EXPECT_EQ(g.interpolatePredictedDepth(lat, lon), INVALID_DATA);
+  // Three of four corners seeded (NE missing): still the sentinel.
+  g.setPredictedDepthAt(gggs::CellIndex(grid_index, kRow, kCol), -10.0f, 0.25f);
+  g.setPredictedDepthAt(gggs::CellIndex(grid_index, kRow, kCol + 1), -12.0f, 0.25f);
+  g.setPredictedDepthAt(gggs::CellIndex(grid_index, kRow + 1, kCol), -11.0f, 0.25f);
+  EXPECT_EQ(g.interpolatePredictedDepth(lat, lon), INVALID_DATA);
+}
+
+TEST_F(GeoGridPredictedSurfaceTest, InterpolateTileEdgeSentinel)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+  // Seed the top TWO rows so only the range check (not missing data) can fire.
+  const uint16_t top = gggs::cell_rows_per_grid - 1;  // 959
+  seedStencil(g, grid_index, top - 1, kCol);
+
+  // A touchdown inside the top row of cells needs node row 960 -- off the tile.
+  const double lat = latAt(grid_index, top + 0.25);
+  const double lon = lonAt(grid_index, kCol + 0.25);
+  EXPECT_EQ(g.interpolatePredictedDepth(lat, lon), INVALID_DATA);
+  // One row further south the full stencil exists and interpolation runs.
+  EXPECT_NE(
+    g.interpolatePredictedDepth(latAt(grid_index, top - 0.75), lon), INVALID_DATA);
+}
+
+TEST_F(GeoGridPredictedSurfaceTest, InsertAppliesSlopeOffset)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+  seedStencil(g, grid_index);
+  // A primed cell far outside the sounding's influence: must stay NaN
+  // (gates-not-fills, ADR-0008).
+  const gggs::CellIndex far_cell(grid_index, kRow + 10, kCol + 10);
+  g.setPredictedDepthAt(far_cell, -15.0f, 0.25f);
+
+  // Touchdown at (kRow+0.25, kCol+0.25): interpolated predicted depth
+  // = -10*0.5625 + -12*0.1875 + -11*0.1875 + -13*0.0625 = -10.75.
+  // Which stencil nodes capture the sounding depends on the metric cell
+  // aspect at this latitude, so assert the per-node invariant instead of a
+  // fixed capture set: every populated node's estimate carries ITS offset,
+  // estimate = depth + (predicted@node - predicted@touchdown). The SW node
+  // (kRow, kCol) is ~0.3 m away and must always capture: -11 + 0.75 = -10.25.
+  const double lat = latAt(grid_index, kRow + 0.25);
+  const double lon = lonAt(grid_index, kCol + 0.25);
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_TRUE(g.insert(makeGeoSounding(lat, lon, -11.0)));
+  }
+
+  const float interp = g.interpolatePredictedDepth(lat, lon);
+  ASSERT_NEAR(interp, -10.75f, 1e-4);
+
+  auto vals = g.values();
+  gggs::CellAreaIterator it(grid_index);
+  bool checked_sw = false;
+  for (std::size_t k = 0; it.valid(); it.next(), ++k) {
+    ASSERT_LT(k, vals.size());
+    if (it->row() == kRow && it->column() == kCol) {
+      EXPECT_NEAR(vals[k].depth, -10.25, 1e-3);
+      checked_sw = true;
+    } else if (!std::isnan(vals[k].depth)) {
+      // Any other populated node must be a stencil node carrying its own
+      // offset relative to the shared touchdown prediction.
+      const float pred = g.predictedDepthAt(*it);
+      ASSERT_NE(pred, INVALID_DATA)
+        << "unexpected populated unprimed cell (" << it->row() << "," <<
+        it->column() << ")";
+      EXPECT_NEAR(vals[k].depth, -11.0 + (pred - interp), 1e-3)
+        << "cell (" << it->row() << "," << it->column() << ")";
+    }
+    if (it->row() == far_cell.row() && it->column() == far_cell.column()) {
+      EXPECT_TRUE(std::isnan(vals[k].depth)) << "far primed cell must not fill";
+    }
+  }
+  EXPECT_TRUE(checked_sw);
+}
+
+TEST_F(GeoGridPredictedSurfaceTest, InsertWithoutPriorUnchanged)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  // No prior anywhere: the offset-0 path must reproduce the raw depth.
+  const double lat = latAt(grid_index, kRow + 0.25);
+  const double lon = lonAt(grid_index, kCol + 0.25);
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_TRUE(g.insert(makeGeoSounding(lat, lon, -11.0)));
+  }
+
+  auto vals = g.values();
+  gggs::CellAreaIterator it(grid_index);
+  bool checked = false;
+  for (std::size_t k = 0; it.valid(); it.next(), ++k) {
+    ASSERT_LT(k, vals.size());
+    if (it->row() == kRow && it->column() == kCol) {
+      EXPECT_NEAR(vals[k].depth, -11.0, 1e-3);
+      checked = true;
+    }
+  }
+  EXPECT_TRUE(checked);
+}
+
 }  // namespace cube

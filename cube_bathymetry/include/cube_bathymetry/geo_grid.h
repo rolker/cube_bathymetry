@@ -109,6 +109,21 @@ public:
   /// extracted separately via @ref values().
     float predictedDepthAt(const gggs::CellIndex & cell) const;
 
+  /// @brief Bilinear predicted-surface depth at the touchdown (latitude,
+  ///        longitude), or the no-correction sentinel INVALID_DATA when the
+  ///        stencil is unavailable.
+  ///
+  /// Port of the original cube_grid_interpolate for the GGGS tile (ADR-0008):
+  /// nodes sit on the cells' SW-corner (row, column) lattice — the same
+  /// position insert() distance-gates against — so the stencil is the floor
+  /// lower-left node and its +1 neighbors, with bilinear weights in (row,
+  /// column) space (the equirectangular within-cell approximation insert()
+  /// already accepts). Returns INVALID_DATA when the stencil crosses the tile
+  /// edge (per-tile scope, like the original's per-tile interpolation) or any
+  /// corner node is absent / has no prediction / is NaN — every sentinel path
+  /// degrades to the uncorrected (offset 0) behaviour in Node::insert.
+    float interpolatePredictedDepth(double latitude, double longitude) const;
+
   /// Returns the lower left grid position
     const gggs::GridIndex & index() const;
 

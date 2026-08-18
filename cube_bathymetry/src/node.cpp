@@ -192,11 +192,12 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
    * sentinels expressed as `INVALID_DATA` (the live blunder check above uses
    * `INVALID_DATA`; the original commented-out guard referenced
    * `parameters.no_data_value`, which is `quiet_NaN()` here — doubly wrong, so
-   * it is deliberately corrected). With no producer wired yet (the
-   * external-prior load + touchdown-interpolation subsystem is a deferred
-   * follow-on), `predicted_depth_at_touchdown` stays at its `INVALID_DATA`
-   * sentinel => offset 0 => the defined, safe, correct-but-uncorrected behaviour
-   * the grids have today.
+   * it is deliberately corrected). The producer landed with #59 (ADR-0008):
+   * `Grid::insert` / `GeoGrid::insert` stamp `predicted_depth_at_touchdown`
+   * from the primed predicted surface; when nothing is primed (or the
+   * interpolation stencil is unavailable) the field stays at its
+   * `INVALID_DATA` sentinel => offset 0 => the defined, safe,
+   * correct-but-uncorrected behaviour.
    */
   if (sounding.predicted_depth_at_touchdown != INVALID_DATA &&
     predicted_depth_ != INVALID_DATA)
@@ -423,7 +424,9 @@ void Node::setPredictedDepth(float depth, float variance)
   // non-sentinel variance. insert()'s blunder limit uses sqrt(predicted_depth_-
   // variance_), so pairing a valid depth with an INVALID_DATA (= float max)
   // variance would make sqrt(.) ~1e19 and silently neutralize blunder rejection.
-  // No producer wires this yet; the assert guards the future external-prior path.
+  // Producers: the Reference/Chart tile prime (store_import primeFromTile) and
+  // Grid::setPredictedDepthAt / GeoGrid::setPredictedDepthAt; the assert guards
+  // them all.
   assert(
     (depth == INVALID_DATA || std::isnan(depth) ||
     (std::isfinite(variance) && variance > 0.0F && variance != INVALID_DATA)) &&

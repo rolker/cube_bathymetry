@@ -107,6 +107,15 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
     gggs::geoPoint(geo_sounding.latitude + delta_lat_deg,
                    geo_sounding.longitude + delta_lon_deg));
 
+  // Slope correction (#59, ADR-0008): stamp the predicted-surface depth at the
+  // touchdown once per sounding — O(1) (4 node lookups) ahead of the per-cell
+  // loop, so the cube#63/#107 hot path is unaffected. INVALID_DATA (no prior,
+  // missing corner, or stencil off this tile) leaves the no-correction
+  // sentinel, so Node::insert applies offset 0 — the pre-#59 behaviour.
+  Sounding corrected = sounding;
+  corrected.predicted_depth_at_touchdown =
+    interpolatePredictedDepth(geo_sounding.latitude, geo_sounding.longitude);
+
   bool inserted = false;
   while(i.valid()) {
     const auto cell = i->position();
@@ -120,12 +129,55 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
       if(!node) {
         node = std::make_shared<Node>();
       }
-      inserted = node->insert(distance, sounding, parameters_) || inserted;
+      inserted = node->insert(distance, corrected, parameters_) || inserted;
     }
     i.next();
   }
 
   return inserted;
+}
+
+float GeoGrid::interpolatePredictedDepth(double latitude, double longitude) const
+{
+  // Continuous SW-corner-lattice coordinates (ADR-0008): rows from south,
+  // columns from west, gggs::cell_rows_per_grid cells per axis. Longitude is
+  // normalized so positions near the antimeridian resolve relative to the
+  // grid's western edge (mirrors gggs::CellIndex's position constructor).
+  const double r = (latitude - index_.southLatitude()) /
+    index_.latitudinalSpan() * gggs::cell_rows_per_grid;
+  const double c = (gggs::normalizeLongitude(longitude) - index_.westLongitude()) /
+    index_.longitudinalSpan() * gggs::cell_columns_per_grid;
+  const auto row = static_cast<int32_t>(std::floor(r));
+  const auto col = static_cast<int32_t>(std::floor(c));
+  // The +1 neighbors must stay inside this tile: a touchdown in the last
+  // row/column of cells (or outside the tile) gets no correction — the same
+  // per-tile scope as the original's cube_grid_interpolate.
+  if(row < 0 || row + 1 >= gggs::cell_rows_per_grid ||
+    col < 0 || col + 1 >= gggs::cell_columns_per_grid)
+  {
+    return INVALID_DATA;
+  }
+
+  // Corner order matches the original: z[0]=SW, z[1]=SE, z[2]=NW, z[3]=NE.
+  float z[4];
+  for (int j = 0; j < 2; ++j) {
+    for (int i = 0; i < 2; ++i) {
+      const auto it = nodes_.find(nodeKey(gggs::CellIndex(index_,
+        static_cast<uint16_t>(row + j), static_cast<uint16_t>(col + i))));
+      const float d = (it != nodes_.end() && it->second) ?
+        it->second->predictedDepth() : INVALID_DATA;
+      if(d == INVALID_DATA || std::isnan(d)) {
+        return INVALID_DATA;
+      }
+      z[j * 2 + i] = d;
+    }
+  }
+
+  const double dc = c - col;
+  const double dr = r - row;
+  return static_cast<float>(
+    z[0] * (1.0 - dc) * (1.0 - dr) + z[1] * dc * (1.0 - dr) +
+    z[2] * (1.0 - dc) * dr + z[3] * dc * dr);
 }
 
 void GeoGrid::setPredictedDepthAt(
