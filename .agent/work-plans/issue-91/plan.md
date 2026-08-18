@@ -45,8 +45,9 @@ Declare a result struct that carries per-layer tile counts:
 
 ```cpp
 struct PriorLayerPrimeResult {
-  std::size_t reference_tiles = 0;  ///< tiles found in Reference layer
-  std::size_t chart_tiles = 0;      ///< tiles found in Chart layer
+  std::size_t reference_tiles = 0;   ///< exact-level tiles primed from Reference
+  std::size_t chart_tiles = 0;       ///< exact-level tiles primed from Chart
+  std::size_t level_mismatched = 0;  ///< tiles skipped: not at the survey level
   std::size_t total() const { return reference_tiles + chart_tiles; }
 };
 ```
@@ -54,7 +55,11 @@ struct PriorLayerPrimeResult {
 Declare the free function in the `cube::` namespace alongside `loadIntoSheet`:
 
 ```cpp
-/// Prime both Reference and Chart prior layers (predicted-only, seed_settled=false).
+/// Prime both Reference and Chart prior layers (predicted-only, seed_settled=false),
+/// EXACT-LEVEL ONLY (plan-review must-fix): a multi-level prior store (#115 ENC
+/// case) holds coarse tiles keyed at their own level, and primeFromTile has no
+/// cross-level guard — priming a coarse tile would seed wrong-geometry cells.
+/// Mismatched tiles are counted and skipped (cross-level needs the resample path).
 /// Chart tiles are primed first (lower priority); Reference tiles are primed on top
 /// (higher priority, overwrites where layers overlap). Neither seeds settled
 /// hypotheses — the prior gates but never fills (no contamination of survey or
@@ -63,6 +68,9 @@ PriorLayerPrimeResult primeFromPriorLayers(
   const marine_bathymetry_store::BathymetryStore & store,
   GeoMapSheet & map_sheet);
 ```
+
+The survey level comes from the sheet: add a public `GeoMapSheet::gridLevel()`
+accessor for the existing private `grid_level_`.
 
 ### 2. Implement `primeFromPriorLayers()` in `store_import.cpp`
 
@@ -94,28 +102,32 @@ if (it != tiles.end()) {
 }
 ```
 
-Replace the exact-match priming with a `primeFromPriorLayers` call, keep the
-Reference cross-level fallback unchanged (Chart cross-level resampling deferred
-to a follow-up — same `primeFromTileResample` pattern; Reference cross-level
-already landed in #115 and must remain functional):
+**Revised per plan-review must-fix**: do NOT swap in the whole-window
+`primeFromPriorLayers` here — `seedNewTile` seeds ONE tile from a *windowed*
+store whose window also holds neighbor tiles and (in the #115 ENC case)
+coarse-level tiles; a whole-window prime would seed wrong-geometry cells from
+coarse tiles and churn neighbor tiles on every seed. Instead keep the existing
+exact-match `find(index)` structure untouched and add only a **Chart
+exact-match lookup** before the Reference one (Chart lower priority, so a
+same-level Reference tile primed after overwrites where both cover a cell):
 
 ```cpp
-// Rung 2 -- reference + chart prior: predicted-only prime (#91/#119).
-// primeFromPriorLayers handles exact-level tiles in both Reference and Chart.
-// Reference cross-level fallback (#115) is applied below when no exact-level
-// Reference tile was found. Chart cross-level fallback is deferred (follow-up).
-cube::primeFromPriorLayers(ref, sheet_);
-
-// Reference cross-level fallback (#115): if no exact-level Reference tile
-// was found in the window, resample the finest coarse-level Reference tile.
-const auto & ref_tiles = ref.tiles(mbs::SourceLayer::Reference);
-if (ref_tiles.find(index) == ref_tiles.end()) {
-  // ... existing cross-level search and primeFromTileResample logic ...
+// Chart exact-level prime FIRST (#119): since the reference→chart split,
+// official chart products live in the Chart layer, which this gate never
+// consulted -- charted-waters imports ran ungated. Chart cross-level
+// resampling is deferred (the #115 fallback below stays Reference-only).
+const auto & chart_tiles = ref.tiles(mbs::SourceLayer::Chart);
+auto chart_it = chart_tiles.find(index);
+if (chart_it != chart_tiles.end()) {
+  primeFromTile(chart_it->second, sheet_, /*seed_settled=*/false);
 }
+// ... existing Reference exact-match + #115 cross-level fallback, unchanged ...
 ```
 
-This preserves the #115 cross-level Reference behavior while adding Chart
-exact-level support.
+This preserves the #115 cross-level Reference behavior (and its
+boundary-containment logic) byte-for-byte while adding Chart exact-level
+support. `primeFromPriorLayers` (level-scoped) serves the live node, which
+loads a whole store rather than a per-tile window.
 
 ### 4. Add `prior_store_dir` param and prime call to `cube_bathymetry_node.cpp` — #91
 
@@ -208,10 +220,19 @@ Mirror `SeededPredictedSurfaceRejectsDeepBlunder` for the new helper:
 
 | File | Change |
 |------|--------|
+| `cube_bathymetry/include/cube_bathymetry/geo_map_sheet.h` | Add public `gridLevel()` accessor (level scoping for the prime helper) |
 | `cube_bathymetry/include/cube_bathymetry/store_import.h` | Add `PriorLayerPrimeResult` struct and `primeFromPriorLayers()` declaration |
-| `cube_bathymetry/src/store_import.cpp` | Implement `primeFromPriorLayers()`; update `seedNewTile()` to call it (fixes #119) |
+| `cube_bathymetry/src/store_import.cpp` | Implement level-scoped `primeFromPriorLayers()`; add Chart exact-match rung to `seedNewTile()` (fixes #119) |
 | `cube_bathymetry/src/cube_bathymetry_node.cpp` | Add `prior_store_dir` param, prime call, budget trim, log/warn; add `prior_store_dir_` member |
-| `cube_bathymetry/test/test_store_import.cpp` | Add three new tests covering Reference-only, Chart-only, and Reference-over-Chart precedence |
+| `cube_bathymetry/test/test_store_import.cpp` | Four helper tests: Reference-only gate, Chart-only gate, Reference-over-Chart precedence, level-mismatch skip |
+| `cube_bathymetry/test/test_import_eviction.cpp` | End-to-end #119 regression: Chart-only prior store gates a false-deep import via `seedNewTile` |
+
+**Trim interplay note** (plan-review suggestion): the live node runs two
+sequential `trimResidentToBudget()` calls (after the prior prime, and after the
+draft warm-start prime). Prior-primed tiles are clean and dataless, so either
+trim may evict them; being predicted-only they are not reloadable on revisit and
+lose their gate — the known evict/revisit re-priming gap, explicitly deferred as
+cube#118 and documented at the call site.
 
 ## Principles Self-Check
 
@@ -228,7 +249,8 @@ Mirror `SeededPredictedSurfaceRejectsDeepBlunder` for the new helper:
 | ADR | Triggered | How addressed |
 |---|---|---|
 | ADR-0001 (long-duration bounding) | Yes — `primeFromPriorLayers` loads the whole prior store like the draft prime | `trimResidentToBudget()` called after the prime (same as the draft warm-start pattern); limitation noted in comment |
-| ADR-0008 (store conventions) | Yes — reads `Reference` and `Chart` layers from a BathymetryStore | Uses the established `SourceLayer` enum and `tiles()` / `loadIntoSheet` API; no writes to prior store |
+| ADR-0008 (project: predicted-surface touchdown interpolation, #59) | Yes — this prime supplies the predicted surface that activates live slope correction | Predicted-only seed via `primeFromTile`; gates-not-fills upheld; side-effect documented in code comment and PR body |
+| ADR-0002 (store conventions, workspace) | Yes — reads `Reference` and `Chart` layers from a BathymetryStore | Uses the established `SourceLayer` enum and `tiles()` / `primeFromTile` API; no writes to prior store |
 | ADR-0013 (progress.md vocabulary) | Yes — plan entry written to progress.md | `## Plan Authored` entry written after committing this file |
 
 ## Consequences
