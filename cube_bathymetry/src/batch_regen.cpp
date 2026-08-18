@@ -60,6 +60,12 @@ struct ScatterRecord
   float intensity;
   float beam_angle;
   float slant_range;
+  // Redundant on the gather path: fromRecord() restores this, but the replay's
+  // GeoGrid::insert recomputes the touchdown depth via interpolatePredictedDepth
+  // (geo_grid.cpp), overwriting the restored value — so the serialized field
+  // never affects the rebuilt estimate. Retained here only to keep this scratch
+  // record a faithful mirror of Sounding; dropping it (a bucket-format change)
+  // is deferred to a follow-up issue (#59 review).
   float predicted_depth_at_touchdown;
 };
 #pragma pack(pop)
