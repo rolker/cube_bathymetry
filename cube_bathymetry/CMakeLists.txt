@@ -178,6 +178,22 @@ install(TARGETS cube_bathymetry_sonar_info_curve EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
+# Forward constant-gradient SSP ray tracer (#126). Own target with NO
+# dependencies beyond the standard library — shared forward model for the
+# unh_marine_autonomy#300 phase-2 inversion and marine_perception_tools#28,
+# which link this target alone (link-level isolation; the package's exported
+# dependency set still resolves for any find_package(cube_bathymetry)).
+add_library(cube_bathymetry_ssp_ray_tracer src/ssp_ray_tracer.cpp)
+target_include_directories(cube_bathymetry_ssp_ray_tracer PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
 target_include_directories(cube_bathymetry_node PUBLIC
   ${grid_map_ros_INCLUDE_DIRS}
@@ -310,6 +326,10 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)
   target_link_libraries(test_sonar_info_curve cube_bathymetry_sonar_info_curve)
+
+  # Links ONLY the ray-tracer target — proves the no-dependency isolation.
+  ament_add_gtest(test_ssp_ray_tracer test/test_ssp_ray_tracer.cpp)
+  target_link_libraries(test_ssp_ray_tracer cube_bathymetry_ssp_ray_tracer)
 
   ament_add_gtest(test_parameters test/test_parameters.cpp)
   target_link_libraries(test_parameters cube_bathymetry)
