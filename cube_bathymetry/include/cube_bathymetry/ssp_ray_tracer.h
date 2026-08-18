@@ -23,6 +23,7 @@
 #ifndef CUBE_BATHYMETRY__SSP_RAY_TRACER_H_
 #define CUBE_BATHYMETRY__SSP_RAY_TRACER_H_
 
+#include <limits>
 #include <vector>
 
 // Forward constant-gradient sound-speed-profile ray tracer (#126).
@@ -53,6 +54,28 @@
 // Across-track offset: metres, positive to starboard, relative to the
 //            transducer (same sign family as rx_angles and
 //            Sounding::sonar_relative_position.y).
+//
+// ===== What is deliberately NOT modelled =====
+//
+// The SEA SURFACE. There is no reflecting (or absorbing) boundary at
+// depth_below_surface == 0. A ray that turns and ascends simply keeps going:
+// above the shallowest profile sample the boundary segment's gradient is
+// extended upward exactly as it is downward past the deepest sample, and the
+// ray may cross and pass above the surface datum. Such a trace returns kOk
+// with a NEGATIVE depth_below_surface (extrapolated == true whenever the
+// above-profile region was entered). Callers that care about surface
+// interaction must detect this themselves — the tracer never clamps, and a
+// clamp here would silently corrupt the geometry the inversion differentiates
+// through. See test SspRayTracer.AscendingRayMayPassAboveTheSurface.
+//
+// PERFORMANCE SHAPE. traceRay() revalidates the profile and locates the
+// transducer's segment on every call (O(n) in the profile length; ~5 us for a
+// 200-sample profile), so nothing is amortised across a beam fan or across an
+// inversion's inner loop. That is a deliberate deferral, not an oversight: the
+// raw-vector signature is the simplest thing both consumers can call, and the
+// prepared-profile overload that would amortise it should be designed against
+// the inversion's real inner-loop access pattern (unh_marine_autonomy#300)
+// rather than guessed at now.
 
 namespace cube
 {
@@ -65,21 +88,25 @@ namespace cube
     double sound_speed;
   };
 
-/// Monotonic profile: depths strictly increasing. A single-point profile is
-/// valid and degenerates to a straight ray at that point's sound speed.
+/// Monotonic profile: depths strictly increasing, and every consecutive pair
+/// far enough apart that its gradient (dc/dz) is finite. A single-point
+/// profile is valid and degenerates to a straight ray at that point's sound
+/// speed.
   using SoundSpeedProfile = std::vector < SoundSpeedProfilePoint >;
 
   enum class RayTraceStatus
   {
   /// Trace completed; all result fields valid.
     kOk,
-  /// Input violated the contract (see traceRay()); all result fields NaN.
+  /// Input violated the contract (see traceRay()); all double result fields
+  /// are NaN and turned/extrapolated are false.
     kInvalidInput,
   /// The array-face Snell correction has no real solution: the profile's
   /// sound speed at the transducer is high enough, relative to the applied
   /// array_sound_speed, that sin(theta) would exceed 1 — the steered beam
   /// cannot refract into the water column. Reachable in practice: startup
-  /// pings carry a stale applied sound speed (#121). All result fields NaN.
+  /// pings carry a stale applied sound speed (#121). All double result fields
+  /// are NaN and turned/extrapolated are false.
     kEvanescentLaunch,
   /// Extrapolation past the profile boundary drove the local sound speed
   /// down to kMinSoundSpeed before the travel time was exhausted. The result
@@ -87,6 +114,14 @@ namespace cube
   /// consumer can see how far the trace got; travel time is NOT fully
   /// consumed.
     kExtrapolationLimit,
+  /// The internal cap on segment traversals was reached before the travel
+  /// time was consumed. The input was well formed — this is the tracer
+  /// declining to keep integrating a pathological (typically finely-sampled
+  /// ducted) profile, NOT a caller error, which is why it is not
+  /// kInvalidInput. All double result fields are NaN and turned/extrapolated
+  /// are false. Not reachable with survey-realistic profiles; if you see it,
+  /// report it rather than working around it.
+    kStepLimit,
   };
 
 /// Floor for extrapolated sound speed (m/s); reaching it ends the trace with
@@ -95,40 +130,60 @@ namespace cube
 
   struct RayTraceResult
   {
-    RayTraceStatus status;
+  /// Default-initialised to the "nothing was computed" state, so an
+  /// aggregate-default-constructed result in a consumer loop can never read
+  /// as a valid trace.
+    RayTraceStatus status = RayTraceStatus::kInvalidInput;
   /// Metres to starboard of the transducer (negative = port).
-    double across_track_offset;
+    double across_track_offset = std::numeric_limits < double > ::quiet_NaN();
   /// Metres below the surface datum, positive down. NOT relative to the
   /// transducer, and NOT Sounding::depth (opposite sign — see file header).
-    double depth_below_surface;
+  /// May be NEGATIVE: no sea surface is modelled (see file header).
+    double depth_below_surface = std::numeric_limits < double > ::quiet_NaN();
   /// Ray direction at the endpoint: radians from nadir, positive starboard,
-  /// CONTINUOUS THROUGH A TURNING POINT — |end_angle| grows monotonically
-  /// along a turning arc, so an ascending ray has |end_angle| > pi/2; the
-  /// sign always gives the across-track direction of travel.
-    double end_angle;
-  /// Straight-line transducer-to-endpoint distance divided by the one-way
-  /// travel time: the constant speed that reproduces the same SLANT RANGE
-  /// for this time. Substituting it into range = twtt*c/2 with the original
-  /// rx angle does NOT reproduce the endpoint position — the ray bent.
-    double effective_sound_speed;
+  /// CONTINUOUS THROUGH A TURNING POINT — across a single turning arc
+  /// |end_angle| grows past pi/2, so an ascending ray has |end_angle| > pi/2
+  /// and the sign always gives the across-track direction of travel. It is
+  /// NOT monotonic over a whole trace: a ducted ray that turns more than once
+  /// has |end_angle| swinging back below pi/2 again.
+    double end_angle = std::numeric_limits < double > ::quiet_NaN();
+  /// Straight-line transducer-to-endpoint distance divided by the travel time
+  /// actually CONSUMED — which is one_way_travel_time for kOk, and less than
+  /// it for kExtrapolationLimit (the trace stopped early). The constant speed
+  /// that reproduces the same SLANT RANGE over the time the ray was actually
+  /// integrated. NaN if no time was consumed at all. Substituting it into
+  /// range = twtt*c/2 with the original rx angle does NOT reproduce the
+  /// endpoint position — the ray bent.
+    double effective_sound_speed = std::numeric_limits < double > ::quiet_NaN();
   /// A turning point (total internal refraction) was passed; the endpoint is
   /// still valid.
-    bool turned;
+    bool turned = false;
   /// The trace ran above the shallowest or below the deepest profile sample;
-  /// that boundary segment's gradient was extended.
-    bool extrapolated;
+  /// that boundary segment's gradient was extended. Carve-out: for a
+  /// single-point profile there is no boundary segment to extend (the one
+  /// sample's speed holds everywhere), so extrapolated stays false at every
+  /// depth — the profile is uniform, not extended.
+    bool extrapolated = false;
   };
 
 /// Trace one beam through a sound speed profile.
 ///
 /// @param profile  Strictly-increasing-depth samples; every sound speed
-///                 finite and > 0. Between samples the gradient is constant
-///                 (piecewise-linear profile => circular-arc ray segments);
-///                 beyond either end the boundary segment's gradient is
-///                 extended (extrapolated flag set).
+///                 finite and > 0; every consecutive pair spaced widely
+///                 enough that (c1-c0)/(z1-z0) is finite. Between samples the
+///                 gradient is constant (piecewise-linear profile =>
+///                 circular-arc ray segments); beyond either end the boundary
+///                 segment's gradient is extended (extrapolated flag set).
 /// @param transducer_depth_below_surface  Metres below the surface datum,
 ///                 positive down, same datum as the profile. Finite; may lie
-///                 outside the profile's depth span (extrapolation).
+///                 outside the profile's depth span (extrapolation) — but the
+///                 profile, extended if need be, must give a sound speed
+///                 >= kMinSoundSpeed at this depth. A transducer sitting far
+///                 enough outside the span that the extended profile has
+///                 already run down to (or below) the floor there is
+///                 kInvalidInput: there is no physical water column to launch
+///                 into, and the joint (profile, depth) pair is what is
+///                 wrong.
 /// @param launch_angle  Beam steering angle as the sonar reported it
 ///                 (rx_angles[i]): radians from nadir, positive starboard,
 ///                 |launch_angle| < pi/2, finite.
@@ -143,12 +198,20 @@ namespace cube
 ///
 /// Violations of the finiteness/range constraints above return
 /// kInvalidInput with NaN fields.
+///
+/// Near-vertical shortcut: a ray parameter sin(launch_angle)/array_sound_speed
+/// below 1e-12 — for realistic sound speeds, |launch_angle| below about
+/// 1.5e-9 rad — is integrated as exactly vertical, returning
+/// across_track_offset and end_angle of exactly +/-0 rather than a value
+/// linear in launch_angle. Relevant if a caller differentiates numerically
+/// with respect to launch_angle: keep the perturbation well above that
+/// threshold.
   RayTraceResult traceRay(
     const SoundSpeedProfile & profile,
     double transducer_depth_below_surface,
     double launch_angle,
     double array_sound_speed,
-    double one_way_travel_time);
+    double one_way_travel_time) noexcept;
 
 }  // namespace cube
 

@@ -21,6 +21,7 @@
 
 #include "cube_bathymetry/ssp_ray_tracer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -37,6 +38,23 @@
 //   t(theta)  = (1/g) * ln( tan(theta/2) / tan(theta0/2) )
 //   dy        = R * (cos(theta0) - cos(theta1))
 //   dz        = R * (sin(theta1) - sin(theta0))
+//
+// The dy/dz forms above are the textbook ones and are NOT what advanceArc()
+// evaluates. Written that way they catastrophically cancel exactly where the
+// geometry matters most: near nadir with a near-flat gradient, R reaches
+// 1e12 m while cos(theta0) and cos(theta1) are both within 1e-15 of 1, so the
+// difference is pure rounding noise and the across-track offset comes back as
+// a hard zero (reproduced at launch 1e-3 rad, g = 5e-9 1/s: 0.0 returned
+// against a true 0.0100 m at 10 m range). The algebraically identical
+// half-angle forms, with m = (theta0 + theta1)/2 and d = (theta1 - theta0)/2,
+// keep every factor at its own scale:
+//
+//   dy = 2 * R * sin(m) * sin(d)
+//   dz = 2 * R * cos(m) * sin(d)
+//
+// and the small quantity d is itself formed without subtracting two nearly
+// equal angles wherever the caller knows it exactly (see advanceInclined()'s
+// time-limited branch, which gets d from atan/expm1 on the tan-half ratio).
 //
 // All internal math is double (plan decision: R reaches tens of km while
 // offsets are metres — float arc differences catastrophically cancel).
@@ -94,10 +112,21 @@ bool profileIsValid(const SoundSpeedProfile & profile)
     {
       return false;
     }
-    if (i > 0 &&
-      profile[i].depth_below_surface <= profile[i - 1].depth_below_surface)
-    {
-      return false;
+    if (i > 0) {
+      if (profile[i].depth_below_surface <= profile[i - 1].depth_below_surface) {
+        return false;
+      }
+      // Strictly increasing is not enough: a denormal-scale depth separation
+      // makes the segment gradient overflow to +/-inf, which then propagates
+      // NaN through the arc radius and the endpoint. Such a profile is
+      // degenerate input, so reject it here rather than returning a NaN
+      // "result" downstream.
+      const double gradient =
+        (profile[i].sound_speed - profile[i - 1].sound_speed) /
+        (profile[i].depth_below_surface - profile[i - 1].depth_below_surface);
+      if (!std::isfinite(gradient)) {
+        return false;
+      }
     }
   }
   return true;
@@ -130,8 +159,11 @@ Segment segmentAt(const SoundSpeedProfile & profile, std::ptrdiff_t index)
     const double g =
       (profile[1].sound_speed - profile[0].sound_speed) /
       (profile[1].depth_below_surface - profile[0].depth_below_surface);
-    seg = {-inf, profile[0].depth_below_surface, kNaN, g, true};
-    seg.c_top = kNaN;  // unused above the profile; c anchored at z_bottom
+    // z_top is -inf, so c_top has no boundary to sit at; carry the shallowest
+    // sample's speed (the anchor soundSpeedIn() uses for this region) rather
+    // than a NaN whose safety would depend on another field's finiteness.
+    seg = {-inf, profile[0].depth_below_surface, profile[0].sound_speed, g,
+      true};
     return seg;
   }
   if (index >= n - 1) {
@@ -212,6 +244,16 @@ bool advanceVertical(
     kMinSoundSpeed : c_bottom;
   const double t_exit = std::isfinite(c_target) ?
     std::log(c_target / c0) / g : std::numeric_limits<double>::infinity();
+  const bool floor_limit = (c_target == kMinSoundSpeed && seg.is_extrapolated);
+  if (floor_limit && !(t_exit > 0.0)) {
+    // Already at or below the extrapolation floor. Advancing would run the
+    // ray BACKWARDS (negative t_exit means a negative elapsed time and a
+    // displacement toward the transducer), so stop here with nothing
+    // consumed. traceRay() rejects a transducer placed below the floor, so
+    // this is a defensive backstop, not a routine path.
+    *status = RayTraceStatus::kExtrapolationLimit;
+    return true;
+  }
   if (state->time_left <= t_exit) {
     const double c1 = c0 * std::exp(g * state->time_left);
     state->z += (c1 - c0) / g;
@@ -220,11 +262,25 @@ bool advanceVertical(
   }
   state->z += (c_target - c0) / g;
   state->time_left -= t_exit;
-  if (c_target == kMinSoundSpeed && seg.is_extrapolated) {
+  if (floor_limit) {
     *status = RayTraceStatus::kExtrapolationLimit;
     return true;  // trace ends here, time NOT fully consumed
   }
   return false;
+}
+
+// Apply one circular-arc segment traversal from state->theta to theta1, in
+// the numerically stable half-angle form (see the file-header note). The
+// caller supplies half_delta == (theta1 - state->theta) / 2 — separately,
+// because near nadir it can often be formed to far better relative accuracy
+// than the subtraction itself allows.
+void advanceArc(TraceState * state, double R, double theta1, double half_delta)
+{
+  const double mid = state->theta + half_delta;
+  const double sin_half = std::sin(half_delta);
+  state->y += 2.0 * R * std::sin(mid) * sin_half;
+  state->z += 2.0 * R * std::cos(mid) * sin_half;
+  state->theta = theta1;
 }
 
 // Advance an inclined ray (p > 0) through one segment using the arc forms.
@@ -271,6 +327,7 @@ bool advanceInclined(
   const double R = 1.0 / (p * g);
   double theta_target;
   bool will_turn = false;
+  bool floor_limit = false;
   const double inf = std::numeric_limits<double>::infinity();
 
   double c_toward = moving_down ?
@@ -293,24 +350,12 @@ bool advanceInclined(
       kPi - std::asin(std::min(1.0, p * c_back)) :
       std::asin(std::min(1.0, p * c_back));
   } else if (sin_toward <= p * kMinSoundSpeed && seg.is_extrapolated) {
-    // The gradient drives c toward the floor before any boundary.
+    // The gradient drives c toward the floor before any boundary. The target
+    // angle is the floor angle; reaching it ends the trace (below), while
+    // exhausting the travel time first is just the ordinary partial advance.
+    floor_limit = true;
     theta_target = moving_down ?
       std::asin(p * kMinSoundSpeed) : kPi - std::asin(p * kMinSoundSpeed);
-    const double tan_half_target = std::tan(theta_target / 2.0);
-    const double tan_half_0 = std::tan(state->theta / 2.0);
-    const double t_exit = std::log(tan_half_target / tan_half_0) / g;
-    if (state->time_left <= t_exit) {
-      // Exhausts before reaching the floor — fall through to the common
-      // partial-advance below by treating the floor angle as the target.
-    } else {
-      const double th1 = theta_target;
-      state->y += R * (std::cos(state->theta) - std::cos(th1));
-      state->z += R * (std::sin(th1) - std::sin(state->theta));
-      state->theta = th1;
-      state->time_left -= t_exit;
-      *status = RayTraceStatus::kExtrapolationLimit;
-      return true;
-    }
   } else {
     theta_target = moving_down ?
       std::asin(sin_toward) : kPi - std::asin(sin_toward);
@@ -320,15 +365,30 @@ bool advanceInclined(
   const double tan_half_target = std::tan(theta_target / 2.0);
   const double t_exit = std::log(tan_half_target / tan_half_0) / g;
 
+  if (floor_limit && !(t_exit > 0.0)) {
+    // Already at or past the floor: advancing would run the ray backwards in
+    // time. Stop here with nothing consumed (defensive — traceRay() rejects a
+    // transducer placed where the extended profile is already at the floor).
+    *status = RayTraceStatus::kExtrapolationLimit;
+    return true;
+  }
+
   if (state->time_left <= t_exit) {
-    const double th1 =
-      2.0 * std::atan(tan_half_0 * std::exp(g * state->time_left));
+    const double growth = std::exp(g * state->time_left);
+    const double th1 = 2.0 * std::atan(tan_half_0 * growth);
+    // half_delta = atan(tan_half_0*growth) - atan(tan_half_0), via the atan
+    // difference identity so the small angle is never formed by subtracting
+    // two nearly equal ones. expm1 keeps the numerator exact for tiny g*t.
+    double half_delta = std::atan(
+      tan_half_0 * std::expm1(g * state->time_left) /
+      (1.0 + tan_half_0 * tan_half_0 * growth));
+    if (!std::isfinite(half_delta)) {
+      half_delta = 0.5 * (th1 - state->theta);  // grazing theta -> pi
+    }
     if ((state->theta - kHalfPi) * (th1 - kHalfPi) < 0.0) {
       state->turned = true;
     }
-    state->y += R * (std::cos(state->theta) - std::cos(th1));
-    state->z += R * (std::sin(th1) - std::sin(state->theta));
-    state->theta = th1;
+    advanceArc(state, R, th1, half_delta);
     state->time_left = 0.0;
     return true;
   }
@@ -338,10 +398,12 @@ bool advanceInclined(
   {
     state->turned = true;
   }
-  state->y += R * (std::cos(state->theta) - std::cos(theta_target));
-  state->z += R * (std::sin(theta_target) - std::sin(state->theta));
-  state->theta = theta_target;
+  advanceArc(state, R, theta_target, 0.5 * (theta_target - state->theta));
   state->time_left -= t_exit;
+  if (floor_limit) {
+    *status = RayTraceStatus::kExtrapolationLimit;
+    return true;  // trace ends here, time NOT fully consumed
+  }
   return false;
 }
 
@@ -352,7 +414,7 @@ RayTraceResult traceRay(
   double transducer_depth_below_surface,
   double launch_angle,
   double array_sound_speed,
-  double one_way_travel_time)
+  double one_way_travel_time) noexcept
 {
   if (!profileIsValid(profile) ||
     !std::isfinite(transducer_depth_below_surface) ||
@@ -376,9 +438,15 @@ RayTraceResult traceRay(
   Segment seg = segmentAt(profile, seg_index);
   const double c_start =
     soundSpeedIn(profile, seg, transducer_depth_below_surface);
-  if (c_start <= 0.0) {
+  if (!std::isfinite(c_start) || c_start < kMinSoundSpeed) {
     // Transducer sits in an extrapolated region whose gradient has already
-    // driven the extended profile unphysical at this depth.
+    // driven the extended profile down to (or below) the sound speed floor at
+    // this depth: there is no water column to launch into. The documented
+    // contract makes this a joint (profile, transducer depth) constraint, so
+    // kInvalidInput is the honest status. Note the >= kMinSoundSpeed test
+    // rather than > 0: admitting a sliver above zero let the trace start
+    // already below the extrapolation floor, which ran the floor branches
+    // backwards (negative consumed time, endpoint above the transducer).
     return invalidResult(RayTraceStatus::kInvalidInput);
   }
 
@@ -409,6 +477,10 @@ RayTraceResult traceRay(
       const double consumed = one_way_travel_time - state.time_left;
       const double slant = std::sqrt(state.y * state.y + dz * dz);
       const double sign = mirrored ? -1.0 : 1.0;
+      // effective_sound_speed is per the header: slant range over the time
+      // actually CONSUMED (== one_way_travel_time on kOk, less when the
+      // extrapolation floor cut the trace short), NaN when nothing was
+      // consumed at all.
       return {status, sign * state.y, state.z, sign * state.theta,
         consumed > 0.0 ? slant / consumed : kNaN,
         state.turned, state.extrapolated};
@@ -419,7 +491,10 @@ RayTraceResult traceRay(
     seg_index += going_down ? 1 : -1;
     seg = segmentAt(profile, seg_index);
   }
-  return invalidResult(RayTraceStatus::kInvalidInput);
+  // The input was well formed; the tracer is declining to keep integrating.
+  // Reporting that as kInvalidInput blamed the caller for the tracer's own
+  // safety cap, so it gets its own status.
+  return invalidResult(RayTraceStatus::kStepLimit);
 }
 
 }  // namespace cube
