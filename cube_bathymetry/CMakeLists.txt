@@ -178,6 +178,37 @@ install(TARGETS cube_bathymetry_sonar_info_curve EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
+# Forward constant-gradient SSP ray tracer (#126). Own target with NO
+# dependencies beyond the standard library — shared forward model for the
+# unh_marine_autonomy#300 phase-2 inversion and marine_perception_tools#28,
+# which link this target alone (link-level isolation; the package's exported
+# dependency set still resolves for any find_package(cube_bathymetry)).
+add_library(cube_bathymetry_ssp_ray_tracer src/ssp_ray_tracer.cpp)
+target_include_directories(cube_bathymetry_ssp_ray_tracer PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  # Headers install to include/${PROJECT_NAME}/ (see the install(DIRECTORY
+  # include/ ...) above), so `#include "cube_bathymetry/ssp_ray_tracer.h"`
+  # only resolves with include/${PROJECT_NAME} on the search path -- a bare
+  # `include` here leaves a target-only consumer unable to find the header.
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+)
+# The two named consumers (unh_marine_autonomy#300, marine_perception_tools#28)
+# link this into shared libraries and a Python extension module, which cannot
+# absorb a non-PIC static archive.
+set_target_properties(cube_bathymetry_ssp_ray_tracer PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+# The implementation uses libm (sin/asin/log/expm1). g++ links it implicitly,
+# but a consumer driving the link with gcc (e.g. a C host program or some
+# Python-extension toolchains) does not — propagate it on the interface so
+# the exported target is self-sufficient (round-2 review finding).
+target_link_libraries(cube_bathymetry_ssp_ray_tracer PUBLIC m)
+install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
 add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
 target_include_directories(cube_bathymetry_node PUBLIC
   ${grid_map_ros_INCLUDE_DIRS}
@@ -310,6 +341,10 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)
   target_link_libraries(test_sonar_info_curve cube_bathymetry_sonar_info_curve)
+
+  # Links ONLY the ray-tracer target — proves the no-dependency isolation.
+  ament_add_gtest(test_ssp_ray_tracer test/test_ssp_ray_tracer.cpp)
+  target_link_libraries(test_ssp_ray_tracer cube_bathymetry_ssp_ray_tracer)
 
   ament_add_gtest(test_parameters test/test_parameters.cpp)
   target_link_libraries(test_parameters cube_bathymetry)
