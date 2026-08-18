@@ -89,3 +89,15 @@ boat-side recording change first"). No open issue blocks *this* one.
 
 ### Actions
 - [ ] Persist audit findings to progress.md as a typed entry (not only a GitHub comment) once the investigation phase runs.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-17 23:09 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-121/plan.md` at `92250b9`
+**Branch**: feature/issue-121 at `92250b9`
+**Phases**: single
+
+### Open questions
+- [ ] Where is a Massabesic/Lewes bag containing `/bizzy/sensors/m3/detections` actually reachable from (this dev host, gabby, or an external drive)? Only import logs, not source bags, were found locally during planning.
