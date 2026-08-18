@@ -61,3 +61,16 @@ Per consequences map:
 - [ ] Add regression test: reference-only tile → evict → revisit → assert deep-outlier sounding is still rejected (blunder gate active).
 - [ ] Add WARN/INFO log when re-priming on reload so gate activation is observable (transparency principle).
 - [ ] Remove "deferred as #118" comments at the two PR #127 call sites once fixed.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-18 12:00 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-118/plan.md` at `abb891d`
+**Branch**: feature/issue-118 at `abb891d`
+**Phases**: single
+
+### Open questions
+- [ ] Live node re-prime mechanism: plan proposes per-tile `loadWindow` (Option A, zero RAM cost); operator adjudicates if retained-handle (Option B) is preferred.
+- [ ] Cross-level fallback for live node revisit path: plan aligns to exact-level only (matches on_configure); operator adjudicates if cross-level resample is wanted here too.
