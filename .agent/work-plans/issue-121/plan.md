@@ -35,7 +35,8 @@ directly, without needing the bag inspection to be exploratory:
     consumer reading all four: it computes
     `range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0`
     and uses `tx_angles` (guarded, default 0 when absent) + `rx_angles` for the
-    3D sounding position (`sounding.h:52-54`).
+    3D sounding position (`tx_angles` read at `sounding.h:49-50`, `rx_angles`
+    at `:53-54`).
   - `src/error_model.cpp` reads `two_way_travel_times` (`:277`, `:344`, `:383`),
     `rx_angles` (`:206`) and `ping_info.sound_speed`/`ping_info.rx_beamwidths`
     (`:277`, `:344`, `:237`) — it does **not** read `tx_angles`.

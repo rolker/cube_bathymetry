@@ -223,8 +223,10 @@ Qualifications:
    override it, so beams the sonar flagged invalid (`det_info` bit 7,
    `em_datagrams.py`) are dropped *before* the message is built — every surviving
    beam is `DETECT_OK` by construction. The real consequence: **the ROS stream
-   contains no rejected-beam population**, so an inversion cannot re-adjudicate
-   the sonar's own bottom detection from bags alone. The empty and 10-beam
+   contains no rejected-beam population** — not even its size, since the decoded
+   `nrx`/`nvalid` counts (`em_datagrams.py:152-153`) are logged but never
+   published — so an inversion cannot re-adjudicate the sonar's own bottom
+   detection from bags alone, nor measure how much was discarded. The empty and 10-beam
    messages are what that filtering looks like on a bad ping.
 
 **Observable set (material, and previously unstated): (twtt, rx_angle) only.**
@@ -283,7 +285,14 @@ ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
   and position (`0x50`) — returns `{'type': dg}`, recognized but **not decoded**,
   so it never reaches ROS. The dropped `0x47` is epic-relevant: it is the sonar's
   own surface-sound-speed stream, of which only the per-ping N78 copy survives
-  into `ping_info.sound_speed`.
+  into `ping_info.sound_speed`. Empirically, in `m3_all/m3_20260616_155246.all`
+  (17.1 MB, the one raw capture available to count against) the datagram census
+  is **1816 × `0x4E` (N78), 1816 × `0x47` (surface sound speed), 1816 × `0x58`
+  (XYZ88), 1817 × `0x41` (attitude), 65 × `0x43` (clock)** — i.e. the M3 emits a
+  surface-sound-speed datagram for **every** ping, and every one of them is
+  dropped at the bridge. Also decoded but never published: `nrx` and `nvalid`
+  (`em_datagrams.py:152-153`), the per-ping beam and valid-beam counts — so a bag
+  cannot even report *how many* beams the sonar rejected, only which survived.
 - **Raw `.all` capture: sparse by intent, per the operator — and the source
   comment reads differently.** Roland stated (2026-08-18) that the `.all` files
   were written for debugging and that their sparse coverage is by design, not a
@@ -337,9 +346,10 @@ ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
 **Q4 — what the importer does with the fields (source-verified, per file).**
 The observables arrive intact and are consumed, but they are **not retained**
 past sounding construction:
-- `include/cube_bathymetry/sounding.h:43,52-54,72` — the only site reading all
-  four: `two_way_travel_times`, `ping_info.sound_speed`, `tx_angles` (guarded,
-  defaults 0), `rx_angles` (plus `intensities`).
+- `include/cube_bathymetry/sounding.h` — the only site reading all four:
+  `two_way_travel_times` + `ping_info.sound_speed` at `:43`, `tx_angles` at
+  `:49-50` (guarded, defaults 0), `rx_angles` at `:53-54` and `:70-72` (plus
+  `intensities`).
 - `src/error_model.cpp` — reads `two_way_travel_times` (`:277,:344,:383`),
   `rx_angles` (`:206`), `ping_info.sound_speed` (`:277,:344`) and
   `ping_info.rx_beamwidths` (`:237`). It does **not** read `tx_angles`.
@@ -347,9 +357,14 @@ past sounding construction:
   (into `platform.mean_speed`/`surf_sspeed`). The four-field list at
   `include/cube_bathymetry/detections_projector.h:107` is a doc comment about the
   input message, not a read site.
-- **`Sounding` stores only derived quantities** — `slant_range`, `beam_angle`
-  (= rx angle), `intensity`, `sonar_relative_position`. Raw `twtt`, `tx_angle`
-  and the applied `sound_speed` are consumed and discarded. An inversion engine
+- **`Sounding` stores only derived quantities** — from the detections message:
+  `slant_range` (`:131`), `beam_angle` (= rx angle, `:123`), `intensity`
+  (`:83`), `sonar_relative_position` (`:135`); plus the pipeline's own
+  `depth` (`:78`), `vertical_error`/`horizontal_error` (`:79-80`) and
+  `predicted_depth_at_touchdown` (`:111`). Raw `twtt`, `tx_angle` and the
+  applied `sound_speed` are consumed and discarded — and `slant_range` is
+  exactly their lossy product `twtt·c/2`, so the three cannot be separated
+  afterwards. An inversion engine
   must therefore read `SonarDetections` at import time (or `Sounding` must be
   extended); it cannot separate travel time from applied sound speed after the
   fact.
@@ -392,8 +407,10 @@ past sounding construction:
   retrofit rewrites `/tf_static` offsets and `header.stamp`, never `twtt`/angle
   payloads.
 - **June bag site label removed.** The bag was previously called
-  "Massabesic-era"; that is unverified — its bag-wide max `twtt` of 75.46 ms
-  implies a ~56 m slant range, deeper than Lake Massabesic. Date (2026-06-09) is
+  "Massabesic-era"; that is unverified and nothing here establishes a site. Its
+  max `twtt` of 75.46 ms implies a ~56 m **slant range**, which is not a depth:
+  at up to 59.4° off nadir the same range is as little as ~29 m of water, so the
+  figure neither confirms nor rules out any particular lake. Date (2026-06-09) is
   all that is asserted.
 - Plan's conditional `.agents/README.md` note: **not applicable** — this repo has
   no `.agents/` directory, so no note was added (correctly deferred).
@@ -427,7 +444,7 @@ past sounding construction:
 - [x] Q1b — observable set is (twtt, rx_angle) only; `tx_angles` and `tx_delays` are both identically zero (one sector, zero tilt — not the empty-sector fallback: `ping_info.frequency` = 500 kHz) — `kongsberg_em_bridge/node.py:544-545,564,574`
 - [x] Q1c — angle convention: `rx_angles` +ve to starboard (Kongsberg pointing angle negated); mount orientation lives in the URDF/`tf_static`, which the sonar bag records — `kongsberg_em_bridge/node.py:566-575`
 - [x] Q2 — recorded travel times are raw N78 wire values, not ray-traced — `kongsberg_em_bridge/em_datagrams.py:128`, `node.py:563`
-- [x] Q3a — bridge decodes N78 + XYZ88 only; `0x47` surface-sound-speed and other datagrams dropped — `em_datagrams.py:191-200`
+- [x] Q3a — bridge decodes N78 + XYZ88 only; `0x47` surface-sound-speed and other datagrams dropped (one `0x47` per ping: 1816 each of `0x4E`/`0x47` in `m3_20260616_155246.all`), and the decoded `nrx`/`nvalid` counts are never published — `em_datagrams.py:152-153,191-200`
 - [x] Q3b — raw `.all` capture is opt-in (`record_on_start` default false) and on disk covers 2026-06-16/17 only; neither scanned bag's date is covered — `perception_launch.py:107-146`, `node.py:205`
 - [x] Q3c — M3 topics ride in the `sonar_logger` bag (self-sufficient: also carries odom, TF and the SV feed), not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`; destination set by `perception_launch.py:275-278` (`:34-41`), not the yaml `uri`
 - [x] Q4 — observables reach the importer but `Sounding` retains only derived values; inversion must read `SonarDetections` at import time — `include/cube_bathymetry/sounding.h:43`, `src/error_model.cpp:277`, `src/detections_projector.cpp:134`
