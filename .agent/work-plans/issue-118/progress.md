@@ -141,3 +141,22 @@ Specialists: Static Analysis (clean on changed lines — cpplint clean; cppcheck
 ### Next step
 review-code (re-review the fixes) via a fresh-context sub-agent:
 `.agent/scripts/dispatch_subagent.sh --mode in-process --issue 118 --skill review-code`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-18 07:40 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-118 at `71cc1c3`
+**Mode**: pre-push
+**Depth**: Deep (reason: safety-critical live blunder-gate path + ~592 changed code lines >=200)
+**Must-fix**: 0 | **Suggestions**: 0 (1 already-adjudicated design note, no action)
+**Round**: 2 | **Ship**: recommended — Round-1 must-fixes addressed and independently re-verified; 0 new must-fix.
+
+Specialists: Static Analysis (ament_cpplint clean on all 4 changed files; no >99 lines; no whitespace errors). Claude Adversarial 2 passes (Lens A logic — no findings; Lens B systemic/safety — its sole "must-fix" (save-timer race between addSoundings and dropTile) is a FALSE POSITIVE: SingleThreadedExecutor (node.cpp:1548) cannot preempt pingCallback, and the add->drop window is pre-existing (origin/jazzy add:1414/drop:1444) — this PR moved reload BEFORE the add, improving gating). Governance + Plan Drift by lead (matches plan @5f34bb5; live-node direct test deferral documented/accepted). Copilot off (default). Local skipped (Ollama not installed).
+
+Note: build/gtest NOT run here (shared underlay unbuilt, symlinked into main/ — building risks concurrent worktree agents). Compile-correctness reviewed statically; CI must run the suite (incl. the 2 new test_import_eviction cases) against a populated underlay before merge.
+
+### Findings
+- [ ] (note, no action) Live-node revisit re-prime is exact-level-only (no cross-level fallback), unlike the offline path — accepted: matches the live node's own on_configure prime, introduces no gap first-touch didn't have; operator-adjudicated per plan open question — `cube_bathymetry/src/cube_bathymetry_node.cpp:1176`
