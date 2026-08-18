@@ -29,16 +29,28 @@ directly, without needing the bag inspection to be exploratory:
   message's relationship to `PingInfo`, a different, slower-cadence topic
   carrying acquisition/correction metadata, not the travel-time/angle
   message itself).
-- **The importer already consumes exactly these fields** for ray tracing:
-  `cube_bathymetry/include/cube_bathymetry/sounding.h:43` computes
-  `range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0`,
-  and uses `tx_angles`/`rx_angles` for the 3D sounding position
-  (`sounding.h:49-54`). `error_model.cpp` and `detections_projector.cpp`
-  independently re-read the same three fields (`two_way_travel_times`,
-  `tx_angles`/`rx_angles`, `ping_info.sound_speed`) for uncertainty and
-  platform sound-speed propagation. **Nothing is discarded on the way in —
-  the importer's input path already carries the exact fields the inversion
-  needs**, answering question 4 directly from source.
+- **The importer's input path carries exactly these fields** (per-file,
+  verified — corrected from an earlier overstated version of this bullet):
+  - `cube_bathymetry/include/cube_bathymetry/sounding.h:43` is the only
+    consumer reading all four: it computes
+    `range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0`
+    and uses `tx_angles` (guarded, default 0 when absent) + `rx_angles` for the
+    3D sounding position (`sounding.h:52-54`).
+  - `src/error_model.cpp` reads `two_way_travel_times` (`:277`, `:344`, `:383`),
+    `rx_angles` (`:206`) and `ping_info.sound_speed`/`ping_info.rx_beamwidths`
+    (`:277`, `:344`, `:237`) — it does **not** read `tx_angles`.
+  - `src/detections_projector.cpp` reads only `ping_info.sound_speed`
+    (`:134-135`, into `platform.mean_speed`/`surf_sspeed`); the four-field list
+    in `detections_projector.h:107` is a doc comment about the input message,
+    not a read site.
+
+  Consequence for the inversion (question 4): the observables **arrive intact
+  in the `SonarDetections` message**, but `Sounding` does **not retain** raw
+  `two_way_travel_times`, `tx_angles`, or `ping_info.sound_speed` — it keeps
+  only the derived `slant_range`, `beam_angle` (= rx angle), `intensity` and
+  `sonar_relative_position`. An inversion engine must therefore read the
+  message at import time (or `Sounding` must be extended); it cannot recover
+  travel time and applied sound speed separately from a stored `Sounding`.
 
 What source inspection *cannot* answer, and the bag inspection step below
 is still needed for:
