@@ -47,8 +47,12 @@ constexpr std::size_t kMaxOpenStreams = 128;
 
 // One scattered sounding: the fields the CUBE insert path reads (geo_grid.cpp /
 // node.cpp), so a reconstructed GeoSounding drives an identical estimate. Native
-// layout — scratch-only, single-machine. `depth` is the position altitude (the
-// GeoSounding ctor sets sounding.depth from point[2]).
+// layout — scratch-only, single-machine; buckets never outlive one run, so the
+// layout can change freely. `depth` is the position altitude (the GeoSounding
+// ctor sets sounding.depth from point[2]). Sounding fields derived at insert
+// time are deliberately NOT serialized: predicted_depth_at_touchdown is
+// recomputed by GeoGrid::insert from the primed predicted surface on replay
+// (#123), and sonar_relative_position is not read by the insert path.
 #pragma pack(push, 1)
 struct ScatterRecord
 {
@@ -60,13 +64,6 @@ struct ScatterRecord
   float intensity;
   float beam_angle;
   float slant_range;
-  // Redundant on the gather path: fromRecord() restores this, but the replay's
-  // GeoGrid::insert recomputes the touchdown depth via interpolatePredictedDepth
-  // (geo_grid.cpp), overwriting the restored value — so the serialized field
-  // never affects the rebuilt estimate. Retained here only to keep this scratch
-  // record a faithful mirror of Sounding; dropping it (a bucket-format change)
-  // is deferred to a follow-up issue (#59 review).
-  float predicted_depth_at_touchdown;
 };
 #pragma pack(pop)
 
@@ -81,7 +78,6 @@ ScatterRecord toRecord(const GeoSounding & s)
   r.intensity = s.sounding.intensity;
   r.beam_angle = s.sounding.beam_angle;
   r.slant_range = s.sounding.slant_range;
-  r.predicted_depth_at_touchdown = s.sounding.predicted_depth_at_touchdown;
   return r;
 }
 
@@ -93,7 +89,6 @@ GeoSounding fromRecord(const ScatterRecord & r)
   s.sounding.intensity = r.intensity;
   s.sounding.beam_angle = r.beam_angle;
   s.sounding.slant_range = r.slant_range;
-  s.sounding.predicted_depth_at_touchdown = r.predicted_depth_at_touchdown;
   return s;
 }
 }  // namespace
