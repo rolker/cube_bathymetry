@@ -417,3 +417,46 @@ samples (one NaN at t=0, nine 0.0 in a 0.3 s burst at t≈2340 s) — confirming
   rolker/cube_bathymetry#121 with the corrected numbers and signal the epic
   consequence to rolker/unh_marine_autonomy#300 (its "bag contents may not be
   invertible" risk line). No `gh` writes were performed by this pass.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-18 00:20 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-121 at `6043cee`
+**Mode**: pre-push
+**Depth**: Deep (reason: 617 changed lines; also project-repo trigger `.agent/work-plans/issue-*/plan.md`)
+**Must-fix**: 5 | **Suggestions**: 20
+**Round**: 2 | **Ship**: continue — must-fix fell 8→5, but two of them (evidence scope, clock skew) change what the epic owner should conclude from an epic-gating verdict
+**Specialists**: Static analysis (no `.md` profile — not checked); Claude Adversarial x2 (Lens A + Lens B, Deep); Copilot off (default); Local qwen3.5:35b (5 findings — 1 corroborating the clock-skew must-fix, 4 discarded as speculative future-proofing of a docs-only spike)
+
+**Theme**: round 2 verified every re-checked source citation as exact and reproduced the arithmetic and bag-wide numbers; the round-1 corrections hold. The remaining defect is that the operator-correction commit `6043cee` shrank the evidence base without weakening the claims.
+
+### Findings
+- [ ] (must-fix) Verdict scope not updated after the June bag was demoted — still "every sampled deployment bag" / "all 179,475 messages across both bags" when only one 74-min shoal-water bag of 156 in `bizzyboat_sonar/` is data-of-record; no representativeness or temporal-window limit (Apr bags carry DeltaT not M3; `2026-06-30` has no `sonar_info`) — `.agent/work-plans/issue-121/progress.md:158-172,305-313`
+- [ ] (must-fix) "Config-verified" citation is dead config — `bizzyboat.yaml:765` uri is overridden at launch by `perception_launch.py:269-278` from `sonar_log_directory` (`:36-41`) + UTC subdir; the yaml path does not exist on disk. Conclusion right, evidence wrong — `.agent/work-plans/issue-121/progress.md:151,249-251,325`, `.agent/work-plans/issue-121/plan.md:92`
+- [ ] (must-fix) `tx_delays` listed as a bag-supplied observable but is identically 0.0 (same sector object as `tilt_deg`, `node.py:564`) — internally inconsistent with the entry's own first-class `tx_angles` limit — `.agent/work-plans/issue-121/progress.md:202-204`
+- [ ] (must-fix) Clock-skew limit missing and the `.orig` check was run on the June-09 bag, which predates the Jun-24-2026 skew onset (`retrofit_m3_bag.py:19-22`); the data-of-record Lewes bag sits inside the window and was never checked. Skew is dismissed as payload-irrelevant, but an inversion georeferences beams via odom/TF (1 s at 3 kn ≈ 1.5 m). `--report-only` is a non-destructive probe — `.agent/work-plans/issue-121/progress.md:293-297,305-313`
+- [ ] (must-fix) ".all = debug by design" recorded as if source-corroborated; `perception_launch.py:114-117` describes the archive as "genuine .all files (Caris/Qimera/MB-System) alongside the sonar bags", configured every deployment — record as operator-stated intent and note the divergence — `.agent/work-plans/issue-121/progress.md:232-243`, `.agent/work-plans/issue-121/plan.md:88-92`
+- [ ] (suggestion) Report `ping_info.frequency` (= 500000.0 Hz) — the only discriminator ruling out the empty-sector fallback as the cause of all-zero `tx_angles` — `.agent/work-plans/issue-121/progress.md:197-204`
+- [ ] (suggestion) "nonzero" reported where the plan required "non-zero/non-NaN"; NaN passes `!= 0` and the entry found one in the SV feed — `.agent/work-plans/issue-121/progress.md:174-176`
+- [ ] (suggestion) "Duration" column is the detections-topic span, unlabeled — June bag runs 97.9 min but the M3 stream stops 17.9 min before the bag ends — `.agent/work-plans/issue-121/progress.md:169-172`
+- [ ] (suggestion) `Sounding` "stores only" enumeration incomplete — also `depth`, `vertical_error`, `horizontal_error`, `predicted_depth_at_touchdown` (`sounding.h:78-124`) — `.agent/work-plans/issue-121/progress.md:270-271`
+- [ ] (suggestion) `tx_angles` read-site is `sounding.h:49-50`, not `:52-54` — `.agent/work-plans/issue-121/progress.md:260-262`, `.agent/work-plans/issue-121/plan.md:38`
+- [ ] (suggestion) "75.46 ms implies ~56 m, deeper than Massabesic" conflates slant range with depth (up to 59.4° off nadir ⇒ as little as ~29 m water) — `.agent/work-plans/issue-121/progress.md:298-301`
+- [ ] (suggestion) "~118–119° observed swath" assumes port/starboard symmetry from one absolute maximum; "nominal 120°" is uncited — `.agent/work-plans/issue-121/progress.md:206-209`
+- [ ] (suggestion) "main `bizzyboat/` bags carry no M3 topics" is unsourced — it holds for `bizzyboat/2026-08-05T19-18-17+00-00`; name the bag — `.agent/work-plans/issue-121/progress.md:251-252`
+- [ ] (suggestion) Q3c omits the favourable corollary — the sonar bag also carries `/bizzy/odom`, `/tf`, `/tf_static` and the SV feed, so no cross-bag join is needed at import — `.agent/work-plans/issue-121/progress.md:244-255`
+- [ ] (suggestion) State the angle-convention contract — `node.py:565-575` negates the Kongsberg pointing angle (+port → ROS +starboard); mount orientation lives in the URDF — `.agent/work-plans/issue-121/progress.md:197-204`
+- [ ] (suggestion) Sharpen Q1a/Q3a — `nrx`/`nvalid` are decoded (`em_datagrams.py:152-153`) but never published, so reject counts are unrecoverable; and the dropped-`0x47` claim has empirical backing (1816 × `0x4E` and 1816 × `0x47` in `m3_20260616_155246.all`) — `.agent/work-plans/issue-121/progress.md:186-195,224-231`
+- [ ] (suggestion) Add a typed entry for the `2900bf1` + `6043cee` pass at `6043cee` — the spike entry's correlation key still reads `eb5aaf7`, which does not contain the operator-corrected text, and the second `## Implementation` entry's Commits list is two commits stale — `.agent/work-plans/issue-121/progress.md:138-155,367-374`
+- [ ] (suggestion) Hand-typed timestamps contradict git (rewrite claimed 23:45 vs `57d15a8` at 23:40:26; entry `**When**: 23:52` inside 23:40–23:41 commits) and the Local Review is cited "at `707392c`" where its own header gives `eb5aaf7` — `.agent/work-plans/issue-121/progress.md:144-148,340,369-374`
+- [ ] (suggestion) "Done by host 2026-08-17" is stale — both comments were refreshed 2026-08-18 with the operator corrections — `.agent/work-plans/issue-121/progress.md:326`
+- [ ] (suggestion) Two entries share the `## Implementation` heading — a last-match consumer gets the remediation log, not the deliverable — `.agent/work-plans/issue-121/progress.md:138,367`
+- [ ] (suggestion) "`bizzyboat_sonar/` is the data-of-record directory" stated without exception, but the tree also holds `2026-06-04T…_kongsberg_em_test` and `m3_all/` — heuristic, not partition — `.agent/work-plans/issue-121/progress.md:249-252`
+- [ ] (suggestion) Repo-qualify the ADR-0009 citation (`unh_marine_autonomy ADR-0009`) — bare it collides with workspace ADR-0009 — `.agent/work-plans/issue-121/plan.md:162`
+- [ ] (suggestion) Plan drift (cosmetic): step 1 still names the un-scanned `bizzyboat/2026-08-03…` bag; the demoted empirical discriminator step carries no inline annotation; Consequences row 2 not updated after the epic signal was posted — `.agent/work-plans/issue-121/plan.md:81-88,105-118`
+- [ ] (suggestion) Drop the unresolvable "referenced in project memory" phrase (dates are inline) and reconcile "no PR needed" if a PR is opened — `.agent/work-plans/issue-121/progress.md:86`, `.agent/work-plans/issue-121/plan.md:196-198`
+- [ ] (suggestion) Knowledge-capture candidates, **proposal only — operator decides**: `bizzyboat_sonar/` vs `bizzy_m3/`/`m3_all/` data-of-record distinction; `skip_invalid_beams` default true ⇒ no rejected-beam population in bags; M3's ~38-ping startup sound-speed default. Propose in the PR body; do not edit an instruction file on this branch.
+- [ ] (owed, host) Must-fix 1-5 also need pushing back into the two published comments (rolker/cube_bathymetry#121 findings comment and the rolker/unh_marine_autonomy#300 epic signal) — the epic currently reads "two deployment recordings".
