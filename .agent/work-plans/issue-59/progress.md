@@ -125,7 +125,7 @@ The issue is in the right repo (`cube_bathymetry`), in the right worktree (`feat
 
 ### Findings
 - [x] (low, Copilot) `Grid::interpolatePredictedDepth` casts `std::floor(rx/ry)` to `int32_t` before any range check; the public contract promises `INVALID_DATA` for out-of-range input, so an extreme finite coordinate passed directly (tests already call the method out-of-range) is UB rather than a clean sentinel. Fix: floor into `double`, range-check against `int32_t` limits (and grid bounds), then cast — `cube_bathymetry/src/grid.cpp:137`
-- [ ] (low, Copilot) Same pre-cast pattern in `GeoGrid::interpolatePredictedDepth`; here `insert()` has no out-of-tile rejection ahead of the call, so an absurd-but-finite latitude/longitude reaches the cast. Fix: floor into `double`, validate range, then cast — `cube_bathymetry/src/geo_grid.cpp:150`
+- [x] (low, Copilot) Same pre-cast pattern in `GeoGrid::interpolatePredictedDepth`; here `insert()` has no out-of-tile rejection ahead of the call, so an absurd-but-finite latitude/longitude reaches the cast. Fix: floor into `double`, validate range, then cast — `cube_bathymetry/src/geo_grid.cpp:150`
 - [ ] (suggestion, Local Review @ `94b5345`) `ScatterRecord::predicted_depth_at_touchdown` is now recomputed on replay insert — redundant serialized payload; document or drop (pre-existing, follow-up issue) — `cube_bathymetry/src/batch_regen.cpp:63`
 
 ### Addressed since prior round

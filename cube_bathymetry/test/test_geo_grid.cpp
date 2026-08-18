@@ -387,6 +387,18 @@ TEST_F(GeoGridPredictedSurfaceTest, InterpolateTileEdgeSentinel)
     g.interpolatePredictedDepth(latAt(grid_index, top - 0.75), lon), INVALID_DATA);
 }
 
+TEST_F(GeoGridPredictedSurfaceTest, InterpolateExtremeCoordinateSentinel)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+  seedStencil(g, grid_index);
+  // insert() has no out-of-tile gate ahead of this public method, so an
+  // absurd-but-finite coordinate floors to a lattice index beyond int32_t.
+  // The range-check must reject it in double before the cast (else UB).
+  const double lon = lonAt(grid_index, kCol + 0.25);
+  EXPECT_EQ(g.interpolatePredictedDepth(1e300, lon), INVALID_DATA);
+}
+
 TEST_F(GeoGridPredictedSurfaceTest, InsertAppliesSlopeOffset)
 {
   auto grid_index = makeGridIndex(43.07, -70.76);

@@ -147,16 +147,22 @@ float GeoGrid::interpolatePredictedDepth(double latitude, double longitude) cons
     index_.latitudinalSpan() * gggs::cell_rows_per_grid;
   const double c = (gggs::normalizeLongitude(longitude) - index_.westLongitude()) /
     index_.longitudinalSpan() * gggs::cell_columns_per_grid;
-  const auto row = static_cast<int32_t>(std::floor(r));
-  const auto col = static_cast<int32_t>(std::floor(c));
-  // The +1 neighbors must stay inside this tile: a touchdown in the last
-  // row/column of cells (or outside the tile) gets no correction — the same
-  // per-tile scope as the original's cube_grid_interpolate.
-  if(row < 0 || row + 1 >= gggs::cell_rows_per_grid ||
-    col < 0 || col + 1 >= gggs::cell_columns_per_grid)
+  // Range-check the floored lattice coordinates in double before casting to
+  // int32_t: insert() has no out-of-tile rejection ahead of this call, so an
+  // absurd-but-finite latitude/longitude (or NaN) could otherwise overflow the
+  // cast, which is UB rather than the documented INVALID_DATA. The +1 neighbors
+  // must stay inside this tile: a touchdown in the last row/column of cells (or
+  // outside the tile) gets no correction — the same per-tile scope as the
+  // original's cube_grid_interpolate. The negated comparison also rejects NaN.
+  const double row_f = std::floor(r);
+  const double col_f = std::floor(c);
+  if(!(row_f >= 0.0 && row_f + 1.0 < gggs::cell_rows_per_grid &&
+       col_f >= 0.0 && col_f + 1.0 < gggs::cell_columns_per_grid))
   {
     return INVALID_DATA;
   }
+  const auto row = static_cast<int32_t>(row_f);
+  const auto col = static_cast<int32_t>(col_f);
 
   // Corner order matches the original: z[0]=SW, z[1]=SE, z[2]=NW, z[3]=NE.
   float z[4];
