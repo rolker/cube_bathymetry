@@ -47,28 +47,38 @@ is still needed for:
    `ping_info.sound_speed` are actually **populated** (non-empty, non-zero)
    in a real M3 recording, vs. structurally present but left at their
    "unavailable" sentinel/empty state by the driver.
-2. Whether the recorded soundings are raw beam detections or a ray-traced
-   product — i.e. whether `two_way_travel_times` reflects the true
-   acoustic travel time or has already been adjusted/pre-corrected
-   upstream of the ROS driver (unanswerable from the message schema or
-   this repo's source; requires comparing recorded values against
-   expected geometry in a real bag).
+2. ~~Whether the recorded soundings are raw beam detections or a ray-traced
+   product~~ — **largely answerable from the driver source** (plan-review
+   correction): the M3 driver `kongsberg_em_bridge` is checked out at
+   `layers/main/sensors_ws/src/marine_tools/kongsberg_em_bridge` and
+   documents itself as a pure wire-format translator decoding the
+   Kongsberg "Raw Range and Angle 78" datagram — geometry and TPU happen
+   downstream. Verify that claim against its decode path, then use the
+   bag sample only as an empirical cross-check (discriminator: sampled
+   `two_way_travel_times` should be genuine two-way seconds, i.e.
+   ≈ 2·depth/sound_speed at nadir, not pre-ray-traced ranges).
 3. Whether the ROS-side recording is a reduced product relative to the
-   M3's full output flowing to QINSy on mercat (a driver/config question,
-   not visible in this repo).
+   M3's full output flowing to QINSy on mercat — partly source-answerable
+   too: `kongsberg_em_bridge`'s `~/set_recording` raw-`.all` service
+   shows what full-datagram capture exists; the residual question is
+   which datagrams the bridge decodes vs. drops.
 
 ## Approach
 
-1. **Locate a representative bag.** Prefer a recent Massabesic or Lewes
-   survey day (per the Issue Review's recommendation), topic
-   `/bizzy/sensors/m3/detections` (confirmed from
-   `~/data/logs/import_lewes_2026-08-05.log`, "Detections topic:
-   /bizzy/sensors/m3/detections"). No bag under that name was found on
-   this dev machine during planning (`~/data/logs/` has import logs but
-   not the source bags) — bags likely live on gabby or an external
-   drive. If none is reachable from this worktree/host, fall back to the
-   most recent locally-reachable bag containing the topic, and note the
-   substitution in the findings.
+1. **Representative bags — resolved (operator-confirmed on this host).**
+   Deployment recordings live under `~/data/logs/gabby/logs/`:
+   `bizzy_m3/bag_2026-06-09T14.51.50_m3_detections/` carries
+   `/bizzy/sensors/m3/detections` (`marine_acoustic_msgs/SonarDetections`)
+   plus `/bizzy/sensors/m3/soundings` (PointCloud2), and
+   `bizzyboat/2026-08-03T18-07-40+00-00/` (Lewes) is a full main
+   deployment bag — check that one too, since whether the *main* bag
+   carries the detections topic is itself part of question 3. Bags are
+   data-of-record: read-only, no modification. Note per finding from
+   rolker/unh_echoboats_project11#342: `retrofit_m3_bag.py` rewrote some
+   M3 bags in place (transducer TF offset + integer-second clock-skew) —
+   record which variant (retrofitted or not) was sampled, since the skew
+   itself bears on invertibility. If the bag check cannot complete, the
+   verdict must be labelled **provisional (source-only)** in the findings.
 2. **Inspect message population in the bag** using `ros2 bag info` (topic
    presence, message counts, types) and a small Python/`ros2 bag play` +
    `ros2 topic echo` or `rosbag2_py` read-loop to sample N messages from
@@ -83,15 +93,18 @@ is still needed for:
    whether backscatter-correction provenance is present, a secondary but
    related finding worth noting).
 4. **Cross-check question 3** (reduced product vs. QINSy full output) by
-   checking `bizzyboat_project11`'s M3 driver launch/config for any
-   filtering, decimation, or field-stripping between the driver and the
-   `/bizzy/sensors/m3/detections` publish — this is a source-only check
-   (no bag needed) in a sibling repo
-   (`layers/main/platforms_ws/src/bizzyboat_project11`), read-only.
+   reading the M3 driver source and launch/config: the driver is
+   `kongsberg_em_bridge` (`layers/main/sensors_ws/src/marine_tools/kongsberg_em_bridge`)
+   — check which datagrams it decodes vs. drops and its `~/set_recording`
+   raw-`.all` capture path; the platform launch/config lives in the
+   `bizzyboat_project11` *package* inside the
+   `layers/main/platforms_ws/src/unh_echoboats_project11` repo (the
+   package name is not the repo dir name). Source-only, read-only.
 5. **Write the findings comment** on
    https://github.com/rolker/cube_bathymetry/issues/121 answering all
    four questions, citing the source evidence above plus the bag-sample
-   results, with an explicit invertible yes/no verdict. If any field
+   results, with an explicit invertible yes/no verdict and the standard
+   AI signature block (`$AGENT_NAME` / `$AGENT_MODEL`). If any field
    proves absent/unpopulated, scope the follow-up
    `rolker/unh_echoboats_project11` recording-change issue per the
    deliverable.
@@ -157,13 +170,11 @@ plan and progress files are the only files this branch touches structurally
 
 ## Open Questions
 
-- [ ] Where is a Massabesic/Lewes bag containing `/bizzy/sensors/m3/detections`
-      actually reachable from (this dev host, gabby, or an external
-      drive)? Planning found only import *logs*, not the source bags,
-      locally. If genuinely unreachable, the findings comment should say
-      so explicitly and note the substitute evidence used (source-code
-      answer for Q1/Q2/Q4, deferring the "is it actually populated"
-      empirical check).
+- [x] ~~Where is a Massabesic/Lewes bag containing `/bizzy/sensors/m3/detections`
+      actually reachable from?~~ **Resolved at the plan-review checkpoint
+      (operator)**: bags are on this host under `~/data/logs/gabby/logs/`
+      (`bizzy_m3/` M3-specific, `bizzyboat/` full deployment bags) —
+      see Approach step 1.
 
 ## Estimated Scope
 
