@@ -113,6 +113,36 @@ the scanned topic, default = the detections topic's sibling `sonar_info`).
 See
 `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
 
+## Live prior-gate prime (`prior_store_dir`)
+
+`cube_bathymetry_node` accepts an optional **`prior_store_dir`** parameter (empty
+by default = off, the pre-#91 behaviour). When set, on `on_configure` the node
+loads that `marine_bathymetry_store` and primes CUBE's **predicted surface** from
+its prior layers — the *live* equivalent of the offline `--reference-store` gate
+above, sharing the same `primeFromPriorLayers` semantics:
+
+- **Predicted-only** (never settled) — the prior turns the blunder-rejection gate
+  on so false-deep detections are dropped live, but seeds no measured depth and no
+  backscatter (cube#89, ADR-0008). As a side-effect a primed predicted surface
+  also activates **live slope-corrected depth** (#59) — this parameter is what
+  turns that on afloat.
+- **`chart/` first, `reference/` overwrites** where both layers cover a cell — the
+  store's `SourceLayer` priority order.
+- **Exact survey level only** — unlike the offline `reference/` path there is **no**
+  cross-level (#115) fallback here; a coarser multi-level prior tile is counted as
+  level-mismatched and skipped.
+- Runs **before** the `draft_dir` warm-start, so an already-surveyed cell keeps its
+  finer draft-derived predicted depth (the draft prime overwrites the prior).
+- **Budget-bounded** like the draft prime (`max_resident_tiles`): the whole prior
+  store is loaded into RAM at configure *before* `trimResidentToBudget` bounds it,
+  so a very large prior spikes RAM transiently — prefer a **region-scoped**
+  `prior_store_dir`. Evicted prior-primed tiles are predicted-only and **not
+  reloadable on revisit**, so they silently lose their gate until evict/revisit
+  re-priming lands (deferred, #118).
+- **Fail-safe** — a missing / unreadable / empty / all-level-mismatched prior logs
+  a warning and the node continues **ungated**; a misconfigured prior never takes
+  down live perception.
+
 ## Data flow & pose sourcing (design: #31)
 
 The package faithfully ports Calder's CUBE *algorithm* but originally diverged
