@@ -101,3 +101,36 @@ boat-side recording change first"). No open issue blocks *this* one.
 
 ### Open questions
 - [ ] Where is a Massabesic/Lewes bag containing `/bizzy/sensors/m3/detections` actually reachable from (this dev host, gabby, or an external drive)? Only import logs, not source bags, were found locally during planning.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-08-17 23:12 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-121/plan.md` at `92250b9`
+**PR**: PR-less (dispatched `--issue 121`; branch `feature/issue-121`)
+**Verdict**: changes-requested
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | Single-pass investigation, no code changes, matches the issue's four questions and explicit non-goal. |
+| Issue alignment | Needs work | Q1/Q4 well covered from source. Q2 (raw vs ray-traced) has no concrete discriminator in the Approach. Q3 (reduced product vs QINSy) is routed to the wrong evidence source. |
+| File targeting | Concern | Step 4 cites `layers/main/platforms_ws/src/bizzyboat_project11`, which does not exist (repo dir is `unh_echoboats_project11`; `bizzyboat_project11` is a package inside it). The M3 driver source that actually answers Q2/Q3 (`layers/main/sensors_ws/src/marine_tools/kongsberg_em_bridge`) is not referenced at all. |
+| Consequences | Good | Both branches (sufficient / insufficient) mapped; secondary-finding branch handled without unprompted scope growth. |
+| Documentation & instruction impact | Good | Section present, non-silent, instruction item framed as an operator-decided candidate and gated on empirical confirmation. |
+| Principle alignment | Needs work | "Capture decisions" and "Only what's needed" satisfied. But an epic-gating verdict rests on an empirical step whose input (a bag) has no confirmed location and whose fallback likely has no target — the plan should not be able to reach a confident "invertible: yes" on source-only evidence without labelling it provisional. |
+| ADR compliance | Good | ADR-0002 satisfied (layer worktree); ADR-0013 entry types planned for the findings; cube ADRs correctly ruled out. ADR-0009 correctly cited as informational. |
+| ROS conventions | Good | Message-schema reasoning is correct and verified (see finding 5). |
+
+### Findings
+- [ ] (must-fix) Context wrongly declares Q2/Q3 unanswerable from source — the M3 driver `kongsberg_em_bridge` is checked out locally at `layers/main/sensors_ws/src/marine_tools/kongsberg_em_bridge` and its README states it decodes the Kongsberg "Raw Range and Angle 78" datagram and is "purely a wire-format translator: geometry and TPU happen downstream", i.e. recorded travel times are raw, not ray-traced. Add the driver (README + `kongsberg_em_bridge/em_datagrams.py` + `node.py`) as a primary evidence source — `plan.md:50-58`
+- [ ] (must-fix) Step 4 targets a nonexistent path `layers/main/platforms_ws/src/bizzyboat_project11`; correct to `layers/main/platforms_ws/src/unh_echoboats_project11/bizzyboat_project11` — `plan.md:89-90`
+- [ ] (must-fix) No bag containing `/bizzy/sensors/m3/detections` is reachable on this host (searched `~/data` for rosbag2 `metadata.yaml`/`.mcap`; no external media mounted; `~/data/logs/import_lewes_2026-08-05.log` records the topic but not the bag path). The step-1 fallback ("most recent locally-reachable bag containing the topic") probably has no target. Add an explicit escalation (ask the operator for the bag location / read-only check on gabby) and a rule that the findings verdict is marked **provisional** if the empirical population check cannot run — this spike gates rolker/unh_marine_autonomy#300 and is flagged there as a possible epic-killer, so a source-only "yes" must not read as confirmed — `plan.md:64-71`
+- [ ] (suggestion) Step 2's sample only reports array sizes and `ping_info.sound_speed`; it gives no discriminator for Q2. Add a concrete test — e.g. does `sound_speed` vary per ping (a live surface-SSP feed; note `marine_tools/sound_speed_bridge` exists) or sit at a constant sentinel/1500 — and record its provenance — `plan.md:72-78`
+- [ ] (suggestion) `bizzyboat_project11/scripts/retrofit_m3_bag.py` rewrites already-recorded M3 bags (transducer offset in `/tf_static`, integer-second `header.stamp` skew correction, in-place with `.orig` backup). Any sampled bag may be a retrofitted copy, and the timing skew itself bears on invertibility. Note which variant was sampled and mention the retrofit in the findings — `plan.md:72-78`
+- [ ] (suggestion) Step 3 can be partly answered from source before touching a bag: the driver publishes a latched `sonar_info` (`marine_interfaces/SonarInfo`, transient_local, re-published per rosbag2 split). The bag check then only confirms it was recorded, not whether it exists — `plan.md:79-84`
+- [ ] (suggestion) Q3 also has a concrete source lead the plan misses: the driver exposes a `~/set_recording` service for raw `.all` recording, so "what is lost relative to QINSy" is partly a question of whether that raw stream is captured — worth checking alongside the launch config — `plan.md:85-90`
+- [ ] (suggestion) The deliverable is a GitHub comment; state that it carries the AI signature block (AGENTS.md) — `plan.md:91-97`
+- [ ] (note, no action) Verified and correct: `SonarDetections.msg` carries `two_way_travel_times[]`, `tx_angles[]`, `rx_angles[]`, `intensities[]` and an embedded `PingInfo ping_info` (with `sound_speed`, 0 = unavailable); `sounding.h:43`, `error_model.cpp:277/344`, and `detections_projector.h:107` all read those fields. The plan's correction of the Issue Review's `PingInfo` assumption holds.
