@@ -87,9 +87,14 @@ is still needed for:
    carries the detections topic is itself part of question 3. Bags are
    data-of-record: read-only, no modification. *(Post-implementation
    operator correction, 2026-08-18: only `bizzyboat_sonar/` bags — the
-   `sonar_logger` output, `bizzyboat.yaml:765` — are sonar survey
-   data-of-record; `bizzy_m3/` and similar are temp engineering captures,
-   and the `.all` files are debug-purpose. Findings scoped accordingly.)* Note per finding from
+   `sonar_logger` output, whose destination comes from
+   `perception_launch.py:275-278` + `:34-41`, **not** the overridden
+   `bizzyboat.yaml:765` uri — are sonar survey data-of-record; `bizzy_m3/`
+   and similar are temp engineering captures, and the `.all` files are
+   debug-purpose (operator-stated intent). Findings scoped accordingly; the
+   `bizzyboat/2026-08-03…` bag named below was not scanned — the same-day
+   `bizzyboat/2026-08-05T*` bags were checked instead and carry no M3
+   topics.)* Note per finding from
    rolker/unh_echoboats_project11#342: `retrofit_m3_bag.py` rewrote some
    M3 bags in place (transducer TF offset + integer-second clock-skew) —
    record which variant (retrofitted or not) was sampled, since the skew

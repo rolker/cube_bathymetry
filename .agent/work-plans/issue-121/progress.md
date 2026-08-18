@@ -147,11 +147,18 @@ generalized from an undisclosed leading-50-message sample and several of its
 claims were falsified by full-bag scans. All numbers below are now **bag-wide**
 (every message read, both bags; bags opened read-only — data of record).
 **Operator corrections folded in 2026-08-18**: (1) only `bizzyboat_sonar/` bags
-are sonar survey data-of-record — config-verified: the `sonar_logger` recorder
-writes to `.../data/bizzyboat_sonar` (`bizzyboat_project11/config/bizzyboat.yaml:765`);
-`bizzy_m3/` and similar hand-named directories are temporary engineering
-captures. (2) The raw `.all` files were written for debugging purposes — their
-sparse coverage is by design, not a recording gap.
+are sonar survey data-of-record — source-verified in the launch, not the yaml:
+the `sonar_logger` node's `storage.uri` from
+`bizzyboat_project11/config/bizzyboat.yaml:765`
+(`/home/field/project11/data/bizzyboat_sonar`, a path that does not exist on
+disk) is **overridden at launch** by `perception_launch.py:275-278`, which sets
+it to `<sonar_log_directory>/<sonar_log_subdirectory>` — the directory being
+`$P11_SONAR_LOG_DIR` defaulting to `/home/field/data/logs/bizzyboat_sonar`
+(`perception_launch.py:34-41`) and the subdirectory the UTC timestamp that names
+each bag. `bizzy_m3/` and similar hand-named directories are temporary
+engineering captures. (2) The raw `.all` files were written for debugging
+purposes (operator-stated intent — see Q3) — their sparse coverage is by design,
+not a recording gap.
 
 ### Spike findings — bag invertibility audit (all four questions answered)
 
@@ -270,12 +277,24 @@ ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
 - **Recording topology** (from the platform config, not inferred from bags):
   `bizzyboat_project11/config/bizzyboat.yaml:713-733` records
   `/bizzy/sensors/m3/detections` + `/bizzy/sensors/m3/sonar_info` in the
-  **`sonar_logger`** bag, not the main deployment recorder — consistent with the
-  main `bizzyboat/` bags carrying no M3 topics. The `sonar_logger` writes to
-  `.../data/bizzyboat_sonar` (`bizzyboat.yaml:765`), confirming
-  operator guidance that **`bizzyboat_sonar/` is the sonar data-of-record
-  directory**; other M3 directories (`bizzy_m3/`, `m3_all/`) are temp
-  engineering/debug captures. Companion
+  **`sonar_logger`** bag, not the main deployment recorder — confirmed against
+  the three main `bizzyboat/2026-08-05T*` bags of the same day, whose 60–63
+  recorded topics include no `m3` topic at all. The `sonar_logger`'s destination
+  is **not** the yaml's `uri` (`bizzyboat.yaml:765`, `/home/field/project11/data/…`
+  — dead config, no such path on disk): `perception_launch.py:275-278` overrides
+  `storage.uri` with `<sonar_log_directory>/<sonar_log_subdirectory>`, i.e.
+  `$P11_SONAR_LOG_DIR` (default `/home/field/data/logs/bizzyboat_sonar`,
+  `:34-41`) plus a UTC-timestamp subdir — which is what the on-disk bag names
+  look like, and what confirms operator guidance that **`bizzyboat_sonar/` is
+  the sonar data-of-record directory**. That directory is the recorder's target,
+  not a curated partition: it also holds aborted recordings, a
+  `2026-06-04T…_kongsberg_em_test` bag and the `m3_all/` raw-`.all` sibling.
+  Other M3 directories (`bizzy_m3/`) are temp engineering captures.
+  Favourable corollary for the inversion: the sonar bag is **self-sufficient**
+  — alongside the detections it carries `/bizzy/odom` (44,360), `/tf` (141,759),
+  `/tf_static` and the SV feed `/bizzy/sensors/sound_speed/sound_speed`
+  (111,024), so georeferencing needs no cross-bag join with the main
+  deployment bag at import time. Companion
   `/bizzy/sensors/m3/sonar_info` (`marine_interfaces/SonarInfo`) is present in the
   Aug 2026 sonar bag (post SonarInfo chain) and absent from the June bag, as
   expected.
@@ -351,10 +370,10 @@ past sounding construction:
 - [x] Q2 — recorded travel times are raw N78 wire values, not ray-traced — `kongsberg_em_bridge/em_datagrams.py:128`, `node.py:563`
 - [x] Q3a — bridge decodes N78 + XYZ88 only; `0x47` surface-sound-speed and other datagrams dropped — `em_datagrams.py:191-200`
 - [x] Q3b — raw `.all` capture is opt-in (`record_on_start` default false) and on disk covers 2026-06-16/17 only; neither scanned bag's date is covered — `perception_launch.py:107-146`, `node.py:205`
-- [x] Q3c — M3 topics ride in the `sonar_logger` bag, not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`
+- [x] Q3c — M3 topics ride in the `sonar_logger` bag (self-sufficient: also carries odom, TF and the SV feed), not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`; destination set by `perception_launch.py:275-278` (`:34-41`), not the yaml `uri`
 - [x] Q4 — observables reach the importer but `Sounding` retains only derived values; inversion must read `SonarDetections` at import time — `include/cube_bathymetry/sounding.h:43`, `src/error_model.cpp:277`, `src/detections_projector.cpp:134`
 - [x] Secondary — 1469.0 m/s is a 38-ping sonar startup transient; the in-bag SV feed reads 1528.102 from t+1.3 s (AML healthy) — Lewes bag full scan
-- [x] Operator corrections (2026-08-18) — `bizzyboat_sonar/` = sonar data-of-record (config-verified, `bizzyboat.yaml:765`); `bizzy_m3/` etc. = temp engineering captures; `.all` files = debug-purpose, sparse by design — folded into Q1/Q3/Limits above
+- [x] Operator corrections (Roland, 2026-08-18) — `bizzyboat_sonar/` = sonar data-of-record (launch-verified: `perception_launch.py:275-278` + `:34-41`, **not** the overridden `bizzyboat.yaml:765` uri); `bizzy_m3/` etc. = temp engineering captures; `.all` files = debug-purpose, sparse by design (operator-stated intent; the launch comment reads differently — see Q3) — folded into Q1/Q3/Limits above
 - [x] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. Done by host 2026-08-17: comment rewritten in place (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal posted (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922).
 
 No follow-up recording-change issue is filed: the observables required by the
