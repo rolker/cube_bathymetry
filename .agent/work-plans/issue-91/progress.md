@@ -18,3 +18,15 @@ issue: 91
 - [ ] Confirm whether budget bounding (`trimResidentToBudget` after `loadIntoSheet`) should apply to the chart prior prime as it does to the draft warm-start prime (#70). The issue does not mention it; the draft prime trims to `max_resident_tiles` right after load to bound RAM — the chart prime loads the same store format and should be consistent.
 - [ ] Explicitly scope out evict/revisit re-priming (#118) in the acceptance criteria or plan. The issue body acknowledges the once-at-configure limitation but the acceptance criteria are silent on it; making the deferral explicit prevents scope creep and false review expectations.
 - [ ] Document the #59 slope-correction side-effect in the implementation. The issue flags it as a "Bonus" but the acceptance criteria omit it; it should appear in the code comment and PR description so reviewers and operators know the prime activates slope correction, not just the blunder gate.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-18 10:30 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-91/plan.md` at `d2ffe75`
+**Branch**: feature/issue-91 at `d2ffe75`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
