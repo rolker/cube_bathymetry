@@ -68,3 +68,25 @@ The issue is in the right repo (`cube_bathymetry`), in the right worktree (`feat
 - [ ] Prior-load mechanism: plan proposes `prior_bathymetry_dir` (existing tile-store format). Operator to confirm or redirect to GeoTIFF/ENC import.
 - [ ] GeoGrid GGGS cell-corner convention: confirm fractional-position convention within a GGGS cell for the bilinear blend. Pinned during implementation.
 - [ ] Variance convention for prior load: fixed-metres vs. percentage-of-depth — expose one or both as a node parameter?
+
+## Plan Review
+**Status**: complete
+**When**: 2026-08-18 01:59 +00:00
+**By**: Claude Code Agent (Claude Opus)
+<!-- Independent: fresh-context sub-agent, model differs from the Sonnet plan author; no shared context. The `## Plan Authored` `**By**` agent-name matches only because "Claude Code Agent" is the framework identity shared by all Claude agents here, not because this is a self-review. -->
+
+**Plan**: `.agent/work-plans/issue-59/plan.md` at `604d4b5`
+**PR**: PR-less (`--issue` mode)
+**Verdict**: changes-requested
+
+### Findings
+- [ ] (must-fix) Step 6 reinvents the existing `Reference`-layer prime — `loadIntoSheet(store, SourceLayer::Reference, sheet, /*seed_settled=*/false)` → `primeFromTile` (cube#89/#96, `store_import.cpp:230-272`) already loads an external prior and seeds `predicted_depth_` via `setPredictedDepthAt` without settling; the batch importer already primes from a coarse Reference prior (`store_import.cpp:604`). Reuse it rather than build a parallel `prior_bathymetry_dir` + `initializePredictedDepthAt` loop — `plan.md:114-128`
+- [ ] (must-fix) Step 3's `initializePredictedDepthAt` adds a base hypothesis (`setPredictedDepth` + `addHypothesis`), contradicting cube#89's deliberate "coarse prior gates, does not fill" decision (`store_import.h:200-204`, `store_import.cpp:250-262`). Reconcile: justify the divergence or drop the hypothesis seed for the GGGS/Reference path — `plan.md:62-70`
+- [ ] (should-fix) Context root-cause is inaccurate: `predicted_depth_` is NOT always `INVALID_DATA` in production — `setPredictedDepthAt` seeds it on the draft/reference prime paths. The real gap is the missing `interpolatePredictedDepth` + insert wiring (Piece 2), which is what leaves `predicted_depth_at_touchdown` at its sentinel → offset 0 — `plan.md:9-13`
+- [ ] (should-fix) GeoGrid bilinear stencil (Step 5) must select the 4-cell neighbourhood by the touchdown's quadrant relative to the cell center (±1 per axis, mirroring `cube_grid_interpolate`'s `floor` lower-left pick), not a fixed `(row+1, col+1)`. Add a GGGS test exercising an off-center quadrant, not just a shared interior point — `plan.md:99-103, 147-149`
+- [ ] (suggestion) Record that the port threads only interpolated depth (not the original's `var_pred`) into `predicted_depth_at_touchdown`, consistent with `Node::insert`'s depth-delta offset (`node.cpp:201-204`) — divergence worth noting — `plan.md:76-90`
+
+### Notes
+- Core interpolation (Steps 4-5) + insert sounding-copy wiring are correctly designed and faithful to `cube_grid.c:2360-2403`. The `INVALID_DATA` sentinel (vs. the original's `0.0f`) is verified correct against `node.cpp:201-204` and is better than the original.
+- ADR-0008 slot is free; existing project ADRs are 0001/0002/0003/0007. ADR-first geometry decision is the right call.
+- Must-fix findings are scoped to the prior-load half (Steps 3, 6); the interpolation core may proceed. Verified against source in the `feature/issue-59` worktree — existing API (`setPredictedDepth`, `addHypothesis`, `Sounding::predicted_depth_at_touchdown`, `GeoGrid`/`GeoMapSheet::setPredictedDepthAt`, `setSettledDepthAt`) all present.
