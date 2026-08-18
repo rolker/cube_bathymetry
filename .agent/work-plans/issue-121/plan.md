@@ -136,10 +136,13 @@ is still needed for:
    proves absent/unpopulated, scope the follow-up
    `rolker/unh_echoboats_project11` recording-change issue per the
    deliverable.
-6. **Persist a typed progress.md entry** (`## Investigation Findings` or
-   equivalent ADR-0013 entry type) mirroring the comment, per the Issue
-   Review's recommendation, so the result is queryable without GitHub
-   read access and available to `run-issue`'s next-phase logic.
+6. **Persist a typed progress.md entry** mirroring the comment, per the
+   Issue Review's recommendation, so the result is queryable without GitHub
+   read access and available to `run-issue`'s next-phase logic. *(As
+   implemented: recorded under the ADR-0013 `## Implementation` type with an
+   "Entry role" line marking it as the spike deliverable — ADR-0013 defines
+   no investigation-result heading, so the closest canonical type is reused
+   and the gap flagged, not worked around with a non-canonical heading.)*
 
 No code changes in this issue — steps 1-4 are read-only inspection; step 5
 is a GitHub comment; step 6 is a progress.md entry. The `.agent/work-plans/issue-121/`
@@ -169,7 +172,7 @@ plan and progress files are the only files this branch touches structurally
 | ADR | Triggered | How addressed |
 |---|---|---|
 | Workspace ADR-0002 (worktree isolation) | Yes | Already satisfied — plan committed inside the issue's layer worktree on `feature/issue-121`. |
-| Workspace ADR-0013 (progress.md entry-type vocabulary) | Yes | `## Plan Authored` entry now; `## Investigation Findings`-style entry at the deliverable step. |
+| Workspace ADR-0013 (progress.md entry-type vocabulary) | Yes | `## Plan Authored` entry now; deliverable recorded under the canonical `## Implementation` type with an "Entry role" marker (ADR-0013 defines no investigation-result heading). |
 | cube_bathymetry ADR-0001/0002/0003/0007 | No | Govern tile eviction/staleness/backscatter-store lifecycle; not implicated by a read-only sensor-data audit. |
 | `unh_marine_autonomy` ADR-0009 (`marine_interfaces/SonarInfo` as local prototype, cited in `SonarInfo.msg`) — distinct from workspace ADR-0009 (dev-tool venv policy) | No (informational) | Confirms `SonarInfo` and `PingInfo` are deliberately separate messages with a documented division of fields — relevant context for question 2, not a compliance obligation here. |
 
@@ -178,7 +181,7 @@ plan and progress files are the only files this branch touches structurally
 | If we change... | Also update... | Included in plan? |
 |---|---|---|
 | Findings show fields insufficient/unpopulated | File follow-up recording-change issue in `rolker/unh_echoboats_project11` | Yes — step 5 |
-| Findings show fields sufficient | Unblocks rolker/unh_marine_autonomy#300 phases 1+ (sim harness, inversion MVP) — epic owner acts on the comment | **Done** — epic signal posted 2026-08-17 (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922); a refresh with this round's scope corrections is owed (see the findings entry's open host item) |
+| Findings show fields sufficient | Unblocks rolker/unh_marine_autonomy#300 phases 1+ (sim harness, inversion MVP) — epic owner acts on the comment | **Done** — epic signal posted 2026-08-17 and refreshed 2026-08-18 with the final scope/citation corrections (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922); no open host items |
 | Findings surface a related but secondary gap (e.g. `SonarInfo` not published in current deployment config) | Note in the comment as a secondary finding, do not scope new work unprompted | Yes — step 3, called out as secondary/non-blocking |
 
 ## Documentation & Instruction Impact
@@ -191,10 +194,11 @@ plan and progress files are the only files this branch touches structurally
   The Issue Review's finding that the recorded `SonarDetections.ping_info.sound_speed`
   is embedded per-message (not a separate topic that could be silently
   absent) is a useful correction to keep in mind for future
-  `cube_bathymetry` sensor-data work — worth a one-line note in this repo's
-  `.agents/README.md` (if one exists) once the findings are confirmed
-  against a real bag, but not before, since the plan-time claim is still
-  source-only and unverified against actual recorded data.
+  `cube_bathymetry` sensor-data work. This repo has no `.agents/README.md`
+  yet (noted gap), so this stays a knowledge-capture candidate surfaced in
+  the PR body for the operator to place (e.g. when a `.agents/` guide is
+  created as its own task) — now empirically confirmed against real bags by
+  the findings entry.
 
 ## Open Questions
 
