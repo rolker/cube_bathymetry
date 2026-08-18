@@ -519,6 +519,175 @@ TEST(StoreImport, SeededPredictedSurfaceRejectsDeepBlunder)
   EXPECT_GT(gated_cells, 0u) << "the shallow tile should prime some cells to gate";
 }
 
+// ---- primeFromPriorLayers (#91/#119): the shared prior-layer prime ----
+
+// Reference-only store: the helper primes the predicted surface and the blunder
+// gate rejects a false-deep sounding at every primed cell (the live-node #91
+// path, same load-bearing behavior as SeededPredictedSurfaceRejectsDeepBlunder).
+TEST(StoreImport, PrimeFromPriorLayersReferenceGatesDeepBlunder)
+{
+  GeoMapSheet shallow_src(1.0f);
+  shallow_src.addSoundings(makeSoundings());
+  auto shallow_tiles = mapSheetToTiles(shallow_src);
+  ASSERT_FALSE(shallow_tiles.empty());
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(
+    1.0f, /*reference_writable=*/true);
+  store.importTiles(
+    marine_bathymetry_store::SourceLayer::Reference, shallow_tiles);
+
+  GeoMapSheet primed(1.0f);
+  const PriorLayerPrimeResult r = primeFromPriorLayers(store, primed);
+  EXPECT_GT(r.reference_tiles, 0u);
+  EXPECT_EQ(r.chart_tiles, 0u);
+  EXPECT_EQ(r.level_mismatched, 0u);
+  EXPECT_TRUE(primed.dirtyGrids().empty()) << "priming must not mark dirty";
+
+  primed.addSoundings(makeDeepSoundings(-150.0f));
+  std::size_t gated_cells = 0;
+  for (const auto & gt : shallow_tiles) {
+    auto grid = primed.gridAt(gt.first);
+    ASSERT_NE(grid, nullptr);
+    const std::vector<DepthAndUncertainty> vals = grid->values();
+    const std::vector<double> & depth = gt.second.depthBand();
+    gggs::CellAreaIterator it(gt.first);
+    std::size_t k = 0;
+    for (; it.valid() && k < depth.size() && k < vals.size(); it.next(), ++k) {
+      if (std::isnan(depth[k])) {
+        continue;
+      }
+      ++gated_cells;
+      EXPECT_TRUE(std::isnan(vals[k].depth))
+        << "deep blunder must be rejected at a Reference-primed cell";
+    }
+  }
+  EXPECT_GT(gated_cells, 0u);
+}
+
+// Chart-only store: the helper reads the Chart layer too — the #119 semantics
+// (charted waters gate) through the shared helper.
+TEST(StoreImport, PrimeFromPriorLayersChartGatesDeepBlunder)
+{
+  GeoMapSheet shallow_src(1.0f);
+  shallow_src.addSoundings(makeSoundings());
+  auto shallow_tiles = mapSheetToTiles(shallow_src);
+  ASSERT_FALSE(shallow_tiles.empty());
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(
+    1.0f, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+  store.importTiles(marine_bathymetry_store::SourceLayer::Chart, shallow_tiles);
+
+  GeoMapSheet primed(1.0f);
+  const PriorLayerPrimeResult r = primeFromPriorLayers(store, primed);
+  EXPECT_EQ(r.reference_tiles, 0u);
+  EXPECT_GT(r.chart_tiles, 0u);
+  EXPECT_EQ(r.level_mismatched, 0u);
+
+  primed.addSoundings(makeDeepSoundings(-150.0f));
+  std::size_t gated_cells = 0;
+  for (const auto & gt : shallow_tiles) {
+    auto grid = primed.gridAt(gt.first);
+    ASSERT_NE(grid, nullptr);
+    const std::vector<DepthAndUncertainty> vals = grid->values();
+    const std::vector<double> & depth = gt.second.depthBand();
+    gggs::CellAreaIterator it(gt.first);
+    std::size_t k = 0;
+    for (; it.valid() && k < depth.size() && k < vals.size(); it.next(), ++k) {
+      if (std::isnan(depth[k])) {
+        continue;
+      }
+      ++gated_cells;
+      EXPECT_TRUE(std::isnan(vals[k].depth))
+        << "deep blunder must be rejected at a Chart-primed cell";
+    }
+  }
+  EXPECT_GT(gated_cells, 0u);
+}
+
+// Where BOTH layers cover a cell, Reference (higher priority) must win: the
+// helper primes Chart first, then Reference overwrites.
+TEST(StoreImport, PrimeFromPriorLayersReferencePrecedesChart)
+{
+  // Reference surface ~ -10 m (makeSoundings), Chart surface -30 m at the SAME
+  // footprint (makeDeepSoundings shares the lat/lon pattern).
+  GeoMapSheet ref_src(1.0f);
+  ref_src.addSoundings(makeSoundings());
+  auto ref_tiles = mapSheetToTiles(ref_src);
+  ASSERT_FALSE(ref_tiles.empty());
+
+  GeoMapSheet chart_src(1.0f);
+  chart_src.addSoundings(makeDeepSoundings(-30.0f));
+  auto chart_tiles = mapSheetToTiles(chart_src);
+  ASSERT_FALSE(chart_tiles.empty());
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(
+    1.0f, /*reference_writable=*/true, /*chart_staging_writable=*/true);
+  store.importTiles(marine_bathymetry_store::SourceLayer::Chart, chart_tiles);
+  store.importTiles(marine_bathymetry_store::SourceLayer::Reference, ref_tiles);
+
+  GeoMapSheet primed(1.0f);
+  const PriorLayerPrimeResult r = primeFromPriorLayers(store, primed);
+  EXPECT_GT(r.reference_tiles, 0u);
+  EXPECT_GT(r.chart_tiles, 0u);
+
+  // Every cell the Reference tile covers must carry the REFERENCE depth, not
+  // the Chart depth it was primed with first.
+  std::size_t checked = 0;
+  for (const auto & gt : ref_tiles) {
+    auto grid = primed.gridAt(gt.first);
+    ASSERT_NE(grid, nullptr);
+    const std::vector<double> & depth = gt.second.depthBand();
+    gggs::CellAreaIterator it(gt.first);
+    std::size_t k = 0;
+    for (; it.valid() && k < depth.size(); it.next(), ++k) {
+      if (std::isnan(depth[k])) {
+        continue;
+      }
+      ++checked;
+      EXPECT_FLOAT_EQ(
+        grid->predictedDepthAt(*it), static_cast<float>(depth[k]))
+        << "Reference must overwrite the Chart prime where both cover a cell";
+    }
+  }
+  EXPECT_GT(checked, 0u);
+}
+
+// A multi-level prior store (the #115 ENC case): tiles at a coarser level than
+// the sheet must be counted and SKIPPED, never primed cell-for-cell (the
+// plan-review must-fix — primeFromTile has no cross-level guard).
+TEST(StoreImport, PrimeFromPriorLayersSkipsLevelMismatchedTiles)
+{
+  // Build the coarse tile DIRECTLY (a handful of synthetic soundings never
+  // captures a node on ~7 m cells): a dense shallow tile at a coarser GGGS
+  // level than the 1 m sheet below.
+  const gggs::GridIndex coarse_grid =
+    gggs::Level::fromCellSize(8.0f).gridIndex(43.07, -70.76);
+  marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+  for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+    ctile.set(
+      (*cit).row(), (*cit).column(),
+      marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+  }
+  std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> coarse_tiles;
+  coarse_tiles.emplace(coarse_grid, std::move(ctile));
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(
+    8.0f, /*reference_writable=*/true);
+  store.importTiles(
+    marine_bathymetry_store::SourceLayer::Reference, std::move(coarse_tiles));
+
+  GeoMapSheet fine(1.0f);
+  const PriorLayerPrimeResult r = primeFromPriorLayers(store, fine);
+  EXPECT_EQ(r.total(), 0u) << "no exact-level tile exists to prime";
+  EXPECT_GT(r.level_mismatched, 0u);
+  EXPECT_TRUE(fine.grids().empty())
+    << "a skipped coarse tile must not lazy-create wrong-geometry nodes";
+}
+
 // Backscatter Welford round-trip incl. n>=2 real dispersion (#96): several beams
 // with DIFFERENT intensities on one cell produce a finite intensity_var; the
 // 3-band encode + welfordFromCell reconstruct the sample count, mean, and estimate

@@ -218,6 +218,69 @@ public:
       }
     }
 
+    // Prior-store predicted-surface prime (#91 -- the live half of the
+    // chart-gate gap; the offline half is seedNewTile's Chart rung, #119).
+    // Seeds CUBE's predicted surface from the prior store's Chart + Reference
+    // layers (Chart first, Reference overwrites -- store priority order,
+    // exact-survey-level tiles only) so the blunder gate rejects false-deep
+    // detections live. Predicted-only (seed_settled=false): the prior gates
+    // but never fills -- no survey or co-estimated-backscatter contamination
+    // (cube#89; gates-not-fills reaffirmed in ADR-0008).
+    //
+    // Side-effect (#59): a primed predicted surface also activates LIVE
+    // slope-corrected depth via the touchdown interpolation in
+    // Grid/GeoGrid::insert -- this parameter is what turns that on afloat.
+    //
+    // Runs BEFORE the draft warm-start below so an already-surveyed cell ends
+    // with its finer draft-derived predicted depth (the draft prime overwrites).
+    //
+    // Once-at-configure limitation: prior-primed tiles are clean and dataless,
+    // so this trim (and the draft prime's trim below) may evict them; being
+    // predicted-only they are NOT reloadable on revisit and silently lose their
+    // gate -- the known evict/revisit re-priming gap, deferred as cube#118.
+    //
+    // A lifecycle node WARNS and continues ungated on a missing/bad/empty
+    // prior -- a misconfigured prior must never take down live perception.
+    prior_store_dir_ = declare_parameter("prior_store_dir", std::string(""));
+    if (!prior_store_dir_.empty()) {
+      try {
+        marine_bathymetry_store::BathymetryStore prior =
+          marine_bathymetry_store::BathymetryStore::fromCellSize(
+          static_cast<float>(cell_size_));
+        marine_bathymetry_store::load(prior, prior_store_dir_);
+        const cube::PriorLayerPrimeResult primed =
+          cube::primeFromPriorLayers(prior, *geo_map_sheet_);
+        if (primed.total() == 0) {
+          RCLCPP_WARN(get_logger(),
+            "prior_store_dir='%s' primed no tiles (%zu level-mismatched "
+            "skipped); predicted surface NOT seeded -- blunder gate and live "
+            "slope correction INACTIVE. Check the path and that the store has "
+            "reference/ or chart/ tiles at the survey level.",
+            prior_store_dir_.c_str(), primed.level_mismatched);
+        } else {
+          RCLCPP_INFO(get_logger(),
+            "Primed predicted surface from prior store '%s': %zu Reference + "
+            "%zu Chart tile(s), %zu level-mismatched skipped. Blunder gate "
+            "active (#91); live slope correction active (#59).",
+            prior_store_dir_.c_str(), primed.reference_tiles,
+            primed.chart_tiles, primed.level_mismatched);
+          // Bound the prime to the resident budget (#70 pattern, same as the
+          // draft prime below). Evicted prior-primed tiles lose their gate
+          // until re-priming lands (#118); bounded RAM outranks gate coverage
+          // on a long survey. As with the draft prime, the WHOLE store is
+          // loaded before this trim, so a very large prior spikes RAM
+          // transiently at configure -- point prior_store_dir at a
+          // region-scoped store (a windowed prime needs a startup position
+          // not available at on_configure; same known limitation).
+          trimResidentToBudget();
+        }
+      } catch (const std::exception & e) {
+        RCLCPP_WARN(get_logger(),
+          "Could not load prior store from '%s': %s (continuing ungated).",
+          prior_store_dir_.c_str(), e.what());
+      }
+    }
+
     // Draft-tile persistence (#21). draft_dir empty (default) disables it; set
     // it per deployment to opt in. Tiles are written as marine_bathymetry_store
     // `draft/` GeoTIFFs (single fused grid, no per-day epochs,
@@ -659,6 +722,9 @@ private:
   // to a single fused `draft/` grid (no per-day epochs, unh_marine_autonomy#221);
   // newest value wins per cell across saves and sessions.
   std::string draft_dir_;
+  // Prior-store directory for the predicted-surface prime (#91); empty = no
+  // prior, node runs ungated (pre-#91 behaviour).
+  std::string prior_store_dir_;
   double save_interval_s_ = 30.0;
   rclcpp::TimerBase::SharedPtr save_timer_;
 
