@@ -112,3 +112,29 @@ The issue is in the right repo (`cube_bathymetry`), in the right worktree (`feat
 - Claude Adversarial Lens A (logic) and Lens B (systemic): no must-fix. Bilinear corner-order/axis mapping, boundary gates, signed/unsigned promotion, and sentinel/NaN paths independently verified correct; per-sounding copy hoisted above the node loop (O(1), hot path respected); gates-not-fills invariant upheld.
 - Local Adversarial skipped: ollama not installed. Copilot off (default).
 - Tests: 6 GridPredictedSurfaceTest + 5 GeoGridPredictedSurfaceTest all pass (log/test_2026-08-17_22-42-00).
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-17 23:42 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #122 at `b7bb846`
+**Sources**: 3 (Copilot R1 @ `b7bb846`, Local Review (Pre-Push) @ `94b5345`, CI rollup @ `b7bb846`)
+**Cross-source confirmations**: 0
+**CI**: all-pass (ROS 2 Jazzy industrial_ci success; copilot-pull-request-reviewer success)
+
+### Findings
+- [ ] (low, Copilot) `Grid::interpolatePredictedDepth` casts `std::floor(rx/ry)` to `int32_t` before any range check; the public contract promises `INVALID_DATA` for out-of-range input, so an extreme finite coordinate passed directly (tests already call the method out-of-range) is UB rather than a clean sentinel. Fix: floor into `double`, range-check against `int32_t` limits (and grid bounds), then cast — `cube_bathymetry/src/grid.cpp:137`
+- [ ] (low, Copilot) Same pre-cast pattern in `GeoGrid::interpolatePredictedDepth`; here `insert()` has no out-of-tile rejection ahead of the call, so an absurd-but-finite latitude/longitude reaches the cast. Fix: floor into `double`, validate range, then cast — `cube_bathymetry/src/geo_grid.cpp:150`
+- [ ] (suggestion, Local Review @ `94b5345`) `ScatterRecord::predicted_depth_at_touchdown` is now recomputed on replay insert — redundant serialized payload; document or drop (pre-existing, follow-up issue) — `cube_bathymetry/src/batch_regen.cpp:63`
+
+### Addressed since prior round
+- (Local Review @ `94b5345`) no-`var_pred` divergence missing from the canonical registry — added in `b7bb846` (`cube_bathymetry/docs/divergences_from_calder.md`).
+
+### False positives
+- None. Both Copilot findings describe a real contract/implementation gap: `Grid::insert` and `GeoGrid::insert` gate non-finite inputs at the door (so NaN/inf cannot reach the cast through the insert path), and `Grid::insert`'s effect-box overlap gate additionally bounds `rx`/`ry`, but both interpolators are public API documented to return `INVALID_DATA` for out-of-range input, and `GeoGrid`'s has no bounding gate upstream. Not dismissible under the Quality Standard.
+
+### Notes
+- No human reviewer comments and no conversation comments on the PR.
+- Copilot's review is against the current head SHA — not stale.
+- Related pre-existing pattern worth covering with the same fix: `Grid::insert`'s effect-box `int32_t` casts at `cube_bathymetry/src/grid.cpp:74-77`.
