@@ -533,7 +533,7 @@ TEST(SspRayTracer, InvalidInputsAreRejected)
   expectInvalid(traceRay(good, 0.0, kNan, 1500.0, 0.01));
   expectInvalid(traceRay(good, 0.0, 0.1, kNan, 0.01));
   expectInvalid(traceRay(good, 0.0, 0.1, 1500.0, kNan));
-  // Launch angle at/H beyond horizontal.
+  // Launch angle at or beyond horizontal.
   expectInvalid(traceRay(good, 0.0, M_PI / 2.0, 1500.0, 0.01));
   expectInvalid(traceRay(good, 0.0, -1.6, 1500.0, 0.01));
   // Non-positive array sound speed.
