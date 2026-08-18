@@ -74,3 +74,25 @@ Per consequences map:
 ### Open questions
 - [ ] Live node re-prime mechanism: plan proposes per-tile `loadWindow` (Option A, zero RAM cost); operator adjudicates if retained-handle (Option B) is preferred.
 - [ ] Cross-level fallback for live node revisit path: plan aligns to exact-level only (matches on_configure); operator adjudicates if cross-level resample is wanted here too.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-08-18 06:45 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-118/plan.md` at `abb891d`
+**PR**: PR-less (`--issue` mode; `gh` unauthenticated, so the issue body/comments were read via this file's `## Issue Review` entry, not live)
+**Verdict**: changes-requested
+
+<!-- Independence: Plan Authored By "Claude Code Agent (Claude Sonnet)"; this reviewer
+     shares the workspace-wide agent name but is a separately-dispatched fresh Opus
+     context (host-driven independent review per #490). The name-based self-review
+     heuristic false-positives in a mono-name workspace, so no self-review annotation
+     is applied — this review is independent. -->
+
+### Findings
+- [ ] (must-fix) Re-prime ordering inverts the established priority: plan applies reference **after** the survey restore at both sites, but `on_configure` primes reference first then lets survey/draft overwrite so the finer survey predicted depth wins (`cube_bathymetry_node.cpp:234`). `primeFromTile` writes `setPredictedDepthAt` for every finite cell (`store_import.cpp:250`), so on a mixed survey+reference tile the coarse reference clobbers the finer survey predicted surface — silently degrading blunder gate + #59 slope correction on revisited surveyed cells (regression vs current survey-only reload). Fix: reference-first-then-survey, or reference only when the survey tile is absent (mirror `seedNewTile`'s early-return exclusivity) — `plan.md:63`, `plan.md:74`
+- [ ] (must-fix) `primeFromTileResample` is defined in an anonymous namespace at `store_import.cpp:597`, AFTER `ImportAccumulator::reloadEvictedTile` (line 545); calling it from there won't compile without hoisting/forward-declaring the helper. Plan's "accessible from the same TU" (`plan.md:70`) omits this reorder.
+- [ ] (suggestion) Live-node fix is untested: the new test lands in `test_import_eviction.cpp` (offline `ImportAccumulator` only). `CubeBathymetryNode::reloadEvictedTile` — the afloat safety path, duplicated logic — gets no coverage; `test_node.cpp` is the low-level `Node`, not the ROS node. Note the gap / add a node-level revisit test if feasible — `plan.md:84`
+- [ ] (suggestion) Live-node exact-level prime must scope to `scratch.tiles(layer).find(index)` for the single revisited tile; reusing `primeFromPriorLayers` over the window would prime edge-adjacent neighbors and inflate resident count against the eviction budget — `plan.md:74`
+- [ ] (suggestion) Context prose says "both call sites carry deferred-#118 comments" but only the live node does (`cube_bathymetry_node.cpp:240`, `:269`); step 4 is correct. Line `:269` sits in a still-valid RAM-spike comment — update in place, don't wholesale-delete — `plan.md:21`, `plan.md:93`
