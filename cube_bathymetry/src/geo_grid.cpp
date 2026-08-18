@@ -157,7 +157,7 @@ float GeoGrid::interpolatePredictedDepth(double latitude, double longitude) cons
   const double row_f = std::floor(r);
   const double col_f = std::floor(c);
   if(!(row_f >= 0.0 && row_f + 1.0 < gggs::cell_rows_per_grid &&
-       col_f >= 0.0 && col_f + 1.0 < gggs::cell_columns_per_grid))
+    col_f >= 0.0 && col_f + 1.0 < gggs::cell_columns_per_grid))
   {
     return INVALID_DATA;
   }

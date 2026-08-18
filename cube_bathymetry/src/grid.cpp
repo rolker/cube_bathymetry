@@ -143,7 +143,8 @@ float Grid::interpolatePredictedDepth(double x, double y) const
   const double col_f = std::floor(rx);
   const double row_f = std::floor(ry);
   if(!(col_f >= 0.0 && col_f + 1.0 < counts_.x &&
-       row_f >= 0.0 && row_f + 1.0 < counts_.y)) {
+    row_f >= 0.0 && row_f + 1.0 < counts_.y))
+  {
     return INVALID_DATA;
   }
   const auto col = static_cast<int32_t>(col_f);
