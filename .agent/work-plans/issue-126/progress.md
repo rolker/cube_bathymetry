@@ -123,3 +123,26 @@ live consequence:
 - [ ] Confirm during implementation/review that the "extrapolate last
   gradient" and turning-ray edge-case behaviors are unit-tested with
   explicit expected values, not just exercised.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-18 01:58 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-126/plan.md` at `a77823a`
+**Branch**: feature/issue-126 at `a77823a`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready. Both Watch
+  recommendations from the Issue Review (sign/unit conventions;
+  deliberate profile-type units/signs) are settled as concrete decisions
+  in the plan itself: angles positive-to-starboard (matching
+  `rx_angles`/`beam_angle`), depths positive-down throughout the new
+  module (opposite `Sounding::depth`'s negative-down, explicitly
+  cross-referenced and flagged for the future phase-2 wiring negation),
+  and the module ships as its own dependency-light CMake target
+  (`cube_bathymetry_ssp_ray_tracer`, no `marine_acoustic_msgs`/tf2/Eigen)
+  so the two downstream repos (`unh_marine_autonomy#300`,
+  `marine_perception_tools#28`) can link it without pulling in
+  `cube_bathymetry`'s full dependency chain.
