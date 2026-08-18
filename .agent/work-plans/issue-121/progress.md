@@ -284,14 +284,27 @@ ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
   so it never reaches ROS. The dropped `0x47` is epic-relevant: it is the sonar's
   own surface-sound-speed stream, of which only the per-ping N78 copy survives
   into `ping_info.sound_speed`.
-- **Raw `.all` capture is a debugging tool, not part of the recording plan**
-  (operator correction — sparse coverage is by design). The platform launch
+- **Raw `.all` capture: sparse by intent, per the operator — and the source
+  comment reads differently.** Roland stated (2026-08-18) that the `.all` files
+  were written for debugging and that their sparse coverage is by design, not a
+  recording gap. That is **operator-stated intent, not a source-corroborated
+  fact**, and the source in fact diverges: the platform launch comment at
+  `perception_launch.py:114-117` describes the feature as archiving the M3's raw
+  stream "as genuine .all files (Caris/Qimera/MB-System) alongside the sonar
+  bags", and `save_all_dir` is configured on every deployment — language that
+  reads as a routine archive rather than a debug aid. The driver parameter's own
+  comment sides with the operator ("`.all` recording is a debugging aid that can
+  consume a lot of disk, so it is OPT-IN on every platform: default off",
+  `node.py:202-205`). The two readings differ only in *intent*; the recorded
+  facts below are the same either way, so nothing in the verdict turns on which
+  is right. Worth reconciling in `bizzyboat_project11` if `.all` archiving is
+  ever relied on. The platform launch
   (`unh_echoboats_project11/bizzyboat_project11/launch/perception_launch.py:107-146`)
   sets `save_all_dir` = `<sonar_log_dir>/m3_all` with a 200 MB rollover but does
   **not** set `record_on_start`, which defaults `False` (`node.py:205`), so
   raw recording must be armed at runtime via `~/set_recording`. On disk,
   `bizzyboat_sonar/m3_all/` holds 43 files, all dated **2026-06-16/17 only** —
-  a debugging session, consistent with the design intent. The earlier claim that
+  consistent with the operator's account of a debugging session. The earlier claim that
   "nothing is unrecoverable" remains **withdrawn** as a factual matter — the ROS
   `SonarDetections` stream is the *intended and only* record for normal survey
   days, and datagrams the bridge drops (incl. `0x47`) are not retained — but this
@@ -397,8 +410,9 @@ past sounding construction:
 - Sonar-rejected beams are absent from the ROS stream (`skip_invalid_beams`
   default true), so bags cannot support re-detection work.
 - Non-N78 datagrams (incl. `0x47` surface sound speed) are dropped by the bridge;
-  raw `.all` capture is a debug facility (sparse by design — 2026-06-16/17 only),
-  so for survey days the `SonarDetections` stream is the record.
+  raw `.all` capture covers 2026-06-16/17 only (operator: debug-purpose, sparse
+  by design; the launch comment reads it as a routine archive — see Q3), so for
+  survey days the `SonarDetections` stream is the record.
 - Startup pings carry a stale applied sound speed (38 pings in the Lewes bag).
 - **Timing is not a limit for this bag, but is a per-bag precondition.** The
   data-of-record bag measures zero integer-second skew, so its beams georeference

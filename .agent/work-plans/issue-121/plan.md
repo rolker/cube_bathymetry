@@ -91,7 +91,9 @@ is still needed for:
    `perception_launch.py:275-278` + `:34-41`, **not** the overridden
    `bizzyboat.yaml:765` uri — are sonar survey data-of-record; `bizzy_m3/`
    and similar are temp engineering captures, and the `.all` files are
-   debug-purpose (operator-stated intent). Findings scoped accordingly; the
+   debug-purpose — operator-stated intent, which the launch comment at
+   `perception_launch.py:114-117` reads differently; see the findings entry's
+   Q3. Findings scoped accordingly; the
    `bizzyboat/2026-08-03…` bag named below was not scanned — the same-day
    `bizzyboat/2026-08-05T*` bags were checked instead and carry no M3
    topics.)* Note per finding from
