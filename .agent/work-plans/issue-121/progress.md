@@ -159,3 +159,36 @@ boat-side recording change first"). No open issue blocks *this* one.
 - Sampled-variant note (echoboats#342 retrofit): retrofit rewrites tf_static offset + stamp skew, not twtt/angle payloads; both a June (possibly retrofitted) and an Aug bag were sampled with consistent field population.
 
 Findings comment posted on rolker/cube_bathymetry#121. Deliverable per plan steps 5–6 complete; no follow-up recording-change issue needed (sufficiency confirmed).
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-17 23:30 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-121 at `eb5aaf7`
+**Mode**: pre-push
+**Depth**: Deep (reason: 343 changed lines; also project-repo trigger `.agent/work-plans/issue-*/plan.md`)
+**Must-fix**: 8 | **Suggestions**: 10
+**Round**: 1 | **Ship**: continue — must-fixes include factual corrections to an epic-gating verdict; several are falsified-by-full-bag-scan claims, not style
+**Specialists**: Static analysis (no .md profile — not checked); Claude Adversarial x2 (Lens A + Lens B, Deep); Copilot off (default); Local qwen3.5:35b (3 findings, all false positives on spot-check — chiefly re-flagging plan defects already fixed in `c782621`)
+
+### Findings
+- [ ] (must-fix) Q1 "every message ... fully populated" falsified bag-wide — 306 empty `two_way_travel_times[]` in the June bag, beams 10-225; figures hold only for the undisclosed leading-50 sample of 55,100/124,375 msgs — `.agent/work-plans/issue-121/progress.md:149`
+- [ ] (must-fix) Secondary SS observation inverted — the 1469.0 value is a 38-ping startup transient (rest of 74 min at 1527.4-1529.0), not "live per-ping tracking"; in-bag `/bizzy/sensors/sound_speed/sound_speed` reads 1528.10 from t=0, so the AML-continuity suggestion targets the wrong subsystem — `.agent/work-plans/issue-121/progress.md:158`
+- [ ] (must-fix) "detection flags all 0 (valid)" is circular — `skip_invalid_beams` defaults true (`node.py:186,227,555`), so flagged beams never reach the message; the real consequence (invalid beams dropped from the ROS stream) is unstated — `.agent/work-plans/issue-121/progress.md:149`
+- [ ] (must-fix) "nothing is unrecoverable" unsupported — `m3_all/` covers only 2026-06-16/17; neither sampled bag's date has raw `.all` coverage — `.agent/work-plans/issue-121/progress.md:153`
+- [ ] (must-fix) Importer source claim overstated — `detections_projector.cpp` reads only `ping_info.sound_speed`; `error_model.cpp` does not read `tx_angles`; only `sounding.h:43` reads all four; and `Sounding` does not retain raw twtt/tx_angle/sound_speed — `.agent/work-plans/issue-121/progress.md:155`, `.agent/work-plans/issue-121/plan.md:37`
+- [ ] (must-fix) ADR-0013 non-conformance in `## Implementation` — missing `**Branch**: ... at <sha>` correlation field and no `### Findings` checkbox list, so `progress_read.py` yields `correlation: null` / `findings: []` and the spike's entire deliverable is machine-invisible — `.agent/work-plans/issue-121/progress.md:138-157`
+- [ ] (must-fix) Consequence owed cross-repo — declaring rolker/unh_marine_autonomy#300 unblocked leaves its "possible epic-killer" Risks line standing with no comment/timeline signal reaching the epic
+- [ ] (must-fix) `tx_angles` explanation wrong — `node.py:574` sets them from sector tilt (zero tilt, not "single-sector"); the material unstated fact is that the observable set is (twtt, rx_angle) only, with no along-track launch angle — `.agent/work-plans/issue-121/progress.md:149`
+- [ ] (suggestion) The "empirical discriminator" carries no information — a pre-ray-traced range also yields a plausible nadir depth; the raw-vs-ray-traced verdict rests on the source read alone — `.agent/work-plans/issue-121/progress.md:151`
+- [ ] (suggestion) 1.65 m internally inconsistent — 2.162 ms at the c=1469.0 then in effect gives 1.588 m (12.49 m checks exactly) — `.agent/work-plans/issue-121/progress.md:151`
+- [ ] (suggestion) "±1.031 rad (full ±59° fan)" mislabels the quantity — June bag reaches 1.0362 rad, nominal fan is 120°, and this is the surviving valid-beam extent after `skip_invalid_beams` — `.agent/work-plans/issue-121/progress.md:149`
+- [ ] (suggestion) "(Massabesic-era)" label unverified — bag-wide max twtt 75.46 ms implies ~56 m, exceeding Massabesic depths — `.agent/work-plans/issue-121/progress.md:149`
+- [ ] (suggestion) Plan step 4's "decodes vs drops" half unreported — `parse_datagram` (`em_datagrams.py:191-201`) decodes N78 + XYZ88 only; the dropped SURFACE_SOUND_SPEED `0x47` datagram is epic-relevant — `.agent/work-plans/issue-121/progress.md:153`
+- [ ] (suggestion) Plan step 4's platform launch/config source never consulted/reported; topology answered from bag contents instead — say which source was used — `.agent/work-plans/issue-121/progress.md:153`
+- [ ] (suggestion) Satisfied checkboxes left open — Issue Review action and the three Plan Review must-fixes (addressed in `c782621`) still read as open work to the parser — `.agent/work-plans/issue-121/progress.md:91,128-135`
+- [ ] (suggestion) `**By**` / `**Model**` split diverges from ADR-0013's `**By**: <agent> (<model>)` used by the other three entries — `.agent/work-plans/issue-121/progress.md:141-142`
+- [ ] (suggestion) Record the one-line disposition of the plan's conditional `.agents/README.md` note (correctly deferred — repo has no `.agents/` dir) — `.agent/work-plans/issue-121/progress.md:161`
+- [ ] (suggestion) Bag variant left "possibly retrofitted"; absence of a `.orig` backup beside the June bag settles the plan's step-1 requirement — `.agent/work-plans/issue-121/progress.md:159`
