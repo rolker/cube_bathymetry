@@ -112,8 +112,32 @@ Per consequences map:
 Specialists: Static Analysis (clean on changed lines — cpplint clean; cppcheck errors are pre-existing false positives on untouched lines). Claude Adversarial 2 passes (Lens A + Lens B, cross-confirmed the ordering gap). Governance + Plan Drift by lead. Copilot off (default). Local skipped (Ollama not installed).
 
 ### Findings
-- [ ] (must-fix) Live node re-primes the gate one batch too late: `addSoundings` runs before the revisit-reload loop, so a false-deep blunder in the first revisit batch of an evicted prior-only tile is accepted ungated (Node::insert returns true when predicted_depth_ is NaN). Offline path reloads before addSoundings via gridIndicesForSoundings; mirror it. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1467` (vs loop at :1489)
-- [ ] (must-fix) Prior re-prime failure permanently loses the gate (prior-only live node, draft_dir empty): loadWindow throw is caught then falls through to `return true`, caller erases the evicted marker, no re-eviction ever retries — tile stays ungated for the session; the "retried on its next revisit" comment is false. Return prior-re-prime success from the draft-empty branch. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1209`
-- [ ] (suggestion) Offline variant of the above: primePriorLayersForTile returns "did I prime" not "did the read succeed", so a failed prior read + successful survey restore erases the evicted_ marker with no retry. — `cube_bathymetry/src/store_import.cpp:567`
-- [ ] (suggestion) Re-prime-failure observability: single 5s-throttled WARN collapses distinct failing tiles; a failed gate re-activation is operator-actionable and should be more prominent than the success INFO. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1210`
-- [ ] (suggestion) No live-node test: the regression test covers only offline ImportAccumulator; the live CubeBathymetryNode::reloadEvictedTile path (where both must-fixes live) is untested. Add a live-node test that forces a prior read failure on revisit and asserts the tile stays in evicted_indices_. — `cube_bathymetry/test/test_import_eviction.cpp:568`
+- [x] (must-fix) Live node re-primes the gate one batch too late: `addSoundings` runs before the revisit-reload loop, so a false-deep blunder in the first revisit batch of an evicted prior-only tile is accepted ungated (Node::insert returns true when predicted_depth_ is NaN). Offline path reloads before addSoundings via gridIndicesForSoundings; mirror it. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1467` (vs loop at :1489)
+- [x] (must-fix) Prior re-prime failure permanently loses the gate (prior-only live node, draft_dir empty): loadWindow throw is caught then falls through to `return true`, caller erases the evicted marker, no re-eviction ever retries — tile stays ungated for the session; the "retried on its next revisit" comment is false. Return prior-re-prime success from the draft-empty branch. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1209`
+- [x] (suggestion) Offline variant of the above: primePriorLayersForTile returns "did I prime" not "did the read succeed", so a failed prior read + successful survey restore erases the evicted_ marker with no retry. — `cube_bathymetry/src/store_import.cpp:567`
+- [x] (suggestion) Re-prime-failure observability: single 5s-throttled WARN collapses distinct failing tiles; a failed gate re-activation is operator-actionable and should be more prominent than the success INFO. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1210`
+- [x] (suggestion) No live-node test: the regression test covers only offline ImportAccumulator; the live CubeBathymetryNode::reloadEvictedTile path (where both must-fixes live) is untested. Add a live-node test that forces a prior read failure on revisit and asserts the tile stays in evicted_indices_. — `cube_bathymetry/test/test_import_eviction.cpp:568` (partly deferred: added the offline analog `PriorReadFailureOnRevisitKeepsTileEvicted` covering the shared reload logic; a direct `CubeBathymetryNode` test needs the class extracted from `cube_bathymetry_node.cpp` — behind `main()`, no header/library target — a structural refactor out of scope for this fix pass)
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-18 07:29 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-118 at `1c488b4`
+**Addressed**: Local Review (Pre-Push) (2026-08-18 07:11, at `5f34bb5`) — all 5 findings (2 must-fix, 3 suggestions)
+**Commits**: `6301463` (node), `fdb3816` (import), `1c488b4` (test)
+
+### Actions
+- [x] (must-fix) Reload evicted tiles BEFORE `addSoundings`, keyed off `gridIndicesForSoundings` (the same influence-radius-expanded window the add touches), so the first revisit batch of a prior-only tile is gated; failed reloads dropped after the add — `cube_bathymetry/src/cube_bathymetry_node.cpp` (`6301463`)
+- [x] (must-fix) Track `prior_ok` in `reloadEvictedTile` and return it from both the draft-empty and survey-restore branches, so a thrown prior read keeps the tile evicted for retry instead of erasing the marker and running ungated for the session — `cube_bathymetry/src/cube_bathymetry_node.cpp` (`6301463`)
+- [x] (suggestion) Re-prime-failure WARN now names the tile and throttles at 1 s (vs the 30 s success INFO), and states the real retry contract — `cube_bathymetry/src/cube_bathymetry_node.cpp` (`6301463`)
+- [x] (suggestion) Offline: `primePriorLayersForTile` gains a `read_ok` out-param distinguishing "load threw" from "nothing to prime"; `ImportAccumulator::reloadEvictedTile` returns it so a failed prior read keeps the tile evicted for retry — `cube_bathymetry/src/store_import.cpp` (`fdb3816`)
+- [x] (suggestion — partly deferred) Added offline regression test `PriorReadFailureOnRevisitKeepsTileEvicted` exercising the shared reload logic; a direct `CubeBathymetryNode` test is deferred (class not test-exposed — behind `main()`, no header/library target — needs a structural refactor out of scope here) — `cube_bathymetry/test/test_import_eviction.cpp` (`1c488b4`)
+
+### Verification
+- `ament_cpplint` clean on all three changed files.
+- **Build/gtest NOT run in this environment**: the worktree's ROS underlay is unbuilt — all of `main/{underlay,core,platforms,site}_ws/install` are empty — and those trees are shared via symlink into `main/`, so building them from this worktree could disrupt concurrent worktree agents. The new `test_import_eviction` case (and the full suite) must be run by the re-review / CI, which build against a populated underlay. The changes were self-reviewed for compile-correctness (signatures, default-arg placement on the single forward declaration, header availability of `tileFilename`/`layerDirName`).
+
+### Next step
+review-code (re-review the fixes) via a fresh-context sub-agent:
+`.agent/scripts/dispatch_subagent.sh --mode in-process --issue 118 --skill review-code`
