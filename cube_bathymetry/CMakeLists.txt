@@ -198,6 +198,11 @@ target_include_directories(cube_bathymetry_ssp_ray_tracer PUBLIC
 set_target_properties(cube_bathymetry_ssp_ray_tracer PROPERTIES
   POSITION_INDEPENDENT_CODE ON
 )
+# The implementation uses libm (sin/asin/log/expm1). g++ links it implicitly,
+# but a consumer driving the link with gcc (e.g. a C host program or some
+# Python-extension toolchains) does not — propagate it on the interface so
+# the exported target is self-sufficient (round-2 review finding).
+target_link_libraries(cube_bathymetry_ssp_ray_tracer PUBLIC m)
 install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

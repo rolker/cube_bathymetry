@@ -57,6 +57,16 @@
 //
 // ===== What is deliberately NOT modelled =====
 //
+// THE ALONG-TRACK DIMENSION. The trace is strictly 2-D in the
+// across-track/depth plane: launch_angle is the full angle from nadir, and
+// the result has no along-track component. This matches the M3 observable
+// set established by #121 (tx_angles identically zero — zero transmit tilt),
+// but it is NARROWER than the 3-D geometry of sounding.h:52-54, which this
+// header cites for its sign conventions: a sonar with a non-zero transmit
+// tilt cannot be traced with this API as-is. Extending to 3-D would add a
+// tx_angle parameter and rotate the (across_track_offset, depth) plane —
+// out of scope until such a sonar exists in the fleet.
+//
 // The SEA SURFACE. There is no reflecting (or absorbing) boundary at
 // depth_below_surface == 0. A ray that turns and ascends simply keeps going:
 // above the shallowest profile sample the boundary segment's gradient is
@@ -69,8 +79,10 @@
 // through. See test SspRayTracer.AscendingRayMayPassAboveTheSurface.
 //
 // PERFORMANCE SHAPE. traceRay() revalidates the profile and locates the
-// transducer's segment on every call (O(n) in the profile length; ~5 us for a
-// 200-sample profile), so nothing is amortised across a beam fan or across an
+// transducer's segment on every call, and the dominant cost tracks the number
+// of SEGMENTS TRAVERSED by the ray (layer crossings, turns, duct cycles) —
+// per-call time is on the order of tens of microseconds for realistic traces,
+// so nothing is amortised across a beam fan or across an
 // inversion's inner loop. That is a deliberate deferral, not an oversight: the
 // raw-vector signature is the simplest thing both consumers can call, and the
 // prepared-profile overload that would amortise it should be designed against
@@ -114,13 +126,15 @@ namespace cube
   /// consumer can see how far the trace got; travel time is NOT fully
   /// consumed.
     kExtrapolationLimit,
-  /// The internal cap on segment traversals was reached before the travel
-  /// time was consumed. The input was well formed — this is the tracer
-  /// declining to keep integrating a pathological (typically finely-sampled
-  /// ducted) profile, NOT a caller error, which is why it is not
-  /// kInvalidInput. All double result fields are NaN and turned/extrapolated
-  /// are false. Not reachable with survey-realistic profiles; if you see it,
-  /// report it rather than working around it.
+  /// The tracer gave up before consuming the travel time on well-formed
+  /// input: either the internal cap on segment traversals was reached
+  /// (typically a finely-sampled ducted profile), or the integrated geometry
+  /// overflowed to non-finite (an extreme travel time on an upward-gradient
+  /// extrapolation) — kOk never carries a non-finite endpoint. NOT a caller
+  /// error, which is why it is not kInvalidInput. All double result fields
+  /// are NaN and turned/extrapolated are false. Not reachable with
+  /// survey-realistic profiles and travel times; if you see it, report it
+  /// rather than working around it.
     kStepLimit,
   };
 

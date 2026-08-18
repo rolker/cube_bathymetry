@@ -473,6 +473,14 @@ RayTraceResult traceRay(
       finished = advanceInclined(profile, seg, p, &state, &status);
     }
     if (finished) {
+      // A very long trace on an upward-gradient extrapolation can run the
+      // exponential depth growth to overflow: kOk must never carry a
+      // non-finite endpoint (the inversion differentiates through these
+      // fields), so a blown-up geometry is reported as kStepLimit — "the
+      // tracer gave up before consuming the time" — rather than success.
+      if (!std::isfinite(state.y) || !std::isfinite(state.z)) {
+        return invalidResult(RayTraceStatus::kStepLimit);
+      }
       const double dz = state.z - transducer_depth_below_surface;
       const double consumed = one_way_travel_time - state.time_left;
       const double slant = std::sqrt(state.y * state.y + dz * dz);

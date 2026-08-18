@@ -459,6 +459,19 @@ TEST(SspRayTracer, EvanescentLaunchIsDistinct)
   EXPECT_TRUE(std::isnan(r.across_track_offset));
 }
 
+TEST(SspRayTracer, OverflowingTraceNeverReturnsOkWithNonFiniteFields)
+{
+  // Round-2 must-fix regression: an extreme travel time on an
+  // upward-gradient extrapolation grows depth exponentially to overflow.
+  // kOk must never carry a non-finite endpoint — the honest outcome is
+  // kStepLimit ("the tracer gave up"), with NaN fields.
+  const cube::SoundSpeedProfile profile{{0.0, 1500.0}, {100.0, 1520.0}};
+  const auto r = traceRay(profile, 0.0, 0.0, 1500.0, 3600.0);
+  EXPECT_EQ(r.status, RayTraceStatus::kStepLimit);
+  EXPECT_TRUE(std::isnan(r.depth_below_surface));
+  EXPECT_TRUE(std::isnan(r.across_track_offset));
+}
+
 TEST(SspRayTracer, ExtrapolationLimitStopsAtSoundSpeedFloor)
 {
   // Steep negative gradient extended below the profile drives c to the

@@ -295,12 +295,14 @@ inferred from the implementation.
 
 ## Documentation & Instruction Impact
 
-- **Stale docs** (must land in this PR): None — no existing README/docs
-  reference ray tracing or sound-speed profiles yet (verified: no hits for
-  "ray", "snell", "sound speed", or "ssp" in `cube_bathymetry/README.md`).
-  The new header's doc comments are the documentation for this feature;
-  no separate doc file is warranted for a single internal module at this
-  stage.
+- **Stale docs** (must land in this PR): none pre-existing — no docs
+  referenced ray tracing or sound-speed profiles before this branch (the
+  repo has a root `README.md`; there is no package-level
+  `cube_bathymetry/README.md` — an earlier revision of this plan cited one
+  in error). *(Revised in review rounds 1–2: the header's doc comments are
+  the authoritative contract, and the branch ADDS a repo-root `README.md`
+  "Exported libraries for other repos" section pointing consumers at the
+  header — a new doc this plan originally said was unwarranted.)*
 - **Agent-instruction candidates** (proposals only): None — the
   isolation-per-target pattern and the sign-convention discipline are
   already established/documented in this repo's `CMakeLists.txt` comments

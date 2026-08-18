@@ -29,7 +29,7 @@ apart. One is deliberately a cross-repo contract:
 
 | Target | Header | Consumers | Notes |
 |---|---|---|---|
-| `cube_bathymetry::cube_bathymetry_ssp_ray_tracer` | `cube_bathymetry/ssp_ray_tracer.h` | `unh_marine_autonomy#300` (sound-speed inversion, phase 2), `marine_perception_tools#28` (CUBE lab re-projection) | Forward constant-gradient SSP ray tracer (#126). Depends on nothing beyond the standard library — no ROS, no GDAL, no message types — so a consumer links this target alone. Built position-independent so it drops into shared libraries and Python extension modules. |
+| `cube_bathymetry::cube_bathymetry_ssp_ray_tracer` | `cube_bathymetry/ssp_ray_tracer.h` | `unh_marine_autonomy#300` (sound-speed inversion, phase 2), `marine_perception_tools#28` (CUBE lab re-projection) | Forward constant-gradient SSP ray tracer (#126). Depends on nothing beyond the standard library (plus libm, propagated on the target) — no ROS, no GDAL, no message types — so a consumer *links* this target alone. Note the isolation is link-level: `find_package(cube_bathymetry)` still resolves this package's full dependency set at configure time. Built position-independent so it drops into shared libraries and Python extension modules. |
 
 The ray tracer's sign, unit, and status conventions are the contract both
 consumers build on and are documented in the header itself, not here — read
