@@ -475,6 +475,88 @@ TEST(ImportEviction, ReferenceSeedDoesNotAddMeasuredData)
   std::filesystem::remove_all(root);
 }
 
+// Chart-layer blunder gate (#119): since the reference->chart layer split,
+// official chart products live in the Chart layer, which seedNewTile's rung 2
+// never consulted -- a prior store holding ONLY chart/ tiles left the import
+// blunder gate silently OFF for charted waters. The Chart exact-match rung fixes
+// that: a same-level chart tile primes the predicted surface (predicted-only)
+// and the false-deep sounding is rejected. (Revert the Chart rung and `with`
+// gains the deep cell -> this fails.)
+TEST(ImportEviction, ChartLayerSeedRejectsDeepBlunder)
+{
+  const std::string root = makeTempDir("chartseed");
+  const std::string prior_dir = root + "/prior_store";
+
+  // Survey the interior of a single survey-level tile (see the cross-level test
+  // below for why the center, not a shared corner).
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // A dense SHALLOW (-20 m) chart tile AT THE SURVEY LEVEL covering the whole
+  // tile, written to the store's chart/ layer (staging-writable store, then
+  // save -- the runtime read path loads it like any other layer).
+  {
+    marine_bathymetry_store::BathymetryTile ctile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  // A clearly-too-deep blunder (~ -150 m) where the chart prior says ~ -20 m.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+
+  // Run WITH the chart-only prior store.
+  const std::string with_prior = root + "/with_prior";
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(with_prior, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  // Baseline: no prior at all.
+  const std::string no_prior = root + "/no_prior";
+  runImport(batches, no_prior, "", /*budget=*/0);
+
+  const auto with = loadBathyCells(with_prior);
+  const auto without = loadBathyCells(no_prior);
+
+  ASSERT_FALSE(without.empty())
+    << "without a prior the deep sounding must settle a cell";
+  bool baseline_is_deep = false;
+  for (const auto & [cell, du] : without) {
+    if (du.first < -100.0) {baseline_is_deep = true;}
+  }
+  EXPECT_TRUE(baseline_is_deep)
+    << "the baseline deep sounding should settle a deep (< -100 m) cell";
+
+  // With the chart-layer prior, the Chart rung seeds the shallow predicted
+  // surface and the blunder gate rejects the deep sounding -- NO cell settles.
+  EXPECT_TRUE(with.empty())
+    << "the chart-layer prior must gate the deep blunder (#119)";
+
+  std::filesystem::remove_all(root);
+}
+
 // Cross-level reference blunder gate (#115): a reference store holding ONLY tiles at
 // a COARSER GGGS level than the survey (e.g. ENC exports at L5/L7/L8 under an L10
 // survey) must still gate a false-deep blunder. `loadWindow` returns the coarse tile

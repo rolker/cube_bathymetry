@@ -283,6 +283,37 @@ void loadIntoSheet(
   }
 }
 
+PriorLayerPrimeResult primeFromPriorLayers(
+  const marine_bathymetry_store::BathymetryStore & store,
+  GeoMapSheet & map_sheet)
+{
+  PriorLayerPrimeResult result;
+  const uint8_t survey_level = map_sheet.gridLevel().level();
+
+  const auto prime_layer =
+    [&](marine_bathymetry_store::SourceLayer layer, std::size_t & primed) {
+      for (const auto & grid_tile : store.tiles(layer)) {
+        // Exact-level scope: primeFromTile walks the tile's OWN cell iterator
+        // with no cross-level guard, so a coarse tile from a multi-level store
+        // (#115) would seed wrong-geometry cells. Count and skip; cross-level
+        // priming is the per-tile importer's resample path, not this bulk one.
+        if (grid_tile.first.level() != survey_level) {
+          ++result.level_mismatched;
+          continue;
+        }
+        primeFromTile(grid_tile.second, map_sheet, /*seed_settled=*/false);
+        ++primed;
+      }
+    };
+
+  // Chart first (lowest-priority prior), Reference on top so it overwrites
+  // where the layers overlap -- the store's SourceLayer priority ordering.
+  prime_layer(marine_bathymetry_store::SourceLayer::Chart, result.chart_tiles);
+  prime_layer(
+    marine_bathymetry_store::SourceLayer::Reference, result.reference_tiles);
+  return result;
+}
+
 // ===========================================================================
 // ImportAccumulator (cube_bathymetry#92): bounded-RAM offline import.
 // ===========================================================================
@@ -684,6 +715,18 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
       const auto ne = index.northEastPosition();
       marine_bathymetry_store::loadWindow(
         ref, cfg_.reference_store_dir, sw, ne, nullptr);
+      // Chart exact-level prime FIRST (#119): since the reference->chart layer
+      // split, official chart products live in the Chart layer, which this gate
+      // never consulted -- charted-waters imports ran ungated. Chart is the
+      // lowest-priority prior, so it primes before Reference below, which
+      // overwrites where both layers cover a cell. Chart cross-level resampling
+      // is deferred (the #115 fallback below stays Reference-only).
+      const auto & chart_tiles =
+        ref.tiles(marine_bathymetry_store::SourceLayer::Chart);
+      auto chart_it = chart_tiles.find(index);
+      if (chart_it != chart_tiles.end()) {
+        primeFromTile(chart_it->second, sheet_, /*seed_settled=*/false);
+      }
       const auto & tiles =
         ref.tiles(marine_bathymetry_store::SourceLayer::Reference);
       // Phase A -- exact same-level match: a reference tile at the survey GGGS level

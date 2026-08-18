@@ -223,6 +223,39 @@ namespace cube
     GeoMapSheet & map_sheet,
     bool seed_settled = true);
 
+/// @brief Per-layer tile counts from @ref primeFromPriorLayers.
+  struct PriorLayerPrimeResult
+  {
+  /// Exact-level tiles primed from the `Reference` layer.
+    std::size_t reference_tiles = 0;
+  /// Exact-level tiles primed from the `Chart` layer.
+    std::size_t chart_tiles = 0;
+  /// Tiles skipped because they are not at the sheet's survey level (a
+  /// multi-level prior store); surfaced so the caller can log the coverage gap.
+    std::size_t level_mismatched = 0;
+    std::size_t total() const {return reference_tiles + chart_tiles;}
+  };
+
+/// @brief Prime @p map_sheet's predicted surface from BOTH prior layers of
+///        @p store (predicted-only, seed_settled=false), exact-level tiles only.
+///
+/// The live-node prior prime (#91) and the offline Chart-gate fix (#119) share
+/// the same semantics: `Chart` tiles are primed first (lowest-priority layer),
+/// then `Reference` tiles on top, overwriting where the layers overlap — the
+/// store's priority ordering. Neither seeds settled hypotheses: the prior gates
+/// blunders and drives slope correction (#59) but never fills (cube#89,
+/// ADR-0008). Does not mark the sheet dirty.
+///
+/// EXACT-LEVEL ONLY: a multi-level prior store (the #115 ENC case) holds coarse
+/// tiles keyed at their own level, and @ref primeFromTile walks each tile's own
+/// cell iterator with no cross-level guard — priming a coarse tile here would
+/// seed wrong-geometry cells. Mismatched tiles are counted and skipped;
+/// cross-level use needs the resample path (@ref primeFromTileResample), which
+/// remains the per-tile importer's concern.
+  PriorLayerPrimeResult primeFromPriorLayers(
+    const marine_bathymetry_store::BathymetryStore & store,
+    GeoMapSheet & map_sheet);
+
 /// @brief Configuration for @ref ImportAccumulator (cube_bathymetry#92, #96).
   struct ImportAccumulatorConfig
   {

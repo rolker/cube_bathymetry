@@ -187,6 +187,14 @@ public:
 
     double nominalCellSizeMeters() const;
 
+  /// @brief The sheet's GGGS grid level (fixed at construction from the
+  ///        requested cell size).
+  ///
+  /// Exposed so store-prime helpers can level-scope a multi-level prior store
+  /// (#91): tiles at other levels must be skipped or resampled, never primed
+  /// cell-for-cell.
+    const gggs::Level & gridLevel() const {return grid_level_;}
+
     std::chrono::steady_clock::time_point lastUpdateTime() const;
 
 private:
