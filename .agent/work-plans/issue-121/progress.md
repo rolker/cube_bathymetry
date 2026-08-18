@@ -305,7 +305,7 @@ past sounding construction:
 - [x] Q3c — M3 topics ride in the `sonar_logger` bag, not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`
 - [x] Q4 — observables reach the importer but `Sounding` retains only derived values; inversion must read `SonarDetections` at import time — `include/cube_bathymetry/sounding.h:43`, `src/error_model.cpp:277`, `src/detections_projector.cpp:134`
 - [x] Secondary — 1469.0 m/s is a 38-ping sonar startup transient; the in-bag SV feed reads 1528.102 from t+1.3 s (AML healthy) — Lewes bag full scan
-- [ ] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. This sub-agent has no GitHub write access; the host performs the sync.
+- [x] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. Done by host 2026-08-17: comment rewritten in place (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal posted (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922).
 
 No follow-up recording-change issue is filed: the observables required by the
 epic are present. The limits above are recording-*configuration* facts (raw
