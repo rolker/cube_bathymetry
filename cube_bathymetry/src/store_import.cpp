@@ -546,9 +546,13 @@ namespace
 {
 // Defined below, alongside primeFromTileResample (#115): forward-declared here
 // because reloadEvictedTile (#118) precedes that namespace block in this file.
+// @p read_ok (optional out): set true when the windowed prior load completed, false
+// when it THREW -- distinct from the bool return ("did any rung prime a cell"), so a
+// caller can tell a transient read failure (retry) from a store with no prior here.
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
-  const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context);
+  const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
+  bool * read_ok = nullptr);
 }  // namespace
 
 bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
@@ -561,12 +565,17 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   // (and #59 slope correction) silently OFF -- the survey restore below rebuilds
   // only measured cells. Prior before survey so the finer survey-derived
   // predicted depth overwrites where survey data exists, the same order as
-  // first touch (seedNewTile) and the live node's on_configure. The helper
-  // warns-and-continues on a prior read error: unlike a survey read error, it
-  // must never drop the batch's soundings.
+  // first touch (seedNewTile) and the live node's on_configure. A prior READ error
+  // keeps the tile evicted (prior_read_ok=false, returned below) so a later revisit
+  // retries the re-prime rather than leaving the gate silently off for the rest of
+  // the run -- the same drop-and-retry the survey read error already uses, extended
+  // to the prior read so a transient hiccup never permanently disables the gate on
+  // prior-only cells.
+  bool prior_read_ok = true;
   if (!cfg_.reference_store_dir.empty()) {
     if (primePriorLayersForTile(
-        cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "revisit"))
+        cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "revisit",
+        &prior_read_ok))
     {
       // Observability (#118): make gate re-activation visible in the import log.
       std::cerr << "import_bag: re-primed prior gate for revisited tile " <<
@@ -603,7 +612,11 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   // revisit's beams blend with the pre-eviction population (lossless backscatter).
   // Runs AFTER the depth reseed and BEFORE the batch's soundings are added.
   restoreSpilledSamples(index);
-  return true;
+  // Survey cells (if any) were restored above, but if the prior READ failed keep
+  // the tile evicted so the caller drops it and a later revisit retries the prior
+  // re-prime (#118) -- otherwise the blunder gate stays off on prior-only cells for
+  // the rest of the run. The intact on-disk survey surface is never clobbered.
+  return prior_read_ok;
 }
 
 namespace
@@ -674,8 +687,12 @@ void primeFromTileResample(
 // Returns true when any rung primed something.
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
-  const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context)
+  const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
+  bool * read_ok)
 {
+  if (read_ok != nullptr) {
+    *read_ok = true;  // flipped to false only if the windowed load below THROWS
+  }
   bool primed = false;
   try {
     marine_bathymetry_store::BathymetryStore ref =
@@ -758,6 +775,9 @@ bool primePriorLayersForTile(
       }
     }
   } catch (const std::exception & e) {
+    if (read_ok != nullptr) {
+      *read_ok = false;  // transient read failure -- caller may keep the tile evicted
+    }
     std::cerr << "import_bag: could not prior-seed tile on " << context << ": "
               << e.what() << " (no prior gate for this tile)" << std::endl;
   }
