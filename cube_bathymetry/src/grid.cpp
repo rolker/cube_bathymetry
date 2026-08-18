@@ -135,11 +135,19 @@ float Grid::interpolatePredictedDepth(double x, double y) const
   // (including within the last row/column of nodes) gets no correction.
   const double rx = (x - origin_.x) / sizes_.x;
   const double ry = (y - origin_.y) / sizes_.y;
-  const auto col = static_cast<int32_t>(std::floor(rx));
-  const auto row = static_cast<int32_t>(std::floor(ry));
-  if(col < 0 || col + 1 >= counts_.x || row < 0 || row + 1 >= counts_.y) {
+  // Range-check the floored lattice coordinates in double before casting to
+  // int32_t: an extreme finite input (or NaN) passed to this public method
+  // would otherwise overflow the cast, which is UB rather than the documented
+  // INVALID_DATA. The stencil needs col..col+1 and row..row+1 inside the
+  // lattice; the negated comparison also rejects NaN (all comparisons false).
+  const double col_f = std::floor(rx);
+  const double row_f = std::floor(ry);
+  if(!(col_f >= 0.0 && col_f + 1.0 < counts_.x &&
+       row_f >= 0.0 && row_f + 1.0 < counts_.y)) {
     return INVALID_DATA;
   }
+  const auto col = static_cast<int32_t>(col_f);
+  const auto row = static_cast<int32_t>(row_f);
 
   // Corner order matches the original: z[0]=LL, z[1]=LR, z[2]=UL, z[3]=UR.
   float z[4];

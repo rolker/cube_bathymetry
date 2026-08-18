@@ -298,6 +298,10 @@ TEST_F(GridPredictedSurfaceTest, InterpolateOutOfRangeSentinel)
   EXPECT_EQ(g.interpolatePredictedDepth(0.5, 1.5), INVALID_DATA);
   EXPECT_EQ(g.interpolatePredictedDepth(-0.5, 0.5), INVALID_DATA);
   EXPECT_EQ(g.interpolatePredictedDepth(0.5, -0.5), INVALID_DATA);
+  // Extreme finite coordinates: the floored lattice index exceeds int32_t, so
+  // the range-check must reject them in double before the cast (else UB).
+  EXPECT_EQ(g.interpolatePredictedDepth(1e300, 0.5), INVALID_DATA);
+  EXPECT_EQ(g.interpolatePredictedDepth(0.5, -1e300), INVALID_DATA);
 }
 
 TEST_F(GridPredictedSurfaceTest, InsertAppliesSlopeOffset)
