@@ -136,29 +136,182 @@ boat-side recording change first"). No open issue blocks *this* one.
 - [ ] (note, no action) Verified and correct: `SonarDetections.msg` carries `two_way_travel_times[]`, `tx_angles[]`, `rx_angles[]`, `intensities[]` and an embedded `PingInfo ping_info` (with `sound_speed`, 0 = unavailable); `sounding.h:43`, `error_model.cpp:277/344`, and `detections_projector.h:107` all read those fields. The plan's correction of the Issue Review's `PingInfo` assumption holds.
 
 ## Implementation
-
-**When**: 2026-08-17 23:21 -04:00
-**By**: Claude Code Agent (host-inline)
-**Model**: Claude Fable 5
 **Status**: complete
+**When**: 2026-08-17 23:21 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**Branch**: feature/issue-121 at `eb5aaf7`
+**Corrected**: rewritten in place 2026-08-17 23:45 -04:00 by the `address-findings`
+pass for the `## Local Review (Pre-Push)` at `707392c` — the original text
+generalized from an undisclosed leading-50-message sample and several of its
+claims were falsified by full-bag scans. All numbers below are now **bag-wide**
+(every message read, both bags; bags opened read-only — data of record).
 
 ### Spike findings — bag invertibility audit (all four questions answered)
 
-**Verdict: INVERTIBLE — YES. No recording change needed; rolker/unh_marine_autonomy#300 phases 1+ are unblocked.**
+**Verdict: INVERTIBLE — YES, with stated limits.** The per-beam observables an
+inversion needs — two-way travel time, receive (across-track) steering angle,
+and the per-ping sound speed the sonar applied — are recorded, raw, in every
+sampled deployment bag. No recording change is required for
+rolker/unh_marine_autonomy#300 phases 1+. The limits (recoverable observable
+set, dropped invalid beams, raw `.all` coverage) are stated under Q1/Q3 and the
+Limits section rather than buried.
 
-**Q1 — fields populated in real recordings: YES.** Sampled 50 `SonarDetections` messages from each of two bags on this host: `~/data/logs/gabby/logs/bizzyboat_sonar/2026-08-05T19-18-17+00-00` (Lewes) and `~/data/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (Massabesic-era). Every message: 219–251 beams, `two_way_travel_times[]` fully populated (Lewes 2.2–6.6 ms; Massabesic 16.7–34.9 ms), `rx_angles[]` spanning ±1.031 rad (full ±59° fan), `tx_angles[]` all 0.0 (single-sector tx, expected), `ping_info.sound_speed` nonzero in all 100 messages, `ping_info.frequency` = 500 kHz, detection flags all 0 (valid).
+**Bags scanned in full** (read-only; `rosbag2_py` sequential read of every
+message on `/bizzy/sensors/m3/detections`):
 
-**Q2 — raw, not ray-traced: CONFIRMED from driver source + empirical cross-check.** `kongsberg_em_bridge` is a pure wire-format translator of the Kongsberg Raw Range and Angle 78 (`N`) datagram: `em_datagrams.py:128` unpacks `twtt` directly from the wire and `node.py:563` appends it unmodified; `ping_info.sound_speed` is the datagram's own surface-sound-speed field (×0.1, `em_datagrams.py:149`) — i.e., the sonar-applied array-face sound speed, recorded **per ping**, which is exactly what an inversion needs to undo beam steering. Empirical discriminator per plan: min(twtt)·c/2 = 1.65 m (Lewes, shallow) and 12.49 m (Massabesic) — plausible nadir depths, so these are genuine two-way seconds.
+| Bag | Msgs | Duration | Empty `twtt[]` | Beams/ping | `twtt` range | `ping_info.sound_speed` |
+|---|---|---|---|---|---|---|
+| `~/data/logs/gabby/logs/bizzyboat_sonar/2026-08-05T19-18-17+00-00` (Lewes, 2026-08-05) | 124,375 | 74.0 min | 0 | 196–254 | 0.361–6.650 ms | nonzero in all; 1469.0 for the first 38 pings, then 1520.1–1529.6 |
+| `~/data/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (2026-06-09, site unverified) | 55,100 | 80.1 min | **306** (0.56%) | 10–225 (non-empty) | 0.524–75.46 ms | nonzero in all; 1497.1–1499.0 |
 
-**Q3 — ROS stream vs full M3 output.** The bridge decodes the RRA-78 datagram into `SonarDetections`; full-fidelity raw datagram capture exists independently via the driver's `~/set_recording` service writing `.all` files — present on disk (`bizzyboat_sonar/m3_all/m3_20260616_*.all`), so nothing is unrecoverable even where the ROS decode is narrower. Recording topology: the **main** deployment bag carries no M3 topics — M3 rides in dedicated sonar bags (`bizzyboat_sonar/`, `bizzy_m3/`). Companion `/bizzy/sensors/m3/sonar_info` (`marine_interfaces/SonarInfo`) is present in Aug 2026 bags (post SonarInfo-chain), absent in the June bag — as expected.
+**Q1 — fields populated in real recordings: YES, with two qualifications.**
+`ping_info.sound_speed` is nonzero in **all 179,475** messages across both bags,
+and `rx_angles[]`/`two_way_travel_times[]` are populated in every message except
+the 306 empty-array messages noted above (June bag only; the Lewes bag has none).
+Qualifications:
 
-**Q4 — importer preserves the fields: YES (source, confirmed at plan time).** `sounding.h:43`, `error_model.cpp`, `detections_projector.cpp` consume `two_way_travel_times`/`tx_angles`/`rx_angles`/`ping_info.sound_speed` directly; nothing discarded on import.
+1. **Not "every message fully populated"** — 306 June-bag messages carry an empty
+   `two_way_travel_times[]` (and hence no beams at all), and non-empty beam counts
+   run as low as 10. A consumer must handle empty and sparse pings.
+2. **"Detection flags all 0" is not evidence of data quality.** The driver's
+   `skip_invalid_beams` parameter defaults **true**
+   (`kongsberg_em_bridge/node.py:186,227,555`) and the platform launch does not
+   override it, so beams the sonar flagged invalid (`det_info` bit 7,
+   `em_datagrams.py`) are dropped *before* the message is built — every surviving
+   beam is `DETECT_OK` by construction. The real consequence: **the ROS stream
+   contains no rejected-beam population**, so an inversion cannot re-adjudicate
+   the sonar's own bottom detection from bags alone. The empty and 10-beam
+   messages are what that filtering looks like on a bad ping.
+
+**Observable set (material, and previously unstated): (twtt, rx_angle) only.**
+`tx_angles[]` is **0.0 in every beam of every message in both bags** — not a
+"single-sector" artifact. `node.py:574` sets `tx_angles` from the transmit
+sector's tilt (`math.radians(sector['tilt_deg'])`), so all-zero means the M3 runs
+at **zero transmit tilt**; there is no along-track launch-angle observable to
+invert. Per beam the bags give two-way travel time, across-track receive angle,
+`tx_delays`, and reflectivity; per ping they give the applied sound speed and
+centre frequency. An inversion must be formulated on that set.
+
+Angular extent: max |`rx_angles`| is 1.0308 rad (59.06°) bag-wide in the Lewes bag
+and 1.0362 rad (59.37°) in the June bag — i.e. a ~118–119° observed swath against
+the M3's nominal 120°. This is the **surviving valid-beam** extent after
+`skip_invalid_beams`, not a declared fan width.
+
+**Q2 — raw, not ray-traced: CONFIRMED from driver source.**
+`kongsberg_em_bridge` is a wire-format translator of the Kongsberg Raw Range and
+Angle 78 (`N`) datagram: `em_datagrams.py:128` unpacks `twtt` straight from the
+wire and `node.py:563` appends it unmodified; `ping_info.sound_speed` is the
+datagram's own surface-sound-speed field (`ssp_raw * 0.1`), i.e. the
+sonar-applied array-face sound speed recorded **per ping** — exactly what an
+inversion needs to undo the sonar's own beam steering. The verdict rests on this
+source read: the plan's proposed empirical discriminator (min(`twtt`)·c/2 giving
+a plausible nadir depth) is **not** a discriminator, since a pre-ray-traced range
+divided the same way also yields a plausible depth; it is therefore reported as
+context, not evidence. For scale, bag-wide `twtt` extremes correspond to slant
+ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
+
+**Q3 — ROS stream vs full M3 output.**
+- **What the bridge decodes:** `parse_datagram` (`em_datagrams.py:191-200`)
+  decodes only N78 (`0x4E`) and XYZ88 (`0x58`); every other datagram type —
+  including `DG_SURFACE_SOUND_SPEED` (`0x47`), attitude (`0x41`), clock (`0x43`)
+  and position (`0x50`) — returns `{'type': dg}`, recognized but **not decoded**,
+  so it never reaches ROS. The dropped `0x47` is epic-relevant: it is the sonar's
+  own surface-sound-speed stream, of which only the per-ping N78 copy survives
+  into `ping_info.sound_speed`.
+- **Raw `.all` capture is opt-in and sparsely present.** The platform launch
+  (`unh_echoboats_project11/bizzyboat_project11/launch/perception_launch.py:107-146`)
+  sets `save_all_dir` = `<sonar_log_dir>/m3_all` with a 200 MB rollover but does
+  **not** set `record_on_start`, which defaults `False` (`node.py:205`), so
+  raw recording must be armed at runtime via `~/set_recording`. On disk,
+  `bizzyboat_sonar/m3_all/` holds 43 files, all dated **2026-06-16/17 only** —
+  neither scanned bag's date has raw `.all` coverage. The earlier claim that
+  "nothing is unrecoverable" is therefore **withdrawn**: for 2026-06-09 and
+  2026-08-05, the ROS `SonarDetections` stream is the *only* record, and the
+  datagrams the bridge drops are gone for those days.
+- **Recording topology** (from the platform config, not inferred from bags):
+  `bizzyboat_project11/config/bizzyboat.yaml:713-733` records
+  `/bizzy/sensors/m3/detections` + `/bizzy/sensors/m3/sonar_info` in the
+  **`sonar_logger`** bag, not the main deployment recorder — consistent with the
+  main `bizzyboat/` bags carrying no M3 topics. Companion
+  `/bizzy/sensors/m3/sonar_info` (`marine_interfaces/SonarInfo`) is present in the
+  Aug 2026 sonar bag (post SonarInfo chain) and absent from the June bag, as
+  expected.
+
+**Q4 — what the importer does with the fields (source-verified, per file).**
+The observables arrive intact and are consumed, but they are **not retained**
+past sounding construction:
+- `include/cube_bathymetry/sounding.h:43,52-54,72` — the only site reading all
+  four: `two_way_travel_times`, `ping_info.sound_speed`, `tx_angles` (guarded,
+  defaults 0), `rx_angles` (plus `intensities`).
+- `src/error_model.cpp` — reads `two_way_travel_times` (`:277,:344,:383`),
+  `rx_angles` (`:206`), `ping_info.sound_speed` (`:277,:344`) and
+  `ping_info.rx_beamwidths` (`:237`). It does **not** read `tx_angles`.
+- `src/detections_projector.cpp:134-135` — reads only `ping_info.sound_speed`
+  (into `platform.mean_speed`/`surf_sspeed`). The four-field list at
+  `include/cube_bathymetry/detections_projector.h:107` is a doc comment about the
+  input message, not a read site.
+- **`Sounding` stores only derived quantities** — `slant_range`, `beam_angle`
+  (= rx angle), `intensity`, `sonar_relative_position`. Raw `twtt`, `tx_angle`
+  and the applied `sound_speed` are consumed and discarded. An inversion engine
+  must therefore read `SonarDetections` at import time (or `Sounding` must be
+  extended); it cannot separate travel time from applied sound speed after the
+  fact.
 
 **Secondary observations**
-- The Lewes sample shows `ping_info.sound_speed` stepping 1469.0 → 1528.1 m/s within a 50-ping window — per-ping applied-SS tracking is live (good for inversion), but a ~59 m/s step is large; worth a glance at the AML feed continuity for that day (observation only, no issue filed per plan's no-unprompted-scope rule).
-- Sampled-variant note (echoboats#342 retrofit): retrofit rewrites tf_static offset + stamp skew, not twtt/angle payloads; both a June (possibly retrofitted) and an Aug bag were sampled with consistent field population.
+- **The 1469.0 m/s value is a sonar startup transient, not an SV-feed problem**
+  (correcting the original entry, which had this backwards). Bag-wide, the Lewes
+  bag's `ping_info.sound_speed` is 1469.0 for exactly the **first 38 pings** and
+  then 1520.1–1529.6 for the remaining 74 minutes. The boat's own SV feed in the
+  same bag (`/bizzy/sensors/sound_speed/sound_speed`,
+  `marine_interfaces/SoundSpeed`, 111,024 samples) reads **1528.102 m/s at
+  t+1.3 s** and stays in 1520.13–1529.62 throughout, with only 10 anomalous
+  samples (one NaN at t=0 and a 0.3 s burst of nine 0.0 values at t≈2340 s). So
+  the AML feed was healthy from the start; the M3 simply applied an internal
+  default for its first 38 pings before the surface SV value took effect. There
+  is no AML-continuity question here — the earlier "check the AML feed for that
+  day" note targeted the wrong subsystem and is withdrawn. The inversion-relevant
+  consequence is the opposite one: **the first tens of pings of a run carry an
+  applied sound speed that does not match the measured surface SV**, and must be
+  either corrected or discarded.
+- **Bag variant (echoboats#342 retrofit): not retrofitted.** No `.orig` backup
+  exists beside `bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (the retrofit
+  script's in-place marker), so the June bag is an original recording. Independent
+  of that, the retrofit rewrites `/tf_static` offsets and `header.stamp` skew, not
+  `twtt`/angle payloads.
+- **June bag site label removed.** The bag was previously called
+  "Massabesic-era"; that is unverified — its bag-wide max `twtt` of 75.46 ms
+  implies a ~56 m slant range, deeper than Lake Massabesic. Date (2026-06-09) is
+  all that is asserted.
+- Plan's conditional `.agents/README.md` note: **not applicable** — this repo has
+  no `.agents/` directory, so no note was added (correctly deferred).
 
-Findings comment posted on rolker/cube_bathymetry#121. Deliverable per plan steps 5–6 complete; no follow-up recording-change issue needed (sufficiency confirmed).
+**Limits on the verdict**
+- Observable set is (twtt, rx_angle) + per-ping applied `sound_speed`; **no
+  along-track launch angle** (zero transmit tilt).
+- Sonar-rejected beams are absent from the ROS stream (`skip_invalid_beams`
+  default true), so bags cannot support re-detection work.
+- Non-N78 datagrams (incl. `0x47` surface sound speed) are dropped by the bridge
+  and only exist in raw `.all` captures, which cover **2026-06-16/17 only**.
+- Startup pings carry a stale applied sound speed (38 pings in the Lewes bag).
+
+### Findings
+- [x] Q1 — `two_way_travel_times[]` / `rx_angles[]` populated bag-wide except 306 empty June-bag messages; `ping_info.sound_speed` nonzero in all 179,475 messages — full scans of both bags
+- [x] Q1a — invalid beams never reach the ROS stream (`skip_invalid_beams` default true) — `kongsberg_em_bridge/node.py:186,227,555`
+- [x] Q1b — observable set is (twtt, rx_angle) only; `tx_angles` all zero = zero transmit tilt — `kongsberg_em_bridge/node.py:574`
+- [x] Q2 — recorded travel times are raw N78 wire values, not ray-traced — `kongsberg_em_bridge/em_datagrams.py:128`, `node.py:563`
+- [x] Q3a — bridge decodes N78 + XYZ88 only; `0x47` surface-sound-speed and other datagrams dropped — `em_datagrams.py:191-200`
+- [x] Q3b — raw `.all` capture is opt-in (`record_on_start` default false) and on disk covers 2026-06-16/17 only; neither scanned bag's date is covered — `perception_launch.py:107-146`, `node.py:205`
+- [x] Q3c — M3 topics ride in the `sonar_logger` bag, not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`
+- [x] Q4 — observables reach the importer but `Sounding` retains only derived values; inversion must read `SonarDetections` at import time — `include/cube_bathymetry/sounding.h:43`, `src/error_model.cpp:277`, `src/detections_projector.cpp:134`
+- [x] Secondary — 1469.0 m/s is a 38-ping sonar startup transient; the in-bag SV feed reads 1528.102 from t+1.3 s (AML healthy) — Lewes bag full scan
+- [ ] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. This sub-agent has no GitHub write access; the host performs the sync.
+
+No follow-up recording-change issue is filed: the observables required by the
+epic are present. The limits above are recording-*configuration* facts (raw
+`.all` opt-in, `skip_invalid_beams`) that the epic can act on if it later needs
+rejected beams or the dropped datagrams — noted, not scoped here, per the plan's
+no-unprompted-scope rule.
 
 ## Local Review (Pre-Push)
 **Status**: complete
@@ -186,7 +339,7 @@ Findings comment posted on rolker/cube_bathymetry#121. Deliverable per plan step
 - [ ] (suggestion) 1.65 m internally inconsistent — 2.162 ms at the c=1469.0 then in effect gives 1.588 m (12.49 m checks exactly) — `.agent/work-plans/issue-121/progress.md:151`
 - [ ] (suggestion) "±1.031 rad (full ±59° fan)" mislabels the quantity — June bag reaches 1.0362 rad, nominal fan is 120°, and this is the surviving valid-beam extent after `skip_invalid_beams` — `.agent/work-plans/issue-121/progress.md:149`
 - [ ] (suggestion) "(Massabesic-era)" label unverified — bag-wide max twtt 75.46 ms implies ~56 m, exceeding Massabesic depths — `.agent/work-plans/issue-121/progress.md:149`
-- [ ] (suggestion) Plan step 4's "decodes vs drops" half unreported — `parse_datagram` (`em_datagrams.py:191-201`) decodes N78 + XYZ88 only; the dropped SURFACE_SOUND_SPEED `0x47` datagram is epic-relevant — `.agent/work-plans/issue-121/progress.md:153`
+- [ ] (suggestion) Plan step 4's "decodes vs drops" half unreported — `parse_datagram` (`em_datagrams.py:191-200`) decodes N78 + XYZ88 only; the dropped SURFACE_SOUND_SPEED `0x47` datagram is epic-relevant — `.agent/work-plans/issue-121/progress.md:153`
 - [ ] (suggestion) Plan step 4's platform launch/config source never consulted/reported; topology answered from bag contents instead — say which source was used — `.agent/work-plans/issue-121/progress.md:153`
 - [ ] (suggestion) Satisfied checkboxes left open — Issue Review action and the three Plan Review must-fixes (addressed in `c782621`) still read as open work to the parser — `.agent/work-plans/issue-121/progress.md:91,128-135`
 - [ ] (suggestion) `**By**` / `**Model**` split diverges from ADR-0013's `**By**: <agent> (<model>)` used by the other three entries — `.agent/work-plans/issue-121/progress.md:141-142`
