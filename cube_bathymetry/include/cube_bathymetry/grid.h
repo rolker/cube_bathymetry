@@ -80,7 +80,8 @@ public:
   /// blunder-gate prior only. Per ADR-0008 the prior gates and corrects — it
   /// never seeds hypotheses, so an unsurveyed primed cell still reads NaN from
   /// values(). Out-of-range indices are ignored.
-  /// @param x, y      Node indices (column, row from the origin corner).
+  /// @param x         Node column index from the origin corner.
+  /// @param y         Node row index from the origin corner.
   /// @param depth     Predicted depth (negative-down), or NaN / INVALID_DATA
   ///                  per Node::setPredictedDepth conventions.
   /// @param variance  Variance of the predicted depth (meter^2); a real depth
