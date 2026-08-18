@@ -85,7 +85,11 @@ is still needed for:
    `bizzyboat/2026-08-03T18-07-40+00-00/` (Lewes) is a full main
    deployment bag — check that one too, since whether the *main* bag
    carries the detections topic is itself part of question 3. Bags are
-   data-of-record: read-only, no modification. Note per finding from
+   data-of-record: read-only, no modification. *(Post-implementation
+   operator correction, 2026-08-18: only `bizzyboat_sonar/` bags — the
+   `sonar_logger` output, `bizzyboat.yaml:765` — are sonar survey
+   data-of-record; `bizzy_m3/` and similar are temp engineering captures,
+   and the `.all` files are debug-purpose. Findings scoped accordingly.)* Note per finding from
    rolker/unh_echoboats_project11#342: `retrofit_m3_bag.py` rewrote some
    M3 bags in place (transducer TF offset + integer-second clock-skew) —
    record which variant (retrofitted or not) was sampled, since the skew

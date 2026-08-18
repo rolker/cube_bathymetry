@@ -146,6 +146,12 @@ pass for the `## Local Review (Pre-Push)` at `707392c` — the original text
 generalized from an undisclosed leading-50-message sample and several of its
 claims were falsified by full-bag scans. All numbers below are now **bag-wide**
 (every message read, both bags; bags opened read-only — data of record).
+**Operator corrections folded in 2026-08-18**: (1) only `bizzyboat_sonar/` bags
+are sonar survey data-of-record — config-verified: the `sonar_logger` recorder
+writes to `.../data/bizzyboat_sonar` (`bizzyboat_project11/config/bizzyboat.yaml:765`);
+`bizzy_m3/` and similar hand-named directories are temporary engineering
+captures. (2) The raw `.all` files were written for debugging purposes — their
+sparse coverage is by design, not a recording gap.
 
 ### Spike findings — bag invertibility audit (all four questions answered)
 
@@ -163,7 +169,7 @@ message on `/bizzy/sensors/m3/detections`):
 | Bag | Msgs | Duration | Empty `twtt[]` | Beams/ping | `twtt` range | `ping_info.sound_speed` |
 |---|---|---|---|---|---|---|
 | `~/data/logs/gabby/logs/bizzyboat_sonar/2026-08-05T19-18-17+00-00` (Lewes, 2026-08-05) | 124,375 | 74.0 min | 0 | 196–254 | 0.361–6.650 ms | nonzero in all; 1469.0 for the first 38 pings, then 1520.1–1529.6 |
-| `~/data/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (2026-06-09, site unverified) | 55,100 | 80.1 min | **306** (0.56%) | 10–225 (non-empty) | 0.524–75.46 ms | nonzero in all; 1497.1–1499.0 |
+| `~/data/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (2026-06-09, site unverified; **temp engineering capture, not data-of-record** — operator) | 55,100 | 80.1 min | **306** (0.56%) | 10–225 (non-empty) | 0.524–75.46 ms | nonzero in all; 1497.1–1499.0 |
 
 **Q1 — fields populated in real recordings: YES, with two qualifications.**
 `ping_info.sound_speed` is nonzero in **all 179,475** messages across both bags,
@@ -173,7 +179,11 @@ Qualifications:
 
 1. **Not "every message fully populated"** — 306 June-bag messages carry an empty
    `two_way_travel_times[]` (and hence no beams at all), and non-empty beam counts
-   run as low as 10. A consumer must handle empty and sparse pings.
+   run as low as 10. A consumer must handle empty and sparse pings. Scope note
+   (operator correction): the June bag is a temp engineering capture; the
+   **data-of-record bag (Lewes, `bizzyboat_sonar/`) has zero empty messages** —
+   so empty pings are a defensive-consumption requirement demonstrated under
+   engineering conditions, not an observed property of survey records.
 2. **"Detection flags all 0" is not evidence of data quality.** The driver's
    `skip_invalid_beams` parameter defaults **true**
    (`kongsberg_em_bridge/node.py:186,227,555`) and the platform launch does not
@@ -219,21 +229,27 @@ ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
   so it never reaches ROS. The dropped `0x47` is epic-relevant: it is the sonar's
   own surface-sound-speed stream, of which only the per-ping N78 copy survives
   into `ping_info.sound_speed`.
-- **Raw `.all` capture is opt-in and sparsely present.** The platform launch
+- **Raw `.all` capture is a debugging tool, not part of the recording plan**
+  (operator correction — sparse coverage is by design). The platform launch
   (`unh_echoboats_project11/bizzyboat_project11/launch/perception_launch.py:107-146`)
   sets `save_all_dir` = `<sonar_log_dir>/m3_all` with a 200 MB rollover but does
   **not** set `record_on_start`, which defaults `False` (`node.py:205`), so
   raw recording must be armed at runtime via `~/set_recording`. On disk,
   `bizzyboat_sonar/m3_all/` holds 43 files, all dated **2026-06-16/17 only** —
-  neither scanned bag's date has raw `.all` coverage. The earlier claim that
-  "nothing is unrecoverable" is therefore **withdrawn**: for 2026-06-09 and
-  2026-08-05, the ROS `SonarDetections` stream is the *only* record, and the
-  datagrams the bridge drops are gone for those days.
+  a debugging session, consistent with the design intent. The earlier claim that
+  "nothing is unrecoverable" remains **withdrawn** as a factual matter — the ROS
+  `SonarDetections` stream is the *intended and only* record for normal survey
+  days, and datagrams the bridge drops (incl. `0x47`) are not retained — but this
+  is the recording design working as intended, not a gap.
 - **Recording topology** (from the platform config, not inferred from bags):
   `bizzyboat_project11/config/bizzyboat.yaml:713-733` records
   `/bizzy/sensors/m3/detections` + `/bizzy/sensors/m3/sonar_info` in the
   **`sonar_logger`** bag, not the main deployment recorder — consistent with the
-  main `bizzyboat/` bags carrying no M3 topics. Companion
+  main `bizzyboat/` bags carrying no M3 topics. The `sonar_logger` writes to
+  `.../data/bizzyboat_sonar` (`bizzyboat.yaml:765`), confirming
+  operator guidance that **`bizzyboat_sonar/` is the sonar data-of-record
+  directory**; other M3 directories (`bizzy_m3/`, `m3_all/`) are temp
+  engineering/debug captures. Companion
   `/bizzy/sensors/m3/sonar_info` (`marine_interfaces/SonarInfo`) is present in the
   Aug 2026 sonar bag (post SonarInfo chain) and absent from the June bag, as
   expected.
@@ -291,8 +307,9 @@ past sounding construction:
   along-track launch angle** (zero transmit tilt).
 - Sonar-rejected beams are absent from the ROS stream (`skip_invalid_beams`
   default true), so bags cannot support re-detection work.
-- Non-N78 datagrams (incl. `0x47` surface sound speed) are dropped by the bridge
-  and only exist in raw `.all` captures, which cover **2026-06-16/17 only**.
+- Non-N78 datagrams (incl. `0x47` surface sound speed) are dropped by the bridge;
+  raw `.all` capture is a debug facility (sparse by design — 2026-06-16/17 only),
+  so for survey days the `SonarDetections` stream is the record.
 - Startup pings carry a stale applied sound speed (38 pings in the Lewes bag).
 
 ### Findings
@@ -305,6 +322,7 @@ past sounding construction:
 - [x] Q3c — M3 topics ride in the `sonar_logger` bag, not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`
 - [x] Q4 — observables reach the importer but `Sounding` retains only derived values; inversion must read `SonarDetections` at import time — `include/cube_bathymetry/sounding.h:43`, `src/error_model.cpp:277`, `src/detections_projector.cpp:134`
 - [x] Secondary — 1469.0 m/s is a 38-ping sonar startup transient; the in-bag SV feed reads 1528.102 from t+1.3 s (AML healthy) — Lewes bag full scan
+- [x] Operator corrections (2026-08-18) — `bizzyboat_sonar/` = sonar data-of-record (config-verified, `bizzyboat.yaml:765`); `bizzy_m3/` etc. = temp engineering captures; `.all` files = debug-purpose, sparse by design — folded into Q1/Q3/Limits above
 - [x] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. Done by host 2026-08-17: comment rewritten in place (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal posted (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922).
 
 No follow-up recording-change issue is filed: the observables required by the
