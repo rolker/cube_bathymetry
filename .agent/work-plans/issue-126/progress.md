@@ -146,3 +146,48 @@ live consequence:
   so the two downstream repos (`unh_marine_autonomy#300`,
   `marine_perception_tools#28`) can link it without pulling in
   `cube_bathymetry`'s full dependency chain.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-08-18 02:02 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-126/plan.md` at `a77823a`
+**PR**: PR-less (`--issue` mode, branch `feature/issue-126`)
+**Verdict**: changes-requested
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | 4 files, one module, no call-site changes; non-goals mirror the issue's three exactly. |
+| Issue alignment | Needs work | Covers the issue's enumerated edge cases, but silently changes `depth` from the issue's "relative to the transducer" to absolute-below-surface, and omits the array-face domain-failure case that #121's stale-applied-SS finding makes reachable. |
+| File targeting | Needs work | Right four files, but the CMake row omits the `install(TARGETS ... EXPORT export_cube_bathymetry)` line without which neither external consumer can link the target. |
+| Consequences | Good | Correctly identifies the public interface as the one live consequence; no `Sounding`/importer/doc rows apply. |
+| Documentation & instruction impact | Good | Non-silent, both subsections explicit. One inaccurate verification claim (see finding 13). |
+| Principle alignment | Needs work | "Enforcement over documentation" — the deliberately-inverted depth sign is mitigated by prose only. |
+| ADR compliance | Good | Correctly reads 0001/0002/0003/0007/0008 as untriggered; new-ADR deferral is defensible but see finding 14. |
+| ROS conventions | N/A | Pure `<cmath>`/`<vector>` geometry, no node/topic/QoS/parameter surface. |
+
+### Findings
+- [ ] (must-fix) Array-face Snell has an undefined domain failure: `asin(p * c_profile(z_tx)) > 1` when the applied SS is below the cast's true value at wide steering angles — reachable in real data per #121's stale-applied-SS finding. Define the behavior and test it — `plan.md:98-104`
+- [ ] (must-fix) `end_angle` representation for turning/ascending rays is unspecified (does it exceed pi/2, or flip sign?) — both consumers integrate against this — `plan.md:86, 124-127`
+- [ ] (must-fix) Validity contract covers only empty profile and `t <= 0`; add non-positive/non-finite sound speeds, `|launch_angle| >= pi/2`, NaN `transducer_depth`, the duplicate/non-monotonic-depth rejection status, and extrapolation that drives `c <= 0`. uma#300 phase-2 feeds *perturbed* candidate profiles, so invalid input is the normal case — `plan.md:80-83, 132-133`
+- [ ] (must-fix) Sign mitigation is documentation-only. Rename the result field (e.g. `depth_below_surface`) so the mismatch with `Sounding::depth` — which is really an elevation — is visible at the call site, and add a sign-assertion test — `plan.md:39-45`
+- [ ] (must-fix) Result `depth` is absolute-below-surface (per the parity formula) while the issue specifies "relative to the transducer"; state the divergence and the shared-datum requirement — `plan.md:139-141`
+- [ ] (suggestion) Precision: `float` fields plus `R = 1/(p*g)` produce catastrophic cancellation in `R*(cos t0 - cos t1)` as `g -> 0`. Compute internally in `double`, state the straight-segment epsilon criterion in terms of that error, and name the closed forms used — `plan.md:106-122`
+- [ ] (suggestion) Add a mirror-symmetry test (port beam = negated starboard beam); the six planned cases are all single-signed, and the turning test should be `|sin theta| >= 1` — `plan.md:123-127, 135-159`
+- [ ] (suggestion) The Snell-invariant test cannot observe layer crossings through an endpoint-only API; specify analytically-computed boundary-crossing travel times, one call per boundary — `plan.md:148-150`
+- [ ] (suggestion) Decision 3's cross-repo isolation rationale is overstated — `package.xml`'s dependency set and `ament_export_dependencies(rclcpp ...)` still resolve for any `find_package(cube_bathymetry)`; the target is link-isolated, not package-isolated — `plan.md:62-72`
+- [ ] (suggestion) CMake row must add `install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT export_${PROJECT_NAME} ...)`; header install is already covered by the existing `install(DIRECTORY include/ ...)` — `plan.md:161-164, 173`
+- [ ] (suggestion) Document that `effective_sound_speed` reproduces slant *range* only — substituting it into `range = twtt*c/2` with the original rx angle lands at the wrong point — `plan.md:87-90`
+- [ ] (suggestion) Consider splitting `validateProfile()` from `traceRay()`, or document the per-call O(n) revalidation, given the inversion loop's call volume — `plan.md:94-96`
+- [ ] (suggestion) Docs-impact verification claim is inaccurate: `README.md:132` maps `surf_sspeed`/`mean_speed`, and `original_cube/docs/CUBE_Development_Notes.md:53` documents the same positive-down/positive-up split. Conclusion (no doc updates) still holds; cite that precedent in the header — `plan.md:205-210`
+- [ ] (suggestion) Reconsider a short ADR: review-issue flagged the extrapolation policy and integration-scheme choice as ADR candidates "at plan/implementation time", and both are now settled cross-repo contracts — `plan.md:192`
+
+### Verified correct (no action)
+- Constant-gradient arc radius `R = 1/(p*g)` with `p = sin(theta)/c`, theta from nadir — confirmed by differentiating Snell (`d theta/ds = p*g`, constant).
+- Ray-parameter form of the array-face correction, `p = sin(launch_angle)/array_sound_speed`, is the standard beam-steering refraction correction (the applied pair defines the invariant); the integration start angle is then `asin(p * c_profile(z_tx))`, which the plan implies but never writes down.
+- Uniform-profile parity formulas match `sounding.h:52-54` exactly at `tx_angle = 0` (`y = r sin(rx)`, `z = r cos(rx)`), and the across-track sign claim vs `sonar_relative_position.y` is correct.
+- Turning condition (`c(z)` reaching `1/p`) is the correct total-internal-refraction criterion.
+- Requiring analytic test expectations be derived independently of the code under test is the right call for this module.
