@@ -250,8 +250,9 @@ namespace cube
 /// tiles keyed at their own level, and @ref primeFromTile walks each tile's own
 /// cell iterator with no cross-level guard — priming a coarse tile here would
 /// seed wrong-geometry cells. Mismatched tiles are counted and skipped;
-/// cross-level use needs the resample path (@ref primeFromTileResample), which
-/// remains the per-tile importer's concern.
+/// cross-level use needs the resampling prime that the per-tile importer applies
+/// via its #115 level-walk fallback (a store-local helper in `store_import.cpp`),
+/// which remains that importer's concern.
   PriorLayerPrimeResult primeFromPriorLayers(
     const marine_bathymetry_store::BathymetryStore & store,
     GeoMapSheet & map_sheet);
