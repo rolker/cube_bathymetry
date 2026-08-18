@@ -96,3 +96,24 @@ Per consequences map:
 - [ ] (suggestion) Live-node fix is untested: the new test lands in `test_import_eviction.cpp` (offline `ImportAccumulator` only). `CubeBathymetryNode::reloadEvictedTile` — the afloat safety path, duplicated logic — gets no coverage; `test_node.cpp` is the low-level `Node`, not the ROS node. Note the gap / add a node-level revisit test if feasible — `plan.md:84`
 - [ ] (suggestion) Live-node exact-level prime must scope to `scratch.tiles(layer).find(index)` for the single revisited tile; reusing `primeFromPriorLayers` over the window would prime edge-adjacent neighbors and inflate resident count against the eviction budget — `plan.md:74`
 - [ ] (suggestion) Context prose says "both call sites carry deferred-#118 comments" but only the live node does (`cube_bathymetry_node.cpp:240`, `:269`); step 4 is correct. Line `:269` sits in a still-valid RAM-spike comment — update in place, don't wholesale-delete — `plan.md:21`, `plan.md:93`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-18 07:11 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-118 at `5f34bb5`
+**Mode**: pre-push
+**Depth**: Deep (reason: 374 changed code lines >=200 + safety-critical blunder gate on live path)
+**Must-fix**: 2 | **Suggestions**: 3
+**Round**: 1 | **Ship**: continue — two live-path must-fixes (gate re-primed too late; permanent gate loss on re-prime failure) are genuine safety/correctness concerns warranting another read.
+
+Specialists: Static Analysis (clean on changed lines — cpplint clean; cppcheck errors are pre-existing false positives on untouched lines). Claude Adversarial 2 passes (Lens A + Lens B, cross-confirmed the ordering gap). Governance + Plan Drift by lead. Copilot off (default). Local skipped (Ollama not installed).
+
+### Findings
+- [ ] (must-fix) Live node re-primes the gate one batch too late: `addSoundings` runs before the revisit-reload loop, so a false-deep blunder in the first revisit batch of an evicted prior-only tile is accepted ungated (Node::insert returns true when predicted_depth_ is NaN). Offline path reloads before addSoundings via gridIndicesForSoundings; mirror it. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1467` (vs loop at :1489)
+- [ ] (must-fix) Prior re-prime failure permanently loses the gate (prior-only live node, draft_dir empty): loadWindow throw is caught then falls through to `return true`, caller erases the evicted marker, no re-eviction ever retries — tile stays ungated for the session; the "retried on its next revisit" comment is false. Return prior-re-prime success from the draft-empty branch. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1209`
+- [ ] (suggestion) Offline variant of the above: primePriorLayersForTile returns "did I prime" not "did the read succeed", so a failed prior read + successful survey restore erases the evicted_ marker with no retry. — `cube_bathymetry/src/store_import.cpp:567`
+- [ ] (suggestion) Re-prime-failure observability: single 5s-throttled WARN collapses distinct failing tiles; a failed gate re-activation is operator-actionable and should be more prominent than the success INFO. — `cube_bathymetry/src/cube_bathymetry_node.cpp:1210`
+- [ ] (suggestion) No live-node test: the regression test covers only offline ImportAccumulator; the live CubeBathymetryNode::reloadEvictedTile path (where both must-fixes live) is untested. Add a live-node test that forces a prior read failure on revisit and asserts the tile stays in evicted_indices_. — `cube_bathymetry/test/test_import_eviction.cpp:568`
