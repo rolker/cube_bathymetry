@@ -138,3 +138,28 @@ The issue is in the right repo (`cube_bathymetry`), in the right worktree (`feat
 - No human reviewer comments and no conversation comments on the PR.
 - Copilot's review is against the current head SHA — not stale.
 - Related pre-existing pattern worth covering with the same fix: `Grid::insert`'s effect-box `int32_t` casts at `cube_bathymetry/src/grid.cpp:74-77`.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-18 03:54 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-59 at `da020c5`
+**Addressed**: Integrated Review (post-PR, `## Integrated Review` When 2026-08-17 23:42 -04:00) — PR #122 @ `b7bb846`
+**Commits**: `daba1d0`, `ea43829`, `80099ea`, `da020c5`
+
+### Actions
+- [x] (low, Copilot) `Grid::interpolatePredictedDepth` pre-cast UB — floor into `double`, range-check `col_f`/`row_f` against `[0, counts-2]` (NaN-rejecting negated form) before the `int32_t` cast; added `1e300` extreme-finite regression asserts to `InterpolateOutOfRangeSentinel` — `cube_bathymetry/src/grid.cpp:138-151`, `cube_bathymetry/test/test_grid.cpp:301-306` (`daba1d0`)
+- [x] (low, Copilot) `GeoGrid::interpolatePredictedDepth` same pre-cast UB (no upstream out-of-tile gate) — same double range-check before cast; added `InterpolateExtremeCoordinateSentinel` test — `cube_bathymetry/src/geo_grid.cpp:150-165`, `cube_bathymetry/test/test_geo_grid.cpp:390-400` (`ea43829`)
+- [x] (suggestion, Local Review @ `94b5345`) `ScatterRecord::predicted_depth_at_touchdown` redundant on replay — documented in place (gather's `GeoGrid::insert` recomputes it; retained as a faithful `Sounding` mirror, dropping the field deferred to a follow-up as a bucket-format change) — `cube_bathymetry/src/batch_regen.cpp:62-69` (`80099ea`)
+
+### Verification
+- Static analysis on all changed files: `ament_cpplint` clean, `ament_uncrustify` clean (brace placement reformatted in `da020c5`), `cppcheck` clean.
+- **Full build/test NOT re-run**: the lower-layer installs (`underlay_ws`/`core_ws`/`platforms_ws`/`site_ws`) were cleaned since the prior `test_2026-08-17_22-42-00` run, and cube_bathymetry's transitive deps (`marine_autonomy`, `marine_bathymetry_store`, …) span the underlay (which includes vrx/gazebo). Rebuilding that stack is out of scope for address-findings; the re-review should build and run the suite (including the two new extreme-coordinate regression tests).
+- Changes are a localized logic reorder: for in-range finite inputs the floored index and boundary semantics are identical to the prior code; the only behavioural change is that out-of-range/extreme/NaN inputs now return `INVALID_DATA` instead of hitting UB in the cast.
+- The `## Integrated Review` Note about `Grid::insert`'s effect-box casts (`grid.cpp:74-77`) is a Note, not an action item, and was not actioned (insert already door-gates non-finite inputs; magnitude-overflow there is pre-existing and out of this review's scope).
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Dispatch a fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 59 --skill review-code
