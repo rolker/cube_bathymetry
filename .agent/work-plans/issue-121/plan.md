@@ -94,7 +94,7 @@ is still needed for:
    operator correction, 2026-08-18: only `bizzyboat_sonar/` bags — the
    `sonar_logger` output, whose destination comes from
    `perception_launch.py:275-278` + `:34-41`, **not** the overridden
-   `bizzyboat.yaml:765` uri — are sonar survey data-of-record; `bizzy_m3/`
+   `bizzyboat.yaml:844-845` uri — are sonar survey data-of-record; `bizzy_m3/`
    and similar are temp engineering captures, and the `.all` files are
    debug-purpose — operator-stated intent, which the launch comment at
    `perception_launch.py:114-117` reads differently; see the findings entry's

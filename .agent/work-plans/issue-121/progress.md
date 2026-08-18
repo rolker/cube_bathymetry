@@ -158,7 +158,7 @@ so the heading is reused (flagged, not worked around).
 **Operator corrections folded in 2026-08-18**: (1) only `bizzyboat_sonar/` bags
 are sonar survey data-of-record — source-verified in the launch, not the yaml:
 the `sonar_logger` node's `storage.uri` from
-`bizzyboat_project11/config/bizzyboat.yaml:765`
+`bizzyboat_project11/config/bizzyboat.yaml:844-845`
 (`/home/field/project11/data/bizzyboat_sonar`, a path that does not exist on
 disk) is **overridden at launch** by `perception_launch.py:275-278`, which sets
 it to `<sonar_log_directory>/<sonar_log_subdirectory>` — the directory being
@@ -295,7 +295,8 @@ ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
   so it never reaches ROS. The dropped `0x47` is epic-relevant: it is the sonar's
   own surface-sound-speed stream, of which only the per-ping N78 copy survives
   into `ping_info.sound_speed`. Empirically, in `m3_all/m3_20260616_155246.all`
-  (17.1 MB, the one raw capture available to count against) the datagram census
+  (17.1 MB — the **smallest** of the 43 `.all` files, ~65 s of an 8.9 GB raw
+  corpus; a spot-check, not a corpus census) the datagram census
   is **1816 × `0x4E` (N78), 1816 × `0x47` (surface sound speed), 1816 × `0x58`
   (XYZ88), 1817 × `0x41` (attitude), 65 × `0x43` (clock)** — i.e. the M3 emits a
   surface-sound-speed datagram for **every** ping, and every one of them is
@@ -328,12 +329,13 @@ ranges of 0.28–5.08 m (Lewes, shoal water) and 0.39–56.5 m (June bag).
   days, and datagrams the bridge drops (incl. `0x47`) are not retained — but this
   is the recording design working as intended, not a gap.
 - **Recording topology** (from the platform config, not inferred from bags):
-  `bizzyboat_project11/config/bizzyboat.yaml:713-733` records
-  `/bizzy/sensors/m3/detections` + `/bizzy/sensors/m3/sonar_info` in the
-  **`sonar_logger`** bag, not the main deployment recorder — confirmed against
+  the `/**/sonar_logger:` block (`bizzyboat_project11/config/bizzyboat.yaml:793`)
+  records `/bizzy/sensors/m3/detections` (`:807`) + `/bizzy/sensors/m3/sonar_info`
+  (`:813`) in the **`sonar_logger`** bag, not the main deployment recorder (whose
+  topic list at `:713-733` deliberately excludes sonar streams) — confirmed against
   the three main `bizzyboat/2026-08-05T*` bags of the same day, whose 60–63
   recorded topics include no `m3` topic at all. The `sonar_logger`'s destination
-  is **not** the yaml's `uri` (`bizzyboat.yaml:765`, `/home/field/project11/data/…`
+  is **not** the yaml's `uri` (`bizzyboat.yaml:844-845`, `/home/field/project11/data/…`
   — dead config, no such path on disk): `perception_launch.py:275-278` overrides
   `storage.uri` with `<sonar_log_directory>/<sonar_log_subdirectory>`, i.e.
   `$P11_SONAR_LOG_DIR` (default `/home/field/data/logs/bizzyboat_sonar`,
@@ -455,13 +457,13 @@ past sounding construction:
 - [x] Q2 — recorded travel times are raw N78 wire values, not ray-traced — `kongsberg_em_bridge/em_datagrams.py:128`, `node.py:563`
 - [x] Q3a — bridge decodes N78 + XYZ88 only; `0x47` surface-sound-speed and other datagrams dropped (one `0x47` per ping: 1816 each of `0x4E`/`0x47` in `m3_20260616_155246.all`), and the decoded `nrx`/`nvalid` counts are never published — `em_datagrams.py:152-153,191-200`
 - [x] Q3b — raw `.all` capture is opt-in (`record_on_start` default false) and on disk covers 2026-06-16/17 only; neither scanned bag's date is covered — `perception_launch.py:107-146`, `node.py:205`
-- [x] Q3c — M3 topics ride in the `sonar_logger` bag (self-sufficient: also carries odom, TF and the SV feed), not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:713-733`; destination set by `perception_launch.py:275-278` (`:34-41`), not the yaml `uri`
+- [x] Q3c — M3 topics ride in the `sonar_logger` bag (self-sufficient: also carries odom, TF and the SV feed), not the main deployment bag — `bizzyboat_project11/config/bizzyboat.yaml:793,807,813` (`sonar_logger` block); destination set by `perception_launch.py:275-278` (`:34-41`), not the yaml `uri` (`:844-845`)
 - [x] Q4 — observables reach the importer but `Sounding` retains only derived values; inversion must read `SonarDetections` at import time — `include/cube_bathymetry/sounding.h:43`, `src/error_model.cpp:277`, `src/detections_projector.cpp:134`
 - [x] Timing — data-of-record bag probed for the #338 integer-second skew despite sitting in the post-2026-06-24 window: histogram `+0 s: 124375` (no skew), `/tf_static` already at the corrected `(-0.29, 0.0, -0.28)`, no `.orig` — read-only `retrofit_m3_bag.py --report-only`; per-bag precondition recorded in Limits
 - [x] Secondary — 1469.0 m/s is a 38-ping sonar startup transient; the in-bag SV feed reads 1528.102 from t+1.3 s (AML healthy) — Lewes bag full scan
-- [x] Operator corrections (Roland, 2026-08-18) — `bizzyboat_sonar/` = sonar data-of-record (launch-verified: `perception_launch.py:275-278` + `:34-41`, **not** the overridden `bizzyboat.yaml:765` uri); `bizzy_m3/` etc. = temp engineering captures; `.all` files = debug-purpose, sparse by design (operator-stated intent; the launch comment reads differently — see Q3) — folded into Q1/Q3/Limits above
+- [x] Operator corrections (Roland, 2026-08-18) — `bizzyboat_sonar/` = sonar data-of-record (launch-verified: `perception_launch.py:275-278` + `:34-41`, **not** the overridden `bizzyboat.yaml:844-845` uri); `bizzy_m3/` etc. = temp engineering captures; `.all` files = debug-purpose, sparse by design (operator-stated intent; the launch comment reads differently — see Q3) — folded into Q1/Q3/Limits above
 - [x] Owed (host): post/refresh the findings comment on rolker/cube_bathymetry#121 with these corrected numbers, and signal the outcome to rolker/unh_marine_autonomy#300 so its "bag contents may not be invertible" epic-killer risk line is closed out with the stated limits. Done by host 2026-08-18 (posted 2026-08-17, refreshed 2026-08-18 with the operator corrections): comment rewritten in place (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal posted (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922).
-- [x] Owed (host, **done 2026-08-18**): both published comments refreshed by the host — findings comment rewritten in place with the full rescoped entry (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal patched for evidence scope, tx_delays, and the skew-probe precondition (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922). Original gap — the epic signal still says "two deployment recordings" where the evidence is **one** 74-min data-of-record bag (0.83% of the archive's M3 messages, June-2026-onward window), and neither comment carries the launch-override citation, the `tx_delays` correction, the clock-skew probe result, or the operator-intent attribution on `.all`. No `gh` writes were performed by this pass.
+- [x] Owed (host, **done 2026-08-18**): both published comments refreshed by the host — findings comment rewritten in place with the full rescoped entry (https://github.com/rolker/cube_bathymetry/issues/121#issuecomment-5323171911) and epic signal patched for evidence scope, tx_delays, and the skew-probe precondition (https://github.com/rolker/unh_marine_autonomy/issues/300#issuecomment-5323318922). Original gap (now closed by that refresh): before it, the epic signal said "two deployment recordings" where the evidence is **one** 74-min data-of-record bag, and neither comment carried the launch-override citation, the `tx_delays` correction, the clock-skew probe result, or the operator-intent attribution on `.all`. (The remediation pass itself performed no `gh` writes; the host did the refresh afterward.)
 - [x] Knowledge-capture candidates (**proposal only — operator decides**; not written to any instruction file from this branch): (a) `bizzyboat_sonar/` = sonar data-of-record vs `bizzy_m3/`/`m3_all/` engineering captures, and the launch override that sets the path; (b) `skip_invalid_beams` defaults true ⇒ bags carry no rejected-beam population and no `nrx`/`nvalid` count; (c) the M3's ~38-ping startup sound-speed default. Surface these in the PR body.
 
 No follow-up recording-change issue is filed: the observables required by the
@@ -661,11 +663,11 @@ modified.
 - Branch remains **docs-only** (`plan.md` + `progress.md`); no source or test
   files changed, so no build/test run applies. Pre-commit hooks ran on every
   commit.
-- One checkbox is deliberately left open in the deliverable entry: the host's
-  refresh of the two published GitHub comments (rolker/cube_bathymetry#121
-  findings comment and the rolker/unh_marine_autonomy#300 epic signal), which
-  still describe "two deployment recordings" and lack this round's scope,
-  citation, `tx_delays`, clock-skew and attribution corrections.
+- The host refreshed both published GitHub comments on 2026-08-18 (findings
+  comment on rolker/cube_bathymetry#121 rewritten in place; epic signal on
+  rolker/unh_marine_autonomy#300 patched for scope, `tx_delays`, and the
+  clock-skew precondition) — the owed-sync checkbox in the deliverable entry
+  is closed; no checkboxes remain open.
 - The clock-skew probe is a **net-positive** finding, not a new limit for this
   bag: the data-of-record recording is already time-aligned and already carries
   the corrected transducer offset. The limit that remains is procedural — other
@@ -688,10 +690,10 @@ modified.
 **Theme**: the audit's substance is holding. Lead-reviewer re-measurement reproduced the archive census exactly (48 non-zero-detection bags, 14,913,030 msgs, 8,657 min, 29/9/10 by month, 17 with `sonar_info`, 93 DeltaT, 52 Apr + 29 May, 0.83%), the three `bizzyboat/2026-08-05T*` main bags (60/61/63 topics, no `m3`), and the `--report-only` non-destructiveness claim (`measure_pass` is reader-only; the first `SequentialWriter` is at `retrofit_m3_bag.py:377`, reached only via the `--out` branch at `:524`). The remaining defects are all **pointer and provenance** errors, not reasoning errors: three wrong/overstated evidence citations plus one self-contradictory status record.
 
 ### Findings
-- [ ] (must-fix) `bizzyboat.yaml:713-733` is the **main** recorder's topic list, and `:714` literally reads "Diagnostic-only: deliberately NOT recorded in sonar_logger" — the opposite of the claim it is cited for. The `/**/sonar_logger:` block is `:793`, with `/bizzy/sensors/m3/detections` at `:807` and `/bizzy/sensors/m3/sonar_info` at `:813` — `.agent/work-plans/issue-121/progress.md:332,458`
-- [ ] (must-fix) `bizzyboat.yaml:765` does not hold the `sonar_logger` `storage.uri`; `:765` is `/bizzy/marine/command`. The dead uri `/home/field/project11/data/bizzyboat_sonar` is at `:844-845` (`storage:` at `:844`). This is the citation round 2 introduced as the corrected "real mechanism", so it is a regression of the same class, and it repeats four times — `.agent/work-plans/issue-121/progress.md:161,336,462`, `.agent/work-plans/issue-121/plan.md:97`
-- [ ] (must-fix) "`m3_all/m3_20260616_155246.all` (17.1 MB, **the one raw capture available to count against**)" is false — `m3_all/` holds 43 `.all` files totalling 8.9 GB, and the one censused is the **smallest** (~65 s). The 1816×`0x4E`/1816×`0x47` census reproduces exactly and the 1:1 conclusion stands, but it is generalized to "every ping" from 0.2% of the raw corpus described as the whole of it — the same evidence-scope overstatement round 2 corrected for the bags — `.agent/work-plans/issue-121/progress.md:297-298`
-- [ ] (must-fix) Host-sync record is self-contradictory and now factually wrong (flagged independently by all three specialists). `62e24c4` flipped the owed checkbox to `[x]` but left its tail in the present tense ("the epic signal **still says** 'two deployment recordings'… neither comment carries the launch-override citation… No `gh` writes were performed by this pass"), and the last entry's Notes still say "One checkbox is deliberately left open". Both comments were in fact refreshed (verified via `gh api`: `#5323171911` and `#5323318922`, updated 2026-08-18T04:36-04:37Z, carrying the scope, `tx_delays` and skew corrections). A reader at the tail of the file would redo a completed cross-repo sync — `.agent/work-plans/issue-121/progress.md:464,664-668`
+- [x] (must-fix) `bizzyboat.yaml:713-733` is the **main** recorder's topic list, and `:714` literally reads "Diagnostic-only: deliberately NOT recorded in sonar_logger" — the opposite of the claim it is cited for. The `/**/sonar_logger:` block is `:793`, with `/bizzy/sensors/m3/detections` at `:807` and `/bizzy/sensors/m3/sonar_info` at `:813` — `.agent/work-plans/issue-121/progress.md:332,458`
+- [x] (must-fix) `bizzyboat.yaml:765` does not hold the `sonar_logger` `storage.uri`; `:765` is `/bizzy/marine/command`. The dead uri `/home/field/project11/data/bizzyboat_sonar` is at `:844-845` (`storage:` at `:844`). This is the citation round 2 introduced as the corrected "real mechanism", so it is a regression of the same class, and it repeats four times — `.agent/work-plans/issue-121/progress.md:161,336,462`, `.agent/work-plans/issue-121/plan.md:97`
+- [x] (must-fix) "`m3_all/m3_20260616_155246.all` (17.1 MB, **the one raw capture available to count against**)" is false — `m3_all/` holds 43 `.all` files totalling 8.9 GB, and the one censused is the **smallest** (~65 s). The 1816×`0x4E`/1816×`0x47` census reproduces exactly and the 1:1 conclusion stands, but it is generalized to "every ping" from 0.2% of the raw corpus described as the whole of it — the same evidence-scope overstatement round 2 corrected for the bags — `.agent/work-plans/issue-121/progress.md:297-298`
+- [x] (must-fix) Host-sync record is self-contradictory and now factually wrong (flagged independently by all three specialists). `62e24c4` flipped the owed checkbox to `[x]` but left its tail in the present tense ("the epic signal **still says** 'two deployment recordings'… neither comment carries the launch-override citation… No `gh` writes were performed by this pass"), and the last entry's Notes still say "One checkbox is deliberately left open". Both comments were in fact refreshed (verified via `gh api`: `#5323171911` and `#5323318922`, updated 2026-08-18T04:36-04:37Z, carrying the scope, `tx_delays` and skew corrections). A reader at the tail of the file would redo a completed cross-repo sync — `.agent/work-plans/issue-121/progress.md:464,664-668`
 - [ ] (suggestion) `ping_info.tx_beamwidths`/`rx_beamwidths` are left **deliberately empty** by the driver (`node.py:547-550`, unit-mismatch workaround, cube_bathymetry#30), so `error_model.cpp:237` always falls through to the Device beamwidth. Q4 cites `:237` as a read site without this, implying per-beam angular width is available — it is not, and an inversion weighting by beam footprint needs that in the observable set / Limits — `.agent/work-plans/issue-121/progress.md:256-258,364`
 - [ ] (suggestion) Mount orientation presented as settled, but `retrofit_m3_bag.py:12-14` records that only the *translation* was corrected in #339 and "the M3 orientation is still pending a patch test". Limits carries a per-bag clock-skew precondition but not this unvalidated rotation, which an inversion georeferences through — `.agent/work-plans/issue-121/progress.md:263-266`, Limits
 - [ ] (suggestion) The verdict noun "INVERTIBLE — YES" conflates *observables recorded* (the four questions asked) with *inversion feasibility*. The sole data-of-record bag spans 0.28–5.08 m slant range (~2.6 m water at nadir); refraction residual scales with range, so it answers field-presence but is a poor phase-1 validation set. Point phase 1 at a deeper bag among the other 47 — `.agent/work-plans/issue-121/progress.md:174,428-433`
@@ -702,6 +704,8 @@ modified.
 - [ ] (suggestion) Two off-by-ones: `rx_angles` is read at `sounding.h:71-72` (`:70` is a comment), and the `.all`-is-a-debugging-aid comment begins at `node.py:201` — `.agent/work-plans/issue-121/progress.md:315,360`
 - [ ] (suggestion) "the M3 stream stops ~17.9 min before the bag ends" — 97.94 − 80.1 = 17.8 — `.agent/work-plans/issue-121/progress.md:213`
 - [ ] (suggestion) Correlation staleness recurs one SHA further along: `62e24c4` edited the deliverable entry after its declared `e1e9be9`, the revision history stops at `9438b15`, the round-2 remediation entry's `Commits` list omits `eb73b69`/`62e24c4`, and **both** `## Implementation` entries now carry the identical correlation key `e1e9be9`, so `progress_read.py --type Implementation` cannot distinguish deliverable from log. Cheapest fix: add a revision-history bullet and re-correlate the remediation entry to its own final commit — `.agent/work-plans/issue-121/progress.md:142,148-157,608,610`
+
+**Disposition (host, 2026-08-18)**: the 4 must-fixes were applied by the host and are checked above (citation corrections to the `bizzyboat.yaml` sonar_logger/uri lines, `.all`-census scope, and the host-sync record made past-tense/consistent). The 13 suggestions are **deferred per the operator's proportionality decision** for findings-only spike records (see rolker/ros2_agent_workspace#601) and remain recorded here for the epic to draw on — notably the empty-`tx/rx_beamwidths` observable gap, the unvalidated M3 mount rotation, and the too-shallow-for-phase-1-validation note. Published per this entry's `Ship: recommended`; no round 4.
 - [ ] (suggestion) `## Issue Review` `**When**: 23:15` postdates its own commit `fbf9d71` (23:04:04) by 11 min and was never touched since; round 2's timestamp fix normalized only the `## Implementation` entries — `.agent/work-plans/issue-121/progress.md:9`
 - [ ] (suggestion) Plan drift: step 6 still names `## Investigation Findings`, an entry type ADR-0013 does not define and which was (correctly) not minted; and `## Documentation & Instruction Impact` still lists one candidate gated on "once confirmed against a real bag" targeting an `.agents/README.md` that does not exist, while the record now carries three different candidates. Sync both, keeping the proposal-only framing — `.agent/work-plans/issue-121/plan.md:139-142,190-197`
 - [ ] (suggestion) Actionable byproduct worth capturing: `cube_bathymetry/include/cube_bathymetry/sounding.h:118-122` carries an open TODO requiring the `rx_angles[i]` sign convention be cross-checked against the `marine_acoustic_msgs` producer before the deferred GeoCoder grazing-angle work (cube_bathymetry#15). This spike's Q1c did exactly that (`node.py:566-575`) — naming it discharges a standing in-repo verification requirement
