@@ -25,7 +25,6 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
-#include <vector>
 
 // Constant-gradient (isogradient) ray tracing, theta-parametrized.
 //
@@ -483,7 +482,7 @@ RayTraceResult traceRay(
       }
       const double dz = state.z - transducer_depth_below_surface;
       const double consumed = one_way_travel_time - state.time_left;
-      const double slant = std::sqrt(state.y * state.y + dz * dz);
+      const double slant = std::hypot(state.y, dz);
       const double sign = mirrored ? -1.0 : 1.0;
       // effective_sound_speed is per the header: slant range over the time
       // actually CONSUMED (== one_way_travel_time on kOk, less when the
