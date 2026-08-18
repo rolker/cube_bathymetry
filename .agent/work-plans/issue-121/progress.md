@@ -232,14 +232,36 @@ Qualifications:
 "single-sector" artifact. `node.py:574` sets `tx_angles` from the transmit
 sector's tilt (`math.radians(sector['tilt_deg'])`), so all-zero means the M3 runs
 at **zero transmit tilt**; there is no along-track launch-angle observable to
-invert. Per beam the bags give two-way travel time, across-track receive angle,
-`tx_delays`, and reflectivity; per ping they give the applied sound speed and
-centre frequency. An inversion must be formulated on that set.
+invert. The zeros are not the driver's empty-sector fallback
+(`node.py:557-558`): `ping_info.frequency` is **500000.0 Hz in all 124,375
+messages** and is taken from `sectors[0]['centre_frequency']`, defaulting to 0.0
+when the sector list is empty (`node.py:544-545`) — a non-zero frequency
+therefore proves a real sector was decoded and its tilt really is zero.
+
+`tx_delays[]` is the same story and must not be counted as a second observable:
+it is filled from the same sector object as the tilt (`sector['tx_delay']`,
+`node.py:564`; wire-sourced at `em_datagrams.py:111,117`) and is likewise
+**identically 0.0 in every beam of the data-of-record bag** — a single transmit
+sector has no inter-sector delay. So per beam the bags give **two-way travel
+time, across-track receive angle and reflectivity**; per ping, the applied sound
+speed and centre frequency. An inversion must be formulated on that set.
+
+Angle convention (contract an inversion must honour): `node.py:566-575` maps
+Kongsberg's beam pointing angle (+ve to **port**) to the
+`marine_acoustic_msgs/SonarDetections` convention by negation, so `rx_angles` is
+**+ve to starboard**; transmit tilt (+ve forward) carries through unnegated. The
+driver deliberately applies no mount rotation — physical orientation (a normally
+mounted downward M3 is roll = π) lives in the URDF `base_link → bizzy/m3`
+transform, and the recorded `/tf_static` in the data-of-record bag carries it.
 
 Angular extent: max |`rx_angles`| is 1.0308 rad (59.06°) bag-wide in the Lewes bag
-and 1.0362 rad (59.37°) in the June bag — i.e. a ~118–119° observed swath against
-the M3's nominal 120°. This is the **surviving valid-beam** extent after
-`skip_invalid_beams`, not a declared fan width.
+and 1.0362 rad (59.37°) in the June capture. Those are single absolute maxima,
+so they bound the half-swath rather than establish port/starboard symmetry: the
+observed fan is at most ~118–119° wide and no narrower than the larger side
+doubled only if symmetric. Either way this is the **surviving valid-beam**
+extent after `skip_invalid_beams`, not a declared fan width — the driver
+declares no fan width, and the M3's "120°" figure is a vendor spec not read from
+any source in this workspace.
 
 **Q2 — raw, not ray-traced: CONFIRMED from driver source.**
 `kongsberg_em_bridge` is a wire-format translator of the Kongsberg Raw Range and
@@ -366,7 +388,8 @@ past sounding construction:
 ### Findings
 - [x] Q1 — in the data-of-record bag, `two_way_travel_times[]` / `rx_angles[]` populated in all 124,375 messages and `ping_info.sound_speed` non-zero and non-NaN in all of them; the non-of-record engineering capture agrees except for 306 empty messages — full scans, scope stated under "Evidence scope"
 - [x] Q1a — invalid beams never reach the ROS stream (`skip_invalid_beams` default true) — `kongsberg_em_bridge/node.py:186,227,555`
-- [x] Q1b — observable set is (twtt, rx_angle) only; `tx_angles` all zero = zero transmit tilt — `kongsberg_em_bridge/node.py:574`
+- [x] Q1b — observable set is (twtt, rx_angle) only; `tx_angles` and `tx_delays` are both identically zero (one sector, zero tilt — not the empty-sector fallback: `ping_info.frequency` = 500 kHz) — `kongsberg_em_bridge/node.py:544-545,564,574`
+- [x] Q1c — angle convention: `rx_angles` +ve to starboard (Kongsberg pointing angle negated); mount orientation lives in the URDF/`tf_static`, which the sonar bag records — `kongsberg_em_bridge/node.py:566-575`
 - [x] Q2 — recorded travel times are raw N78 wire values, not ray-traced — `kongsberg_em_bridge/em_datagrams.py:128`, `node.py:563`
 - [x] Q3a — bridge decodes N78 + XYZ88 only; `0x47` surface-sound-speed and other datagrams dropped — `em_datagrams.py:191-200`
 - [x] Q3b — raw `.all` capture is opt-in (`record_on_start` default false) and on disk covers 2026-06-16/17 only; neither scanned bag's date is covered — `perception_launch.py:107-146`, `node.py:205`
