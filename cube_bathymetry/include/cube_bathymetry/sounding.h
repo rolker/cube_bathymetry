@@ -105,9 +105,10 @@ namespace cube
   /// `pred_depth` is never exactly `0.0` m. In this port a legitimately
   /// interpolated touchdown depth at the shoreline could be `0.0`, so we use
   /// `INVALID_DATA` to carry the same intent ("no interpolation result =>
-  /// skip") without the value collision. No producer sets this yet (the
-  /// external-prior + touchdown-interpolation subsystem is a deferred
-  /// follow-on), so it stays at the sentinel and the offset is 0.
+  /// skip") without the value collision. Producers (#59):
+  /// `Grid::insert` / `GeoGrid::insert` stamp this via
+  /// `interpolatePredictedDepth` on a per-sounding copy (ADR-0008); it stays
+  /// at the sentinel (offset 0) when no predicted surface is primed there.
     float predicted_depth_at_touchdown = INVALID_DATA;
 
   /// Per-beam receive (steering) angle in radians, positive to starboard

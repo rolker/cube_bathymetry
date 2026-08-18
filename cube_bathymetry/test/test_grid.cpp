@@ -241,4 +241,107 @@ TEST_F(GridTest, NonFiniteSoundingDoesNotPoisonGoodData)
   EXPECT_TRUE(still_valid);
 }
 
+// ---- Predicted-surface producer (#59, ADR-0008) ----
+//
+// Node lattice for the 2x2 grids below (origin (0,0), 1 m cells):
+//   node (x=0,y=0) = -10   node (x=1,y=0) = -12
+//   node (x=0,y=1) = -11   node (x=1,y=1) = -13
+
+class GridPredictedSurfaceTest : public GridTest
+{
+protected:
+  Grid makeSeededGrid()
+  {
+    Grid g(CellCounts(2, 2), CellSizes(1.0f), MapPosition(0.0, 0.0), params);
+    g.setPredictedDepthAt(0, 0, -10.0f, 0.25f);
+    g.setPredictedDepthAt(1, 0, -12.0f, 0.25f);
+    g.setPredictedDepthAt(0, 1, -11.0f, 0.25f);
+    g.setPredictedDepthAt(1, 1, -13.0f, 0.25f);
+    return g;
+  }
+};
+
+TEST_F(GridPredictedSurfaceTest, SetPredictedDepthAtRoundTrip)
+{
+  auto g = makeSeededGrid();
+  // At exactly the lower-left node the bilinear weights collapse to z[0].
+  EXPECT_FLOAT_EQ(g.interpolatePredictedDepth(0.0, 0.0), -10.0f);
+  // Out-of-range seeding is ignored, not UB.
+  g.setPredictedDepthAt(5, 5, -20.0f, 0.25f);
+}
+
+TEST_F(GridPredictedSurfaceTest, InterpolateBilinearInteriorOffCenter)
+{
+  auto g = makeSeededGrid();
+  // Off-center on BOTH axes (dx=0.25, dy=0.75) to catch axis mix-ups:
+  // -10*0.75*0.25 + -12*0.25*0.25 + -11*0.75*0.75 + -13*0.25*0.75 = -11.25
+  EXPECT_NEAR(g.interpolatePredictedDepth(0.25, 0.75), -11.25f, 1e-5);
+}
+
+TEST_F(GridPredictedSurfaceTest, InterpolateNoDataCornerSentinel)
+{
+  Grid g(CellCounts(2, 2), CellSizes(1.0f), MapPosition(0.0, 0.0), params);
+  // Fully unseeded grid: no correction anywhere.
+  EXPECT_EQ(g.interpolatePredictedDepth(0.25, 0.75), INVALID_DATA);
+  // Three of four corners seeded: still the sentinel.
+  g.setPredictedDepthAt(0, 0, -10.0f, 0.25f);
+  g.setPredictedDepthAt(1, 0, -12.0f, 0.25f);
+  g.setPredictedDepthAt(0, 1, -11.0f, 0.25f);
+  EXPECT_EQ(g.interpolatePredictedDepth(0.25, 0.75), INVALID_DATA);
+}
+
+TEST_F(GridPredictedSurfaceTest, InterpolateOutOfRangeSentinel)
+{
+  auto g = makeSeededGrid();
+  // Stencil would need node column 2 / row 2 (grid has 0..1) or column -1.
+  EXPECT_EQ(g.interpolatePredictedDepth(1.5, 0.5), INVALID_DATA);
+  EXPECT_EQ(g.interpolatePredictedDepth(0.5, 1.5), INVALID_DATA);
+  EXPECT_EQ(g.interpolatePredictedDepth(-0.5, 0.5), INVALID_DATA);
+  EXPECT_EQ(g.interpolatePredictedDepth(0.5, -0.5), INVALID_DATA);
+  // Extreme finite coordinates: the floored lattice index exceeds int32_t, so
+  // the range-check must reject them in double before the cast (else UB).
+  EXPECT_EQ(g.interpolatePredictedDepth(1e300, 0.5), INVALID_DATA);
+  EXPECT_EQ(g.interpolatePredictedDepth(0.5, -1e300), INVALID_DATA);
+}
+
+TEST_F(GridPredictedSurfaceTest, InsertAppliesSlopeOffset)
+{
+  auto g = makeSeededGrid();
+
+  // Touchdown (0.25, 0.75): interpolated predicted depth = -11.25 (test above).
+  // Only node (x=0,y=1) at (0,1) is within the ~0.55 m capture radius
+  // (distance 0.354 m); its offset = predicted@node - predicted@touchdown
+  // = -11 - (-11.25) = +0.25, so the queued depth is -11 + 0.25 = -10.75.
+  for (int i = 0; i < 5; ++i) {
+    MapSounding s(0.25, 0.75, -11.0f);
+    s.sounding.vertical_error = 0.5f;
+    s.sounding.horizontal_error = 0.1f;
+    ASSERT_TRUE(g.insert(s));
+  }
+
+  auto vals = g.values();
+  ASSERT_EQ(vals.size(), 4u);
+  EXPECT_NEAR(vals[1 * 2 + 0].depth, -10.75, 1e-3);
+  // Gates-not-fills (ADR-0008): primed-but-unsurveyed nodes still read NaN.
+  EXPECT_TRUE(std::isnan(vals[0].depth));
+  EXPECT_TRUE(std::isnan(vals[1].depth));
+  EXPECT_TRUE(std::isnan(vals[3].depth));
+}
+
+TEST_F(GridPredictedSurfaceTest, InsertWithoutPriorUnchanged)
+{
+  Grid g(CellCounts(2, 2), CellSizes(1.0f), MapPosition(0.0, 0.0), params);
+
+  // No prior anywhere: the offset-0 path must reproduce the raw depth.
+  for (int i = 0; i < 5; ++i) {
+    MapSounding s(0.25, 0.75, -11.0f);
+    s.sounding.vertical_error = 0.5f;
+    s.sounding.horizontal_error = 0.1f;
+    ASSERT_TRUE(g.insert(s));
+  }
+
+  auto vals = g.values();
+  EXPECT_NEAR(vals[1 * 2 + 0].depth, -11.0, 1e-3);
+}
+
 }  // namespace cube

@@ -89,6 +89,14 @@ bool Grid::insert(const MapSounding & sounding)
 
   auto radius_squared = radius * radius;
 
+  // Slope correction (#59, ADR-0008): stamp the predicted-surface depth at the
+  // touchdown once per sounding. INVALID_DATA (no prior, missing corner, or
+  // stencil off the grid) leaves the no-correction sentinel, so Node::insert
+  // applies offset 0 — the pre-#59 behaviour.
+  Sounding corrected = sounding.sounding;
+  corrected.predicted_depth_at_touchdown =
+    interpolatePredictedDepth(sounding.x, sounding.y);
+
   for (auto y = min_y; y < max_y; ++y) {
     for (auto x = min_x; x < max_x; ++x) {
       auto node_x = origin_.x + x * sizes_.x;
@@ -100,11 +108,66 @@ bool Grid::insert(const MapSounding & sounding)
         if(!nodes_[index]) {
           nodes_[index] = std::make_shared<Node>();
         }
-        nodes_[index]->insert(sqrt(distance_squared), sounding.sounding, parameters_);
+        nodes_[index]->insert(sqrt(distance_squared), corrected, parameters_);
       }
     }
   }
   return true;
+}
+
+void Grid::setPredictedDepthAt(uint32_t x, uint32_t y, float depth, float variance)
+{
+  if(x >= static_cast<uint32_t>(counts_.x) || y >= static_cast<uint32_t>(counts_.y)) {
+    return;
+  }
+  auto & node = nodes_[y * counts_.x + x];
+  if(!node) {
+    node = std::make_shared<Node>();
+  }
+  node->setPredictedDepth(depth, variance);
+}
+
+float Grid::interpolatePredictedDepth(double x, double y) const
+{
+  // Continuous node-lattice coordinates: node (i, j) sits at origin + i*sizes,
+  // so floor picks the lower-left node exactly as cube_grid_interpolate does
+  // (ADR-0008). The stencil must fit inside the lattice; a touchdown outside it
+  // (including within the last row/column of nodes) gets no correction.
+  const double rx = (x - origin_.x) / sizes_.x;
+  const double ry = (y - origin_.y) / sizes_.y;
+  // Range-check the floored lattice coordinates in double before casting to
+  // int32_t: an extreme finite input (or NaN) passed to this public method
+  // would otherwise overflow the cast, which is UB rather than the documented
+  // INVALID_DATA. The stencil needs col..col+1 and row..row+1 inside the
+  // lattice; the negated comparison also rejects NaN (all comparisons false).
+  const double col_f = std::floor(rx);
+  const double row_f = std::floor(ry);
+  if(!(col_f >= 0.0 && col_f + 1.0 < counts_.x &&
+    row_f >= 0.0 && row_f + 1.0 < counts_.y))
+  {
+    return INVALID_DATA;
+  }
+  const auto col = static_cast<int32_t>(col_f);
+  const auto row = static_cast<int32_t>(row_f);
+
+  // Corner order matches the original: z[0]=LL, z[1]=LR, z[2]=UL, z[3]=UR.
+  float z[4];
+  for (int j = 0; j < 2; ++j) {
+    for (int i = 0; i < 2; ++i) {
+      const auto & node = nodes_[(row + j) * counts_.x + (col + i)];
+      const float d = node ? node->predictedDepth() : INVALID_DATA;
+      if(d == INVALID_DATA || std::isnan(d)) {
+        return INVALID_DATA;
+      }
+      z[j * 2 + i] = d;
+    }
+  }
+
+  const double dx = rx - col;
+  const double dy = ry - row;
+  return static_cast<float>(
+    z[0] * (1.0 - dx) * (1.0 - dy) + z[1] * dx * (1.0 - dy) +
+    z[2] * (1.0 - dx) * dy + z[3] * dx * dy);
 }
 
 const MapPosition & Grid::origin() const

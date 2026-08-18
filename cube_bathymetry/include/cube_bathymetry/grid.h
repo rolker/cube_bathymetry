@@ -23,6 +23,7 @@
 #ifndef CUBE_BATHYMETRY__GRID_H_
 #define CUBE_BATHYMETRY__GRID_H_
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include "cube_bathymetry/node.h"
@@ -72,6 +73,31 @@ public:
   */
     bool insert(const MapSounding & sounding);
     bool insert(const std::vector < MapSounding > &soundings);
+
+  /// @brief Seed the predicted depth at node (x, y), lazy-creating the Node.
+  ///
+  /// Planar peer of GeoGrid::setPredictedDepthAt: seeds the slope-correction /
+  /// blunder-gate prior only. Per ADR-0008 the prior gates and corrects — it
+  /// never seeds hypotheses, so an unsurveyed primed cell still reads NaN from
+  /// values(). Out-of-range indices are ignored.
+  /// @param x         Node column index from the origin corner.
+  /// @param y         Node row index from the origin corner.
+  /// @param depth     Predicted depth (negative-down), or NaN / INVALID_DATA
+  ///                  per Node::setPredictedDepth conventions.
+  /// @param variance  Variance of the predicted depth (meter^2); a real depth
+  ///                  requires a finite positive variance (see Node).
+    void setPredictedDepthAt(uint32_t x, uint32_t y, float depth, float variance);
+
+  /// @brief Bilinear predicted-surface depth at map position (x, y), or the
+  ///        no-correction sentinel INVALID_DATA when the stencil is unavailable.
+  ///
+  /// Port of the original cube_grid_interpolate (ADR-0008): nodes sit on the
+  /// origin + index*sizes lattice, so the stencil is the floor lower-left node
+  /// and its +1 neighbors. Returns INVALID_DATA when the stencil would leave
+  /// the grid or any corner node is absent / has no prediction / is NaN — every
+  /// sentinel path degrades to the uncorrected (offset 0) behaviour in
+  /// Node::insert, never to a wrong correction.
+    float interpolatePredictedDepth(double x, double y) const;
 
   // Returns the lower left grid position
     const MapPosition & origin() const;
