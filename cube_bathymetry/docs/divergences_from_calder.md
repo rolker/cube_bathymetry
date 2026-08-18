@@ -114,7 +114,20 @@ clamp and the median-queue outlier bounds; the ~0.6 % difference is numerically
 negligible. We keep the more-correct value rather than reproduce Calder's rounded
 one. Regression tests assert 2.576, not Calder's constant.
 
-## 5. Nomination uncertainty source
+## 5. Touchdown interpolation ports depth only (no `var_pred`)
+
+**Calder**: `cube_grid_interpolate` (`original_cube/libsrc/cube/cube_grid.c`)
+optionally outputs an interpolated prediction variance (`var_pred` via
+`cube_grid_est_interp_error`) alongside the bilinear predicted depth at the
+sounding touchdown.
+
+**Port** (#59, ADR-0008): `Grid::interpolatePredictedDepth` /
+`GeoGrid::interpolatePredictedDepth` thread only the interpolated **depth** into
+`Sounding::predicted_depth_at_touchdown` — `Node::insert`'s slope offset is a
+pure depth delta and has no variance consumer. A future consumer of prediction
+variance at the touchdown must port `cube_grid_est_interp_error`.
+
+## 6. Nomination uncertainty source
 
 **Calder**: when a hypothesis is nominated, `cube_node_extract_depth_unct`
 (`original_cube/libsrc/cube/cube_node.c:1916`) reports the nominated hypothesis's
