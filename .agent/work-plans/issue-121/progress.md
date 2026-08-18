@@ -155,26 +155,52 @@ sparse coverage is by design, not a recording gap.
 
 ### Spike findings — bag invertibility audit (all four questions answered)
 
-**Verdict: INVERTIBLE — YES, with stated limits.** The per-beam observables an
-inversion needs — two-way travel time, receive (across-track) steering angle,
-and the per-ping sound speed the sonar applied — are recorded, raw, in every
-sampled deployment bag. No recording change is required for
+**Verdict: INVERTIBLE — YES, with stated limits, on the evidence scoped below.**
+The per-beam observables an inversion needs — two-way travel time, receive
+(across-track) steering angle, and the per-ping sound speed the sonar applied —
+are recorded, raw, in the one **data-of-record** bag scanned in full (Lewes,
+2026-08-05, 74 min, shoal water), and corroborated by a second full scan of a
+non-of-record engineering capture. No recording change is required for
 rolker/unh_marine_autonomy#300 phases 1+. The limits (recoverable observable
-set, dropped invalid beams, raw `.all` coverage) are stated under Q1/Q3 and the
-Limits section rather than buried.
+set, dropped invalid beams, raw `.all` coverage, evidence scope) are stated
+under Q1/Q3 and the Limits section rather than buried.
+
+**Evidence scope — one bag of a heterogeneous archive.** `bizzyboat_sonar/`
+holds 157 entries: 152 rosbag2 recordings with a readable `metadata.yaml`, 4
+directories without one (aborted recordings), and the `m3_all/` raw-`.all`
+sibling — so "`bizzyboat_sonar/` is the sonar data-of-record directory" names
+the recorder's purpose, not a clean partition (the tree also holds e.g.
+`2026-06-04T…_kongsberg_em_test`). Of the 152, **48 carry
+`/bizzy/sensors/m3/detections`**, totalling **14,913,030 detection messages over
+~8,657 min**. The bag scanned here is 124,375 messages / 74.0 min — **0.83% of
+the archive's detection messages**. Temporal window: M3-bearing bags start in
+2026-06 (29 in June, 9 in July, 10 in August); the 52 April and 29 May bags
+predate the M3 (93 of the 152 carry a DeltaT topic instead), and only 17 of the
+48 M3 bags carry `/bizzy/sensors/m3/sonar_info` (the pre-SonarInfo-chain
+majority does not).
+
+What that scope does and does not license: the **field-presence and rawness**
+claims are properties of the driver's encode path — source-verified below, and
+identical for every bag `kongsberg_em_bridge` wrote — so they generalize across
+the archive. The **bag-wide distributions** (beam counts, `twtt` ranges, the
+38-ping startup transient, zero empty pings) are properties of this single
+74-minute shoal-water run and must **not** be read as archive-wide. Deep-water,
+multi-sector, and pre-SonarInfo runs were not scanned.
 
 **Bags scanned in full** (read-only; `rosbag2_py` sequential read of every
-message on `/bizzy/sensors/m3/detections`):
+message on `/bizzy/sensors/m3/detections`; "Duration" is the span of the
+detections topic itself, not the bag):
 
-| Bag | Msgs | Duration | Empty `twtt[]` | Beams/ping | `twtt` range | `ping_info.sound_speed` |
+| Bag | Msgs | Detections span | Empty `twtt[]` | Beams/ping | `twtt` range | `ping_info.sound_speed` |
 |---|---|---|---|---|---|---|
-| `~/data/logs/gabby/logs/bizzyboat_sonar/2026-08-05T19-18-17+00-00` (Lewes, 2026-08-05) | 124,375 | 74.0 min | 0 | 196–254 | 0.361–6.650 ms | nonzero in all; 1469.0 for the first 38 pings, then 1520.1–1529.6 |
-| `~/data/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (2026-06-09, site unverified; **temp engineering capture, not data-of-record** — operator) | 55,100 | 80.1 min | **306** (0.56%) | 10–225 (non-empty) | 0.524–75.46 ms | nonzero in all; 1497.1–1499.0 |
+| **Data-of-record**: `~/data/logs/gabby/logs/bizzyboat_sonar/2026-08-05T19-18-17+00-00` (Lewes, 2026-08-05) | 124,375 | 74.03 min (bag: 74.04) | 0 | 196–254 | 0.361–6.650 ms | non-zero and non-NaN in all 124,375; 1469.0 for the first 38 pings, then 1520.1–1529.6 |
+| *Not* data-of-record: `~/data/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (2026-06-09, site unverified; **temp engineering capture** — operator) | 55,100 | 80.1 min (bag: 97.9 — the M3 stream stops ~17.9 min before the bag ends) | **306** (0.56%) | 10–225 (non-empty) | 0.524–75.46 ms | nonzero in all; 1497.1–1499.0 |
 
-**Q1 — fields populated in real recordings: YES, with two qualifications.**
-`ping_info.sound_speed` is nonzero in **all 179,475** messages across both bags,
-and `rx_angles[]`/`two_way_travel_times[]` are populated in every message except
-the 306 empty-array messages noted above (June bag only; the Lewes bag has none).
+**Q1 — fields populated in real recordings: YES, with two qualifications.** In
+the data-of-record bag, `ping_info.sound_speed` is **non-zero and non-NaN in all
+124,375 messages** (the plan's actual test — NaN passes a bare `!= 0`), and
+`rx_angles[]`/`two_way_travel_times[]` are populated in every message. The
+engineering capture agrees except for 306 empty-array messages.
 Qualifications:
 
 1. **Not "every message fully populated"** — 306 June-bag messages carry an empty
@@ -303,6 +329,12 @@ past sounding construction:
   no `.agents/` directory, so no note was added (correctly deferred).
 
 **Limits on the verdict**
+- **Evidence scope**: one data-of-record bag scanned in full — 74 min of shoal
+  water on 2026-08-05, 0.83% of the 14.9 M detection messages in
+  `bizzyboat_sonar/`, and the M3-bearing part of that archive only begins
+  2026-06. Field presence/rawness generalize (they are encode-path properties);
+  the distributions quoted here do not. No deep-water or pre-SonarInfo run was
+  scanned.
 - Observable set is (twtt, rx_angle) + per-ping applied `sound_speed`; **no
   along-track launch angle** (zero transmit tilt).
 - Sonar-rejected beams are absent from the ROS stream (`skip_invalid_beams`
@@ -313,7 +345,7 @@ past sounding construction:
 - Startup pings carry a stale applied sound speed (38 pings in the Lewes bag).
 
 ### Findings
-- [x] Q1 — `two_way_travel_times[]` / `rx_angles[]` populated bag-wide except 306 empty June-bag messages; `ping_info.sound_speed` nonzero in all 179,475 messages — full scans of both bags
+- [x] Q1 — in the data-of-record bag, `two_way_travel_times[]` / `rx_angles[]` populated in all 124,375 messages and `ping_info.sound_speed` non-zero and non-NaN in all of them; the non-of-record engineering capture agrees except for 306 empty messages — full scans, scope stated under "Evidence scope"
 - [x] Q1a — invalid beams never reach the ROS stream (`skip_invalid_beams` default true) — `kongsberg_em_bridge/node.py:186,227,555`
 - [x] Q1b — observable set is (twtt, rx_angle) only; `tx_angles` all zero = zero transmit tilt — `kongsberg_em_bridge/node.py:574`
 - [x] Q2 — recorded travel times are raw N78 wire values, not ray-traced — `kongsberg_em_bridge/em_datagrams.py:128`, `node.py:563`
