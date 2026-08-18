@@ -234,10 +234,10 @@ public:
     // Runs BEFORE the draft warm-start below so an already-surveyed cell ends
     // with its finer draft-derived predicted depth (the draft prime overwrites).
     //
-    // Once-at-configure limitation: prior-primed tiles are clean and dataless,
-    // so this trim (and the draft prime's trim below) may evict them; being
-    // predicted-only they are NOT reloadable on revisit and silently lose their
-    // gate -- the known evict/revisit re-priming gap, deferred as cube#118.
+    // Prior-primed tiles are clean and dataless, so this trim (and the draft
+    // prime's trim below) may evict them; a revisit re-primes the gate from
+    // prior_store_dir in reloadEvictedTile (#118), so eviction costs one
+    // windowed disk read on return, never the gate.
     //
     // A lifecycle node WARNS and continues ungated on a missing/bad/empty
     // prior -- a misconfigured prior must never take down live perception.
@@ -265,8 +265,8 @@ public:
             prior_store_dir_.c_str(), primed.reference_tiles,
             primed.chart_tiles, primed.level_mismatched);
           // Bound the prime to the resident budget (#70 pattern, same as the
-          // draft prime below). Evicted prior-primed tiles lose their gate
-          // until re-priming lands (#118); bounded RAM outranks gate coverage
+          // draft prime below). Evicted prior-primed tiles get their gate
+          // re-primed on revisit (reloadEvictedTile, #118); bounded RAM wins
           // on a long survey. As with the draft prime, the WHOLE store is
           // loaded before this trim, so a very large prior spikes RAM
           // transiently at configure -- point prior_store_dir at a
@@ -1159,6 +1159,59 @@ private:
   // re-created grid be saved over the intact on-disk surface (review #70 round 2).
   bool reloadEvictedTile(const gggs::GridIndex & index)
   {
+    // Re-prime the prior FIRST (#118): a tile whose predicted surface came only
+    // from the prior prime returns from eviction with the blunder gate (and #59
+    // slope correction) silently OFF -- the survey restore below rebuilds only
+    // measured cells. Prior before the survey restore so the finer
+    // survey-derived predicted depth overwrites where survey data exists (the
+    // same order as on_configure). Runs even without draft persistence:
+    // prior-primed tiles are clean and evictable regardless of draft_dir.
+    //
+    // Single-tile exact-level primes, NOT primeFromPriorLayers over the loaded
+    // window -- the window also holds edge-adjacent neighbor tiles, and priming
+    // them would lazy-create nodes that inflate the resident count against the
+    // very budget doing the evicting. Chart first, Reference overwrites -- the
+    // same layered, exact-level-only semantics as the on_configure prime (no
+    // cross-level fallback in the live node). Warn-and-continue on error: a
+    // prior read failure leaves this tile ungated, never blocks the reload.
+    if (!prior_store_dir_.empty()) {
+      try {
+        marine_bathymetry_store::BathymetryStore prior_scratch =
+          marine_bathymetry_store::BathymetryStore::fromCellSize(
+          static_cast<float>(cell_size_));
+        const auto psw = index.southWestPosition();
+        const auto pne = index.northEastPosition();
+        marine_bathymetry_store::loadWindow(
+          prior_scratch, prior_store_dir_, psw, pne, nullptr);
+        bool primed = false;
+        const auto & chart_tiles =
+          prior_scratch.tiles(marine_bathymetry_store::SourceLayer::Chart);
+        auto chart_it = chart_tiles.find(index);
+        if (chart_it != chart_tiles.end()) {
+          cube::primeFromTile(chart_it->second, *geo_map_sheet_,
+            /*seed_settled=*/false);
+          primed = true;
+        }
+        const auto & ref_tiles =
+          prior_scratch.tiles(marine_bathymetry_store::SourceLayer::Reference);
+        auto ref_it = ref_tiles.find(index);
+        if (ref_it != ref_tiles.end()) {
+          cube::primeFromTile(ref_it->second, *geo_map_sheet_,
+            /*seed_settled=*/false);
+          primed = true;
+        }
+        if (primed) {
+          // Observability (#118): gate re-activation must be visible; throttled
+          // so a burst of revisits does not spam the log.
+          RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
+            "Re-primed prior gate (blunder + slope) on revisited tile " << index);
+        }
+      } catch (const std::exception & e) {
+        RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
+          "Could not re-prime prior for revisited tile: " << e.what() <<
+          " (tile continues ungated; retried on its next revisit)");
+      }
+    }
     if(draft_dir_.empty()) {
       return true;
     }
@@ -1430,7 +1483,12 @@ private:
     // the real data and must not be clobbered) and keep the evicted marker so the
     // next revisit retries -- the few new soundings for that tile this cycle are
     // discarded (they re-survey cheaply; disk integrity wins).
-    if(!draft_dir_.empty() && !evicted_indices_.empty()) {
+    // Also run when only a prior store is configured (#118): without draft
+    // persistence a prior-primed (clean) tile can still be evicted, and its
+    // revisit must re-prime the gate even though there is no survey to restore.
+    if((!draft_dir_.empty() || !prior_store_dir_.empty()) &&
+      !evicted_indices_.empty())
+    {
       std::vector<gggs::GridIndex> revisited;
       for (const auto & idx : geo_map_sheet_->dirtyGrids()) {
         if(evicted_indices_.count(idx)) {
