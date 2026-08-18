@@ -58,43 +58,50 @@ Proposed: **Option A** (per-tile disk read). Rationale: same pattern as the exis
 reload in `reloadEvictedTile`, zero RAM impact, RAM discipline is the stated priority
 (#70). Operator adjudicates at plan-review if RAM avoidance is preferred.
 
-### Step-by-step
+### Step-by-step (revised per plan review; as implemented)
 
-1. **`ImportAccumulator::reloadEvictedTile` (`store_import.cpp:545`)** — after the
-   survey-layer restore, add reference prior re-seeding that mirrors `seedNewTile`'s
-   rung 2:
-   - If `cfg_.reference_store_dir` is non-empty, `loadWindow` into a scratch store.
-   - Chart exact-level prime first (`primeFromTile(..., seed_settled=false)`).
-   - Reference Phase A exact-level prime (`primeFromTile(..., seed_settled=false)`).
-   - Reference Phase B cross-level fallback (call `primeFromTileResample`, the
-     namespace-local helper already in `store_import.cpp`; accessible from the same TU).
-   - Emit `std::cerr` INFO line when any prior re-prime fires (auditability, #118 review
-     action: "observable re-prime logging").
+1. **Extract `seedNewTile`'s whole prior rung into a file-local helper**
+   `primePriorLayersForTile(prior_store_dir, cell_size_m, index, sheet, context)`
+   (returns `bool primed`): windowed load → Chart exact-level → Reference
+   exact-level → the #115 containment-checked cross-level fallback, predicted-only
+   at every rung, warn-and-continue on load error. Defined in the existing
+   anonymous namespace after `primeFromTileResample` (visibility must-fix:
+   `reloadEvictedTile` precedes that block, so it gets an anonymous-namespace
+   **forward declaration**). `seedNewTile` rung 2 becomes a call.
 
-2. **`CubeBathymetryNode::reloadEvictedTile` (`cube_bathymetry_node.cpp:1160`)** — after
-   the draft-survey restore, add prior re-seeding:
-   - If `prior_store_dir_` is non-empty, `loadWindow` into a scratch store for this tile.
-   - Chart exact-level first, Reference exact-level overwrites (same semantics as
-     `primeFromPriorLayers`, exact-level only — cross-level fallback is not needed
-     because at `on_configure` the live node already only applies exact-level primes).
-   - Use `cube::primeFromTile` (public API in `store_import.h`).
-   - `RCLCPP_INFO_STREAM_THROTTLE` when re-prime fires (throttled to avoid log spam on
-     repeated revisits).
+2. **`ImportAccumulator::reloadEvictedTile`** — call the helper **BEFORE the
+   survey restore** (ordering must-fix: prior first, so the finer survey-derived
+   predicted depth overwrites where measured data exists — the same order as
+   first touch and `on_configure`). `std::cerr` line when a re-prime fired
+   (observability).
 
-3. **New regression test (`test_import_eviction.cpp`)** — `ReferenceOnlyTileEvictRevisit`:
-   - Build a dense shallow reference tile (no survey data) and a reference store.
-   - Survey the tile with gate-accepting soundings, forcing eviction by covering many
-     other tiles.
-   - Revisit with a clearly-too-deep blunder sounding.
-   - Assert: the blunder sounding is NOT settled (the gate is active on revisit, cell map
-     is empty or no deep cell). This follows the shape of `ChartLayerSeedRejectsDeepBlunder`
-     and `CoarseLevelReferenceSeedRejectsDeepBlunder`.
+3. **`CubeBathymetryNode::reloadEvictedTile`** — prior re-prime **before** the
+   draft restore and **before** the `draft_dir_` early-return (prior-primed
+   tiles are clean and evictable without draft persistence): single-tile
+   exact-level `find(index)` lookups, Chart then Reference (review suggestion:
+   NOT a whole-window `primeFromPriorLayers`, which would lazy-create neighbor
+   nodes against the eviction budget). `RCLCPP_INFO_STREAM_THROTTLE` on
+   re-prime; throttled WARN + continue-ungated on error. The pingCallback
+   revisit loop's gate is **widened** to also run when only `prior_store_dir_`
+   is configured.
 
-4. **Remove the two "deferred as #118" comments** (`cube_bathymetry_node.cpp:240`,
-   `cube_bathymetry_node.cpp:269`).
+4. **Regression test** `ReferenceOnlyTileEvictRevisitKeepsGate`
+   (`test_import_eviction.cpp`): dense shallow Reference tile; visit 1 surveys
+   one cell; spread batches force eviction (budget 3); revisit with a −150 m
+   blunder at a **different, never-surveyed** cell of the tile. Asserts the
+   shallow survey survives the round-trip AND no deep cell settles.
+   **Discrimination verified**: with the reload re-prime disabled the test
+   fails (pre-fix bug reproduced).
 
-5. **Update `store_import.h` private doc comment for `reloadEvictedTile`** to reflect
-   that it now also re-seeds the reference prior on reload.
+5. **Comments/docs**: the two live-node "deferred as #118" comments updated
+   in place to describe the shipped behaviour (review suggestion: the `:269`
+   one sits inside a still-valid RAM note); `store_import.h` doc for
+   `reloadEvictedTile` documents the prior-first re-prime.
+
+**Known coverage gap** (review suggestion, accepted): the live-node
+`reloadEvictedTile` duplicate of the prime logic has no node-level test — no
+ROS-node test harness exists in this package; the shared semantics are covered
+via the import-path regression test and the #91 helper tests.
 
 ## Files to Change
 
