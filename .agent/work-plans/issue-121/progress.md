@@ -134,3 +134,28 @@ boat-side recording change first"). No open issue blocks *this* one.
 - [ ] (suggestion) Q3 also has a concrete source lead the plan misses: the driver exposes a `~/set_recording` service for raw `.all` recording, so "what is lost relative to QINSy" is partly a question of whether that raw stream is captured — worth checking alongside the launch config — `plan.md:85-90`
 - [ ] (suggestion) The deliverable is a GitHub comment; state that it carries the AI signature block (AGENTS.md) — `plan.md:91-97`
 - [ ] (note, no action) Verified and correct: `SonarDetections.msg` carries `two_way_travel_times[]`, `tx_angles[]`, `rx_angles[]`, `intensities[]` and an embedded `PingInfo ping_info` (with `sound_speed`, 0 = unavailable); `sounding.h:43`, `error_model.cpp:277/344`, and `detections_projector.h:107` all read those fields. The plan's correction of the Issue Review's `PingInfo` assumption holds.
+
+## Implementation
+
+**When**: 2026-08-17 23:21 -04:00
+**By**: Claude Code Agent (host-inline)
+**Model**: Claude Fable 5
+**Status**: complete
+
+### Spike findings — bag invertibility audit (all four questions answered)
+
+**Verdict: INVERTIBLE — YES. No recording change needed; rolker/unh_marine_autonomy#300 phases 1+ are unblocked.**
+
+**Q1 — fields populated in real recordings: YES.** Sampled 50 `SonarDetections` messages from each of two bags on this host: `~/data/logs/gabby/logs/bizzyboat_sonar/2026-08-05T19-18-17+00-00` (Lewes) and `~/data/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (Massabesic-era). Every message: 219–251 beams, `two_way_travel_times[]` fully populated (Lewes 2.2–6.6 ms; Massabesic 16.7–34.9 ms), `rx_angles[]` spanning ±1.031 rad (full ±59° fan), `tx_angles[]` all 0.0 (single-sector tx, expected), `ping_info.sound_speed` nonzero in all 100 messages, `ping_info.frequency` = 500 kHz, detection flags all 0 (valid).
+
+**Q2 — raw, not ray-traced: CONFIRMED from driver source + empirical cross-check.** `kongsberg_em_bridge` is a pure wire-format translator of the Kongsberg Raw Range and Angle 78 (`N`) datagram: `em_datagrams.py:128` unpacks `twtt` directly from the wire and `node.py:563` appends it unmodified; `ping_info.sound_speed` is the datagram's own surface-sound-speed field (×0.1, `em_datagrams.py:149`) — i.e., the sonar-applied array-face sound speed, recorded **per ping**, which is exactly what an inversion needs to undo beam steering. Empirical discriminator per plan: min(twtt)·c/2 = 1.65 m (Lewes, shallow) and 12.49 m (Massabesic) — plausible nadir depths, so these are genuine two-way seconds.
+
+**Q3 — ROS stream vs full M3 output.** The bridge decodes the RRA-78 datagram into `SonarDetections`; full-fidelity raw datagram capture exists independently via the driver's `~/set_recording` service writing `.all` files — present on disk (`bizzyboat_sonar/m3_all/m3_20260616_*.all`), so nothing is unrecoverable even where the ROS decode is narrower. Recording topology: the **main** deployment bag carries no M3 topics — M3 rides in dedicated sonar bags (`bizzyboat_sonar/`, `bizzy_m3/`). Companion `/bizzy/sensors/m3/sonar_info` (`marine_interfaces/SonarInfo`) is present in Aug 2026 bags (post SonarInfo-chain), absent in the June bag — as expected.
+
+**Q4 — importer preserves the fields: YES (source, confirmed at plan time).** `sounding.h:43`, `error_model.cpp`, `detections_projector.cpp` consume `two_way_travel_times`/`tx_angles`/`rx_angles`/`ping_info.sound_speed` directly; nothing discarded on import.
+
+**Secondary observations**
+- The Lewes sample shows `ping_info.sound_speed` stepping 1469.0 → 1528.1 m/s within a 50-ping window — per-ping applied-SS tracking is live (good for inversion), but a ~59 m/s step is large; worth a glance at the AML feed continuity for that day (observation only, no issue filed per plan's no-unprompted-scope rule).
+- Sampled-variant note (echoboats#342 retrofit): retrofit rewrites tf_static offset + stamp skew, not twtt/angle payloads; both a June (possibly retrofitted) and an Aug bag were sampled with consistent field population.
+
+Findings comment posted on rolker/cube_bathymetry#121. Deliverable per plan steps 5–6 complete; no follow-up recording-change issue needed (sufficiency confirmed).
