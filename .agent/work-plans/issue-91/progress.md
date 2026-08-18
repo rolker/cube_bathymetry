@@ -86,3 +86,30 @@ issue: 91
 
 ### Addressed since prior round
 - (suggestion, Local Review (Pre-Push) @ `22c5f50`) Whole prior store loaded into RAM before `trimResidentToBudget` — addressed by `dcc9478`, which documents the transient configure-time RAM peak and recommends a region-scoped `prior_store_dir` at `cube_bathymetry/src/cube_bathymetry_node.cpp:267-274`.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-18 06:14 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #127 at `93ec2f1`   <!-- local feature/issue-91 head; host performs the push -->
+**Addressed**: Integrated Review (post-PR, from `triage-reviews`) @ 2026-08-18 02:08 -04:00, PR #127 `dcc9478`
+**Commits**: `299d7c5`, `5fdd7c8`, `93ec2f1`
+
+All three open findings were documentation-only; each was verified against current
+source before editing (Chart rung confirmed in `store_import.cpp:715` `seedNewTile`
++ `primeFromPriorLayers`; live `prior_store_dir` confirmed in
+`cube_bathymetry_node.cpp:242`; `primeFromTileResample` confirmed declared in no
+header — only defined at `store_import.cpp:597`). Pre-commit hooks ran on every
+commit (no `--no-verify`); no package test is touched by doc-only changes.
+
+### Actions
+- [x] (medium, integrator) README seed-precedence rung 2 now documents the exact-level `chart/` rung added by #119 (chart primes first, reference overwrites; no cross-level fallback for chart) — `README.md:72-90` (`299d7c5`)
+- [x] (low, integrator) Added a "Live prior-gate prime (`prior_store_dir`)" README section documenting the live equivalent of the offline prior-gate path — `README.md:107-137` (`5fdd7c8`)
+- [x] (low, Copilot) Reworded the unresolvable Doxygen `@ref primeFromTileResample` in the public header to describe the per-tile importer's #115 level-walk resample path without an unresolvable cross-reference — `cube_bathymetry/include/cube_bathymetry/store_import.h:249-255` (`93ec2f1`)
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a
+fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 91 --skill review-code
