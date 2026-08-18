@@ -186,7 +186,17 @@ install(TARGETS cube_bathymetry_sonar_info_curve EXPORT export_${PROJECT_NAME}
 add_library(cube_bathymetry_ssp_ray_tracer src/ssp_ray_tracer.cpp)
 target_include_directories(cube_bathymetry_ssp_ray_tracer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
+  # Headers install to include/${PROJECT_NAME}/ (see the install(DIRECTORY
+  # include/ ...) above), so `#include "cube_bathymetry/ssp_ray_tracer.h"`
+  # only resolves with include/${PROJECT_NAME} on the search path -- a bare
+  # `include` here leaves a target-only consumer unable to find the header.
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+)
+# The two named consumers (unh_marine_autonomy#300, marine_perception_tools#28)
+# link this into shared libraries and a Python extension module, which cannot
+# absorb a non-PIC static archive.
+set_target_properties(cube_bathymetry_ssp_ray_tracer PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
 )
 install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
