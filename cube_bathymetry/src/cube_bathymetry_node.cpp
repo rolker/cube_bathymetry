@@ -1152,11 +1152,13 @@ private:
   // evicted tile into a scratch store and reseed its settled cells so
   // accumulation continues from the saved state and the next save is complete.
   //
-  // Returns true when the on-disk state is now consistent with what a save will
-  // write -- either the tile was found and reseeded, or it is genuinely absent on
-  // disk (nothing to preserve). Returns false ONLY on a load error (the file may
-  // exist but be transiently unreadable): the caller must then NOT let the partial
-  // re-created grid be saved over the intact on-disk surface (review #70 round 2).
+  // Returns true when the tile is fully restored and the on-disk state is
+  // consistent with what a save will write -- the tile was found and reseeded (or
+  // genuinely absent, nothing to preserve) AND the prior gate re-prime succeeded.
+  // Returns false on a load error -- a survey read error (the file may exist but be
+  // transiently unreadable) OR a prior READ error (#118): the caller must then keep
+  // the tile evicted and NOT let the partial re-created grid be saved over the
+  // intact on-disk surface (review #70 round 2), so a later revisit retries.
   bool reloadEvictedTile(const gggs::GridIndex & index)
   {
     // Re-prime the prior FIRST (#118): a tile whose predicted surface came only
@@ -1172,8 +1174,12 @@ private:
     // them would lazy-create nodes that inflate the resident count against the
     // very budget doing the evicting. Chart first, Reference overwrites -- the
     // same layered, exact-level-only semantics as the on_configure prime (no
-    // cross-level fallback in the live node). Warn-and-continue on error: a
-    // prior read failure leaves this tile ungated, never blocks the reload.
+    // cross-level fallback in the live node). On a prior READ error the tile is
+    // kept evicted (prior_ok=false, returned below) so a later revisit retries the
+    // re-prime instead of silently running ungated for the rest of the session
+    // (#118): the read is transient, and a permanently-off blunder gate is exactly
+    // the failure this issue closes.
+    bool prior_ok = true;
     if (!prior_store_dir_.empty()) {
       try {
         marine_bathymetry_store::BathymetryStore prior_scratch =
@@ -1207,13 +1213,21 @@ private:
             "Re-primed prior gate (blunder + slope) on revisited tile " << index);
         }
       } catch (const std::exception & e) {
-        RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
-          "Could not re-prime prior for revisited tile: " << e.what() <<
-          " (tile continues ungated; retried on its next revisit)");
+        prior_ok = false;
+        // Observability (#118): a failed gate re-activation is operator-actionable,
+        // so name the tile and throttle much tighter than the success INFO (30 s)
+        // -- distinct failing tiles are far less likely to be collapsed into one
+        // suppressed line, and the message states the (now real) retry contract.
+        RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 1000,
+          "Could not re-prime prior blunder gate on revisited tile " << index <<
+          ": " << e.what() << " (kept evicted and retried on its next revisit; "
+          "this batch's soundings on it are dropped to keep the gate correct)");
       }
     }
     if(draft_dir_.empty()) {
-      return true;
+      // Prior-only tile (no survey to restore): its consistency IS the prior
+      // re-prime, so a failed prior read must keep it evicted for retry (#118).
+      return prior_ok;
     }
     try {
       marine_bathymetry_store::BathymetryStore scratch =
@@ -1228,7 +1242,10 @@ private:
       if(it != tiles.end()) {
         cube::primeFromTile(it->second, *geo_map_sheet_);
       }
-      return true;
+      // Survey cells restored, but if the prior read failed keep the tile evicted
+      // so the prior gate is retried on the next revisit (#118) -- the caller drops
+      // the tile; the intact on-disk survey surface is untouched.
+      return prior_ok;
     } catch (const std::exception & e) {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
         "Could not reload evicted tile on revisit: " << e.what() <<
@@ -1464,44 +1481,49 @@ private:
     auto timestamp = epoch + std::chrono::seconds(msg->header.stamp.sec) +
       std::chrono::nanoseconds(msg->header.stamp.nanosec);
 
-    geo_map_sheet_->addSoundings(soundings, timestamp);
-
-    // Lossless revisit reload (#70, ADR-0001). Any tile this batch just
-    // re-created/dirtied that was evicted earlier must be reseeded from disk
-    // before the next save, or that save overwrites the tile's full on-disk
-    // surface with only the freshly-accumulated cells.
+    // Lossless revisit reload, BEFORE the add (#118, #70, ADR-0001). Reload any
+    // evicted tile this batch is about to touch FIRST -- before addSoundings -- so
+    // the batch's beams accrete onto the reloaded/re-primed hypotheses AND the
+    // blunder gate (+ #59 slope correction) is already active for the batch's own
+    // soundings. Node::insert accepts anything while a cell's predicted_depth_ is
+    // NaN, so a false-deep blunder in the FIRST revisit batch of an evicted
+    // prior-only tile would otherwise be settled ungated before the reload
+    // re-primes it. The offline importer already reloads-before-add
+    // (store_import.cpp addBatch); this mirrors it.
     //
-    // Key off the DIRTY set -- the grids insert() actually touched -- NOT the
-    // sounding centres: addSoundings expands the bounds by each sounding's
-    // influence radius (one-cell floor, #104) and spills into neighbour tiles
-    // near a GGGS seam, so a centre-only check would miss an
-    // evicted neighbour and clobber it (review #70 round 2). Reseeding does not
-    // mark dirty, so the grid stays dirty for the save (reloaded settled cells +
-    // new cells); a resurveyed cell keeps the new value, others the reloaded one.
+    // Key off gridIndicesForSoundings -- the SAME influence-radius-expanded window
+    // addSoundings will touch (one-cell floor, #104; spills into a near-seam
+    // neighbour tile) -- NOT the sounding centres, so an evicted neighbour reached
+    // only by spillover is still reloaded, not clobbered (review #70 round 2). It
+    // is the post-add dirty set computed one step early.
     //
-    // On a reload error, DROP the partial re-created grid (the on-disk surface is
-    // the real data and must not be clobbered) and keep the evicted marker so the
-    // next revisit retries -- the few new soundings for that tile this cycle are
-    // discarded (they re-survey cheaply; disk integrity wins).
+    // On a reload error, record the tile and -- AFTER the add -- DROP its partial
+    // re-created grid (the on-disk surface is the real data and must not be
+    // clobbered) and keep the evicted marker so the next revisit retries; the few
+    // new soundings for that tile this cycle are discarded (they re-survey cheaply;
+    // disk/gate integrity wins).
     // Also run when only a prior store is configured (#118): without draft
     // persistence a prior-primed (clean) tile can still be evicted, and its
     // revisit must re-prime the gate even though there is no survey to restore.
+    std::vector<gggs::GridIndex> reload_failed;
     if((!draft_dir_.empty() || !prior_store_dir_.empty()) &&
       !evicted_indices_.empty())
     {
-      std::vector<gggs::GridIndex> revisited;
-      for (const auto & idx : geo_map_sheet_->dirtyGrids()) {
+      for (const auto & idx : geo_map_sheet_->gridIndicesForSoundings(soundings)) {
         if(evicted_indices_.count(idx)) {
-          revisited.push_back(idx);
+          if(reloadEvictedTile(idx)) {
+            evicted_indices_.erase(idx);
+          } else {
+            reload_failed.push_back(idx);
+          }
         }
       }
-      for (const auto & idx : revisited) {
-        if(reloadEvictedTile(idx)) {
-          evicted_indices_.erase(idx);
-        } else {
-          geo_map_sheet_->dropTile(idx);  // protect the intact on-disk surface
-        }
-      }
+    }
+
+    geo_map_sheet_->addSoundings(soundings, timestamp);
+
+    for (const auto & idx : reload_failed) {
+      geo_map_sheet_->dropTile(idx);  // protect the intact on-disk surface
     }
 
     if(last_grid_publish_time_.nanoseconds() == 0 ||
