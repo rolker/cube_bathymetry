@@ -65,3 +65,24 @@ issue: 91
 - Local Adversarial skipped: Ollama not installed. Copilot off (default).
 - Test suite NOT executed in this pre-push review (static + adversarial reads only); CI runs the GTests.
 - Dismissed (false positives): (1) param re-declaration on reconfigure — matches the node's existing convention for ~15 params incl. sibling draft_dir; (2) "trim before draft_dir = data loss" — trimResidentToBudget drops only non-dirty cold tiles and never persists; at configure the sheet holds only clean prior-primed tiles (documented #118 gate-loss, not data loss).
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-18 02:08 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #127 at `dcc9478`
+**Sources**: 3 (Copilot R1 @ `dcc9478`, Local Review (Pre-Push) @ `22c5f50`, CI rollup @ `dcc9478`)
+**Cross-source confirmations**: 0
+**CI**: all-pass (ROS 2 Jazzy industrial_ci success, copilot-pull-request-reviewer success)
+
+### Findings
+- [ ] (medium, integrator) README "Seed precedence (`--reference-store`)" still documents only the two rungs survey -> reference; the #119 fix adds an exact-level `Chart`-layer rung inside rung 2 (no cross-level fallback for Chart), so the user-facing description of `--reference-store` behavior is now incomplete — `README.md:67-86`
+- [ ] (low, integrator) New live-node `prior_store_dir` parameter is undocumented outside the source comments; the README describes the offline prior-gate path in detail but not its live equivalent — `README.md`
+- [ ] (low, Copilot) Doxygen `@ref primeFromTileResample` in the public header points to a symbol that is not declared in any header (it is a `namespace cube` definition local to `store_import.cpp`), so readers cannot resolve it from the public API surface; reword to describe the cross-level resample path without an `@ref` — `cube_bathymetry/include/cube_bathymetry/store_import.h:253`
+
+### False positives
+- (Copilot) "it's in an anonymous namespace in store_import.cpp" / "can produce broken docs / warnings" — the premise and the consequence are both wrong: `primeFromTileResample` is defined at `namespace cube` scope (the anonymous namespace in that file closes at line 336, well above the definition at line 597), and the repo has no Doxyfile and no docs job in `.github/workflows/`, so no doc build emits a warning. Only the readability half of the comment is actionable, kept as a low finding above.
+
+### Addressed since prior round
+- (suggestion, Local Review (Pre-Push) @ `22c5f50`) Whole prior store loaded into RAM before `trimResidentToBudget` — addressed by `dcc9478`, which documents the transient configure-time RAM peak and recommends a region-scoped `prior_store_dir` at `cube_bathymetry/src/cube_bathymetry_node.cpp:267-274`.
