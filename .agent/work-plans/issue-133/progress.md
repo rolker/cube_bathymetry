@@ -318,8 +318,90 @@ Specialists: static analysis run (ament_cpplint "No problems found", ament_uncru
 - [x] (suggestion) reloadEvictedTile loadWindow catch lacks the ambiguous-store guard; safe only by call-ordering invariant — add a note or mirror the guard — `src/store_import.cpp:~676`
 - [x] (suggestion) Live node on_configure swallows an ambiguous-store load() throw (WARN + empty start), asymmetric with the importer's loud abort; loses warm-start + catalog silently — add an explicit decision/comment — `src/cube_bathymetry_node.cpp:~402`
 - [x] (suggestion) No test exercises the hasAmbiguousSurveyMigration abort/rethrow path — `test/`
-- [ ] (suggestion) Post-migration Draft shadowing (draft over old coverage hidden under Processed > Draft until reprocessed) — worth an operator-facing note (inherited ADR-0010 D8 semantics)
+- [x] (suggestion) Post-migration Draft shadowing (draft over old coverage hidden under Processed > Draft until reprocessed) — worth an operator-facing note (inherited ADR-0010 D8 semantics) (deferred: out of this round's host scope, which is the 4 ambiguous-store safety-net items; this is a documentation-only, inherited-semantics note with no code change, best folded into the operator-facing store docs rather than this hardening pass)
 
 ### Next step
 
 Verdict is **approved** (0 must-fix). Lifecycle: **Local Review** -> push / open PR -> **triage-reviews**. The 5 suggestions are non-blocking hardening/doc items; the host may optionally route them to address-findings first, but none gate the push. This is a lockstep change — the push/PR must co-land with uma#308 (feature/issue-308); host CI should run the combined build.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-20 19:42 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-133 at `1ac0e8a` (code; a trailing progress commit follows)
+**Addressed**: Local Review (Pre-Push) (2026-08-20 19:17 +00:00, at `d802a30`)
+**Commits**: `df83ce8`, `0ae6a90`, `646561e`, `1ac0e8a`
+
+### What landed
+
+Pre-publish hardening round on the ambiguous-store safety-net seam. The four
+in-scope suggestions from the round-2 Local Review were **fixed**; the fifth
+(operator-facing Draft-shadowing note) is **deferred** with a reason (out of this
+round's host scope — documentation-only, inherited ADR-0010 D8 semantics, no code
+change). All four fixes build + test clean against the uma#308 store overlay.
+
+- **F1 — generalize the guard to the persisting-`survey/` condition.** Renamed the
+  anonymous-namespace `hasAmbiguousSurveyMigration` (both-dirs only) to a public
+  `cube::legacySurveyDirPersists(store_dir)` (declared in `store_import.h`) that keys
+  on the `survey/` PATH still being present after a load/loadWindow threw — the shared
+  signature of all three permanent ADR-0010 D8 migration refusals (symlinked `survey/`,
+  ambiguous both-dirs, or an uncommittable rename), since a *successful* migration
+  renames `survey/` away. Uses `is_directory` (follows the link) OR `is_symlink` (the
+  variant an is_directory-only probe missed and silently degraded tile-by-tile).
+  `seedNewTile`'s abort message updated to name the generalized condition. —
+  `src/store_import.cpp` (`legacySurveyDirPersists`, `seedNewTile`), `include/cube_bathymetry/store_import.h`
+- **F2 — mirror the guard in `reloadEvictedTile`.** Its `loadWindow` catch now runs
+  the same `legacySurveyDirPersists` → rethrow-loudly check before the drop-and-retry
+  path, with a comment noting it is belt-and-suspenders: by call ordering
+  `seedNewTile` would already have aborted an ambiguous store on first touch, but the
+  guard keeps the invariant local rather than resting on that ordering. —
+  `src/store_import.cpp:~676`
+- **F3 — live node `on_configure` fails loudly, symmetric with the importer.** The
+  startup-prime catch now, on `legacySurveyDirPersists(draft_dir_)`, logs an
+  `RCLCPP_ERROR` explaining the store needs manual attention and returns
+  `CallbackReturn::FAILURE` instead of the silent WARN + cold (empty) start — a boat
+  operator learns the store must be fixed rather than losing warm-start + the
+  disk-serve catalog on every reboot with no signal. Genuine transient/missing-store
+  errors keep the WARN-and-continue-empty behavior. — `src/cube_bathymetry_node.cpp:~402`
+- **F4 — test the abort/rethrow path.** Two new `ImportEviction` tests:
+  `AmbiguousSurveyStoreAbortsImport` (a both-`survey/`-and-`processed/` store — copies
+  a written `processed/` to `survey/` — asserts `addBatch` throws with the loud
+  `ABORTING` message) and `SymlinkedSurveyStoreAbortsImport` (a symlinked `survey/`
+  with no `processed/` dir — the variant the old both-dirs check would miss — asserts
+  it also aborts), each first asserting `legacySurveyDirPersists` detects the store. —
+  `test/test_import_eviction.cpp`
+
+### Build Verification — Option A (local, issue-308 store overlay)
+
+Same overlay as the prior Implementation entries: `/opt/ros/jazzy` + the built
+**uma#308 `feature/issue-308` core** (`issue-unh_marine_autonomy-308/core_ws/install`;
+installed `marine_bathymetry_store` confirmed split with the public
+`BathymetryStore::clearOverlappedDraft`). Rebuilt and tested `cube_bathymetry` against
+that overlay.
+
+**Result**: build OK (only pre-existing unrelated `-Wunused-but-set-variable` warning
+in `test_tile_eviction_rss.cpp`); `colcon test` → **29/29 CTest suites passed, 0
+failed** (all linters clean — cpplint/uncrustify/cppcheck/flake8/etc.; gtest 21
+executables). The two new gtest cases ran and passed (ImportEviction suite now 15
+tests, was 13). Pre-commit hooks ran on every commit; none used `--no-verify`.
+
+### Lockstep note
+
+Unchanged: this PR cannot build against the pre-split main-tree jazzy core; it must
+co-land with uma#308 (feature/issue-308). Verified locally against that store — host
+CI should run the combined build.
+
+### Actions
+- [x] Generalize the ambiguous-store guard to any persisting `survey/` layer (symlink + both-dirs + uncommittable rename) — `src/store_import.cpp` (`legacySurveyDirPersists`), `include/cube_bathymetry/store_import.h`
+- [x] Mirror the guard in `reloadEvictedTile` (belt-and-suspenders + call-ordering note) — `src/store_import.cpp:~676`
+- [x] Live node `on_configure` fails loudly on an ambiguous/refused store (ERROR + `CallbackReturn::FAILURE`), symmetric with the importer's abort — `src/cube_bathymetry_node.cpp:~402`
+- [x] Test the abort/rethrow path — both-dirs and symlinked variants — `test/test_import_eviction.cpp`
+- [x] Post-migration Draft-shadowing operator note (deferred: out of this round's host scope; documentation-only, inherited ADR-0010 D8 semantics, no code change — fold into operator-facing store docs)
+
+### Next step
+
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a
+fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 133 --skill review-code
