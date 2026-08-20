@@ -387,13 +387,16 @@ public:
           seed_catalog(marine_bathymetry_store::SourceLayer::Draft, draft_tiles);
           seed_catalog(
             marine_bathymetry_store::SourceLayer::Processed, processed_tiles);
-          // Bound the prime to the resident budget (must-fix): loadIntoSheet loads
-          // the WHOLE store, so without this a restart mid-long-survey re-creates
-          // the unbounded RAM #70 prevents. Primed tiles are clean and already on
-          // disk, so dropping the cold ones is lossless; they reload on revisit.
-          // (The transient peak during the whole-store load before the trim is a
-          // known limitation -- a windowed prime needs a startup position that is
-          // not available at on_configure; tracked as a follow-up.)
+          // Bound the prime to the resident budget (must-fix): the fused prime
+          // loads the WHOLE store, so without this a restart mid-long-survey
+          // re-creates the unbounded RAM #70 prevents. Primed tiles are clean and
+          // already on disk, so dropping the cold ones is lossless; they reload on
+          // revisit. (The transient peak before the trim is now the TWO-layer union:
+          // `store` holds BOTH the Processed AND the Draft tiles fully resident, and
+          // the sheet holds the fused Processed-over-Draft surface on top of them --
+          // higher than a single-layer prime. A windowed prime would bound it but
+          // needs a startup position not available at on_configure; tracked as a
+          // follow-up.)
           trimResidentToBudget();
         }
       } catch (const std::exception & e) {
