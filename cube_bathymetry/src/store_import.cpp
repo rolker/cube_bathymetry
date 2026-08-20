@@ -23,6 +23,7 @@
 #include "cube_bathymetry/store_import.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -219,19 +220,42 @@ IntensityWelford welfordFromCell(
   return w;
 }
 
-void primeFromTile(
-  const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
+void primeFromTileSkippingMask(
+  const marine_bathymetry_store::BathymetryTile & tile,
+  const marine_bathymetry_store::BathymetryTile * mask, GeoMapSheet & map_sheet,
   bool seed_settled)
 {
+  // Contract: `mask`, when non-null, must be an overlapping tile at the SAME
+  // GridIndex as `tile` -- the cell-for-cell `k` indexing below (mask_depth[k])
+  // is only meaningful when both tiles share a grid + cell size. All current
+  // callers satisfy this (they pair each Draft tile with its same-index
+  // Processed tile); pin it so a future caller that violates it trips in debug
+  // rather than silently masking the wrong cells.
+  assert((!mask || mask->index() == tile.index()) &&
+    "primeFromTileSkippingMask: mask must share the tile's GridIndex");
   const gggs::GridIndex & grid = tile.index();
   const std::vector<double> & depth = tile.depthBand();
   const std::vector<double> & uncertainty = tile.uncertaintyBand();
+
+  // Deterministic per-cell overlap resolution (ADR-0010 D8). `mask`, when non-null,
+  // is an overlapping tile at the SAME GridIndex (a Processed tile shadowing this
+  // Draft tile) -- same grid + cell size means its bands index cell-for-cell by the
+  // same `k`, so a cell the mask already covers with a finite depth is SKIPPED here
+  // rather than primed. That is what makes the fused Processed-over-Draft prime
+  // deliver Processed-wins-on-overlap independent of CUBE's chooseHypothesis
+  // tie-break: the overlapped cell carries ONLY the Processed hypothesis, matching
+  // the store's query-side `Processed > Draft` walk (see the fused-prime callers in
+  // cube_bathymetry_node.cpp).
+  const std::vector<double> * mask_depth = mask ? &mask->depthBand() : nullptr;
 
   // Walk the tile in GGGS cell order (row 0 = south, row-major) -- the same order
   // BathymetryTile's bands use -- and prime every finite-depth cell.
   gggs::CellAreaIterator it(grid);
   std::size_t k = 0;
   for (; it.valid() && k < depth.size(); it.next(), ++k) {
+    if (mask_depth && k < mask_depth->size() && !std::isnan((*mask_depth)[k])) {
+      continue;  // mask (Processed) already covers this cell -- do not layer under it
+    }
     const double d = depth[k];
     if (std::isnan(d)) {
       continue;  // no-data cell -- nothing to prime
@@ -270,6 +294,14 @@ void primeFromTile(
   }
 }
 
+void primeFromTile(
+  const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
+  bool seed_settled)
+{
+  // No overlap mask: prime every finite-depth cell (the single-layer prime path).
+  primeFromTileSkippingMask(tile, /*mask=*/nullptr, map_sheet, seed_settled);
+}
+
 void loadIntoSheet(
   const marine_bathymetry_store::BathymetryStore & store,
   marine_bathymetry_store::SourceLayer layer,
@@ -280,6 +312,31 @@ void loadIntoSheet(
   // tiles directly. Empty map -> no-op.
   for (const auto & grid_tile : store.tiles(layer)) {
     primeFromTile(grid_tile.second, map_sheet, seed_settled);
+  }
+}
+
+void loadDraftSkippingProcessed(
+  const marine_bathymetry_store::BathymetryStore & store,
+  GeoMapSheet & map_sheet,
+  bool seed_settled)
+{
+  // Second half of the fused Processed-over-Draft prime (ADR-0010 D8): the caller
+  // seeds Processed FULLY first (loadIntoSheet(..., Processed, ...)), then calls
+  // this to layer Draft only where Processed left a gap. Each Draft tile is primed
+  // through primeFromTileSkippingMask with the same-GridIndex Processed tile as its
+  // mask, so an overlapped cell keeps ONLY its Processed hypothesis -- deterministic
+  // Processed-wins independent of CUBE's chooseHypothesis tie-break, matching the
+  // store's query-side `Processed > Draft` walk. Empty Draft layer -> no-op.
+  const auto & processed_tiles =
+    store.tiles(marine_bathymetry_store::SourceLayer::Processed);
+  for (const auto & [index, draft_tile] :
+    store.tiles(marine_bathymetry_store::SourceLayer::Draft))
+  {
+    const auto p_it = processed_tiles.find(index);
+    primeFromTileSkippingMask(
+      draft_tile,
+      p_it != processed_tiles.end() ? &p_it->second : nullptr,
+      map_sheet, seed_settled);
   }
 }
 
@@ -451,11 +508,11 @@ void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
   if (!tile.dirty()) {
     return;
   }
-  // The off-boat CUBE re-run is the authoritative product: always the `survey`
-  // layer (uma#248 collapsed the draft/processed split into one).
+  // The off-boat CUBE re-run is the authoritative product: always the `processed`
+  // layer (ADR-0010 D8 re-split the fused survey layer into processed + draft).
   const std::string layer_dir = cfg_.store_dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Survey);
+    marine_bathymetry_store::SourceLayer::Processed);
   std::filesystem::create_directories(layer_dir);
   // tile_io::saveTile writes the GTiff directly to the final path and checks the
   // flush/close result (an I/O error or full disk throws), but it is NOT crash-atomic:
@@ -465,6 +522,35 @@ void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
   marine_bathymetry_store::saveTile(
     tile, layer_dir + "/" + marine_bathymetry_store::tileFilename(index));
   ++bathy_persisted_;
+
+  // Cross-layer anti-clobber (ADR-0010 D8): a processed write clears the draft
+  // cells it overlaps, so stale live-CUBE draft never shadows the authoritative
+  // re-run in the display cache or wastes disk. The store owns this semantics via
+  // the public clearOverlappedDraft, so this direct-saveTile producer applies it
+  // exactly as importGeoTiff does. This path keeps no persistent in-memory store,
+  // so load the tile's window (pulls in any overlapping draft tile), clear against
+  // the just-written processed tile, and persist only the touched (dirtied) draft
+  // tiles. Clearing is an optimization, not a correctness requirement -- the query
+  // overlay already resolves Processed > Draft -- so a failure here is logged and
+  // swallowed: the authoritative processed write above already succeeded and must
+  // not be lost, nor the import aborted.
+  try {
+    marine_bathymetry_store::BathymetryStore scratch =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(cfg_.cell_size_m);
+    const auto sw = index.southWestPosition();
+    const auto ne = index.northEastPosition();
+    marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
+    const auto cleared = scratch.clearOverlappedDraft(tile);
+    if (cleared.cells_cleared > 0) {
+      marine_bathymetry_store::save(scratch, cfg_.store_dir, nullptr);
+    }
+  } catch (const std::exception & e) {
+    std::cerr << "import_bag: could not clear overlapped draft for processed tile "
+              << index << ": " << e.what()
+              << " (processed write stands; stale draft may briefly shadow the "
+      "display cache until the next processed pass or a manual clear)"
+              << std::endl;
+  }
 }
 
 void ImportAccumulator::persistBackscatterTile(const gggs::GridIndex & index)
@@ -589,7 +675,7 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
     const auto ne = index.northEastPosition();
     marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
     const auto & tiles =
-      scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
+      scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
     auto it = tiles.find(index);
     if (it != tiles.end()) {
       // seed_settled=true: restore each cell's settled depth/uncertainty as a CUBE
@@ -597,6 +683,23 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
       primeFromTile(it->second, sheet_);
     }
   } catch (const std::exception & e) {
+    // Mirror seedNewTile's permanent-vs-transient split (belt-and-suspenders here):
+    // a persisting legacy `survey/` means the ADR-0010 D8 migration REFUSED the store
+    // and will for every tile, so degrading tile-by-tile would silently gut the import
+    // -- abort loudly instead. By call ordering this is normally unreachable: a tile
+    // only reaches eviction/reload AFTER seedNewTile touched the same store_dir on its
+    // first touch, which would already have aborted an ambiguous/refused store; but
+    // guarding here too keeps the invariant local rather than resting on that ordering.
+    if (legacySurveyDirPersists(cfg_.store_dir)) {
+      throw std::runtime_error(
+              "import_bag: ABORTING -- store '" + cfg_.store_dir + "' still has a "
+              "legacy 'survey/' layer dir after the ADR-0010 D8 auto-migration refused "
+              "it (symlinked, ambiguous with 'processed/', or an uncommittable rename) "
+              "while reloading an evicted tile; the refusal is store-wide, so the "
+              "import cannot proceed. Resolve by hand (replace a symlink with a real "
+              "dir, or merge/remove one of 'survey/' and 'processed/'). Underlying "
+              "error: " + std::string(e.what()));
+    }
     // The on-disk surface is the real data: on a load error the caller drops the
     // partial re-created grid rather than let a later save clobber the intact file.
     // The tile stays evicted, so a later batch that revisits it retries the reload;
@@ -789,21 +892,70 @@ bool primePriorLayersForTile(
   }
   return primed;
 }
+
 }  // namespace
+
+bool legacySurveyDirPersists(const std::string & store_dir)
+{
+  if (store_dir.empty()) {
+    return false;
+  }
+  namespace fs = std::filesystem;
+  const fs::path survey = fs::path(store_dir) / "survey";
+  // A legacy `survey/` that is STILL present after a load/loadWindow threw means the
+  // ADR-0010 D8 auto-migration REFUSED it -- and refuses identically for every tile
+  // (the condition is store-wide, not per-tile). All three refusal variants leave
+  // `survey/` behind: a symlinked `survey/`, an ambiguous both-`survey/`-and-
+  // `processed/` store, or a rename that could not commit (read-only fs). A
+  // SUCCESSFUL migration renames `survey/` to `processed/` (so it is gone), and a
+  // store that never had one has none -- so keying on `survey/`'s persistence, not
+  // on the throw's message nor on the both-dirs case alone, tells this permanent,
+  // whole-store failure apart from a transient single-tile read error. is_directory
+  // FOLLOWS symlinks (a real dir OR a link to one); is_symlink additionally catches
+  // a symlinked `survey/` whose target is missing/not-a-dir -- the variant an
+  // is_directory-only probe would miss and then silently degrade tile-by-tile.
+  // Fail SAFE toward the loud abort (ADR-0010 D8 intent): a genuine stat failure
+  // (EACCES/EIO/ELOOP) must not be read as "no survey/ -- store is clean" and
+  // silently degrade a permanent migration refusal into a transient per-tile skip.
+  // But the normal clean-store case (survey/ simply absent) MUST return false --
+  // and on libstdc++ `fs::is_directory(p, ec)` / `is_symlink(p, ec)` DO set
+  // ec = ENOENT (or ENOTDIR) for a missing path (contrary to the assumption of an
+  // earlier revision), so "any ec set" cannot mean failure or this would refuse
+  // EVERY store without a survey/ layer. Classify the ec instead: ENOENT/ENOTDIR
+  // means survey/ genuinely does not exist (clean store -> false); any OTHER error
+  // means the probe could not rule a persisting survey/ out -> fail safe to abort.
+  const auto genuine_stat_error = [](const std::error_code & ec) {
+      return ec && ec != std::errc::no_such_file_or_directory &&
+             ec != std::errc::not_a_directory;
+    };
+  // is_directory FOLLOWS the link (a real dir OR a link to one); check its ec before
+  // the symlink probe so a symlinked survey/ pointing at a real dir short-circuits.
+  std::error_code dir_ec;
+  if (fs::is_directory(survey, dir_ec) || genuine_stat_error(dir_ec)) {
+    return true;
+  }
+  // is_directory was a clean false (survey/ absent or not a dir): still catch a
+  // symlinked survey/ whose target is missing/not-a-dir -- the variant an
+  // is_directory-only probe misses -- again failing safe on a genuine stat error.
+  std::error_code link_ec;
+  return fs::is_symlink(survey, link_ec) || genuine_stat_error(link_ec);
+}
 
 bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
 {
-  // Two-rung seed precedence (#96), run once per tile on first touch. survey wins
-  // over reference: a survey tile is measured CUBE data (settle it, seed its
+  // Two-rung seed precedence (#96), run once per tile on first touch. processed wins
+  // over reference: a processed tile is measured CUBE data (settle it, seed its
   // backscatter); a reference tile is a coarse read-only prior (gate only).
 
-  // Rung 1 -- survey: a pre-existing survey bathy tile (an incremental import into
-  // an existing store, or -- via reloadEvictedTile -- an already-written tile).
-  // loadWindow silently returns 0 when store_dir has no survey/ layer yet (a fresh
-  // import), so this falls through to the reference rung with no error/warning.
-  // skip_survey_seed disables this rung for the batch-regen gather: replaying a
-  // tile's complete sounding population onto a warm-start from that same tile in the
-  // OUTPUT store would double-count it (a silent blend, not an exact rebuild).
+  // Rung 1 -- processed: a pre-existing processed bathy tile (an incremental import
+  // into an existing store, or -- via reloadEvictedTile -- an already-written tile).
+  // The off-boat re-run reads back its own authoritative `processed` layer, not the
+  // live `draft` (ADR-0010 D8). loadWindow silently returns 0 when store_dir has no
+  // processed/ layer yet (a fresh import), so this falls through to the reference
+  // rung with no error/warning. skip_survey_seed disables this rung for the
+  // batch-regen gather: replaying a tile's complete sounding population onto a
+  // warm-start from that same tile in the OUTPUT store would double-count it (a
+  // silent blend, not an exact rebuild).
   if (!cfg_.store_dir.empty() && !cfg_.skip_survey_seed) {
     try {
       marine_bathymetry_store::BathymetryStore scratch =
@@ -812,11 +964,11 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
       const auto ne = index.northEastPosition();
       marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
       const auto & tiles =
-        scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
+        scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
       auto it = tiles.find(index);
       if (it != tiles.end()) {
-        // Settled warm-start: the survey layer round-trips as a CUBE hypothesis and
-        // refines under new soundings (ADR-0001).
+        // Settled warm-start: the processed layer round-trips as a CUBE hypothesis
+        // and refines under new soundings (ADR-0001).
         primeFromTile(it->second, sheet_, /*seed_settled=*/true);
         // Reconstruct each cell's corrected-intensity Welford from the survey
         // backscatter tile so the re-run's beams blend with the stored population
@@ -842,6 +994,28 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
         return true;
       }
     } catch (const std::exception & e) {
+      // Distinguish a PERMANENT store-wide failure from a transient per-tile one.
+      // If a legacy `survey/` layer dir PERSISTS, loadWindow above threw from the
+      // ADR-0010 D8 migration REFUSING it -- a symlinked `survey/`, an ambiguous
+      // both-`survey/`-and-`processed/` store, or a rename it could not commit -- and
+      // it will throw identically for every tile (a successful migration would have
+      // renamed `survey/` away). Degrading tile-by-tile (return false) would then drop
+      // EVERY batch's soundings and silently emit a near-empty store. Abort the whole
+      // import loudly instead so the operator resolves the store by hand. (Uncaught
+      // here -> addBatch -> import_bag main, whose ping loop catches only
+      // TransformException, so this propagates out and terminates the process with a
+      // non-zero status -- no partial store is finalized.)
+      if (legacySurveyDirPersists(cfg_.store_dir)) {
+        throw std::runtime_error(
+                "import_bag: ABORTING -- store '" + cfg_.store_dir + "' still has a "
+                "legacy 'survey/' layer dir after the ADR-0010 D8 auto-migration "
+                "refused it (it is symlinked, the store also has a 'processed/' dir, "
+                "or the rename could not commit); the migration refuses identically "
+                "for every tile, so the import cannot seed and would silently produce "
+                "a near-empty result. Resolve by hand (replace a symlink with a real "
+                "dir, or merge/remove one of 'survey/' and 'processed/'). Underlying "
+                "error: " + e.what());
+      }
       // A survey-seed read error means the on-disk survey tile EXISTS but could not
       // be loaded (a fresh import returns 0 tiles WITHOUT throwing, so it never
       // reaches here). Accumulating from scratch and then persisting would overwrite

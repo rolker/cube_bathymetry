@@ -124,7 +124,7 @@ std::map<gggs::CellIndex, std::pair<double, double>> loadBathyCells(
   marine_bathymetry_store::load(store, store_dir);
   std::map<gggs::CellIndex, std::pair<double, double>> out;
   for (const auto & grid_tile : store.tiles(
-      marine_bathymetry_store::SourceLayer::Survey))
+      marine_bathymetry_store::SourceLayer::Processed))
   {
     const auto & depth = grid_tile.second.depthBand();
     const auto & unc = grid_tile.second.uncertaintyBand();
@@ -373,13 +373,13 @@ TEST(ImportEviction, NeverDropsTileWhenPersistFails)
   const std::string root = makeTempDir("persistfail");
   const std::string store_dir = root + "/store";
   std::filesystem::create_directories(store_dir);
-  // layerDirName(Survey) == "survey": plant a FILE there so
+  // layerDirName(Processed) == "processed": plant a FILE there so
   // create_directories() throws and persistBathyTile cannot write.
   {
     std::ofstream blocker(
       store_dir + "/" +
       marine_bathymetry_store::layerDirName(
-        marine_bathymetry_store::SourceLayer::Survey));
+        marine_bathymetry_store::SourceLayer::Processed));
     blocker << "not a directory";
   }
 
@@ -559,9 +559,9 @@ TEST(ImportEviction, ChartLayerSeedRejectsDeepBlunder)
 
 // Evict/revisit keeps the prior gate (#118): a tile whose predicted surface came
 // only from the reference prime used to return from eviction with the gate OFF —
-// reloadEvictedTile restored the Survey layer only, so a cell never surveyed
+// reloadEvictedTile restored the Processed layer only, so a cell never surveyed
 // (prior-gated only) accepted a false-deep sounding on revisit. The fix re-primes
-// the prior FIRST on reload (then the survey restore overwrites where measured
+// the prior FIRST on reload (then the processed restore overwrites where measured
 // data exists). Here: survey one cell of a reference-gated tile, force its
 // eviction with spread batches, revisit with a deep blunder at a DIFFERENT cell
 // of the same tile — the blunder must still be rejected. (Revert the reload
@@ -948,6 +948,235 @@ TEST(ImportEviction, BoundaryFlushCrossLevelReferenceRejectsDeepBlunder)
   EXPECT_TRUE(with.empty())
     << "the containing coarse tile must gate the deep blunder even when a flush "
        "survey tile also loads the edge-adjacent coarse neighbor";
+
+  std::filesystem::remove_all(root);
+}
+
+// Cross-layer anti-clobber on the direct-write import path (ADR-0010 D8): a
+// processed write must clear the overlapped draft cells via the store's public
+// clearOverlappedDraft (parity with the GeoTIFF importer), so stale live-CUBE
+// draft never shadows the authoritative re-run. Seed a draft cell that the import
+// WILL overlap and another draft cell in a different, un-surveyed tile that it will
+// NOT. After the import: processed holds the surveyed cell, the overlapped draft
+// cell is cleared to no-data, and the unrelated draft cell survives (clearing is
+// scoped to the processed tile, not a global wipe).
+TEST(ImportEviction, ProcessedImportClearsOverlappedDraft)
+{
+  constexpr double kLat = 43.0;
+  constexpr double kLon = -70.0;
+
+  const std::string root = makeTempDir("draftclear");
+  const std::string store_dir = root + "/store";
+  std::filesystem::create_directories(store_dir);
+
+  marine_bathymetry_store::BathymetryStore probe =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+  const gggs::CellIndex overlapped = probe.cellIndex(kLat, kLon);
+  // A cell in a clearly different tile the survey never visits.
+  const gggs::CellIndex untouched = probe.cellIndex(kLat + 1.0, kLon - 1.0);
+  ASSERT_NE(overlapped.grid(), untouched.grid())
+    << "the untouched seed cell must live in a different tile";
+
+  // Seed a DRAFT surface on disk with both cells.
+  {
+    marine_bathymetry_store::BathymetryStore seed =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    seed.set(
+      marine_bathymetry_store::SourceLayer::Draft, overlapped, {-11.0, 0.5});
+    seed.set(
+      marine_bathymetry_store::SourceLayer::Draft, untouched, {-22.0, 0.5});
+    ASSERT_GT(marine_bathymetry_store::save(seed, store_dir), 0u);
+  }
+
+  // Run a processed import that surveys ONLY the overlapped cell's position.
+  runImport(
+    {surveyCell(kLat, kLon, 12.0f, 30.0f)}, store_dir, /*bs_dir=*/"", /*budget=*/0);
+
+  marine_bathymetry_store::BathymetryStore out =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+  marine_bathymetry_store::load(out, store_dir);
+
+  // Processed holds the authoritative surveyed cell.
+  const auto processed_cell =
+    out.get(marine_bathymetry_store::SourceLayer::Processed, overlapped);
+  ASSERT_TRUE(processed_cell.has_value() && processed_cell->hasData())
+    << "the processed re-run must persist the surveyed cell";
+
+  // The overlapped draft cell was cleared to no-data by the processed write.
+  const auto draft_overlapped =
+    out.get(marine_bathymetry_store::SourceLayer::Draft, overlapped);
+  EXPECT_TRUE(!draft_overlapped.has_value() || !draft_overlapped->hasData())
+    << "the overlapped draft cell must be cleared by the processed write";
+
+  // The unrelated draft cell (different tile) survives -- clearing is scoped, not
+  // a global wipe.
+  const auto draft_untouched =
+    out.get(marine_bathymetry_store::SourceLayer::Draft, untouched);
+  ASSERT_TRUE(draft_untouched.has_value() && draft_untouched->hasData())
+    << "a draft cell the processed data does not cover must survive";
+  EXPECT_NEAR(draft_untouched->depth, -22.0, 1e-6);
+
+  std::filesystem::remove_all(root);
+}
+
+// Fused Processed-over-Draft prime priority (ADR-0010 D8, cube#133 review r1):
+// where Processed and Draft carry CONFLICTING depths on the same cell, the primed
+// sheet must report the PROCESSED depth -- the store's query-side `Processed > Draft`
+// walk -- not the Draft depth. The original prime seeded Draft-then-Processed and
+// leaned on seeding order; but two settled 1-sample hypotheses tie-break in CUBE's
+// chooseHypothesis to the FIRST-seeded, so that reported Draft on overlap (the
+// must-fix). The fix seeds Processed fully, then layers Draft with a per-cell filter
+// (loadDraftSkippingProcessed) that skips any cell Processed already covers, so the
+// overlapped cell carries only the Processed hypothesis -- deterministic regardless
+// of the tie-break, and it also keeps the predicted-surface prior Processed's (no
+// Draft write lands on the cell at all). This test pins the observable contract:
+// the overlapped cell reports the Processed depth, while a Draft-only cell in a tile
+// Processed does not cover is still primed from Draft (the skip is scoped, not a
+// blanket Draft drop).
+TEST(ImportEviction, FusedPrimeProcessedWinsOverConflictingDraft)
+{
+  constexpr double kLat = 43.0;
+  constexpr double kLon = -70.0;
+  constexpr double kProcessedDepth = -50.0;   // authoritative surface
+  constexpr double kDraftOverlapDepth = -11.0;  // stale live-CUBE surface (must lose)
+  constexpr double kDraftOnlyDepth = -22.0;    // Draft with no Processed cover
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+  const gggs::CellIndex overlapped = store.cellIndex(kLat, kLon);
+  const gggs::CellIndex draft_only = store.cellIndex(kLat + 1.0, kLon - 1.0);
+  ASSERT_NE(overlapped.grid(), draft_only.grid())
+    << "the Draft-only cell must live in a tile with no Processed coverage";
+
+  // Same cell, conflicting depths in the two layers -> the overlap under test.
+  store.set(
+    marine_bathymetry_store::SourceLayer::Processed, overlapped, {kProcessedDepth, 0.5});
+  store.set(
+    marine_bathymetry_store::SourceLayer::Draft, overlapped, {kDraftOverlapDepth, 0.5});
+  // A Draft cell Processed does not cover -> must still be primed from Draft.
+  store.set(
+    marine_bathymetry_store::SourceLayer::Draft, draft_only, {kDraftOnlyDepth, 0.5});
+
+  // The node's fused startup prime: Processed FULLY first, then Draft-skip-Processed.
+  GeoMapSheet sheet(kCellSize);
+  loadIntoSheet(store, marine_bathymetry_store::SourceLayer::Processed, sheet);
+  loadDraftSkippingProcessed(store, sheet);
+
+  // Read the primed settled depths back out of the sheet.
+  const auto tiles = mapSheetToTiles(sheet);
+  const auto depthAt = [&](const gggs::CellIndex & cell) -> double {
+      const auto t_it = tiles.find(cell.grid());
+      if (t_it == tiles.end()) {return std::nan("");}
+      const auto & depth = t_it->second.depthBand();
+      gggs::CellAreaIterator it(t_it->second.index());
+      std::size_t k = 0;
+      for (; it.valid() && k < depth.size(); it.next(), ++k) {
+        if (*it == cell) {return depth[k];}
+      }
+      return std::nan("");
+    };
+
+  const double primed_overlap = depthAt(overlapped);
+  ASSERT_FALSE(std::isnan(primed_overlap))
+    << "the overlapped cell must be primed from one of the two layers";
+  EXPECT_NEAR(primed_overlap, kProcessedDepth, 1e-2)
+    << "Processed must win the overlapped cell (got " << primed_overlap
+    << "; Draft would be " << kDraftOverlapDepth << ")";
+  EXPECT_GT(std::abs(primed_overlap - kDraftOverlapDepth), 1.0)
+    << "the overlapped cell must NOT report the stale Draft depth";
+
+  const double primed_draft_only = depthAt(draft_only);
+  ASSERT_FALSE(std::isnan(primed_draft_only))
+    << "a Draft cell with no Processed cover must still be primed from Draft";
+  EXPECT_NEAR(primed_draft_only, kDraftOnlyDepth, 1e-2)
+    << "the Draft-only cell must survive (the skip is scoped to Processed cells)";
+}
+
+// Ambiguous-store abort (ADR-0010 D8, cube#133 review r2): a store that holds BOTH a
+// legacy `survey/` and a `processed/` layer dir is a permanent, whole-store migration
+// REFUSAL -- loadWindow throws identically for every tile. seedNewTile must tell that
+// apart from a transient per-tile read error (which drops one tile and retries) and
+// abort the WHOLE import loudly, so import_bag terminates non-zero rather than
+// silently emitting a near-empty store. This pins the abort/rethrow path.
+TEST(ImportEviction, AmbiguousSurveyStoreAbortsImport)
+{
+  const std::string root = makeTempDir("ambiguous");
+  const std::string store_dir = root + "/store";
+  std::filesystem::create_directories(store_dir);
+
+  // Write a real `processed/` layer with one tile, then COPY it to `survey/` so the
+  // store holds both dirs -- exactly the half-migrated state the migration refuses.
+  {
+    marine_bathymetry_store::BathymetryStore seed =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    const gggs::CellIndex cell = seed.cellIndex(43.0, -70.0);
+    seed.set(marine_bathymetry_store::SourceLayer::Processed, cell, {-12.0, 0.5});
+    ASSERT_GT(marine_bathymetry_store::save(seed, store_dir), 0u);
+  }
+  std::filesystem::copy(
+    std::filesystem::path(store_dir) / "processed",
+    std::filesystem::path(store_dir) / "survey",
+    std::filesystem::copy_options::recursive);
+  ASSERT_TRUE(cube::legacySurveyDirPersists(store_dir))
+    << "the both-dirs store must be detected as a persisting legacy survey/ layer";
+
+  // First touch of the tile -> seedNewTile -> loadWindow -> migration refusal -> the
+  // guard must RETHROW (abort), not swallow-and-degrade.
+  GeoMapSheet sheet(kCellSize);
+  ImportAccumulator accumulator(sheet, makeConfig(store_dir, /*bs_dir=*/"", /*budget=*/0));
+  bool threw = false;
+  try {
+    accumulator.addBatch(surveyCell(43.0, -70.0, 12.0f, 30.0f));
+  } catch (const std::exception & e) {
+    threw = true;
+    EXPECT_NE(std::string(e.what()).find("ABORTING"), std::string::npos)
+      << "the abort must be the loud ambiguous-store message, got: " << e.what();
+  }
+  EXPECT_TRUE(threw) << "an ambiguous survey+processed store must abort the import";
+
+  std::filesystem::remove_all(root);
+}
+
+// Generalized guard (cube#133 review r2): a SYMLINKED `survey/` is also a permanent
+// migration refusal (renaming it would point `processed/` out of the store), but it
+// need not be accompanied by a `processed/` dir -- so a both-dirs-only check would
+// miss it and silently degrade tile-by-tile. legacySurveyDirPersists keys on the
+// survey/ path (is_symlink included), so this variant aborts too.
+TEST(ImportEviction, SymlinkedSurveyStoreAbortsImport)
+{
+  const std::string root = makeTempDir("symlinksurvey");
+  const std::string store_dir = root + "/store";
+  std::filesystem::create_directories(store_dir);
+
+  // A real directory holding one legacy tile, OUTSIDE the store, then a `survey/`
+  // symlink pointing at it -- no `processed/` dir present.
+  const std::string target = root + "/legacy_survey_target";
+  {
+    marine_bathymetry_store::BathymetryStore seed =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    const gggs::CellIndex cell = seed.cellIndex(43.0, -70.0);
+    seed.set(marine_bathymetry_store::SourceLayer::Processed, cell, {-12.0, 0.5});
+    ASSERT_GT(marine_bathymetry_store::save(seed, store_dir), 0u);
+  }
+  // Move the just-written processed/ out to the external target and link survey/ to it.
+  std::filesystem::rename(
+    std::filesystem::path(store_dir) / "processed", target);
+  std::filesystem::create_directory_symlink(
+    target, std::filesystem::path(store_dir) / "survey");
+  ASSERT_TRUE(cube::legacySurveyDirPersists(store_dir))
+    << "a symlinked survey/ must be detected as a persisting legacy layer";
+
+  GeoMapSheet sheet(kCellSize);
+  ImportAccumulator accumulator(sheet, makeConfig(store_dir, /*bs_dir=*/"", /*budget=*/0));
+  bool threw = false;
+  try {
+    accumulator.addBatch(surveyCell(43.0, -70.0, 12.0f, 30.0f));
+  } catch (const std::exception & e) {
+    threw = true;
+    EXPECT_NE(std::string(e.what()).find("ABORTING"), std::string::npos)
+      << "the abort must be the loud message, got: " << e.what();
+  }
+  EXPECT_TRUE(threw) << "a symlinked survey/ store must abort the import";
 
   std::filesystem::remove_all(root);
 }

@@ -242,11 +242,11 @@ TEST(StoreImport, LoadIntoSheetRoundTrip)
   // Copy the tile map (importTiles consumes it) but keep a reference set.
   std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles_copy = tiles;
   store.importTiles(
-    marine_bathymetry_store::SourceLayer::Survey, std::move(tiles));
+    marine_bathymetry_store::SourceLayer::Processed, std::move(tiles));
 
   GeoMapSheet loaded(1.0f);
   loadIntoSheet(
-    store, marine_bathymetry_store::SourceLayer::Survey, loaded);
+    store, marine_bathymetry_store::SourceLayer::Processed, loaded);
 
   std::size_t checked = 0;
   for (const auto & grid_tile : tiles_copy) {
@@ -276,7 +276,7 @@ TEST(StoreImport, LoadIntoSheetEmptyLayerIsNoOp)
     marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
   GeoMapSheet loaded(1.0f);
   loadIntoSheet(
-    store, marine_bathymetry_store::SourceLayer::Survey, loaded);
+    store, marine_bathymetry_store::SourceLayer::Processed, loaded);
   EXPECT_TRUE(loaded.grids().empty());
 }
 

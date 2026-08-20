@@ -321,22 +321,43 @@ public:
           marine_bathymetry_store::BathymetryStore::fromCellSize(
           static_cast<float>(cell_size_));
         marine_bathymetry_store::load(store, draft_dir_);
-        // The live node writes (and re-primes from) the `survey` layer since
-        // uma#248 collapsed the draft/processed split into one (ADR-0001 addendum).
+        // The live node WRITES the `draft` layer (ADR-0010 D8), but it PRIMES
+        // from Processed union Draft. On a boat's first boot after co-land, load()
+        // auto-migrates a legacy `survey/` dir to `processed/` (ADR-0010 D8), so
+        // priming from draft alone would warm-start from an empty layer and lose
+        // both the GeoMapSheet seed and the disk-serve catalog.
+        //
+        // Processed must WIN per cell where the two layers overlap (it is the
+        // authoritative surface; the store's own query walks `Processed > Draft`).
+        // Seeding order alone does NOT deliver that: two settled 1-sample
+        // hypotheses tie-break in CUBE's chooseHypothesis to the FIRST-seeded, so a
+        // Draft-then-Processed prime would report Draft on overlap. Instead seed
+        // Processed FULLY first, then layer Draft with a per-cell filter that SKIPS
+        // any cell Processed already covers (loadDraftSkippingProcessed) -- the
+        // overlapped cell then carries only the Processed hypothesis, deterministic
+        // regardless of the tie-break.
+        const auto & processed_tiles =
+          store.tiles(marine_bathymetry_store::SourceLayer::Processed);
         const auto & draft_tiles =
-          store.tiles(marine_bathymetry_store::SourceLayer::Survey);
-        if (!draft_tiles.empty()) {
+          store.tiles(marine_bathymetry_store::SourceLayer::Draft);
+        if (!processed_tiles.empty() || !draft_tiles.empty()) {
           cube::loadIntoSheet(
-            store, marine_bathymetry_store::SourceLayer::Survey, *geo_map_sheet_);
+            store, marine_bathymetry_store::SourceLayer::Processed, *geo_map_sheet_);
+          cube::loadDraftSkippingProcessed(store, *geo_map_sheet_);
           RCLCPP_INFO(get_logger(),
-            "Primed GeoMapSheet from %zu survey tiles under %s",
-            draft_tiles.size(), draft_dir_.c_str());
+            "Primed GeoMapSheet from %zu processed + %zu draft tiles under %s",
+            processed_tiles.size(), draft_tiles.size(), draft_dir_.c_str());
           // Seed the tile-version registry from ALL persisted tiles BEFORE the
           // trim (#106): the catalog advertises the full on-disk store, so
           // tiles evicted by the trim below stay advertised and disk-servable.
           // (Seeding from grids() AFTER the trim -- the previous order -- lost
           // the just-evicted tiles from the catalog, and the consumer's
           // prune-on-absence deleted valid coverage, ADR-0008 D4.)
+          //
+          // Seed from BOTH layers (each under its own dir for the mtime) so
+          // migrated `processed/` coverage is advertised too; catalog_builder_ is
+          // newest-wins per index, so a grid present in both takes the fresher
+          // file mtime.
           //
           // Version = the tile FILE's mtime, not now() (#106 review r1):
           // stamping the prime time made every reboot advertise the whole
@@ -346,33 +367,65 @@ public:
           // raster since uma#248, so the file stamp is the durable version
           // source. A stat failure falls back to now() -- worst case is one
           // redundant refresh of that tile, never loss.
-          const std::string survey_dir = draft_dir_ + "/" +
-            marine_bathymetry_store::layerDirName(
-            marine_bathymetry_store::SourceLayer::Survey);
           const std::int64_t fallback_version = now().nanoseconds();
-          for (const auto & [tile_index, tile] : draft_tiles) {
-            std::int64_t version = fallback_version;
-            struct stat st;
-            const std::string tile_path = survey_dir + "/" +
-              marine_bathymetry_store::tileFilename(tile_index);
-            if (::stat(tile_path.c_str(), &st) == 0) {
-              version = static_cast<std::int64_t>(st.st_mtim.tv_sec) *
-                1000000000LL + st.st_mtim.tv_nsec;
-            }
-            catalog_builder_.update(tile_index, version);
-          }
-          // Bound the prime to the resident budget (must-fix): loadIntoSheet loads
-          // the WHOLE store, so without this a restart mid-long-survey re-creates
-          // the unbounded RAM #70 prevents. Primed tiles are clean and already on
-          // disk, so dropping the cold ones is lossless; they reload on revisit.
-          // (The transient peak during the whole-store load before the trim is a
-          // known limitation -- a windowed prime needs a startup position that is
-          // not available at on_configure; tracked as a follow-up.)
+          const auto seed_catalog =
+            [&](marine_bathymetry_store::SourceLayer layer, const auto & tiles) {
+              const std::string layer_dir = draft_dir_ + "/" +
+                marine_bathymetry_store::layerDirName(layer);
+              for (const auto & entry : tiles) {
+                const auto & tile_index = entry.first;  // tile payload unused here
+                std::int64_t version = fallback_version;
+                struct stat st;
+                const std::string tile_path = layer_dir + "/" +
+                  marine_bathymetry_store::tileFilename(tile_index);
+                if (::stat(tile_path.c_str(), &st) == 0) {
+                  version = static_cast<std::int64_t>(st.st_mtim.tv_sec) *
+                    1000000000LL + st.st_mtim.tv_nsec;
+                }
+                catalog_builder_.update(tile_index, version);
+              }
+            };
+          seed_catalog(marine_bathymetry_store::SourceLayer::Draft, draft_tiles);
+          seed_catalog(
+            marine_bathymetry_store::SourceLayer::Processed, processed_tiles);
+          // Bound the prime to the resident budget (must-fix): the fused prime
+          // loads the WHOLE store, so without this a restart mid-long-survey
+          // re-creates the unbounded RAM #70 prevents. Primed tiles are clean and
+          // already on disk, so dropping the cold ones is lossless; they reload on
+          // revisit. (The transient peak before the trim is now the TWO-layer union:
+          // `store` holds BOTH the Processed AND the Draft tiles fully resident, and
+          // the sheet holds the fused Processed-over-Draft surface on top of them --
+          // higher than a single-layer prime. A windowed prime would bound it but
+          // needs a startup position not available at on_configure; tracked as a
+          // follow-up.)
           trimResidentToBudget();
         }
       } catch (const std::exception & e) {
-        // A missing/empty store dir is normal on a first run; a genuine load
-        // error must not block configure -- log and continue with an empty sheet.
+        // Explicit decision on an AMBIGUOUS/refused store (ADR-0010 D8), symmetric
+        // with the importer's loud abort: if a legacy `survey/` layer dir PERSISTS,
+        // load() threw because the auto-migration REFUSED the store (symlinked
+        // `survey/`, both `survey/` and `processed/` present, or an uncommittable
+        // rename) -- a permanent, whole-store condition, not a transient read glitch.
+        // Silently starting empty here would give the boat operator a COLD start
+        // (no warm-start seed, no disk-serve catalog) with no signal that the store
+        // needs manual attention, and every reboot would repeat it. Fail configure
+        // LOUDLY instead so the operator learns the store must be fixed by hand --
+        // the same loud failure import_bag raises rather than emitting a near-empty
+        // result.
+        if (cube::legacySurveyDirPersists(draft_dir_)) {
+          RCLCPP_ERROR(get_logger(),
+            "Refusing to configure: store '%s' still has a legacy 'survey/' layer "
+            "dir after the ADR-0010 D8 auto-migration refused it (it is symlinked, "
+            "the store also has a 'processed/' dir, or the rename could not commit): "
+            "%s. This is permanent -- starting empty would silently lose warm-start "
+            "and the disk-serve catalog. Resolve by hand (replace a symlink with a "
+            "real dir, or merge/remove one of 'survey/' and 'processed/') and "
+            "re-configure.", draft_dir_.c_str(), e.what());
+          return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+                 CallbackReturn::FAILURE;
+        }
+        // A missing/empty store dir is normal on a first run; a genuine transient
+        // load error must not block configure -- log and continue with an empty sheet.
         RCLCPP_WARN(get_logger(),
           "Could not load existing draft tiles from %s: %s (starting empty)",
           draft_dir_.c_str(), e.what());
@@ -1023,14 +1076,32 @@ private:
         marine_bathymetry_store::loadWindow(
           scratch, draft_dir_, index.southWestPosition(),
           index.northEastPosition(), nullptr);
-        const auto & tiles =
-          scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
-        const auto it = tiles.find(index);
-        if (it == tiles.end()) {
+        // Best source across Processed union Draft (ADR-0010 D8): serve the fused
+        // tile. Processed must win per overlapping cell (the store's query walks
+        // `Processed > Draft`), and seeding order alone cannot guarantee that -- two
+        // settled 1-sample hypotheses tie-break to the first-seeded in CUBE's
+        // chooseHypothesis. Seed Processed FULLY first, then layer Draft with a
+        // per-cell filter (primeFromTileSkippingMask with the Processed tile as
+        // mask) that skips any cell Processed already covers, so the overlapped cell
+        // keeps only the Processed hypothesis.
+        const auto & processed =
+          scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
+        const auto & draft =
+          scratch.tiles(marine_bathymetry_store::SourceLayer::Draft);
+        const auto d_it = draft.find(index);
+        const auto p_it = processed.find(index);
+        if (d_it == draft.end() && p_it == processed.end()) {
           continue;  // absent on disk after all; nothing to serve
         }
         cube::GeoMapSheet scratch_sheet(static_cast<float>(cell_size_));
-        cube::primeFromTile(it->second, scratch_sheet);
+        if (p_it != processed.end()) {
+          cube::primeFromTile(p_it->second, scratch_sheet);
+        }
+        if (d_it != draft.end()) {
+          cube::primeFromTileSkippingMask(
+            d_it->second,
+            p_it != processed.end() ? &p_it->second : nullptr, scratch_sheet);
+        }
         if (auto grid = scratch_sheet.gridAt(index)) {
           if (auto vt = cube::quantizeTile(*grid, stamp)) {
             sonar_tile_publisher_->publish(*vt);
@@ -1236,15 +1307,30 @@ private:
       const auto sw = index.southWestPosition();
       const auto ne = index.northEastPosition();
       marine_bathymetry_store::loadWindow(scratch, draft_dir_, sw, ne, nullptr);
-      const auto & tiles =
-        scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
-      auto it = tiles.find(index);
-      if(it != tiles.end()) {
-        cube::primeFromTile(it->second, *geo_map_sheet_);
+      // Best source across Processed union Draft (ADR-0010 D8): restore the fused
+      // cells. Processed must win per overlapping cell (the store's query walks
+      // `Processed > Draft`), and seeding order alone cannot guarantee that -- two
+      // settled 1-sample hypotheses tie-break to the first-seeded in CUBE's
+      // chooseHypothesis. Seed Processed FULLY first, then layer Draft with a
+      // per-cell filter (primeFromTileSkippingMask with the Processed tile as mask)
+      // that skips any cell Processed already covers, so the overlapped cell keeps
+      // only the Processed hypothesis.
+      const auto & processed =
+        scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
+      const auto & draft =
+        scratch.tiles(marine_bathymetry_store::SourceLayer::Draft);
+      const auto p_it = processed.find(index);
+      if (p_it != processed.end()) {
+        cube::primeFromTile(p_it->second, *geo_map_sheet_);
       }
-      // Survey cells restored, but if the prior read failed keep the tile evicted
+      if (const auto it = draft.find(index); it != draft.end()) {
+        cube::primeFromTileSkippingMask(
+          it->second,
+          p_it != processed.end() ? &p_it->second : nullptr, *geo_map_sheet_);
+      }
+      // Stored cells restored, but if the prior read failed keep the tile evicted
       // so the prior gate is retried on the next revisit (#118) -- the caller drops
-      // the tile; the intact on-disk survey surface is untouched.
+      // the tile; the intact on-disk surface is untouched.
       return prior_ok;
     } catch (const std::exception & e) {
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
@@ -1275,16 +1361,17 @@ private:
       return;
     }
 
-    // Single fused survey grid (unh_marine_autonomy#221, #248): tiles go directly
-    // under <draft_dir>/survey/ with no per-day epoch segment. The live node now
-    // writes the `survey` layer directly (uma#248 collapsed the draft/processed
-    // split; ADR-0001 addendum): a bounded/approximate boat-side product that an
-    // off-boat batch-regen later overwrites as authoritative. Newest value wins per
-    // cell, so successive saves and sessions accumulate into one grid.
+    // Single fused draft grid (unh_marine_autonomy#221): tiles go directly under
+    // <draft_dir>/draft/ with no per-day epoch segment. The live node writes the
+    // `draft` layer (ADR-0010 D8): a bounded/approximate boat-side product that an
+    // off-boat batch-regen later supersedes as the authoritative `processed` layer
+    // (Processed > Draft, and each processed write clears the overlapped draft
+    // cells). Newest value wins per cell, so successive saves and sessions
+    // accumulate into one grid.
     const std::string dir =
       draft_dir_ + "/" +
       marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Survey);
+      marine_bathymetry_store::SourceLayer::Draft);
 
     std::size_t written = 0;
     try {

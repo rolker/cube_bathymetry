@@ -123,7 +123,7 @@ TEST(TileEvictionRss, ResidentCountBoundedWhileDiskGrows)
   const std::string draft_dir =
     dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Survey);
+    marine_bathymetry_store::SourceLayer::Draft);
   std::filesystem::create_directories(draft_dir);
 
   GeoMapSheet sheet(1.0f);

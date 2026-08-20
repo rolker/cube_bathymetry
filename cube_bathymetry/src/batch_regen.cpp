@@ -96,6 +96,26 @@ GeoSounding fromRecord(const ScatterRecord & r)
 BatchRegen::BatchRegen(SheetFactory factory, ImportAccumulatorConfig config)
 : factory_(std::move(factory)), cfg_(std::move(config)), index_sheet_(factory_())
 {
+  // PREFLIGHT (cube#133): batch-regen is a WRITE-PATH tool and, unlike the live node
+  // and store_import's load()/loadWindow() catches, it NEVER load()s the output store --
+  // so the ADR-0010 D8 `survey/`->`processed/` auto-migration never fires here. If the
+  // output store still carries a legacy `survey/` (a pre-D8 store, or one whose migration
+  // was REFUSED), the first processed write in finalize() would create `processed/`
+  // ALONGSIDE the surviving `survey/` -- exactly the ambiguous both-dirs state every
+  // future load() then permanently refuses (a nightly regen would silently brick the
+  // store for all loaders until an operator intervenes). Refuse LOUDLY here, before a
+  // single tile is scattered or written, rather than producing that state. Write-path
+  // tools do NOT migrate (documented invariant) -- the operator must migrate first.
+  if (legacySurveyDirPersists(cfg_.store_dir)) {
+    throw std::runtime_error(
+            "batch_regen: output store '" + cfg_.store_dir +
+            "' still has a legacy `survey/` layer (ADR-0010 D8). batch-regen is a "
+            "write-path tool and does NOT migrate; writing here would leave `processed/` "
+            "alongside `survey/`, the ambiguous state future store loads permanently "
+            "refuse. Migrate the store first -- run a store load (the live cube_bathymetry "
+            "node, or store_import) to auto-migrate `survey/`->`processed/`, or rename "
+            "`survey/` to `processed/` manually -- then re-run batch-regen.");
+  }
 }
 
 BatchRegen::~BatchRegen()
@@ -247,20 +267,20 @@ void BatchRegen::finalize(
   flushOpenStreams();
   closeAllStreams();
 
-  // A non-empty output survey layer means batch-regen is rebuilding over a populated
-  // store. The gather forces from-scratch (skip_survey_seed below) so it never blends
-  // onto the tiles it rebuilds, but tiles NOT touched by this run stay behind as
-  // stale survey data mixed with the fresh rebuild -- warn so the operator can point
-  // -o at an empty directory for a clean exact rebuild.
+  // A non-empty output processed layer means batch-regen is rebuilding over a
+  // populated store. The gather forces from-scratch (skip_survey_seed below) so it
+  // never blends onto the tiles it rebuilds, but tiles NOT touched by this run stay
+  // behind as stale processed data mixed with the fresh rebuild -- warn so the
+  // operator can point -o at an empty directory for a clean exact rebuild.
   if (!cfg_.store_dir.empty()) {
-    const std::string survey_dir = cfg_.store_dir + "/" +
+    const std::string processed_dir = cfg_.store_dir + "/" +
       marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Survey);
+      marine_bathymetry_store::SourceLayer::Processed);
     std::error_code ec;
-    if (std::filesystem::is_directory(survey_dir, ec) &&
-      !std::filesystem::is_empty(survey_dir, ec))
+    if (std::filesystem::is_directory(processed_dir, ec) &&
+      !std::filesystem::is_empty(processed_dir, ec))
     {
-      std::cerr << "batch_regen: WARNING output survey layer '" << survey_dir
+      std::cerr << "batch_regen: WARNING output processed layer '" << processed_dir
                 << "' is not empty; batch-regen rebuilds each touched tile from "
         "scratch, but any pre-existing tile this run does NOT touch is left in "
         "place (stale data mixed with the rebuild). Point -o at an empty directory "

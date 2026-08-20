@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <set>
@@ -136,7 +137,7 @@ std::map<gggs::CellIndex, std::pair<double, double>> loadBathyCells(
   marine_bathymetry_store::load(store, store_dir);
   std::map<gggs::CellIndex, std::pair<double, double>> out;
   for (const auto & grid_tile : store.tiles(
-      marine_bathymetry_store::SourceLayer::Survey))
+      marine_bathymetry_store::SourceLayer::Processed))
   {
     const auto & depth = grid_tile.second.depthBand();
     const auto & unc = grid_tile.second.uncertaintyBand();
@@ -353,6 +354,41 @@ TEST(BatchRegen, ScratchDirCleanedUpAfterFinalize)
     << "finalize must delete the scatter scratch dir";
   EXPECT_TRUE(regen.scratchDir().empty()) << "finalize must clear the scratch path";
   EXPECT_GT(regen.bathyTilesPersisted(), 0u);
+
+  std::filesystem::remove_all(root);
+}
+
+// PREFLIGHT (cube#133): batch-regen never load()s the output store, so the ADR-0010
+// D8 `survey/`->`processed/` auto-migration never fires from this write-path tool. An
+// output store still carrying a legacy `survey/` must be REFUSED at construction --
+// before a single tile is scattered or written -- so a nightly regen cannot leave
+// `processed/` alongside the surviving `survey/` (the ambiguous both-dirs state every
+// future load then permanently refuses).
+TEST(BatchRegen, LegacySurveyStoreRefusedBeforeAnyWrite)
+{
+  const std::string root = makeTempDir("legacy_survey");
+  const std::string store_dir = root + "/store";
+  const std::string bs_dir = root + "/bs";
+
+  // A store that predates (or was refused by) the D8 migration: a populated `survey/`
+  // layer still present on disk.
+  const std::string survey_dir = store_dir + "/survey";
+  std::filesystem::create_directories(survey_dir);
+  {std::ofstream(survey_dir + "/legacy_tile.tile") << "stale";}
+  ASSERT_TRUE(legacySurveyDirPersists(store_dir))
+    << "test setup: the store must present a persisting legacy survey/ layer";
+
+  // Construction itself must refuse -- the preflight runs before scatter/finalize.
+  EXPECT_THROW(
+    BatchRegen(sheetFactory(), makeConfig(store_dir, bs_dir)),
+    std::runtime_error);
+
+  // Nothing was written: no `processed/` layer was created alongside `survey/`.
+  const std::string processed_dir = store_dir + "/" +
+    marine_bathymetry_store::layerDirName(
+    marine_bathymetry_store::SourceLayer::Processed);
+  EXPECT_FALSE(std::filesystem::exists(processed_dir))
+    << "batch-regen must not create processed/ (or any output) when it refuses";
 
   std::filesystem::remove_all(root);
 }

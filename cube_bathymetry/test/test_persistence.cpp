@@ -69,14 +69,14 @@ std::vector<GeoSounding> makeSoundings()
 }
 
 // Mirror cube_bathymetry_node::saveDirtyTiles() at library level: write each
-// dirty grid as a survey tile under <dir>/survey/ (flat, no epoch segment).
+// dirty grid as a draft tile under <dir>/draft/ (flat, no epoch segment).
 std::size_t saveDirty(GeoMapSheet & sheet, const std::string & dir)
 {
   const std::set<gggs::GridIndex> dirty = sheet.dirtyGrids();
   const std::string out =
     dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Survey);
+    marine_bathymetry_store::SourceLayer::Draft);
   std::filesystem::create_directories(out);
   std::size_t written = 0;
   for (const auto & index : dirty) {
@@ -106,14 +106,14 @@ std::string makeTempDir(const std::string & tag)
 }
 }  // namespace
 
-// confirm layerDirName(Survey) == "survey" so the hand-built save path matches the
-// directory load() scans (uma#248 renamed the live layer draft -> survey).
-TEST(Persistence, SurveyLayerDirNameIsSurvey)
+// confirm layerDirName(Draft) == "draft" so the hand-built save path matches the
+// directory load() scans (ADR-0010 D8 re-split the live layer survey -> draft).
+TEST(Persistence, DraftLayerDirNameIsDraft)
 {
   EXPECT_EQ(
     marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Survey),
-    "survey");
+      marine_bathymetry_store::SourceLayer::Draft),
+    "draft");
 }
 
 // Save dirty tiles, then load the whole store back and verify the depth/
@@ -141,7 +141,7 @@ TEST(Persistence, SaveDirtyThenStoreLoadRoundTrips)
   EXPECT_EQ(loaded_count, written);
 
   const auto & draft_tiles =
-    loaded.tiles(marine_bathymetry_store::SourceLayer::Survey);
+    loaded.tiles(marine_bathymetry_store::SourceLayer::Draft);
   ASSERT_FALSE(draft_tiles.empty()) << "draft tiles must be present after load";
 
   // Every finite reference cell must match a loaded cell (depth + uncertainty).
@@ -199,7 +199,7 @@ TEST(Persistence, PeriodicSaveEqualsEndOfSessionExport)
     marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
   marine_bathymetry_store::load(loaded, dir_periodic);
   const auto & draft_tiles =
-    loaded.tiles(marine_bathymetry_store::SourceLayer::Survey);
+    loaded.tiles(marine_bathymetry_store::SourceLayer::Draft);
   ASSERT_FALSE(draft_tiles.empty());
 
   EXPECT_EQ(draft_tiles.size(), ref_tiles.size());
@@ -228,7 +228,7 @@ std::size_t finiteCellCount(
   const marine_bathymetry_store::BathymetryStore & store,
   const gggs::GridIndex & index)
 {
-  const auto & tiles = store.tiles(marine_bathymetry_store::SourceLayer::Survey);
+  const auto & tiles = store.tiles(marine_bathymetry_store::SourceLayer::Draft);
   auto it = tiles.find(index);
   if (it == tiles.end()) {
     return 0;
@@ -291,7 +291,7 @@ TEST(Persistence, RevisitAfterEvictPreservesData)
   GeoMapSheet reloaded(1.0f);
   {
     marine_bathymetry_store::BathymetryStore store = loadDraft(dir);
-    loadIntoSheet(store, marine_bathymetry_store::SourceLayer::Survey, reloaded);
+    loadIntoSheet(store, marine_bathymetry_store::SourceLayer::Draft, reloaded);
   }
   reloaded.addSoundings(makeSparseResurvey());  // touches ~one cell
   ASSERT_GT(saveDirty(reloaded, dir), 0u);

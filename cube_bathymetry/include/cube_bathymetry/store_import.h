@@ -205,6 +205,24 @@ namespace cube
     const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
     bool seed_settled = true);
 
+/// @brief Prime @p tile into @p map_sheet, SKIPPING every cell that @p mask
+///        already covers with a finite depth (per-cell overlap resolution).
+///
+/// The deterministic core of the fused Processed-over-Draft prime (ADR-0010 D8):
+/// @p mask, when non-null, is an overlapping tile at the SAME GridIndex (the
+/// Processed tile shadowing @p tile's Draft data). Because both tiles share the
+/// grid geometry and cell size, their bands index cell-for-cell by the same `k`,
+/// so a cell the mask covers is left untouched and the fused sheet keeps ONLY the
+/// mask's hypothesis there -- Processed-wins-on-overlap regardless of CUBE's
+/// chooseHypothesis tie-break, matching the store's query-side `Processed > Draft`
+/// walk. A null @p mask primes every finite-depth cell (equivalent to
+/// @ref primeFromTile). @p seed_settled forwards to the same warm-start vs.
+/// predicted-only semantics documented on @ref primeFromTile.
+  void primeFromTileSkippingMask(
+    const marine_bathymetry_store::BathymetryTile & tile,
+    const marine_bathymetry_store::BathymetryTile * mask, GeoMapSheet & map_sheet,
+    bool seed_settled = true);
+
 /// @brief Load every tile of @p layer from @p store into @p map_sheet,
 ///        priming predicted depths cell-by-cell.
 ///
@@ -220,6 +238,23 @@ namespace cube
   void loadIntoSheet(
     const marine_bathymetry_store::BathymetryStore & store,
     marine_bathymetry_store::SourceLayer layer,
+    GeoMapSheet & map_sheet,
+    bool seed_settled = true);
+
+/// @brief Layer the `Draft` tiles of @p store into @p map_sheet, SKIPPING every
+///        cell already covered by the overlapping `Processed` tile.
+///
+/// The second half of the fused Processed-over-Draft prime (ADR-0010 D8): the
+/// caller seeds `Processed` FULLY first (@ref loadIntoSheet with
+/// `SourceLayer::Processed`), then calls this to add `Draft` only where `Processed`
+/// left a gap. Each Draft tile is primed via @ref primeFromTileSkippingMask with
+/// its same-GridIndex Processed tile (if any) as the mask, so an overlapped cell
+/// keeps ONLY its Processed hypothesis -- deterministic Processed-wins independent
+/// of CUBE's chooseHypothesis tie-break, matching the store's query-side
+/// `Processed > Draft` walk. A no-op if the `Draft` layer holds no tiles.
+/// @p seed_settled forwards to @ref primeFromTile.
+  void loadDraftSkippingProcessed(
+    const marine_bathymetry_store::BathymetryStore & store,
     GeoMapSheet & map_sheet,
     bool seed_settled = true);
 
@@ -256,6 +291,26 @@ namespace cube
   PriorLayerPrimeResult primeFromPriorLayers(
     const marine_bathymetry_store::BathymetryStore & store,
     GeoMapSheet & map_sheet);
+
+/// @brief True when a legacy `survey/` layer dir PERSISTS in @p store_dir — the
+///        signature of a permanent, whole-store ADR-0010 D8 migration REFUSAL.
+///
+/// `load()`/`loadWindow()` auto-migrate a legacy `survey/` to `processed/` by a
+/// single rename, but REFUSE (throw) three ways, each leaving `survey/` in place:
+/// a **symlinked** `survey/` (renaming it would point `processed/` out of the
+/// store), an **ambiguous** store holding BOTH `survey/` and `processed/`, or a
+/// rename that **cannot commit** (e.g. a read-only filesystem). A *successful*
+/// migration renames `survey/` away, and a store that never had one has none — so
+/// "`survey/` still present *after* a load threw" cleanly separates this permanent,
+/// every-tile failure from a transient single-tile read error. Callers use it in a
+/// load/loadWindow catch to abort LOUDLY (the operator must fix the store by hand)
+/// instead of degrading tile-by-tile to a silently near-empty result.
+///
+/// Keys on the PATH, not the migration's throw message (brittle) nor the both-dirs
+/// case alone (misses the symlink variant): `is_directory` follows the link so it
+/// catches a real dir or a link to one, and `is_symlink` additionally catches a
+/// symlinked `survey/` whose target is missing/not-a-dir. Empty @p store_dir → false.
+  bool legacySurveyDirPersists(const std::string & store_dir);
 
 /// @brief Configuration for @ref ImportAccumulator (cube_bathymetry#92, #96).
   struct ImportAccumulatorConfig
