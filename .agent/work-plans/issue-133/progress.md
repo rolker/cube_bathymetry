@@ -129,3 +129,81 @@ plan inline — before implementation.
 - [ ] Add a consequence + decision for the `survey/`→`processed/` migration vs. the node's `Draft` startup prime (warm-start / disk-serve catalog on first post-co-land boot).
 - [ ] Close Open Question #2 (Processed is freely writable — no gate flag) and drop the ADR-0002 A2.1 caveat.
 - [ ] Adopt local Build Verification Option A against the built `issue-308` install.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-20 18:35 +00:00
+**By**: Claude Opus
+
+**Plan**: `.agent/work-plans/issue-133/plan.md` at `955805d` (revised per Plan Review)
+**Branch**: feature/issue-133
+**Commits**:
+- `955805d` — plan revision (MF1 `clearOverlappedDraft`, MF2 Processed∪Draft prime, close OQ#2, commit Build Verification Option A, record confirmed store API)
+- `87f11e9` — implementation (retarget writers + prime + draft clearing + tests)
+
+### What landed
+
+Plan revised first (committed before any source change), then implemented per the
+revised plan and the operator's two must-fix decisions:
+
+- **MF1 — direct-write draft clearing via the shared store API.** `store_import.cpp`
+  `persistBathyTile` now writes `Processed` and, after its direct `saveTile`, calls
+  the store's public `BathymetryStore::clearOverlappedDraft(const BathymetryTile&)`
+  (uma#308 `1d8c3a8`). Because this path holds no persistent store, it runs a scoped
+  `loadWindow` → `clearOverlappedDraft(tile)` → `save` cycle over the tile's window
+  (persists only the dirtied draft tiles). Clearing is an optimization (the query
+  overlay already resolves `Processed > Draft`), so a failure is logged to `std::cerr`
+  and swallowed — the authoritative processed write is never lost nor the import
+  aborted. `batch_regen` routes its writes through the same `persistBathyTile`, so it
+  clears draft transitively (its finalize output-layer check → `Processed`).
+- **MF2 — live node primes from Processed ∪ Draft.** The node still **writes** `Draft`
+  (`saveDirtyTiles`, node.cpp:1287), but its **reads** fuse both layers so warm-start
+  survives the legacy `survey/`→`processed/` migration on first post-co-land boot:
+  startup GeoMapSheet seed (Draft then Processed so Processed wins), disk-serve
+  tile-version catalog (seeded from both layer dirs; builder is newest-wins per index),
+  the disk-serve scratch read (node.cpp:1027), and the eviction-reload read
+  (node.cpp:1240) all best-source across Processed ∪ Draft.
+- **Plan Review suggestions folded in.** Open Question #2 closed (`Processed`/`Draft`
+  both freely writable per `bathy_cell.hpp:57-58`; ADR-0002 A2.1 caveat dropped).
+  Backscatter store (`marine_mbes_backscatter_store::SourceLayer::Survey`,
+  store_import.cpp:519/858, test_batch_regen.cpp:170, test_import_eviction.cpp:171)
+  left untouched. Enum ordinals confirmed `Processed=0 > Draft=1 > Reference=2 > Chart=3`.
+
+**Source**: `cube_bathymetry_node.cpp` (startup prime seed+catalog, disk-serve read,
+eviction-reload read → Processed∪Draft; write → Draft), `store_import.cpp`
+(`persistBathyTile` → Processed + clearOverlappedDraft; `reloadEvictedTile` /
+`primeInitialTile` reads → Processed), `batch_regen.cpp` (finalize check → Processed).
+Stale `survey`-layer comments updated throughout.
+
+**Tests**: node-path sites → `Draft` (`test_persistence`, `test_anti_entropy_disk_serve`,
+`test_tile_eviction_rss`); import/batch-regen sites → `Processed` (`test_store_import`,
+`test_batch_regen`, `test_import_eviction`); backscatter sites unchanged. Renamed/fixed
+the `layerDirName` assertion test (`DraftLayerDirNameIsDraft`, now expects `"draft"`).
+Added `ImportEviction.ProcessedImportClearsOverlappedDraft` covering the net-new
+direct-write draft clearing (overlapped draft cleared to no-data; processed
+authoritative; unrelated draft in a different tile survives — clearing is scoped).
+
+### Build Verification — Option A (local, not deferred to host CI)
+
+Nothing was pre-built locally, so the dependency stack was bootstrapped to overlay the
+split store:
+- `geodesy` built in the shared `underlay_ws` (`main/underlay_ws`) — needed transitively
+  by `marine_sidescan_mosaic` ← `marine_survey_index`.
+- The **uma#308 `feature/issue-308` core** (`issue-unh_marine_autonomy-308/core_ws`, head
+  `7048669`; `clearOverlappedDraft` at `1d8c3a8`) completed to a consistent install:
+  `marine_sidescan_mosaic`, `marine_survey_index`, `marine_mbes_backscatter_store` built
+  (a stale pre-geodesy CMake cache was cleaned first). Installed header confirmed split
+  (`Processed`/`Draft`) with the public `clearOverlappedDraft`.
+- `cube_bathymetry` built and tested against that overlay
+  (`/opt/ros/jazzy` + `main/underlay_ws/install` + `issue-308 core_ws/install`).
+
+**Result**: build OK; `colcon test` → **553 tests, 0 errors, 0 failures, 68 skipped**
+(the initial run's lone failure was a uncrustify split-string indent in `store_import.cpp`,
+fixed in the same commit; not a test-logic failure). `ProcessedImportClearsOverlappedDraft`
+ran and passed. No tests skipped or disabled.
+
+### Lockstep note
+
+This PR cannot build against the pre-split main-tree jazzy core (still exposes
+`SourceLayer::Survey`); it must co-land with uma#308 (feature/issue-308). Verified
+locally against that store — host CI should run the combined build to confirm.
