@@ -372,7 +372,8 @@ public:
             [&](marine_bathymetry_store::SourceLayer layer, const auto & tiles) {
               const std::string layer_dir = draft_dir_ + "/" +
                 marine_bathymetry_store::layerDirName(layer);
-              for (const auto & [tile_index, tile] : tiles) {
+              for (const auto & entry : tiles) {
+                const auto & tile_index = entry.first;  // tile payload unused here
                 std::int64_t version = fallback_version;
                 struct stat st;
                 const std::string tile_path = layer_dir + "/" +
