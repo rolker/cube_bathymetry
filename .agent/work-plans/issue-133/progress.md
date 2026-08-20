@@ -207,3 +207,23 @@ ran and passed. No tests skipped or disabled.
 This PR cannot build against the pre-split main-tree jazzy core (still exposes
 `SourceLayer::Survey`); it must co-land with uma#308 (feature/issue-308). Verified
 locally against that store — host CI should run the combined build to confirm.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-20 18:45 +00:00
+**By**: Claude Opus
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-133 at `73db43b`
+**Mode**: pre-push
+**Depth**: Deep (reason: cross-layer lockstep breaking change touching store write semantics + net-new draft-clearing path)
+**Must-fix**: 1 | **Suggestions**: 3
+**Round**: 1 | **Ship**: continue — one genuine correctness concern in the fused prime warrants a fix + independent re-read
+
+Specialists: static analysis run (uncrustify/cpplint/cppcheck clean on changed lines); 2 Claude Adversarial passes (Lens A + Lens B); Local Adversarial skipped (Ollama not responding on :11434); Copilot off (default). Store API verified directly against built issue-308 headers.
+
+### Findings
+- [ ] (must-fix) Fused Processed∪Draft prime does not deliver the claimed "Processed > Draft per cell on overlap" for the reported settled depth: CUBE `chooseHypothesis` (strict `>`, node.cpp:376) tie-breaks two 1-sample settled hypotheses to the first-seeded (Draft), so Draft-then-Processed reports Draft on overlap. Predicted-prior wants Processed primed last, settled wants it first — no single order satisfies both. Happy path is masked by `clearOverlappedDraft`; residual overlap serves the non-authoritative surface. Fix the logic or correct the three comment blocks. — `cube_bathymetry_node.cpp:330-339,1044-1063,1266-1281`
+- [ ] (suggestion) No test covers fused overlapping-cell priority; a conflicting-depth Draft+Processed prime test would pin the contract and catch the must-fix. — `test/test_import_eviction.cpp`
+- [ ] (suggestion) `seedNewTile` catch treats the permanent both-exist `survey/`+`processed/` migration throw as a transient per-tile read error, silently degrading an import to a near-no-op; distinguish and abort loudly. — `store_import.cpp:~875`
+- [ ] (suggestion) Two-layer transient-RAM comment understates the peak (Processed + Draft both fully resident before the trim at node.cpp:390). — `cube_bathymetry_node.cpp:383-389`
