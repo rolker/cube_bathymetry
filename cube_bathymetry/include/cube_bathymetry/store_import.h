@@ -205,6 +205,24 @@ namespace cube
     const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
     bool seed_settled = true);
 
+/// @brief Prime @p tile into @p map_sheet, SKIPPING every cell that @p mask
+///        already covers with a finite depth (per-cell overlap resolution).
+///
+/// The deterministic core of the fused Processed-over-Draft prime (ADR-0010 D8):
+/// @p mask, when non-null, is an overlapping tile at the SAME GridIndex (the
+/// Processed tile shadowing @p tile's Draft data). Because both tiles share the
+/// grid geometry and cell size, their bands index cell-for-cell by the same `k`,
+/// so a cell the mask covers is left untouched and the fused sheet keeps ONLY the
+/// mask's hypothesis there -- Processed-wins-on-overlap regardless of CUBE's
+/// chooseHypothesis tie-break, matching the store's query-side `Processed > Draft`
+/// walk. A null @p mask primes every finite-depth cell (equivalent to
+/// @ref primeFromTile). @p seed_settled forwards to the same warm-start vs.
+/// predicted-only semantics documented on @ref primeFromTile.
+  void primeFromTileSkippingMask(
+    const marine_bathymetry_store::BathymetryTile & tile,
+    const marine_bathymetry_store::BathymetryTile * mask, GeoMapSheet & map_sheet,
+    bool seed_settled = true);
+
 /// @brief Load every tile of @p layer from @p store into @p map_sheet,
 ///        priming predicted depths cell-by-cell.
 ///
@@ -220,6 +238,23 @@ namespace cube
   void loadIntoSheet(
     const marine_bathymetry_store::BathymetryStore & store,
     marine_bathymetry_store::SourceLayer layer,
+    GeoMapSheet & map_sheet,
+    bool seed_settled = true);
+
+/// @brief Layer the `Draft` tiles of @p store into @p map_sheet, SKIPPING every
+///        cell already covered by the overlapping `Processed` tile.
+///
+/// The second half of the fused Processed-over-Draft prime (ADR-0010 D8): the
+/// caller seeds `Processed` FULLY first (@ref loadIntoSheet with
+/// `SourceLayer::Processed`), then calls this to add `Draft` only where `Processed`
+/// left a gap. Each Draft tile is primed via @ref primeFromTileSkippingMask with
+/// its same-GridIndex Processed tile (if any) as the mask, so an overlapped cell
+/// keeps ONLY its Processed hypothesis -- deterministic Processed-wins independent
+/// of CUBE's chooseHypothesis tie-break, matching the store's query-side
+/// `Processed > Draft` walk. A no-op if the `Draft` layer holds no tiles.
+/// @p seed_settled forwards to @ref primeFromTile.
+  void loadDraftSkippingProcessed(
+    const marine_bathymetry_store::BathymetryStore & store,
     GeoMapSheet & map_sheet,
     bool seed_settled = true);
 

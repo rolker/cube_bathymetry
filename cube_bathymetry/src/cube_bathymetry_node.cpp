@@ -325,18 +325,25 @@ public:
         // from Processed union Draft. On a boat's first boot after co-land, load()
         // auto-migrates a legacy `survey/` dir to `processed/` (ADR-0010 D8), so
         // priming from draft alone would warm-start from an empty layer and lose
-        // both the GeoMapSheet seed and the disk-serve catalog. Processed outranks
-        // Draft, so it is primed second -- last-write-wins per cell in the fused
-        // sheet leaves Processed on top where the two overlap.
+        // both the GeoMapSheet seed and the disk-serve catalog.
+        //
+        // Processed must WIN per cell where the two layers overlap (it is the
+        // authoritative surface; the store's own query walks `Processed > Draft`).
+        // Seeding order alone does NOT deliver that: two settled 1-sample
+        // hypotheses tie-break in CUBE's chooseHypothesis to the FIRST-seeded, so a
+        // Draft-then-Processed prime would report Draft on overlap. Instead seed
+        // Processed FULLY first, then layer Draft with a per-cell filter that SKIPS
+        // any cell Processed already covers (loadDraftSkippingProcessed) -- the
+        // overlapped cell then carries only the Processed hypothesis, deterministic
+        // regardless of the tie-break.
         const auto & processed_tiles =
           store.tiles(marine_bathymetry_store::SourceLayer::Processed);
         const auto & draft_tiles =
           store.tiles(marine_bathymetry_store::SourceLayer::Draft);
         if (!processed_tiles.empty() || !draft_tiles.empty()) {
           cube::loadIntoSheet(
-            store, marine_bathymetry_store::SourceLayer::Draft, *geo_map_sheet_);
-          cube::loadIntoSheet(
             store, marine_bathymetry_store::SourceLayer::Processed, *geo_map_sheet_);
+          cube::loadDraftSkippingProcessed(store, *geo_map_sheet_);
           RCLCPP_INFO(get_logger(),
             "Primed GeoMapSheet from %zu processed + %zu draft tiles under %s",
             processed_tiles.size(), draft_tiles.size(), draft_dir_.c_str());
@@ -1043,8 +1050,13 @@ private:
           scratch, draft_dir_, index.southWestPosition(),
           index.northEastPosition(), nullptr);
         // Best source across Processed union Draft (ADR-0010 D8): serve the fused
-        // tile. Prime Draft first, then Processed, so Processed > Draft wins per
-        // cell where the two overlap.
+        // tile. Processed must win per overlapping cell (the store's query walks
+        // `Processed > Draft`), and seeding order alone cannot guarantee that -- two
+        // settled 1-sample hypotheses tie-break to the first-seeded in CUBE's
+        // chooseHypothesis. Seed Processed FULLY first, then layer Draft with a
+        // per-cell filter (primeFromTileSkippingMask with the Processed tile as
+        // mask) that skips any cell Processed already covers, so the overlapped cell
+        // keeps only the Processed hypothesis.
         const auto & processed =
           scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
         const auto & draft =
@@ -1055,11 +1067,13 @@ private:
           continue;  // absent on disk after all; nothing to serve
         }
         cube::GeoMapSheet scratch_sheet(static_cast<float>(cell_size_));
-        if (d_it != draft.end()) {
-          cube::primeFromTile(d_it->second, scratch_sheet);
-        }
         if (p_it != processed.end()) {
           cube::primeFromTile(p_it->second, scratch_sheet);
+        }
+        if (d_it != draft.end()) {
+          cube::primeFromTileSkippingMask(
+            d_it->second,
+            p_it != processed.end() ? &p_it->second : nullptr, scratch_sheet);
         }
         if (auto grid = scratch_sheet.gridAt(index)) {
           if (auto vt = cube::quantizeTile(*grid, stamp)) {
@@ -1267,17 +1281,25 @@ private:
       const auto ne = index.northEastPosition();
       marine_bathymetry_store::loadWindow(scratch, draft_dir_, sw, ne, nullptr);
       // Best source across Processed union Draft (ADR-0010 D8): restore the fused
-      // cells. Prime Draft first, then Processed, so Processed > Draft wins per
-      // cell where the two overlap.
+      // cells. Processed must win per overlapping cell (the store's query walks
+      // `Processed > Draft`), and seeding order alone cannot guarantee that -- two
+      // settled 1-sample hypotheses tie-break to the first-seeded in CUBE's
+      // chooseHypothesis. Seed Processed FULLY first, then layer Draft with a
+      // per-cell filter (primeFromTileSkippingMask with the Processed tile as mask)
+      // that skips any cell Processed already covers, so the overlapped cell keeps
+      // only the Processed hypothesis.
       const auto & processed =
         scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
       const auto & draft =
         scratch.tiles(marine_bathymetry_store::SourceLayer::Draft);
-      if (const auto it = draft.find(index); it != draft.end()) {
-        cube::primeFromTile(it->second, *geo_map_sheet_);
+      const auto p_it = processed.find(index);
+      if (p_it != processed.end()) {
+        cube::primeFromTile(p_it->second, *geo_map_sheet_);
       }
-      if (const auto it = processed.find(index); it != processed.end()) {
-        cube::primeFromTile(it->second, *geo_map_sheet_);
+      if (const auto it = draft.find(index); it != draft.end()) {
+        cube::primeFromTileSkippingMask(
+          it->second,
+          p_it != processed.end() ? &p_it->second : nullptr, *geo_map_sheet_);
       }
       // Stored cells restored, but if the prior read failed keep the tile evicted
       // so the prior gate is retried on the next revisit (#118) -- the caller drops

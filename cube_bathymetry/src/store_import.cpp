@@ -219,19 +219,34 @@ IntensityWelford welfordFromCell(
   return w;
 }
 
-void primeFromTile(
-  const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
+void primeFromTileSkippingMask(
+  const marine_bathymetry_store::BathymetryTile & tile,
+  const marine_bathymetry_store::BathymetryTile * mask, GeoMapSheet & map_sheet,
   bool seed_settled)
 {
   const gggs::GridIndex & grid = tile.index();
   const std::vector<double> & depth = tile.depthBand();
   const std::vector<double> & uncertainty = tile.uncertaintyBand();
 
+  // Deterministic per-cell overlap resolution (ADR-0010 D8). `mask`, when non-null,
+  // is an overlapping tile at the SAME GridIndex (a Processed tile shadowing this
+  // Draft tile) -- same grid + cell size means its bands index cell-for-cell by the
+  // same `k`, so a cell the mask already covers with a finite depth is SKIPPED here
+  // rather than primed. That is what makes the fused Processed-over-Draft prime
+  // deliver Processed-wins-on-overlap independent of CUBE's chooseHypothesis
+  // tie-break: the overlapped cell carries ONLY the Processed hypothesis, matching
+  // the store's query-side `Processed > Draft` walk (see the fused-prime callers in
+  // cube_bathymetry_node.cpp).
+  const std::vector<double> * mask_depth = mask ? &mask->depthBand() : nullptr;
+
   // Walk the tile in GGGS cell order (row 0 = south, row-major) -- the same order
   // BathymetryTile's bands use -- and prime every finite-depth cell.
   gggs::CellAreaIterator it(grid);
   std::size_t k = 0;
   for (; it.valid() && k < depth.size(); it.next(), ++k) {
+    if (mask_depth && k < mask_depth->size() && !std::isnan((*mask_depth)[k])) {
+      continue;  // mask (Processed) already covers this cell -- do not layer under it
+    }
     const double d = depth[k];
     if (std::isnan(d)) {
       continue;  // no-data cell -- nothing to prime
@@ -270,6 +285,14 @@ void primeFromTile(
   }
 }
 
+void primeFromTile(
+  const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
+  bool seed_settled)
+{
+  // No overlap mask: prime every finite-depth cell (the single-layer prime path).
+  primeFromTileSkippingMask(tile, /*mask=*/nullptr, map_sheet, seed_settled);
+}
+
 void loadIntoSheet(
   const marine_bathymetry_store::BathymetryStore & store,
   marine_bathymetry_store::SourceLayer layer,
@@ -280,6 +303,31 @@ void loadIntoSheet(
   // tiles directly. Empty map -> no-op.
   for (const auto & grid_tile : store.tiles(layer)) {
     primeFromTile(grid_tile.second, map_sheet, seed_settled);
+  }
+}
+
+void loadDraftSkippingProcessed(
+  const marine_bathymetry_store::BathymetryStore & store,
+  GeoMapSheet & map_sheet,
+  bool seed_settled)
+{
+  // Second half of the fused Processed-over-Draft prime (ADR-0010 D8): the caller
+  // seeds Processed FULLY first (loadIntoSheet(..., Processed, ...)), then calls
+  // this to layer Draft only where Processed left a gap. Each Draft tile is primed
+  // through primeFromTileSkippingMask with the same-GridIndex Processed tile as its
+  // mask, so an overlapped cell keeps ONLY its Processed hypothesis -- deterministic
+  // Processed-wins independent of CUBE's chooseHypothesis tie-break, matching the
+  // store's query-side `Processed > Draft` walk. Empty Draft layer -> no-op.
+  const auto & processed_tiles =
+    store.tiles(marine_bathymetry_store::SourceLayer::Processed);
+  for (const auto & [index, draft_tile] :
+    store.tiles(marine_bathymetry_store::SourceLayer::Draft))
+  {
+    const auto p_it = processed_tiles.find(index);
+    primeFromTileSkippingMask(
+      draft_tile,
+      p_it != processed_tiles.end() ? &p_it->second : nullptr,
+      map_sheet, seed_settled);
   }
 }
 
