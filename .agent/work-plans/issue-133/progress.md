@@ -223,7 +223,78 @@ locally against that store — host CI should run the combined build to confirm.
 Specialists: static analysis run (uncrustify/cpplint/cppcheck clean on changed lines); 2 Claude Adversarial passes (Lens A + Lens B); Local Adversarial skipped (Ollama not responding on :11434); Copilot off (default). Store API verified directly against built issue-308 headers.
 
 ### Findings
-- [ ] (must-fix) Fused Processed∪Draft prime does not deliver the claimed "Processed > Draft per cell on overlap" for the reported settled depth: CUBE `chooseHypothesis` (strict `>`, node.cpp:376) tie-breaks two 1-sample settled hypotheses to the first-seeded (Draft), so Draft-then-Processed reports Draft on overlap. Predicted-prior wants Processed primed last, settled wants it first — no single order satisfies both. Happy path is masked by `clearOverlappedDraft`; residual overlap serves the non-authoritative surface. Fix the logic or correct the three comment blocks. — `cube_bathymetry_node.cpp:330-339,1044-1063,1266-1281`
-- [ ] (suggestion) No test covers fused overlapping-cell priority; a conflicting-depth Draft+Processed prime test would pin the contract and catch the must-fix. — `test/test_import_eviction.cpp`
-- [ ] (suggestion) `seedNewTile` catch treats the permanent both-exist `survey/`+`processed/` migration throw as a transient per-tile read error, silently degrading an import to a near-no-op; distinguish and abort loudly. — `store_import.cpp:~875`
-- [ ] (suggestion) Two-layer transient-RAM comment understates the peak (Processed + Draft both fully resident before the trim at node.cpp:390). — `cube_bathymetry_node.cpp:383-389`
+- [x] (must-fix) Fused Processed∪Draft prime does not deliver the claimed "Processed > Draft per cell on overlap" for the reported settled depth: CUBE `chooseHypothesis` (strict `>`, node.cpp:376) tie-breaks two 1-sample settled hypotheses to the first-seeded (Draft), so Draft-then-Processed reports Draft on overlap. Predicted-prior wants Processed primed last, settled wants it first — no single order satisfies both. Happy path is masked by `clearOverlappedDraft`; residual overlap serves the non-authoritative surface. Fix the logic or correct the three comment blocks. — `cube_bathymetry_node.cpp:330-339,1044-1063,1266-1281`
+- [x] (suggestion) No test covers fused overlapping-cell priority; a conflicting-depth Draft+Processed prime test would pin the contract and catch the must-fix. — `test/test_import_eviction.cpp`
+- [x] (suggestion) `seedNewTile` catch treats the permanent both-exist `survey/`+`processed/` migration throw as a transient per-tile read error, silently degrading an import to a near-no-op; distinguish and abort loudly. — `store_import.cpp:~875`
+- [x] (suggestion) Two-layer transient-RAM comment understates the peak (Processed + Draft both fully resident before the trim at node.cpp:390). — `cube_bathymetry_node.cpp:383-389`
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-20 19:05 +00:00
+**By**: Claude Opus
+
+**Branch**: feature/issue-133 at `9dd0cc2`
+**Addressed**: Local Review (Pre-Push) (2026-08-20 18:45 +00:00, at `73db43b`)
+**Commits**: `af6c785`, `c13b2b3`, `dde422e`, `9dd0cc2`
+
+### What landed
+
+All four findings of the source review were **fixed** (none deferred). The must-fix
+resolves the fused-prime priority BEFORE CUBE's hypothesis machinery (per the host
+steer), so overlap is deterministic regardless of `chooseHypothesis`'s tie-break.
+
+- **MF — fused prime is now Processed-seed-then-Draft-skip-Processed, not seed-order.**
+  New `primeFromTileSkippingMask(tile, mask, sheet, seed_settled)` primes a Draft tile
+  but SKIPS every cell an overlapping same-GridIndex Processed tile already covers with
+  finite depth (the mask); `primeFromTile` is now a thin `mask=nullptr` forwarder, and
+  new `loadDraftSkippingProcessed(store, sheet)` layers Draft over a fully-seeded
+  Processed layer using each Draft tile's same-index Processed tile as its mask. All
+  three sites now **seed Processed fully first, then Draft-skip-Processed**: startup
+  prime (node.cpp:330-347), disk-serve scratch read (node.cpp:1053-1082), and
+  eviction-reload read (node.cpp:1284-1308). The overlapped cell carries ONLY the
+  Processed hypothesis (both its settled depth and its predicted/blunder prior) —
+  deterministic Processed-wins, matching the store's query-side `Processed > Draft`
+  walk. The three comment blocks were rewritten to describe this mechanism (they
+  previously claimed last-write-wins/seed-order, which the tie-break defeats).
+- **S1 — regression test pinning the contract.** `ImportEviction.FusedPrimeProcessedWinsOverConflictingDraft`
+  (test_import_eviction.cpp) primes a sheet from a store with conflicting Processed
+  (−50 m) and Draft (−11 m) depths on the SAME cell plus a Draft-only cell in another
+  tile; asserts the overlapped cell reports the Processed depth (not the stale Draft
+  depth) and the Draft-only cell survives (skip is scoped, not a blanket Draft drop).
+- **S2 — `seedNewTile` aborts loudly on the permanent ambiguous store.** New filesystem
+  helper `hasAmbiguousSurveyMigration(store_dir)` detects a store holding BOTH `survey/`
+  and `processed/` dirs directly (not by matching the throw's message). On a survey-seed
+  `loadWindow` throw, if that store-wide condition holds the catch now RETHROWS a clear
+  fatal error instead of returning false — otherwise every tile would degrade to a
+  dropped-soundings no-op and silently emit a near-empty store. Uncaught → `addBatch` →
+  import_bag main (whose ping loop catches only `TransformException`) → process
+  terminates non-zero, no partial store finalized. Genuine transient per-tile read
+  errors keep the existing drop-and-retry behavior.
+- **S3 — two-layer transient-RAM peak comment corrected** (node.cpp:390): the peak is
+  now the two-layer union — `store` holds BOTH Processed and Draft tiles resident and
+  the sheet holds the fused surface on top — higher than a single-layer prime.
+
+### Build Verification — Option A (local, issue-308 store overlay)
+
+Same bootstrap as the prior Implementation entry: `/opt/ros/jazzy` +
+`main/underlay_ws/install` + the built **uma#308 `feature/issue-308` core**
+(`issue-unh_marine_autonomy-308/core_ws/install`; installed `marine_bathymetry_store`
+confirmed split with the public `BathymetryStore::clearOverlappedDraft`). Rebuilt and
+tested `cube_bathymetry` against that overlay.
+
+**Result**: build OK; `colcon test` → **554 tests, 0 errors, 0 failures, 68 skipped**
+(was 553 pre-change; +1 is the new fused-prime test, which ran and passed). Pre-commit
+hooks (uncrustify/cpplint) ran on every commit; none used `--no-verify`.
+
+### Actions
+- [x] Resolve fused-prime priority before the hypothesis machinery (Processed-seed-then-Draft-skip-Processed) at all three sites + rewrite the comments — `cube_bathymetry_node.cpp:330-347,1053-1082,1284-1308`, `store_import.cpp` (`primeFromTileSkippingMask`, `loadDraftSkippingProcessed`)
+- [x] Conflicting-depth Draft+Processed prime test pinning per-cell priority — `test/test_import_eviction.cpp` (`FusedPrimeProcessedWinsOverConflictingDraft`)
+- [x] `seedNewTile` distinguishes the permanent both-exist migration throw and aborts loudly — `store_import.cpp` (`hasAmbiguousSurveyMigration` + seedNewTile catch)
+- [x] Correct the two-layer transient-RAM peak comment — `cube_bathymetry_node.cpp:390`
+
+### Next step
+
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a
+fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 133 --skill review-code
