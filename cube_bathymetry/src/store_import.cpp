@@ -867,29 +867,31 @@ bool primePriorLayersForTile(
   return primed;
 }
 
-// A store that holds BOTH a legacy `survey/` and a `processed/` layer dir is an
-// ambiguous half-migrated store: the ADR-0010 D8 auto-migration refuses it LOUDLY
-// (throws) and it does so for EVERY tile, since the condition is store-wide, not
-// per-tile. Detect it directly from the filesystem -- not by matching the throw's
-// message -- so the survey-seed path can tell this permanent, whole-import failure
-// apart from a transient single-tile read error and abort instead of silently
-// degrading tile-by-tile to a near-no-op import.
-bool hasAmbiguousSurveyMigration(const std::string & store_dir)
+}  // namespace
+
+bool legacySurveyDirPersists(const std::string & store_dir)
 {
   if (store_dir.empty()) {
     return false;
   }
   namespace fs = std::filesystem;
-  std::error_code survey_ec;
-  std::error_code processed_ec;
-  const bool has_survey =
-    fs::is_directory(fs::path(store_dir) / "survey", survey_ec);
-  const bool has_processed = fs::is_directory(
-    fs::path(store_dir) / marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Processed), processed_ec);
-  return has_survey && has_processed;
+  const fs::path survey = fs::path(store_dir) / "survey";
+  // A legacy `survey/` that is STILL present after a load/loadWindow threw means the
+  // ADR-0010 D8 auto-migration REFUSED it -- and refuses identically for every tile
+  // (the condition is store-wide, not per-tile). All three refusal variants leave
+  // `survey/` behind: a symlinked `survey/`, an ambiguous both-`survey/`-and-
+  // `processed/` store, or a rename that could not commit (read-only fs). A
+  // SUCCESSFUL migration renames `survey/` to `processed/` (so it is gone), and a
+  // store that never had one has none -- so keying on `survey/`'s persistence, not
+  // on the throw's message nor on the both-dirs case alone, tells this permanent,
+  // whole-store failure apart from a transient single-tile read error. is_directory
+  // FOLLOWS symlinks (a real dir OR a link to one); is_symlink additionally catches
+  // a symlinked `survey/` whose target is missing/not-a-dir -- the variant an
+  // is_directory-only probe would miss and then silently degrade tile-by-tile.
+  std::error_code dir_ec;
+  std::error_code link_ec;
+  return fs::is_directory(survey, dir_ec) || fs::is_symlink(survey, link_ec);
 }
-}  // namespace
 
 bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
 {
@@ -945,22 +947,26 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
       }
     } catch (const std::exception & e) {
       // Distinguish a PERMANENT store-wide failure from a transient per-tile one.
-      // If the store holds both a legacy `survey/` and a `processed/` dir, loadWindow
-      // above threw from the ADR-0010 D8 migration REFUSING an ambiguous store -- and
-      // it will throw identically for every tile. Degrading tile-by-tile (return
-      // false) would then drop EVERY batch's soundings and silently emit a near-empty
-      // store. Abort the whole import loudly instead so the operator resolves the
-      // store by hand. (Uncaught here -> addBatch -> import_bag main, whose ping loop
-      // catches only TransformException, so this propagates out and terminates the
-      // process with a non-zero status -- no partial store is finalized.)
-      if (hasAmbiguousSurveyMigration(cfg_.store_dir)) {
+      // If a legacy `survey/` layer dir PERSISTS, loadWindow above threw from the
+      // ADR-0010 D8 migration REFUSING it -- a symlinked `survey/`, an ambiguous
+      // both-`survey/`-and-`processed/` store, or a rename it could not commit -- and
+      // it will throw identically for every tile (a successful migration would have
+      // renamed `survey/` away). Degrading tile-by-tile (return false) would then drop
+      // EVERY batch's soundings and silently emit a near-empty store. Abort the whole
+      // import loudly instead so the operator resolves the store by hand. (Uncaught
+      // here -> addBatch -> import_bag main, whose ping loop catches only
+      // TransformException, so this propagates out and terminates the process with a
+      // non-zero status -- no partial store is finalized.)
+      if (legacySurveyDirPersists(cfg_.store_dir)) {
         throw std::runtime_error(
-                "import_bag: ABORTING -- store '" + cfg_.store_dir + "' has BOTH a "
-                "legacy 'survey/' and a 'processed/' layer dir; the ADR-0010 D8 "
-                "auto-migration refuses this ambiguous store for every tile, so the "
-                "import cannot seed and would silently produce a near-empty result. "
-                "Resolve by hand (merge or remove one layer). Underlying error: " +
-                e.what());
+                "import_bag: ABORTING -- store '" + cfg_.store_dir + "' still has a "
+                "legacy 'survey/' layer dir after the ADR-0010 D8 auto-migration "
+                "refused it (it is symlinked, the store also has a 'processed/' dir, "
+                "or the rename could not commit); the migration refuses identically "
+                "for every tile, so the import cannot seed and would silently produce "
+                "a near-empty result. Resolve by hand (replace a symlink with a real "
+                "dir, or merge/remove one of 'survey/' and 'processed/'). Underlying "
+                "error: " + e.what());
       }
       // A survey-seed read error means the on-disk survey tile EXISTS but could not
       // be loaded (a fresh import returns 0 tiles WITHOUT throwing, so it never

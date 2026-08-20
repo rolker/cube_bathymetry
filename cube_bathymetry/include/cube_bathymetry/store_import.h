@@ -292,6 +292,26 @@ namespace cube
     const marine_bathymetry_store::BathymetryStore & store,
     GeoMapSheet & map_sheet);
 
+/// @brief True when a legacy `survey/` layer dir PERSISTS in @p store_dir — the
+///        signature of a permanent, whole-store ADR-0010 D8 migration REFUSAL.
+///
+/// `load()`/`loadWindow()` auto-migrate a legacy `survey/` to `processed/` by a
+/// single rename, but REFUSE (throw) three ways, each leaving `survey/` in place:
+/// a **symlinked** `survey/` (renaming it would point `processed/` out of the
+/// store), an **ambiguous** store holding BOTH `survey/` and `processed/`, or a
+/// rename that **cannot commit** (e.g. a read-only filesystem). A *successful*
+/// migration renames `survey/` away, and a store that never had one has none — so
+/// "`survey/` still present *after* a load threw" cleanly separates this permanent,
+/// every-tile failure from a transient single-tile read error. Callers use it in a
+/// load/loadWindow catch to abort LOUDLY (the operator must fix the store by hand)
+/// instead of degrading tile-by-tile to a silently near-empty result.
+///
+/// Keys on the PATH, not the migration's throw message (brittle) nor the both-dirs
+/// case alone (misses the symlink variant): `is_directory` follows the link so it
+/// catches a real dir or a link to one, and `is_symlink` additionally catches a
+/// symlinked `survey/` whose target is missing/not-a-dir. Empty @p store_dir → false.
+  bool legacySurveyDirPersists(const std::string & store_dir);
+
 /// @brief Configuration for @ref ImportAccumulator (cube_bathymetry#92, #96).
   struct ImportAccumulatorConfig
   {
