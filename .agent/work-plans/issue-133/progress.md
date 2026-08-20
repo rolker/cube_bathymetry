@@ -569,3 +569,104 @@ a fresh-context sub-agent:
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 133 --skill review-code
 
 Do not push — the host pushes to PR #134.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-20 20:58 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-133 at `712fccd` (code; a trailing progress commit follows)
+**Addressed**: Copilot review comment on PR #134 (`batch_regen.cpp:258`), host-verified
+valid. NOTE: this finding post-dates the latest `## Integrated Review`
+(2026-08-20 16:08 -04:00, whose 3 findings are all resolved/checked) and was **not**
+separately triaged into a formal review entry — it arrived as a fresh Copilot PR
+comment and its fix was partially staged in the worktree. Per the address-findings
+`progress_read.py` parse, the latest review entry has **0 open findings**; this pass
+therefore completes an out-of-band partial fix rather than a checkbox in a review
+entry. The finding and the existing edits were re-verified independently against the
+source before completing them.
+**Commits**: `da339dd`, `712fccd`
+
+### What landed
+
+The pre-staged edits (batch_regen preflight + a refuses-before-writing test) were
+reviewed against the finding and found correct in intent but **incomplete**: building
+and testing them exposed a genuine, platform-dependent bug in `legacySurveyDirPersists`
+that broke every clean store. Both the preflight and the newly-discovered bug are
+fixed; all 557 cube_bathymetry tests pass against the split store overlay.
+
+- **Finding fix — batch_regen refuses a persisting legacy `survey/` before any write.**
+  `BatchRegen`'s constructor now runs a preflight (`legacySurveyDirPersists(cfg_.store_dir)`)
+  and throws before a single tile is scattered or written. batch_regen is a write-path
+  tool that never `load()`s the output store, so the ADR-0010 D8 `survey/`→`processed/`
+  auto-migration never fires from it; without this guard the first `finalize()` write
+  would create `processed/` alongside a surviving `survey/` — the ambiguous both-dirs
+  state every future `load()` permanently refuses (a nightly regen would silently brick
+  the store). The error tells the operator to migrate first (run a load-path tool, or
+  rename `survey/` manually). Reuses the shared helper, honoring the documented
+  "write-path tools do not migrate" invariant. — `src/batch_regen.cpp:96-119`
+- **Prerequisite bug fix (discovered during build/test) — `legacySurveyDirPersists`
+  treated a clean store as ambiguous on this libstdc++.** The prior round's "F1"
+  hardening (Integrated Review, commit `baec567`) used `if (fs::is_directory(survey, ec)
+  || ec) return true;` on the stated assumption that `is_directory(p, ec)` leaves `ec`
+  unset for a nonexistent path. That assumption is **false on this platform**: an
+  empirical check (and the 4 failing `BatchRegen …ExactMatch` tests) confirm
+  `fs::is_directory`/`is_symlink` set `ec = ENOENT` (or `ENOTDIR`) for an absent
+  `survey/`, so the guard returned `true` for **every** store without a `survey/`
+  layer. The bug stayed latent because the only callers were catch-block guards
+  (`seedNewTile` / `reloadEvictedTile` / node `on_configure`) that run *after* a real
+  `loadWindow` throw — so it never hit the happy path until this preflight became the
+  first unconditional caller. (Left unfixed it would also convert a transient
+  per-tile `loadWindow` error on a clean store into a fatal import abort.) The fix
+  classifies the `error_code`: `ENOENT`/`ENOTDIR` ⇒ `survey/` genuinely absent (clean
+  store ⇒ `false`); any other error (EACCES/EIO/ELOOP) still fails safe toward the
+  ADR-0010 D8 loud abort. Symlinked / both-dirs refusal detection is unchanged. —
+  `src/store_import.cpp:898-937`
+- **Test.** `BatchRegen.LegacySurveyStoreRefusedBeforeAnyWrite`: a store with a
+  populated `survey/` makes construction throw (`std::runtime_error`) and asserts no
+  `processed/` layer is created (refuses before any write). The existing
+  `ImportEviction.{AmbiguousSurveyStoreAbortsImport,SymlinkedSurveyStoreAbortsImport}`
+  tests continue to pass, confirming the ec fix did not weaken the real-`survey/`
+  refusal path; the 4 `BatchRegen …ExactMatch` tests (clean stores) now pass instead
+  of throwing. — `test/test_batch_regen.cpp`
+
+### Build Verification — Option A (local, split store overlay)
+
+The prior Implementation entries' `issue-unh_marine_autonomy-308` worktree is gone, so
+the split store was rebuilt from the now-merged source in `main/core_ws`
+(`marine_bathymetry_store` confirmed split: `SourceLayer::Processed=0`/`Draft=1`, public
+`clearOverlappedDraft`). Overlay: `/opt/ros/jazzy` + `main/underlay_ws/install`
+(`geodesy` built for `geodesics.h`) + the built `main/core_ws/install` (9-package
+up-to set: stores + `marine_survey_index` and deps; a stale pre-geodesy CMake cache on
+`marine_sidescan_mosaic` was cleaned first). Rebuilt and tested `cube_bathymetry`
+against that overlay (its stale build dir, cached against the deleted 308 overlay, was
+cleaned first).
+
+**Result**: build OK (only the pre-existing unrelated `-Wunused-but-set-variable` in
+`test_tile_eviction_rss.cpp`); `colcon test` → **557 tests, 0 errors, 0 failures, 68
+skipped**. `ament_uncrustify`/`ament_cpplint` clean on all three changed files
+(test file reformatted before commit). No `--no-verify`.
+
+### Lockstep note
+
+Unchanged: this PR cannot build against the pre-split main-tree jazzy core; it co-lands
+with uma#308 (feature/issue-308) — now merged to `main/core_ws` (the split source this
+build used). The hosted `ROS 2 Jazzy (industrial_ci)` red remains the expected co-land
+break until that lands in CI's core. Verified locally against the split store.
+
+### Actions
+- [x] batch_regen refuses a persisting legacy `survey/` before any write (constructor preflight) — `src/batch_regen.cpp:96-119`
+- [x] Fix `legacySurveyDirPersists` ec classification so an absent `survey/` (ENOENT/ENOTDIR) reads as a clean store, not an abort — `src/store_import.cpp:898-937`
+- [x] Refuses-before-writing test + confirm existing abort/ExactMatch tests still pass — `test/test_batch_regen.cpp`
+
+### Next step
+
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to a
+fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 133 --skill review-code
+
+Note for the re-review: the `legacySurveyDirPersists` ec fix is broader than the
+original batch_regen finding (it corrects previously-reviewed code from round `baec567`)
+because the preflight exposed that latent bug — re-read it on its own merits. Do not
+push — the host pushes to PR #134.
