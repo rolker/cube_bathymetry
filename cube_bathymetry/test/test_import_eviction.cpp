@@ -1092,4 +1092,93 @@ TEST(ImportEviction, FusedPrimeProcessedWinsOverConflictingDraft)
     << "the Draft-only cell must survive (the skip is scoped to Processed cells)";
 }
 
+// Ambiguous-store abort (ADR-0010 D8, cube#133 review r2): a store that holds BOTH a
+// legacy `survey/` and a `processed/` layer dir is a permanent, whole-store migration
+// REFUSAL -- loadWindow throws identically for every tile. seedNewTile must tell that
+// apart from a transient per-tile read error (which drops one tile and retries) and
+// abort the WHOLE import loudly, so import_bag terminates non-zero rather than
+// silently emitting a near-empty store. This pins the abort/rethrow path.
+TEST(ImportEviction, AmbiguousSurveyStoreAbortsImport)
+{
+  const std::string root = makeTempDir("ambiguous");
+  const std::string store_dir = root + "/store";
+  std::filesystem::create_directories(store_dir);
+
+  // Write a real `processed/` layer with one tile, then COPY it to `survey/` so the
+  // store holds both dirs -- exactly the half-migrated state the migration refuses.
+  {
+    marine_bathymetry_store::BathymetryStore seed =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    const gggs::CellIndex cell = seed.cellIndex(43.0, -70.0);
+    seed.set(marine_bathymetry_store::SourceLayer::Processed, cell, {-12.0, 0.5});
+    ASSERT_GT(marine_bathymetry_store::save(seed, store_dir), 0u);
+  }
+  std::filesystem::copy(
+    std::filesystem::path(store_dir) / "processed",
+    std::filesystem::path(store_dir) / "survey",
+    std::filesystem::copy_options::recursive);
+  ASSERT_TRUE(cube::legacySurveyDirPersists(store_dir))
+    << "the both-dirs store must be detected as a persisting legacy survey/ layer";
+
+  // First touch of the tile -> seedNewTile -> loadWindow -> migration refusal -> the
+  // guard must RETHROW (abort), not swallow-and-degrade.
+  GeoMapSheet sheet(kCellSize);
+  ImportAccumulator accumulator(sheet, makeConfig(store_dir, /*bs_dir=*/"", /*budget=*/0));
+  bool threw = false;
+  try {
+    accumulator.addBatch(surveyCell(43.0, -70.0, 12.0f, 30.0f));
+  } catch (const std::exception & e) {
+    threw = true;
+    EXPECT_NE(std::string(e.what()).find("ABORTING"), std::string::npos)
+      << "the abort must be the loud ambiguous-store message, got: " << e.what();
+  }
+  EXPECT_TRUE(threw) << "an ambiguous survey+processed store must abort the import";
+
+  std::filesystem::remove_all(root);
+}
+
+// Generalized guard (cube#133 review r2): a SYMLINKED `survey/` is also a permanent
+// migration refusal (renaming it would point `processed/` out of the store), but it
+// need not be accompanied by a `processed/` dir -- so a both-dirs-only check would
+// miss it and silently degrade tile-by-tile. legacySurveyDirPersists keys on the
+// survey/ path (is_symlink included), so this variant aborts too.
+TEST(ImportEviction, SymlinkedSurveyStoreAbortsImport)
+{
+  const std::string root = makeTempDir("symlinksurvey");
+  const std::string store_dir = root + "/store";
+  std::filesystem::create_directories(store_dir);
+
+  // A real directory holding one legacy tile, OUTSIDE the store, then a `survey/`
+  // symlink pointing at it -- no `processed/` dir present.
+  const std::string target = root + "/legacy_survey_target";
+  {
+    marine_bathymetry_store::BathymetryStore seed =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    const gggs::CellIndex cell = seed.cellIndex(43.0, -70.0);
+    seed.set(marine_bathymetry_store::SourceLayer::Processed, cell, {-12.0, 0.5});
+    ASSERT_GT(marine_bathymetry_store::save(seed, store_dir), 0u);
+  }
+  // Move the just-written processed/ out to the external target and link survey/ to it.
+  std::filesystem::rename(
+    std::filesystem::path(store_dir) / "processed", target);
+  std::filesystem::create_directory_symlink(
+    target, std::filesystem::path(store_dir) / "survey");
+  ASSERT_TRUE(cube::legacySurveyDirPersists(store_dir))
+    << "a symlinked survey/ must be detected as a persisting legacy layer";
+
+  GeoMapSheet sheet(kCellSize);
+  ImportAccumulator accumulator(sheet, makeConfig(store_dir, /*bs_dir=*/"", /*budget=*/0));
+  bool threw = false;
+  try {
+    accumulator.addBatch(surveyCell(43.0, -70.0, 12.0f, 30.0f));
+  } catch (const std::exception & e) {
+    threw = true;
+    EXPECT_NE(std::string(e.what()).find("ABORTING"), std::string::npos)
+      << "the abort must be the loud message, got: " << e.what();
+  }
+  EXPECT_TRUE(threw) << "a symlinked survey/ store must abort the import";
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube

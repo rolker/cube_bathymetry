@@ -317,7 +317,7 @@ Specialists: static analysis run (ament_cpplint "No problems found", ament_uncru
 - [x] (suggestion) hasAmbiguousSurveyMigration detects only the both-dirs case; store also throws (permanently) on a symlinked `survey/`, so that variant still degrades tile-by-tile to a silent near-empty store — key on "survey/ persists after loadWindow threw" instead — `src/store_import.cpp:~877`
 - [x] (suggestion) reloadEvictedTile loadWindow catch lacks the ambiguous-store guard; safe only by call-ordering invariant — add a note or mirror the guard — `src/store_import.cpp:~676`
 - [x] (suggestion) Live node on_configure swallows an ambiguous-store load() throw (WARN + empty start), asymmetric with the importer's loud abort; loses warm-start + catalog silently — add an explicit decision/comment — `src/cube_bathymetry_node.cpp:~402`
-- [ ] (suggestion) No test exercises the hasAmbiguousSurveyMigration abort/rethrow path — `test/`
+- [x] (suggestion) No test exercises the hasAmbiguousSurveyMigration abort/rethrow path — `test/`
 - [ ] (suggestion) Post-migration Draft shadowing (draft over old coverage hidden under Processed > Draft until reprocessed) — worth an operator-facing note (inherited ADR-0010 D8 semantics)
 
 ### Next step
