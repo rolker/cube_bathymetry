@@ -78,3 +78,17 @@ must be co-landed with the store.
 - [ ] Confirm backscatter store `SourceLayer::Survey` scope — update or explicitly exclude in plan
 - [ ] Plan must include build-verification strategy against the uma#313 / feature/issue-308 store
 - [ ] Include scratch-tile-walk read sites (cube_bathymetry_node.cpp lines 1027, 1240, 1287) explicitly in the implementation plan
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-20 17:41 +00:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-133/plan.md` at `bbcde41`
+**Branch**: feature/issue-133 at `bbcde41`
+**Phases**: single
+
+### Open questions
+- [ ] Confirm draft-clearing function signature from uma#313 before implementing call in `persistBathyTile()`
+- [ ] Confirm whether `SourceLayer::Processed` requires a constructor write-gate flag in uma#313
+- [ ] Confirm whether `batch_regen.cpp` should also invoke draft clearing (likely yes via shared `ImportAccumulator`, but only `store_import` is explicitly named in the issue)
