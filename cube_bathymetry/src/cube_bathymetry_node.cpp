@@ -400,8 +400,31 @@ public:
           trimResidentToBudget();
         }
       } catch (const std::exception & e) {
-        // A missing/empty store dir is normal on a first run; a genuine load
-        // error must not block configure -- log and continue with an empty sheet.
+        // Explicit decision on an AMBIGUOUS/refused store (ADR-0010 D8), symmetric
+        // with the importer's loud abort: if a legacy `survey/` layer dir PERSISTS,
+        // load() threw because the auto-migration REFUSED the store (symlinked
+        // `survey/`, both `survey/` and `processed/` present, or an uncommittable
+        // rename) -- a permanent, whole-store condition, not a transient read glitch.
+        // Silently starting empty here would give the boat operator a COLD start
+        // (no warm-start seed, no disk-serve catalog) with no signal that the store
+        // needs manual attention, and every reboot would repeat it. Fail configure
+        // LOUDLY instead so the operator learns the store must be fixed by hand --
+        // the same loud failure import_bag raises rather than emitting a near-empty
+        // result.
+        if (cube::legacySurveyDirPersists(draft_dir_)) {
+          RCLCPP_ERROR(get_logger(),
+            "Refusing to configure: store '%s' still has a legacy 'survey/' layer "
+            "dir after the ADR-0010 D8 auto-migration refused it (it is symlinked, "
+            "the store also has a 'processed/' dir, or the rename could not commit): "
+            "%s. This is permanent -- starting empty would silently lose warm-start "
+            "and the disk-serve catalog. Resolve by hand (replace a symlink with a "
+            "real dir, or merge/remove one of 'survey/' and 'processed/') and "
+            "re-configure.", draft_dir_.c_str(), e.what());
+          return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+                 CallbackReturn::FAILURE;
+        }
+        // A missing/empty store dir is normal on a first run; a genuine transient
+        // load error must not block configure -- log and continue with an empty sheet.
         RCLCPP_WARN(get_logger(),
           "Could not load existing draft tiles from %s: %s (starting empty)",
           draft_dir_.c_str(), e.what());
