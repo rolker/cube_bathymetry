@@ -916,24 +916,29 @@ bool legacySurveyDirPersists(const std::string & store_dir)
   // is_directory-only probe would miss and then silently degrade tile-by-tile.
   // Fail SAFE toward the loud abort (ADR-0010 D8 intent): a genuine stat failure
   // (EACCES/EIO/ELOOP) must not be read as "no survey/ -- store is clean" and
-  // silently degrade a permanent migration refusal into a transient per-tile
-  // skip. `fs::is_directory(p, ec)` does NOT set ec for a plain nonexistent path
-  // (not_found is not an error), so a set ec means a REAL stat failure, not the
-  // normal fresh-store case -- treat it as "survey/ may persist, cannot rule it
-  // out" and abort. Check dir_ec BEFORE the symlink probe rather than OR-ing both
-  // ecs at the end: is_directory FOLLOWS the link, so on a symlinked survey/
-  // pointing at a real dir it returns true and short-circuits, and dir_ec is only
-  // set on an actual stat failure worth aborting on.
+  // silently degrade a permanent migration refusal into a transient per-tile skip.
+  // But the normal clean-store case (survey/ simply absent) MUST return false --
+  // and on libstdc++ `fs::is_directory(p, ec)` / `is_symlink(p, ec)` DO set
+  // ec = ENOENT (or ENOTDIR) for a missing path (contrary to the assumption of an
+  // earlier revision), so "any ec set" cannot mean failure or this would refuse
+  // EVERY store without a survey/ layer. Classify the ec instead: ENOENT/ENOTDIR
+  // means survey/ genuinely does not exist (clean store -> false); any OTHER error
+  // means the probe could not rule a persisting survey/ out -> fail safe to abort.
+  const auto genuine_stat_error = [](const std::error_code & ec) {
+      return ec && ec != std::errc::no_such_file_or_directory &&
+             ec != std::errc::not_a_directory;
+    };
+  // is_directory FOLLOWS the link (a real dir OR a link to one); check its ec before
+  // the symlink probe so a symlinked survey/ pointing at a real dir short-circuits.
   std::error_code dir_ec;
-  if (fs::is_directory(survey, dir_ec) || dir_ec) {
+  if (fs::is_directory(survey, dir_ec) || genuine_stat_error(dir_ec)) {
     return true;
   }
-  // is_directory was a clean false (survey/ is not a dir and not a stat error):
-  // still catch a symlinked survey/ whose target is missing/not-a-dir -- the
-  // variant an is_directory-only probe misses. is_symlink likewise leaves link_ec
-  // unset for a plain nonexistent path, so a set link_ec is again a real failure.
+  // is_directory was a clean false (survey/ absent or not a dir): still catch a
+  // symlinked survey/ whose target is missing/not-a-dir -- the variant an
+  // is_directory-only probe misses -- again failing safe on a genuine stat error.
   std::error_code link_ec;
-  return fs::is_symlink(survey, link_ec) || static_cast<bool>(link_ec);
+  return fs::is_symlink(survey, link_ec) || genuine_stat_error(link_ec);
 }
 
 bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
