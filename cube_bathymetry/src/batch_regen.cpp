@@ -247,20 +247,20 @@ void BatchRegen::finalize(
   flushOpenStreams();
   closeAllStreams();
 
-  // A non-empty output survey layer means batch-regen is rebuilding over a populated
-  // store. The gather forces from-scratch (skip_survey_seed below) so it never blends
-  // onto the tiles it rebuilds, but tiles NOT touched by this run stay behind as
-  // stale survey data mixed with the fresh rebuild -- warn so the operator can point
-  // -o at an empty directory for a clean exact rebuild.
+  // A non-empty output processed layer means batch-regen is rebuilding over a
+  // populated store. The gather forces from-scratch (skip_survey_seed below) so it
+  // never blends onto the tiles it rebuilds, but tiles NOT touched by this run stay
+  // behind as stale processed data mixed with the fresh rebuild -- warn so the
+  // operator can point -o at an empty directory for a clean exact rebuild.
   if (!cfg_.store_dir.empty()) {
-    const std::string survey_dir = cfg_.store_dir + "/" +
+    const std::string processed_dir = cfg_.store_dir + "/" +
       marine_bathymetry_store::layerDirName(
-      marine_bathymetry_store::SourceLayer::Survey);
+      marine_bathymetry_store::SourceLayer::Processed);
     std::error_code ec;
-    if (std::filesystem::is_directory(survey_dir, ec) &&
-      !std::filesystem::is_empty(survey_dir, ec))
+    if (std::filesystem::is_directory(processed_dir, ec) &&
+      !std::filesystem::is_empty(processed_dir, ec))
     {
-      std::cerr << "batch_regen: WARNING output survey layer '" << survey_dir
+      std::cerr << "batch_regen: WARNING output processed layer '" << processed_dir
                 << "' is not empty; batch-regen rebuilds each touched tile from "
         "scratch, but any pre-existing tile this run does NOT touch is left in "
         "place (stale data mixed with the rebuild). Point -o at an empty directory "

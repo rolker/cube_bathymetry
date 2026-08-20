@@ -124,7 +124,7 @@ std::map<gggs::CellIndex, std::pair<double, double>> loadBathyCells(
   marine_bathymetry_store::load(store, store_dir);
   std::map<gggs::CellIndex, std::pair<double, double>> out;
   for (const auto & grid_tile : store.tiles(
-      marine_bathymetry_store::SourceLayer::Survey))
+      marine_bathymetry_store::SourceLayer::Processed))
   {
     const auto & depth = grid_tile.second.depthBand();
     const auto & unc = grid_tile.second.uncertaintyBand();
@@ -373,13 +373,13 @@ TEST(ImportEviction, NeverDropsTileWhenPersistFails)
   const std::string root = makeTempDir("persistfail");
   const std::string store_dir = root + "/store";
   std::filesystem::create_directories(store_dir);
-  // layerDirName(Survey) == "survey": plant a FILE there so
+  // layerDirName(Processed) == "processed": plant a FILE there so
   // create_directories() throws and persistBathyTile cannot write.
   {
     std::ofstream blocker(
       store_dir + "/" +
       marine_bathymetry_store::layerDirName(
-        marine_bathymetry_store::SourceLayer::Survey));
+        marine_bathymetry_store::SourceLayer::Processed));
     blocker << "not a directory";
   }
 
@@ -559,9 +559,9 @@ TEST(ImportEviction, ChartLayerSeedRejectsDeepBlunder)
 
 // Evict/revisit keeps the prior gate (#118): a tile whose predicted surface came
 // only from the reference prime used to return from eviction with the gate OFF —
-// reloadEvictedTile restored the Survey layer only, so a cell never surveyed
+// reloadEvictedTile restored the Processed layer only, so a cell never surveyed
 // (prior-gated only) accepted a false-deep sounding on revisit. The fix re-primes
-// the prior FIRST on reload (then the survey restore overwrites where measured
+// the prior FIRST on reload (then the processed restore overwrites where measured
 // data exists). Here: survey one cell of a reference-gated tile, force its
 // eviction with spread batches, revisit with a deep blunder at a DIFFERENT cell
 // of the same tile — the blunder must still be rejected. (Revert the reload
@@ -948,6 +948,73 @@ TEST(ImportEviction, BoundaryFlushCrossLevelReferenceRejectsDeepBlunder)
   EXPECT_TRUE(with.empty())
     << "the containing coarse tile must gate the deep blunder even when a flush "
        "survey tile also loads the edge-adjacent coarse neighbor";
+
+  std::filesystem::remove_all(root);
+}
+
+// Cross-layer anti-clobber on the direct-write import path (ADR-0010 D8): a
+// processed write must clear the overlapped draft cells via the store's public
+// clearOverlappedDraft (parity with the GeoTIFF importer), so stale live-CUBE
+// draft never shadows the authoritative re-run. Seed a draft cell that the import
+// WILL overlap and another draft cell in a different, un-surveyed tile that it will
+// NOT. After the import: processed holds the surveyed cell, the overlapped draft
+// cell is cleared to no-data, and the unrelated draft cell survives (clearing is
+// scoped to the processed tile, not a global wipe).
+TEST(ImportEviction, ProcessedImportClearsOverlappedDraft)
+{
+  constexpr double kLat = 43.0;
+  constexpr double kLon = -70.0;
+
+  const std::string root = makeTempDir("draftclear");
+  const std::string store_dir = root + "/store";
+  std::filesystem::create_directories(store_dir);
+
+  marine_bathymetry_store::BathymetryStore probe =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+  const gggs::CellIndex overlapped = probe.cellIndex(kLat, kLon);
+  // A cell in a clearly different tile the survey never visits.
+  const gggs::CellIndex untouched = probe.cellIndex(kLat + 1.0, kLon - 1.0);
+  ASSERT_NE(overlapped.grid(), untouched.grid())
+    << "the untouched seed cell must live in a different tile";
+
+  // Seed a DRAFT surface on disk with both cells.
+  {
+    marine_bathymetry_store::BathymetryStore seed =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    seed.set(
+      marine_bathymetry_store::SourceLayer::Draft, overlapped, {-11.0, 0.5});
+    seed.set(
+      marine_bathymetry_store::SourceLayer::Draft, untouched, {-22.0, 0.5});
+    ASSERT_GT(marine_bathymetry_store::save(seed, store_dir), 0u);
+  }
+
+  // Run a processed import that surveys ONLY the overlapped cell's position.
+  runImport(
+    {surveyCell(kLat, kLon, 12.0f, 30.0f)}, store_dir, /*bs_dir=*/"", /*budget=*/0);
+
+  marine_bathymetry_store::BathymetryStore out =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+  marine_bathymetry_store::load(out, store_dir);
+
+  // Processed holds the authoritative surveyed cell.
+  const auto processed_cell =
+    out.get(marine_bathymetry_store::SourceLayer::Processed, overlapped);
+  ASSERT_TRUE(processed_cell.has_value() && processed_cell->hasData())
+    << "the processed re-run must persist the surveyed cell";
+
+  // The overlapped draft cell was cleared to no-data by the processed write.
+  const auto draft_overlapped =
+    out.get(marine_bathymetry_store::SourceLayer::Draft, overlapped);
+  EXPECT_TRUE(!draft_overlapped.has_value() || !draft_overlapped->hasData())
+    << "the overlapped draft cell must be cleared by the processed write";
+
+  // The unrelated draft cell (different tile) survives -- clearing is scoped, not
+  // a global wipe.
+  const auto draft_untouched =
+    out.get(marine_bathymetry_store::SourceLayer::Draft, untouched);
+  ASSERT_TRUE(draft_untouched.has_value() && draft_untouched->hasData())
+    << "a draft cell the processed data does not cover must survive";
+  EXPECT_NEAR(draft_untouched->depth, -22.0, 1e-6);
 
   std::filesystem::remove_all(root);
 }

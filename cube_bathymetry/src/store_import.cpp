@@ -451,11 +451,11 @@ void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
   if (!tile.dirty()) {
     return;
   }
-  // The off-boat CUBE re-run is the authoritative product: always the `survey`
-  // layer (uma#248 collapsed the draft/processed split into one).
+  // The off-boat CUBE re-run is the authoritative product: always the `processed`
+  // layer (ADR-0010 D8 re-split the fused survey layer into processed + draft).
   const std::string layer_dir = cfg_.store_dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Survey);
+    marine_bathymetry_store::SourceLayer::Processed);
   std::filesystem::create_directories(layer_dir);
   // tile_io::saveTile writes the GTiff directly to the final path and checks the
   // flush/close result (an I/O error or full disk throws), but it is NOT crash-atomic:
@@ -465,6 +465,35 @@ void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
   marine_bathymetry_store::saveTile(
     tile, layer_dir + "/" + marine_bathymetry_store::tileFilename(index));
   ++bathy_persisted_;
+
+  // Cross-layer anti-clobber (ADR-0010 D8): a processed write clears the draft
+  // cells it overlaps, so stale live-CUBE draft never shadows the authoritative
+  // re-run in the display cache or wastes disk. The store owns this semantics via
+  // the public clearOverlappedDraft, so this direct-saveTile producer applies it
+  // exactly as importGeoTiff does. This path keeps no persistent in-memory store,
+  // so load the tile's window (pulls in any overlapping draft tile), clear against
+  // the just-written processed tile, and persist only the touched (dirtied) draft
+  // tiles. Clearing is an optimization, not a correctness requirement -- the query
+  // overlay already resolves Processed > Draft -- so a failure here is logged and
+  // swallowed: the authoritative processed write above already succeeded and must
+  // not be lost, nor the import aborted.
+  try {
+    marine_bathymetry_store::BathymetryStore scratch =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(cfg_.cell_size_m);
+    const auto sw = index.southWestPosition();
+    const auto ne = index.northEastPosition();
+    marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
+    const auto cleared = scratch.clearOverlappedDraft(tile);
+    if (cleared.cells_cleared > 0) {
+      marine_bathymetry_store::save(scratch, cfg_.store_dir, nullptr);
+    }
+  } catch (const std::exception & e) {
+    std::cerr << "import_bag: could not clear overlapped draft for processed tile "
+              << index << ": " << e.what()
+              << " (processed write stands; stale draft may briefly shadow the "
+      "display cache until the next processed pass or a manual clear)"
+              << std::endl;
+  }
 }
 
 void ImportAccumulator::persistBackscatterTile(const gggs::GridIndex & index)
@@ -589,7 +618,7 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
     const auto ne = index.northEastPosition();
     marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
     const auto & tiles =
-      scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
+      scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
     auto it = tiles.find(index);
     if (it != tiles.end()) {
       // seed_settled=true: restore each cell's settled depth/uncertainty as a CUBE
@@ -793,17 +822,19 @@ bool primePriorLayersForTile(
 
 bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
 {
-  // Two-rung seed precedence (#96), run once per tile on first touch. survey wins
-  // over reference: a survey tile is measured CUBE data (settle it, seed its
+  // Two-rung seed precedence (#96), run once per tile on first touch. processed wins
+  // over reference: a processed tile is measured CUBE data (settle it, seed its
   // backscatter); a reference tile is a coarse read-only prior (gate only).
 
-  // Rung 1 -- survey: a pre-existing survey bathy tile (an incremental import into
-  // an existing store, or -- via reloadEvictedTile -- an already-written tile).
-  // loadWindow silently returns 0 when store_dir has no survey/ layer yet (a fresh
-  // import), so this falls through to the reference rung with no error/warning.
-  // skip_survey_seed disables this rung for the batch-regen gather: replaying a
-  // tile's complete sounding population onto a warm-start from that same tile in the
-  // OUTPUT store would double-count it (a silent blend, not an exact rebuild).
+  // Rung 1 -- processed: a pre-existing processed bathy tile (an incremental import
+  // into an existing store, or -- via reloadEvictedTile -- an already-written tile).
+  // The off-boat re-run reads back its own authoritative `processed` layer, not the
+  // live `draft` (ADR-0010 D8). loadWindow silently returns 0 when store_dir has no
+  // processed/ layer yet (a fresh import), so this falls through to the reference
+  // rung with no error/warning. skip_survey_seed disables this rung for the
+  // batch-regen gather: replaying a tile's complete sounding population onto a
+  // warm-start from that same tile in the OUTPUT store would double-count it (a
+  // silent blend, not an exact rebuild).
   if (!cfg_.store_dir.empty() && !cfg_.skip_survey_seed) {
     try {
       marine_bathymetry_store::BathymetryStore scratch =
@@ -812,11 +843,11 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
       const auto ne = index.northEastPosition();
       marine_bathymetry_store::loadWindow(scratch, cfg_.store_dir, sw, ne, nullptr);
       const auto & tiles =
-        scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
+        scratch.tiles(marine_bathymetry_store::SourceLayer::Processed);
       auto it = tiles.find(index);
       if (it != tiles.end()) {
-        // Settled warm-start: the survey layer round-trips as a CUBE hypothesis and
-        // refines under new soundings (ADR-0001).
+        // Settled warm-start: the processed layer round-trips as a CUBE hypothesis
+        // and refines under new soundings (ADR-0001).
         primeFromTile(it->second, sheet_, /*seed_settled=*/true);
         // Reconstruct each cell's corrected-intensity Welford from the survey
         // backscatter tile so the re-run's beams blend with the stored population

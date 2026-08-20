@@ -136,7 +136,7 @@ std::map<gggs::CellIndex, std::pair<double, double>> loadBathyCells(
   marine_bathymetry_store::load(store, store_dir);
   std::map<gggs::CellIndex, std::pair<double, double>> out;
   for (const auto & grid_tile : store.tiles(
-      marine_bathymetry_store::SourceLayer::Survey))
+      marine_bathymetry_store::SourceLayer::Processed))
   {
     const auto & depth = grid_tile.second.depthBand();
     const auto & unc = grid_tile.second.uncertaintyBand();

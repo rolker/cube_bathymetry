@@ -95,7 +95,7 @@ std::size_t saveDirty(GeoMapSheet & sheet, const std::string & dir)
   const std::string out =
     dir + "/" +
     marine_bathymetry_store::layerDirName(
-    marine_bathymetry_store::SourceLayer::Survey);
+    marine_bathymetry_store::SourceLayer::Draft);
   std::filesystem::create_directories(out);
   std::size_t written = 0;
   for (const auto & index : dirty) {
@@ -167,7 +167,7 @@ TEST(AntiEntropyDiskServe, ColdConsumerConvergesToFullStoreAcrossEviction)
     marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
   marine_bathymetry_store::load(store, dir);
   const auto & store_tiles =
-    store.tiles(marine_bathymetry_store::SourceLayer::Survey);
+    store.tiles(marine_bathymetry_store::SourceLayer::Draft);
   ASSERT_EQ(store_tiles.size(), static_cast<std::size_t>(kTileCount));
 
   marine_tiled_raster_store::TileCatalogBuilder builder;
@@ -207,7 +207,7 @@ TEST(AntiEntropyDiskServe, ColdConsumerConvergesToFullStoreAcrossEviction)
       scratch, dir, index.southWestPosition(), index.northEastPosition(),
       nullptr);
     const auto & tiles =
-      scratch.tiles(marine_bathymetry_store::SourceLayer::Survey);
+      scratch.tiles(marine_bathymetry_store::SourceLayer::Draft);
     const auto it = tiles.find(index);
     ASSERT_NE(it, tiles.end()) << "every cataloged tile must load from disk";
 
@@ -267,7 +267,7 @@ TEST(AntiEntropyDiskServe, ResidentOnlyCatalogPrunesValidCoverage)
       marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
     marine_bathymetry_store::load(store, dir);
     for (const auto & [tile_index, tile] :
-      store.tiles(marine_bathymetry_store::SourceLayer::Survey))
+      store.tiles(marine_bathymetry_store::SourceLayer::Draft))
     {
       consumer.markHave(tile_index, held_version);
     }
