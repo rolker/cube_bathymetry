@@ -674,6 +674,23 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
       primeFromTile(it->second, sheet_);
     }
   } catch (const std::exception & e) {
+    // Mirror seedNewTile's permanent-vs-transient split (belt-and-suspenders here):
+    // a persisting legacy `survey/` means the ADR-0010 D8 migration REFUSED the store
+    // and will for every tile, so degrading tile-by-tile would silently gut the import
+    // -- abort loudly instead. By call ordering this is normally unreachable: a tile
+    // only reaches eviction/reload AFTER seedNewTile touched the same store_dir on its
+    // first touch, which would already have aborted an ambiguous/refused store; but
+    // guarding here too keeps the invariant local rather than resting on that ordering.
+    if (legacySurveyDirPersists(cfg_.store_dir)) {
+      throw std::runtime_error(
+              "import_bag: ABORTING -- store '" + cfg_.store_dir + "' still has a "
+              "legacy 'survey/' layer dir after the ADR-0010 D8 auto-migration refused "
+              "it (symlinked, ambiguous with 'processed/', or an uncommittable rename) "
+              "while reloading an evicted tile; the refusal is store-wide, so the "
+              "import cannot proceed. Resolve by hand (replace a symlink with a real "
+              "dir, or merge/remove one of 'survey/' and 'processed/'). Underlying "
+              "error: " + std::string(e.what()));
+    }
     // The on-disk surface is the real data: on a load error the caller drops the
     // partial re-created grid rather than let a later save clobber the intact file.
     // The tile stays evicted, so a later batch that revisits it retries the reload;
