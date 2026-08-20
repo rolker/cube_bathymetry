@@ -426,3 +426,68 @@ Specialists: static analysis run (ament_cpplint/uncrustify clean on changed line
 
 ### Next step
 Verdict is **approved** (0 must-fix). Lifecycle: **Local Review** -> push / open PR -> **triage-reviews**. The 2 suggestions are optional, non-blocking hardening; the host may route them to address-findings or defer. Lockstep change: the push/PR must co-land with uma#308 (feature/issue-308); host CI should run the combined build.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-20 16:08 -04:00
+**By**: Claude Code Agent (Claude Fable 5)
+
+**PR**: #134 at `9f98343`
+**Sources**: 3 (Copilot R1 @ `9f98343`, Local Review (Pre-Push) R3 @ `881429c`, CI rollup)
+**Cross-source confirmations**: 1
+**CI**: failures-noted (expected co-land break, see below)
+
+Copilot reviewed all 12 files, 2 inline comments, 0 conversation comments. R3
+(`881429c`) is one progress-only commit behind head, so its findings describe
+the identical code Copilot reviewed. Copilot's error_code comment independently
+re-derives R3's first open suggestion — a cross-source confirmation and the
+strongest signal this round.
+
+**CI**: the `ROS 2 Jazzy (industrial_ci)` failure is the EXPECTED lockstep
+break, not a regression: hosted CI builds against jazzy's pre-split
+`marine_bathymetry_store` where `SourceLayer::Processed` does not exist
+(`'Processed' is not a member of SourceLayer`). It resolves when
+rolker/unh_marine_autonomy#313 (uma#308 D8 split) merges — the co-land partner
+this PR's plan and every prior review entry already document. Do not gate on it
+locally; the merge gate is the combined build.
+
+### Findings
+- [ ] (cross-confirmed: Copilot + Local Review R3) `legacySurveyDirPersists`
+  ignores the `std::error_code`s from `is_directory`/`is_symlink`; a genuine
+  stat failure (EACCES/EIO/ELOOP) returns false and the callers treat a
+  permanent migration refusal as transient — silently degrading instead of the
+  loud abort the function exists to guarantee (ADR-0010 D8 fail-loud intent).
+  Fail safe toward abort when either ec is set. Note the short-circuit: when
+  `is_directory` returns true, `is_symlink` never runs — restructure to check
+  `dir_ec` before probing the symlink, rather than OR-ing both ecs at the end.
+  `fs::is_directory(p, ec)` does NOT set ec for a plain nonexistent path
+  (not_found is not an error), so ec-set = genuine stat failure and the normal
+  fresh-store path cannot misfire. — `cube_bathymetry/src/store_import.cpp:910`
+- [ ] (minor, Copilot) Unused structured binding `tile` in the `seed_catalog`
+  lambda's `for (const auto & [tile_index, tile] : tiles)` — dead name; iterate
+  the pair and use `.first` (or equivalent). Copilot's sub-claim that it
+  "introduces an unused-variable warning" is inaccurate: GCC/Clang under
+  `-Wall -Wextra` do not warn when only one name of a decomposition is unused,
+  and the prior clean build (29/29 suites) confirms none fired; the pattern is
+  also inherited verbatim from the removed pre-split loop. Valid as a trivial
+  dead-code cleanup, not a warning fix. — `cube_bathymetry/src/cube_bathymetry_node.cpp:375`
+- [ ] (suggestion, Local Review R3 — not raised by Copilot) Defensive
+  `assert(!mask || mask->index() == tile.index())` in
+  `primeFromTileSkippingMask` to pin the same-GridIndex mask contract (all
+  current callers satisfy it). Optional hardening; carried forward so the open
+  set lives in one entry. — `cube_bathymetry/src/store_import.cpp:222`
+
+### False positives
+- (CI rollup) `ROS 2 Jazzy (industrial_ci)` red is not a finding against this
+  PR — it is the documented expected co-land break (hosted CI lacks the D8
+  `Draft`/`Processed` split until rolker/unh_marine_autonomy#313 merges);
+  classified per the lockstep contract in plan.md and all three pre-push
+  review entries.
+
+### Next step
+Lifecycle: **Integrated Review** -> address-findings. Recommended: fix the
+cross-confirmed `legacySurveyDirPersists` ec hardening + the trivial unused
+binding in one small commit (the R3 assert item may ride along or stay
+deferred — optional). Then re-run local build/tests against the uma#308
+overlay and push. Merge gate remains the combined co-land with
+rolker/unh_marine_autonomy#313.
