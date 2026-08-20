@@ -452,7 +452,7 @@ this PR's plan and every prior review entry already document. Do not gate on it
 locally; the merge gate is the combined build.
 
 ### Findings
-- [ ] (cross-confirmed: Copilot + Local Review R3) `legacySurveyDirPersists`
+- [x] (cross-confirmed: Copilot + Local Review R3) `legacySurveyDirPersists`
   ignores the `std::error_code`s from `is_directory`/`is_symlink`; a genuine
   stat failure (EACCES/EIO/ELOOP) returns false and the callers treat a
   permanent migration refusal as transient — silently degrading instead of the
@@ -463,7 +463,7 @@ locally; the merge gate is the combined build.
   `fs::is_directory(p, ec)` does NOT set ec for a plain nonexistent path
   (not_found is not an error), so ec-set = genuine stat failure and the normal
   fresh-store path cannot misfire. — `cube_bathymetry/src/store_import.cpp:910`
-- [ ] (minor, Copilot) Unused structured binding `tile` in the `seed_catalog`
+- [x] (minor, Copilot) Unused structured binding `tile` in the `seed_catalog`
   lambda's `for (const auto & [tile_index, tile] : tiles)` — dead name; iterate
   the pair and use `.first` (or equivalent). Copilot's sub-claim that it
   "introduces an unused-variable warning" is inaccurate: GCC/Clang under
@@ -471,7 +471,7 @@ locally; the merge gate is the combined build.
   and the prior clean build (29/29 suites) confirms none fired; the pattern is
   also inherited verbatim from the removed pre-split loop. Valid as a trivial
   dead-code cleanup, not a warning fix. — `cube_bathymetry/src/cube_bathymetry_node.cpp:375`
-- [ ] (suggestion, Local Review R3 — not raised by Copilot) Defensive
+- [x] (suggestion, Local Review R3 — not raised by Copilot) Defensive
   `assert(!mask || mask->index() == tile.index())` in
   `primeFromTileSkippingMask` to pin the same-GridIndex mask contract (all
   current callers satisfy it). Optional hardening; carried forward so the open
@@ -491,3 +491,81 @@ binding in one small commit (the R3 assert item may ride along or stay
 deferred — optional). Then re-run local build/tests against the uma#308
 overlay and push. Merge gate remains the combined co-land with
 rolker/unh_marine_autonomy#313.
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-20 20:16 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-133 at `baec567` (code; a trailing progress commit follows)
+**Addressed**: Integrated Review (2026-08-20 16:08 -04:00, PR #134 at `9f98343`)
+**Commits**: `0393e13`, `baec567`
+
+### What landed
+
+All three open findings from the latest `## Integrated Review` were **fixed**
+(none deferred), in two atomic commits split by file. Rebuilt + retested against
+the uma#308 (`feature/issue-308`) store overlay — all tests green.
+
+- **F1 (cross-confirmed: Copilot + Local Review R3) — `legacySurveyDirPersists`
+  fails loud on genuine stat errors.** The probe now fails SAFE toward the
+  ADR-0010 D8 loud abort: `is_directory(survey, dir_ec)` is checked together with
+  `dir_ec` BEFORE the symlink probe (`fs::is_directory(survey, dir_ec) || dir_ec`),
+  and the symlink fallback likewise treats a set `link_ec` as a positive. Since
+  `fs::is_directory`/`fs::is_symlink` do NOT set the ec for a plain nonexistent
+  path (`not_found` is not an error), a set ec is a REAL stat failure
+  (EACCES/EIO/ELOOP) — so a permanent migration refusal can no longer be misread
+  as "no survey/, store is clean" and silently degrade to a transient per-tile
+  skip. Checking `dir_ec` before the symlink probe (rather than OR-ing both ecs at
+  the end) matches the short-circuit: `is_directory` follows the link and returns
+  true for a symlinked-to-real-dir `survey/`, so the symlink probe only runs when
+  `is_directory` was a clean false. The normal fresh-store path (no `survey/`)
+  cannot misfire. — `src/store_import.cpp:889` (`legacySurveyDirPersists`)
+- **F2 (minor, Copilot) — unused `tile` binding dropped.** The `seed_catalog`
+  lambda decomposed each map entry as `[tile_index, tile]` but used only
+  `tile_index`; now iterates the pair and takes `.first`. Trivial dead-code
+  cleanup, no behavior change. — `src/cube_bathymetry_node.cpp:375`
+- **F3 (suggestion, Local Review R3) — same-GridIndex mask contract asserted.**
+  Added `assert(!mask || mask->index() == tile.index())` (plus `<cassert>`) at the
+  top of `primeFromTileSkippingMask`, pinning the invariant the cell-for-cell `k`
+  indexing (`mask_depth[k]`) relies on. All current callers satisfy it (each pairs
+  a Draft tile with its same-index Processed tile); the assert trips a future
+  violating caller in debug rather than silently masking the wrong cells. The full
+  test run (asserts enabled) passed, confirming no current caller violates it. —
+  `src/store_import.cpp:222` (`primeFromTileSkippingMask`)
+
+### Build Verification — Option A (local, issue-308 store overlay)
+
+Same overlay as the prior Implementation entries: `/opt/ros/jazzy` + the built
+**uma#308 `feature/issue-308` core**
+(`issue-unh_marine_autonomy-308/core_ws/install`; installed
+`marine_bathymetry_store` confirmed split with the public
+`BathymetryStore::clearOverlappedDraft`; `geodesy` resolved from `/opt/ros/jazzy`).
+Rebuilt and tested `cube_bathymetry` against that overlay.
+
+**Result**: build OK; `colcon test` → **556 tests, 0 errors, 0 failures, 68
+skipped**. The new `assert` did not fire (asserts are compiled in for the test
+build), confirming the same-GridIndex mask contract holds for every caller
+exercised. Pre-commit hooks (uncrustify/cpplint) ran on both fix commits; none
+used `--no-verify`.
+
+### Lockstep note
+
+Unchanged: this PR cannot build against the pre-split main-tree jazzy core; it
+must co-land with uma#308 (feature/issue-308) — the hosted `ROS 2 Jazzy
+(industrial_ci)` red is the expected co-land break, not a regression. Verified
+locally against the split store; host CI runs the combined build.
+
+### Actions
+- [x] `legacySurveyDirPersists` fails loud on genuine stat errors (check `dir_ec` before the symlink probe) — `src/store_import.cpp:889`
+- [x] Drop the unused `tile` structured binding in `seed_catalog` (iterate the pair, use `.first`) — `src/cube_bathymetry_node.cpp:375`
+- [x] Defensive `assert(!mask || mask->index() == tile.index())` in `primeFromTileSkippingMask` — `src/store_import.cpp:222`
+
+### Next step
+
+Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand off to
+a fresh-context sub-agent:
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 133 --skill review-code
+
+Do not push — the host pushes to PR #134.
