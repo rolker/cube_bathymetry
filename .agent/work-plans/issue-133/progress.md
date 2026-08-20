@@ -298,3 +298,28 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand of
 fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 133 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-20 19:17 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-133 at `d802a30`
+**Mode**: pre-push
+**Depth**: Deep (reason: cross-layer lockstep breaking change touching store write semantics + net-new fused-prime / anti-clobber paths)
+**Must-fix**: 0 | **Suggestions**: 5
+**Round**: 2 | **Ship**: recommended — no must-fix; round-1 must-fix (fused-prime priority) verified resolved and pinned by a new test; remaining items are hardening/doc suggestions on an already-added safety net
+
+Specialists: static analysis run (ament_cpplint "No problems found", ament_uncrustify no divergence; cppcheck emitted only GTest-macro parse noise); 2 Claude Adversarial passes (Lens A logic/correctness + Lens B systemic/safety), both clean of must-fix. Copilot off (default); Local Adversarial not invoked. Store API (clearOverlappedDraft / save-dirty-only / SourceLayer ordinals / survey->processed migration incl. symlink-refusal) verified directly against the built uma#308 (feature/issue-308) headers. Build relied on the prior Implementation entry's clean run (554 tests, 0 failures) against the uma#308 overlay — source is byte-identical since (9dd0cc2..HEAD touches only progress.md).
+
+### Findings
+- [ ] (suggestion) hasAmbiguousSurveyMigration detects only the both-dirs case; store also throws (permanently) on a symlinked `survey/`, so that variant still degrades tile-by-tile to a silent near-empty store — key on "survey/ persists after loadWindow threw" instead — `src/store_import.cpp:~877`
+- [ ] (suggestion) reloadEvictedTile loadWindow catch lacks the ambiguous-store guard; safe only by call-ordering invariant — add a note or mirror the guard — `src/store_import.cpp:~676`
+- [ ] (suggestion) Live node on_configure swallows an ambiguous-store load() throw (WARN + empty start), asymmetric with the importer's loud abort; loses warm-start + catalog silently — add an explicit decision/comment — `src/cube_bathymetry_node.cpp:~402`
+- [ ] (suggestion) No test exercises the hasAmbiguousSurveyMigration abort/rethrow path — `test/`
+- [ ] (suggestion) Post-migration Draft shadowing (draft over old coverage hidden under Processed > Draft until reprocessed) — worth an operator-facing note (inherited ADR-0010 D8 semantics)
+
+### Next step
+
+Verdict is **approved** (0 must-fix). Lifecycle: **Local Review** -> push / open PR -> **triage-reviews**. The 5 suggestions are non-blocking hardening/doc items; the host may optionally route them to address-findings first, but none gate the push. This is a lockstep change — the push/PR must co-land with uma#308 (feature/issue-308); host CI should run the combined build.
