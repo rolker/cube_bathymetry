@@ -96,6 +96,26 @@ GeoSounding fromRecord(const ScatterRecord & r)
 BatchRegen::BatchRegen(SheetFactory factory, ImportAccumulatorConfig config)
 : factory_(std::move(factory)), cfg_(std::move(config)), index_sheet_(factory_())
 {
+  // PREFLIGHT (cube#133): batch-regen is a WRITE-PATH tool and, unlike the live node
+  // and store_import's load()/loadWindow() catches, it NEVER load()s the output store --
+  // so the ADR-0010 D8 `survey/`->`processed/` auto-migration never fires here. If the
+  // output store still carries a legacy `survey/` (a pre-D8 store, or one whose migration
+  // was REFUSED), the first processed write in finalize() would create `processed/`
+  // ALONGSIDE the surviving `survey/` -- exactly the ambiguous both-dirs state every
+  // future load() then permanently refuses (a nightly regen would silently brick the
+  // store for all loaders until an operator intervenes). Refuse LOUDLY here, before a
+  // single tile is scattered or written, rather than producing that state. Write-path
+  // tools do NOT migrate (documented invariant) -- the operator must migrate first.
+  if (legacySurveyDirPersists(cfg_.store_dir)) {
+    throw std::runtime_error(
+            "batch_regen: output store '" + cfg_.store_dir +
+            "' still has a legacy `survey/` layer (ADR-0010 D8). batch-regen is a "
+            "write-path tool and does NOT migrate; writing here would leave `processed/` "
+            "alongside `survey/`, the ambiguous state future store loads permanently "
+            "refuse. Migrate the store first -- run a store load (the live cube_bathymetry "
+            "node, or store_import) to auto-migrate `survey/`->`processed/`, or rename "
+            "`survey/` to `processed/` manually -- then re-run batch-regen.");
+  }
 }
 
 BatchRegen::~BatchRegen()
