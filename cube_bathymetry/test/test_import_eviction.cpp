@@ -1019,4 +1019,77 @@ TEST(ImportEviction, ProcessedImportClearsOverlappedDraft)
   std::filesystem::remove_all(root);
 }
 
+// Fused Processed-over-Draft prime priority (ADR-0010 D8, cube#133 review r1):
+// where Processed and Draft carry CONFLICTING depths on the same cell, the primed
+// sheet must report the PROCESSED depth -- the store's query-side `Processed > Draft`
+// walk -- not the Draft depth. The original prime seeded Draft-then-Processed and
+// leaned on seeding order; but two settled 1-sample hypotheses tie-break in CUBE's
+// chooseHypothesis to the FIRST-seeded, so that reported Draft on overlap (the
+// must-fix). The fix seeds Processed fully, then layers Draft with a per-cell filter
+// (loadDraftSkippingProcessed) that skips any cell Processed already covers, so the
+// overlapped cell carries only the Processed hypothesis -- deterministic regardless
+// of the tie-break, and it also keeps the predicted-surface prior Processed's (no
+// Draft write lands on the cell at all). This test pins the observable contract:
+// the overlapped cell reports the Processed depth, while a Draft-only cell in a tile
+// Processed does not cover is still primed from Draft (the skip is scoped, not a
+// blanket Draft drop).
+TEST(ImportEviction, FusedPrimeProcessedWinsOverConflictingDraft)
+{
+  constexpr double kLat = 43.0;
+  constexpr double kLon = -70.0;
+  constexpr double kProcessedDepth = -50.0;   // authoritative surface
+  constexpr double kDraftOverlapDepth = -11.0;  // stale live-CUBE surface (must lose)
+  constexpr double kDraftOnlyDepth = -22.0;    // Draft with no Processed cover
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+  const gggs::CellIndex overlapped = store.cellIndex(kLat, kLon);
+  const gggs::CellIndex draft_only = store.cellIndex(kLat + 1.0, kLon - 1.0);
+  ASSERT_NE(overlapped.grid(), draft_only.grid())
+    << "the Draft-only cell must live in a tile with no Processed coverage";
+
+  // Same cell, conflicting depths in the two layers -> the overlap under test.
+  store.set(
+    marine_bathymetry_store::SourceLayer::Processed, overlapped, {kProcessedDepth, 0.5});
+  store.set(
+    marine_bathymetry_store::SourceLayer::Draft, overlapped, {kDraftOverlapDepth, 0.5});
+  // A Draft cell Processed does not cover -> must still be primed from Draft.
+  store.set(
+    marine_bathymetry_store::SourceLayer::Draft, draft_only, {kDraftOnlyDepth, 0.5});
+
+  // The node's fused startup prime: Processed FULLY first, then Draft-skip-Processed.
+  GeoMapSheet sheet(kCellSize);
+  loadIntoSheet(store, marine_bathymetry_store::SourceLayer::Processed, sheet);
+  loadDraftSkippingProcessed(store, sheet);
+
+  // Read the primed settled depths back out of the sheet.
+  const auto tiles = mapSheetToTiles(sheet);
+  const auto depthAt = [&](const gggs::CellIndex & cell) -> double {
+      const auto t_it = tiles.find(cell.grid());
+      if (t_it == tiles.end()) {return std::nan("");}
+      const auto & depth = t_it->second.depthBand();
+      gggs::CellAreaIterator it(t_it->second.index());
+      std::size_t k = 0;
+      for (; it.valid() && k < depth.size(); it.next(), ++k) {
+        if (*it == cell) {return depth[k];}
+      }
+      return std::nan("");
+    };
+
+  const double primed_overlap = depthAt(overlapped);
+  ASSERT_FALSE(std::isnan(primed_overlap))
+    << "the overlapped cell must be primed from one of the two layers";
+  EXPECT_NEAR(primed_overlap, kProcessedDepth, 1e-2)
+    << "Processed must win the overlapped cell (got " << primed_overlap
+    << "; Draft would be " << kDraftOverlapDepth << ")";
+  EXPECT_GT(std::abs(primed_overlap - kDraftOverlapDepth), 1.0)
+    << "the overlapped cell must NOT report the stale Draft depth";
+
+  const double primed_draft_only = depthAt(draft_only);
+  ASSERT_FALSE(std::isnan(primed_draft_only))
+    << "a Draft cell with no Processed cover must still be primed from Draft";
+  EXPECT_NEAR(primed_draft_only, kDraftOnlyDepth, 1e-2)
+    << "the Draft-only cell must survive (the skip is scoped to Processed cells)";
+}
+
 }  // namespace cube
