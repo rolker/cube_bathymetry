@@ -92,3 +92,40 @@ must be co-landed with the store.
 - [ ] Confirm draft-clearing function signature from uma#313 before implementing call in `persistBathyTile()`
 - [ ] Confirm whether `SourceLayer::Processed` requires a constructor write-gate flag in uma#313
 - [ ] Confirm whether `batch_regen.cpp` should also invoke draft clearing (likely yes via shared `ImportAccumulator`, but only `store_import` is explicitly named in the issue)
+
+## Plan Review
+**Status**: complete
+**When**: 2026-08-20 17:50 +00:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-133/plan.md` at `bbcde41`
+**PR**: PR-less (`--issue 133`, layer worktree `feature/issue-133`)
+**Verdict**: changes-requested
+
+Note: `gh` was unauthenticated in this environment; the linked issue was read
+from the `## Issue Review` entry above (not a fresh `gh issue view`). The
+uma#308 store API was verified directly against the local `feature/issue-308`
+worktree headers (`issue-unh_marine_autonomy-308/core_ws/.../marine_bathymetry_store`).
+
+### Findings
+- [ ] (must-fix) Step 3's "invoke the store-side draft-clearing function" after `saveTile()` assumes an API that does not exist. The uma#308 public surface is `layerDirName` / `saveTile` / `set` / `importTiles` / `tiles` — there is **no standalone clear-draft function**. Cell-wise draft clearing is an internal side effect of `importGeoTiff(store, Processed, path)` (returns `ProcessedImportResult`), reached only via the GeoTIFF-file import path. `persistBathyTile` writes an in-memory tile via **direct `saveTile()`**, which bypasses `importGeoTiff` entirely — so there is nothing to "invoke." Correctness does **not** depend on clearing (the query overlay resolves `Processed > Draft`, per `geotiff_import.hpp`/`bathymetry_store.hpp`); clearing is a space + display-cache-invalidation optimization (camp#171/#172). Reframe Step 3: either (a) omit clearing on the `saveTile` path and rely on read-time priority (document this), or (b) implement explicit cell-wise `store.set(Draft, cell, {})` — a materially larger change than a one-line call. — `plan.md:67-69`, `plan.md:222-224`
+- [ ] (must-fix) Missing consequence: legacy `survey/` auto-migrates to **`processed/`** on load (`migrateLegacySurveyDir`, single rename; `tile_io.hpp:53-55`). Step 2 retargets the live node's startup prime (`store.tiles(...)`, `loadIntoSheet(...)`, mtime walk — node.cpp:327/330/351) to `Draft`. On the first boot after co-land on a boat with prior on-disk `survey/`, that data is relabeled `processed/`, so the node primes from an **empty `Draft`** — losing its warm-start GeoMapSheet seed and its disk-serve tile-version catalog (node.cpp:333+). The live node's own historical output was really draft/live data, yet migration marks it `Processed` (now out-ranking new draft writes). The plan must address this: prime the node from `Processed` (or Processed∪Draft) to preserve warm-start across the migration boundary, or explicitly confirm empty-draft-first-boot is acceptable. — `plan.md:54-58`
+- [ ] (suggestion) Open Question #2 is answerable now and can be closed: `Processed` and `Draft` are **both freely writable** (`bathy_cell.hpp:57-58`); only `Reference`/`Chart` are constructor-gated (`reference_writable` / `chart_staging_writable`). No write-gate flag is needed for `Processed`. Drop the ADR-0002 A2.1 caveat at `plan.md:179` and the open question at `plan.md:225-226`. — `plan.md:179`
+- [ ] (suggestion) Build verification is more achievable than the plan assumes. The `feature/issue-308` store is **built and present locally** at `issue-unh_marine_autonomy-308/core_ws/install/marine_bathymetry_store` — Build Verification Option A (overlay that install) can run now. Commit to a local build+test rather than deferring to combined host CI. — `plan.md:196-207`
+- [ ] (positive) File targeting verified exhaustively correct against `grep`: all node/store_import/batch_regen `SourceLayer::Survey` sites and every test-file line map exactly to the plan's tables; bathy-vs-backscatter (`mbs = marine_mbes_backscatter_store`, store_import.cpp:479) and Draft-vs-Processed classification are all accurate. Enum ordinals confirmed: `Processed=0 > Draft=1 > Reference=2 > Chart=3`.
+
+### Summary
+Scope, structure, and file targeting are excellent — a well-partitioned single-PR
+enum retarget with every site correctly enumerated and classified. The plan's one
+piece of net-new logic (draft-clearing) rests on an incorrect assumption about the
+store API, and it omits the consequence of the legacy `survey/`→`processed/`
+migration on the live node's now-`Draft` startup prime. Both are small, targeted
+amendments (not a rewrite); the plan's Step-1 "confirm the API first" gate already
+creates space to resolve them. Address the two must-fix items — ideally amend the
+plan inline — before implementation.
+
+### Recommended Actions
+- [ ] Reframe Step 3's draft-clearing: decide omit-and-rely-on-`Processed > Draft` vs. explicit cell-wise `set(Draft, cell, {})`; correct the "invoke the store-side draft-clearing function" wording (no such function exists).
+- [ ] Add a consequence + decision for the `survey/`→`processed/` migration vs. the node's `Draft` startup prime (warm-start / disk-serve catalog on first post-co-land boot).
+- [ ] Close Open Question #2 (Processed is freely writable — no gate flag) and drop the ADR-0002 A2.1 caveat.
+- [ ] Adopt local Build Verification Option A against the built `issue-308` install.
