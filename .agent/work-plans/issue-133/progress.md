@@ -405,3 +405,24 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes). Hand of
 fresh-context sub-agent:
 
     .agent/scripts/dispatch_subagent.sh --mode in-process --issue 133 --skill review-code
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-08-20 19:50 +00:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: approved
+
+**Branch**: feature/issue-133 at `881429c`
+**Mode**: pre-push
+**Depth**: Deep (reason: 200+ lines / 10+ files; safety-relevant persistence, eviction, and lifecycle paths)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 3 | **Ship**: recommended — 0 must-fix; round-1 fused-prime must-fix stays resolved + test-pinned; round-2's 4 hardening suggestions all landed (F1-F4); this round's 2 items are optional low-value defensive hardening on an already-solid safety net.
+
+Specialists: static analysis run (ament_cpplint/uncrustify clean on changed lines — HEAD byte-identical to last-tested `1ac0e8a`, only progress.md differs; cppcheck's 3 `useStlAlgorithm` hits all on untouched context lines, dropped); 2 Claude Adversarial passes (Lens A logic + Lens B systemic) — both surfaced only false positives (a non-existent OOB: line 247 short-circuits `k < mask_depth->size()` before indexing; and a "use RCLCPP_WARN" that misreads the offline import_bag library `store_import.cpp` — 0 rclcpp usages, 8 existing std::cerr — as a ROS node) plus the 2 hardening suggestions below. Copilot off (default). Local Adversarial skipped (Ollama not reachable on :11434). Store API (clearOverlappedDraft / save-dirty-only / SourceLayer ordinals / survey->processed migration refusals) re-verified against the built uma#308 (feature/issue-308) install headers. Build relies on the prior Implementation entry's clean run (29/29 CTest suites) against the uma#308 overlay — source unchanged since.
+
+### Findings
+- [ ] (suggestion) `legacySurveyDirPersists` ignores the `error_code`s from `is_directory`/`is_symlink`; a genuine stat failure returns false and silently degrades instead of the loud abort — fail safe toward abort on ec set — `src/store_import.cpp:910`
+- [ ] (suggestion) Defensive `assert(!mask || mask->index() == tile.index())` in `primeFromTileSkippingMask` to pin the same-GridIndex mask contract (all current callers already satisfy it) — `src/store_import.cpp:222`
+
+### Next step
+Verdict is **approved** (0 must-fix). Lifecycle: **Local Review** -> push / open PR -> **triage-reviews**. The 2 suggestions are optional, non-blocking hardening; the host may route them to address-findings or defer. Lockstep change: the push/PR must co-land with uma#308 (feature/issue-308); host CI should run the combined build.
