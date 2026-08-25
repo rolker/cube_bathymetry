@@ -156,6 +156,12 @@ incremental replacement for the monolithic whole-survey emission and the
 reconstructing a full-survey display from the stream (e.g. in RViz) is out of
 scope here (follow-up).
 
+**Updated 2026-08-25** — "one message per changed tile" is now only the
+default. See the *Dirty sub-window publishing* addendum below: the quantized
+`~/coverage_tiles` stream can send just the changed cells of a tile
+(`publish_dirty_subwindow`, off by default), and the publish-dirty set has
+gained per-tile cell bounds to make that possible.
+
 ### 5. `clear_grid` service removed (superseded by automatic bounding)
 
 `clear_grid` was the *manual* mitigation for the two problems this ADR now solves
@@ -324,3 +330,137 @@ disk-serve with zero live-sheet churn, cold-consumer convergence, and a
 negative control proving a resident-only catalog prunes a warm consumer's
 valid coverage. Field validation against the #104 symptom (07-21 bag replay +
 cold-CAMP catch-up) is tracked on #104.
+
+## Addendum — Dirty sub-window publishing (`publish_dirty_subwindow`, 2026-08-25)
+
+Section 4 above describes the incremental stream as **per-tile**: the
+publish-dirty *set* bounds which tiles are sent, and each one is sent whole.
+That is still what happens by default, and it is not enough.
+
+### The measurement
+
+On the boat, `~/coverage_tiles` carries level-11 tiles of 960x960 cells with
+three bands — `depth` INT16 plus `uncertainty` and `backscatter` UINT8, so
+4 bytes per cell:
+
+| | cells | payload |
+|---|---|---|
+| whole tile | 921,600 | **3,686,400 B** |
+
+The operator link's whole budget is 1,500,000 B/s, so **one tile message is
+2.46x the entire per-second budget** and occupies ~2.5 s of the link at full
+cap. At the measured 0.26 tiles/s that is ~958 kB/s, 64% of the budget, for
+coverage alone. Rate-limiting cannot help: 0.26/s is already slow. The problem
+is message **size**.
+
+`quantize_tile.cpp` hardcoded `window_col = window_row = 0`,
+`window_width = cols`, `window_height = rows`. The wire contract
+(`SonarVisualizationTile`, uma#230) has said since it was designed that bands
+carry only the dirty sub-window and the consumer patches it in at the offset —
+the producer side was simply never built.
+
+### Decision
+
+**1. Track dirty cell bounds, not just the dirty flag.** `GeoGrid::insert`
+already evaluates per cell whether the CUBE node accepted the sounding; that
+per-cell result now expands a `CellBox` (inclusive min/max row and column)
+instead of collapsing straight into the per-grid bool.
+`GeoMapSheet::clearPublishDirtyGrids()` resets the boxes of exactly the tiles
+it clears, so the tile set and the cell bounds cannot drift. The save cadence
+does not touch them, and the seed/reload accessors — which already carry a
+no-dirty-mark contract — do not expand them.
+
+A bounding **box**, not a per-cell mask: four `uint16` per tile against a
+960x960 bitset, O(1) on the profiler-hot insert path (#63/#107), and the wire
+carries a rectangular window anyway, so a mask could not be transmitted without
+changing the message. The cost is over-coverage — a diagonal or two-lobed
+change set sends unchanged cells inside its hull, degrading to the whole tile
+in the worst case, which is exactly today's behaviour and never worse.
+
+`GeoGrid` is the only place that can do this: `GeoMapSheet` sees one bool per
+grid, and re-deriving a box from the sounding bounds would duplicate the
+influence-radius math the two deliberately share (#104).
+
+**2. `quantizeTileWindow(grid, stamp, window)` packs just that box.**
+`width`/`height` still carry the full tile size — the contract requires it —
+while the window fields and each band's array cover exactly the box, row-major.
+`quantizeTile()` is now that function called with `CellBox::wholeTile()`, so the
+full-tile path and the patch path share one implementation and the default
+output is byte-for-byte what it was.
+
+Two consequences worth stating:
+
+- The backscatter **auto-range is scoped to the window**. That is what makes
+  the whole-tile case byte-identical, and it gives a narrow patch better
+  dynamic range — but successive patches to one tile can then carry different
+  `scale`/`offset`. A consumer must dequantize on receipt
+  (`value = raw*scale + offset`, uma ADR-0008 D1) and store physical values;
+  one that stored raw counts against a single per-tile scale would mis-render
+  older cells. `depth` and `uncertainty` are fixed-scale and unaffected.
+- A window with no finite-depth cell returns `nullopt` rather than an
+  all-nodata patch, which would blank cells the consumer already holds.
+
+**3. The heal paths stay whole-tile.** `tileRequestCallback()` and
+`drainDiskServeQueue()` are unchanged. They exist to repair a consumer that has
+diverged, and a patch cannot repair divergence.
+
+**4. It is off by default.** `publish_dirty_subwindow` (bool, default `false`,
+read at configure) gates the whole thing; `false` reproduces the existing
+stream exactly. Enabling it logs a WARN.
+
+### What it saves
+
+Cells at ~1 m, publish cadence >= 5 s, boat ~2 m/s, ~40 m swath, plus a
+two-cell influence margin each side. Payload only, per tile message:
+
+| case | box | payload | vs full |
+|---|---|---|---|
+| one cycle, line along a tile axis | 14 x 44 | 2,464 B | 0.07% (1,500x) |
+| one cycle, line at 45 deg | 41 x 41 | 6,724 B | 0.18% (550x) |
+| a whole survey line crossing the tile in one cycle | 44 x 960 | 168,960 B | 4.6% (22x) |
+| a diagonal line crossing the tile corner to corner in one cycle | 960 x 960 | 3,686,400 B | 100% (no saving) |
+
+At the measured 0.26 tiles/s the first row is ~641 B/s against ~958 kB/s today
+— coverage stops being the link's dominant cost. The last row is the honest
+worst case and the reason the box representation is called out above: the
+saving is a function of track geometry, not a constant. `publishDirtyTiles()`
+therefore logs the cells actually sent against the whole-tile equivalent
+(throttled, 30 s) so the enable/disable decision can be made from a measured
+ratio on the survey in hand.
+
+### Why opt-in, and what enabling it requires
+
+The patch-application semantics live in the consumer. **CAMP (camp#121) is not
+in this workspace and its implementation could not be verified here** —
+uma `docs/sonar_ecosystem.md` records camp#121 / PR camp#139 as merged, but a
+docs claim about an out-of-tree repo is not evidence of shipped behaviour, and
+a consumer that ignored the window fields would paint a patch across the whole
+tile and corrupt the operator's coverage view mid-survey.
+
+The in-tree second consumer, `marine_web_view`'s `coverage_renderer` (uma#345),
+*does* implement the patch path — `_on_tile` decodes with the window
+dimensions, dequantizes per message, and applies at `(window_row,
+window_col)` — and it exposes the second half of the prerequisite:
+
+> Only a whole-tile message advances possession; a partial one updates the
+> pixels and leaves the catalog free to re-serve the tile in full.
+
+That is deliberate and correct — it is what stops a lost best-effort patch from
+becoming a permanent hole the catalog never re-requests — but it means that
+against *that* consumer, enabling `publish_dirty_subwindow` makes every patched
+tile stay in `reconcile()`'s `to_request` list and be re-served **in full**
+anyway, costing more than leaving the parameter off.
+
+So enabling this requires a consumer that both (a) applies the window and (b)
+accounts for patch possession (a per-tile hole map, or an explicit
+whole-tile refresh cadence). Until such a consumer is confirmed on the operator
+side, `false` is the correct value. The catalog/TileRequest path remains what
+recovers a consumer that gets it wrong.
+
+Enforced by `test_geo_grid` (box accumulation, reset, re-accumulation, and that
+rejected soundings and the seed/reload paths never dirty a cell),
+`test_geo_map_sheet` (box and set clear together; a save does not consume the
+publish bounds), and `test_quantize_tile` (window packing order and offsets,
+band length always `window_width * window_height` per dtype across six window
+shapes, the wire extent bound, whole-tile equals the full-tile output
+byte for byte, clamping, and the empty/no-depth/outside-tile `nullopt` cases).
