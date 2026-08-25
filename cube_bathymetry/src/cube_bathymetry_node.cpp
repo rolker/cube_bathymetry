@@ -517,15 +517,23 @@ public:
     subwindow_desc.description =
       "Publish only each tile's dirty sub-window on ~/coverage_tiles instead of "
       "the whole tile (SonarVisualizationTile window_col/row/width/height). "
-      "REQUIRES a consumer that (a) patches bands in at the window offset and "
+      "REQUIRES a consumer that (a) patches bands in at the window offset, "
       "(b) dequantizes per message -- the backscatter band's scale/offset is "
-      "auto-ranged over the window, so it varies between patches. A consumer "
-      "that records possession only for whole tiles will keep re-requesting "
-      "each patched tile in full via the catalog, costing MORE bandwidth than "
-      "leaving this off. The catalog/TileRequest heal path re-sends a tile in "
-      "full and is what recovers a consumer that gets it wrong. Default false "
-      "reproduces the full-tile stream exactly. Read at configure; read_only, "
-      "so a runtime set is rejected rather than silently ignored.";
+      "auto-ranged over the window, so it varies between patches -- and (c) "
+      "does NOT advance its held tile version from a patch. Get (c) wrong and "
+      "the failure is SILENT: the catalog version is bumped on a patch exactly "
+      "as on a whole tile, so a consumer that records header.stamp as its held "
+      "version -- what SonarVisualizationTile tells it to do -- matches the "
+      "catalog and never re-requests. One dropped best-effort patch then leaves "
+      "a PERMANENT, INVISIBLE gap in the operator's coverage display while "
+      "anti-entropy reports convergence. Get (c) right and the cost is only "
+      "WASTEFUL: such a consumer re-requests each patched tile in full via the "
+      "catalog, spending MORE bandwidth than leaving this off. The "
+      "catalog/TileRequest heal path re-sends a tile in full and is what "
+      "recovers a consumer that gets it wrong -- but only one that still asks. "
+      "Default false reproduces the full-tile stream exactly. Read at "
+      "configure; read_only, so a runtime set is rejected rather than silently "
+      "ignored.";
     // read_only enforces the "Read at configure" promise above. Without it a
     // runtime `ros2 param set publish_dirty_subwindow true` SUCCEEDS, reads
     // back true via `ros2 param get`, and changes nothing on the wire --
@@ -539,9 +547,16 @@ public:
     if (publish_dirty_subwindow_) {
       RCLCPP_WARN(get_logger(),
         "publish_dirty_subwindow is ENABLED: ~/coverage_tiles carries dirty "
-        "sub-window patches, not whole tiles. Verify the consumer applies "
-        "window_col/window_row/window_width/window_height before trusting the "
-        "operator coverage view.");
+        "sub-window patches, not whole tiles. Before trusting the operator "
+        "coverage view, verify the consumer (a) applies "
+        "window_col/window_row/window_width/window_height and (b) does NOT "
+        "advance its held tile version from a patch. The catalog version is "
+        "bumped on a patch just as on a whole tile, so a consumer that records "
+        "header.stamp as possession matches the catalog, never re-requests, and "
+        "one dropped best-effort patch becomes a PERMANENT, INVISIBLE coverage "
+        "gap that anti-entropy reports as converged. A consumer that does "
+        "account for patch possession instead re-requests every patched tile in "
+        "full, costing more bandwidth than leaving this off.");
     }
     sonar_tile_publisher_ =
       create_publisher<marine_interfaces::msg::SonarVisualizationTile>(
