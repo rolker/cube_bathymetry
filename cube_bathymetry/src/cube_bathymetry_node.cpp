@@ -524,7 +524,16 @@ public:
       "each patched tile in full via the catalog, costing MORE bandwidth than "
       "leaving this off. The catalog/TileRequest heal path re-sends a tile in "
       "full and is what recovers a consumer that gets it wrong. Default false "
-      "reproduces the full-tile stream exactly. Read at configure.";
+      "reproduces the full-tile stream exactly. Read at configure; read_only, "
+      "so a runtime set is rejected rather than silently ignored.";
+    // read_only enforces the "Read at configure" promise above. Without it a
+    // runtime `ros2 param set publish_dirty_subwindow true` SUCCEEDS, reads
+    // back true via `ros2 param get`, and changes nothing on the wire --
+    // accepted, reads back, inert. Under rmw_zenoh a `param set` can also drop
+    // silently, so the operator's set -> get habit cannot catch that here.
+    // Launch/YAML overrides are unaffected: read_only only rejects a set after
+    // declaration.
+    subwindow_desc.read_only = true;
     publish_dirty_subwindow_ =
       declare_parameter("publish_dirty_subwindow", false, subwindow_desc);
     if (publish_dirty_subwindow_) {
