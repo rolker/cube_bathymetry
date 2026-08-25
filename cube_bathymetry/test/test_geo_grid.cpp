@@ -475,4 +475,179 @@ TEST_F(GeoGridPredictedSurfaceTest, InsertWithoutPriorUnchanged)
   EXPECT_TRUE(checked);
 }
 
+// --- Publish-dirty cell bounds (ADR-0001 section 4 sub-window addendum) ------
+//
+// The box is what lets the incremental display-tile publish send a sub-window
+// instead of the whole 960x960 tile, so its correctness is a data-integrity
+// concern: too small and changed cells never reach the operator; not reset and
+// the saving evaporates.
+
+class GeoGridDirtyCellsTest : public GeoGridTest
+{
+protected:
+  // Geographic position of the fractional lattice coordinate (row_f, col_f).
+  static double latAt(const gggs::GridIndex & grid_index, double row_f)
+  {
+    return grid_index.southLatitude() +
+           row_f / gggs::cell_rows_per_grid * grid_index.latitudinalSpan();
+  }
+  static double lonAt(const gggs::GridIndex & grid_index, double col_f)
+  {
+    return grid_index.westLongitude() +
+           col_f / gggs::cell_columns_per_grid * grid_index.longitudinalSpan();
+  }
+
+  // Cells the grid actually holds a finite depth for, as a bounding box. The
+  // independent oracle the tracked box is checked against: it is derived from
+  // values(), not from the tracking code under test.
+  static CellBox observedBox(const GeoGrid & g)
+  {
+    CellBox box;
+    const auto values = g.values();
+    gggs::CellAreaIterator it(g.index());
+    for (std::size_t k = 0; it.valid(); it.next(), ++k) {
+      if (k < values.size() && std::isfinite(values[k].depth)) {
+        box.expand(it->row(), it->column());
+      }
+    }
+    return box;
+  }
+};
+
+TEST_F(GeoGridDirtyCellsTest, FreshGridHasAnEmptyBox)
+{
+  GeoGrid g(makeGridIndex(43.07, -70.76), params);
+  EXPECT_TRUE(g.publishDirtyCells().empty());
+  EXPECT_EQ(g.publishDirtyCells().rows(), 0);
+  EXPECT_EQ(g.publishDirtyCells().columns(), 0);
+}
+
+TEST_F(GeoGridDirtyCellsTest, InsertBoundsTheCellsItWrote)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  // Enough soundings at one touchdown to settle a hypothesis, so values() has
+  // finite cells for the oracle below to bound (see
+  // ValuesAfterInsertionsContainsValidDepths).
+  for (int i = 0; i < 20; ++i) {
+    ASSERT_TRUE(g.insert(makeGeoSounding(
+        latAt(grid_index, 480.5), lonAt(grid_index, 480.5), -10.0)));
+  }
+
+  const CellBox & box = g.publishDirtyCells();
+  ASSERT_FALSE(box.empty());
+  // A sounding spreads over its influence radius, so the box is small
+  // but not necessarily 1x1; it must be a tiny neighbourhood of cell 480,480
+  // and -- the load-bearing property -- must CONTAIN every cell that ended up
+  // with data.
+  const CellBox observed = observedBox(g);
+  ASSERT_FALSE(observed.empty());
+  EXPECT_LE(box.min_row, observed.min_row);
+  EXPECT_LE(box.min_col, observed.min_col);
+  EXPECT_GE(box.max_row, observed.max_row);
+  EXPECT_GE(box.max_col, observed.max_col);
+  EXPECT_LT(box.rows(), gggs::cell_rows_per_grid);
+  EXPECT_LT(box.columns(), gggs::cell_columns_per_grid);
+}
+
+TEST_F(GeoGridDirtyCellsTest, BoxSpansTwoSeparatedTouchdowns)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  ASSERT_TRUE(g.insert(makeGeoSounding(
+      latAt(grid_index, 200.5), lonAt(grid_index, 300.5), -10.0)));
+  ASSERT_TRUE(g.insert(makeGeoSounding(
+      latAt(grid_index, 400.5), lonAt(grid_index, 700.5), -12.0)));
+
+  const CellBox & box = g.publishDirtyCells();
+  ASSERT_FALSE(box.empty());
+  // The hull of both touchdowns -- the over-coverage the box representation
+  // deliberately accepts (see CellBox's docs).
+  EXPECT_LE(box.min_row, 200);
+  EXPECT_GE(box.max_row, 400);
+  EXPECT_LE(box.min_col, 300);
+  EXPECT_GE(box.max_col, 700);
+  // Still far short of the whole tile, which is the entire point.
+  EXPECT_LT(box.rows(), gggs::cell_rows_per_grid);
+  EXPECT_LT(box.columns(), gggs::cell_columns_per_grid);
+}
+
+TEST_F(GeoGridDirtyCellsTest, ClearResetsAndTheBoxReaccumulates)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  ASSERT_TRUE(g.insert(makeGeoSounding(
+      latAt(grid_index, 100.5), lonAt(grid_index, 100.5), -10.0)));
+  ASSERT_FALSE(g.publishDirtyCells().empty());
+
+  g.clearPublishDirtyCells();
+  EXPECT_TRUE(g.publishDirtyCells().empty())
+    << "a published tile must start the next cycle with no dirty cells";
+
+  // Re-accumulate somewhere else: the new box must describe ONLY the new work,
+  // not the union with the already-published region.
+  ASSERT_TRUE(g.insert(makeGeoSounding(
+      latAt(grid_index, 800.5), lonAt(grid_index, 800.5), -11.0)));
+  const CellBox & box = g.publishDirtyCells();
+  ASSERT_FALSE(box.empty());
+  EXPECT_GT(box.min_row, 100)
+    << "the box re-accumulated from the cleared state, not from the old hull";
+  EXPECT_GT(box.min_col, 100);
+}
+
+TEST_F(GeoGridDirtyCellsTest, RejectedSoundingLeavesTheBoxEmpty)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  // Door-gated at insert (non-positive vertical error): nothing is written, so
+  // nothing may be advertised as dirty.
+  auto bad = makeGeoSounding(
+    latAt(grid_index, 480.5), lonAt(grid_index, 480.5), -10.0, 0.0f);
+  EXPECT_FALSE(g.insert(bad));
+  EXPECT_TRUE(g.publishDirtyCells().empty());
+}
+
+TEST_F(GeoGridDirtyCellsTest, SeedAndReloadPathsDoNotDirtyCells)
+{
+  auto grid_index = makeGridIndex(43.07, -70.76);
+  GeoGrid g(grid_index, params);
+
+  // These reproduce already-persisted data and carry an explicit no-dirty-mark
+  // contract (see GeoGrid's docs); the cell box must honour the same contract
+  // or a warm start would push the whole primed region over the link.
+  g.setPredictedDepthAt(gggs::CellIndex(grid_index, 10, 10), -10.0f, 0.25f);
+  g.setSettledDepthAt(gggs::CellIndex(grid_index, 20, 20), -11.0f, 0.5f);
+  EXPECT_TRUE(g.publishDirtyCells().empty());
+}
+
+TEST(CellBox, WholeTileCoversEveryCell)
+{
+  const CellBox box = CellBox::wholeTile();
+  EXPECT_FALSE(box.empty());
+  EXPECT_EQ(box.min_row, 0);
+  EXPECT_EQ(box.min_col, 0);
+  EXPECT_EQ(box.rows(), gggs::cell_rows_per_grid);
+  EXPECT_EQ(box.columns(), gggs::cell_columns_per_grid);
+}
+
+TEST(CellBox, DefaultIsEmptyAndExpandMakesItOneCell)
+{
+  CellBox box;
+  EXPECT_TRUE(box.empty());
+  box.expand(7, 9);
+  EXPECT_FALSE(box.empty());
+  EXPECT_EQ(box.min_row, 7);
+  EXPECT_EQ(box.max_row, 7);
+  EXPECT_EQ(box.min_col, 9);
+  EXPECT_EQ(box.max_col, 9);
+  EXPECT_EQ(box.rows(), 1);
+  EXPECT_EQ(box.columns(), 1);
+  box.clear();
+  EXPECT_TRUE(box.empty());
+}
+
 }  // namespace cube

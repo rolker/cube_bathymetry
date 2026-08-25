@@ -233,6 +233,18 @@ std::set<gggs::GridIndex> GeoMapSheet::publishDirtyGrids() const
 
 void GeoMapSheet::clearPublishDirtyGrids()
 {
+  // Reset each dirty grid's cell-level box in the SAME call that clears the
+  // index set, so the two can never drift: a box left behind would make the
+  // next sub-window publish cover cells that were already sent, and a box
+  // cleared early would silently drop cells from the incremental stream.
+  // Grids not in the set have an empty box by construction -- GeoGrid::insert
+  // is the only thing that expands one, and any grid it wrote is in the set.
+  for (const auto & index  :  publish_dirty_grids_) {
+    auto it = grids_.find(index);
+    if(it != grids_.end() && it->second) {
+      it->second->clearPublishDirtyCells();
+    }
+  }
   publish_dirty_grids_.clear();
 }
 
