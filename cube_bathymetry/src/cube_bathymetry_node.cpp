@@ -508,6 +508,32 @@ public:
     } else {
       disk_serve_interval_s_ = interval_raw;
     }
+    // Dirty sub-window push (ADR-0001 section 4 sub-window addendum). OFF by
+    // default: it is a change to what the CONSUMER must do, not just to what we
+    // send, and a consumer that ignores the window fields would paint a patch
+    // over the whole tile -- corrupting the operator's coverage view during a
+    // survey. Opt in only against a consumer known to implement the patch path.
+    rcl_interfaces::msg::ParameterDescriptor subwindow_desc;
+    subwindow_desc.description =
+      "Publish only each tile's dirty sub-window on ~/coverage_tiles instead of "
+      "the whole tile (SonarVisualizationTile window_col/row/width/height). "
+      "REQUIRES a consumer that (a) patches bands in at the window offset and "
+      "(b) dequantizes per message -- the backscatter band's scale/offset is "
+      "auto-ranged over the window, so it varies between patches. A consumer "
+      "that records possession only for whole tiles will keep re-requesting "
+      "each patched tile in full via the catalog, costing MORE bandwidth than "
+      "leaving this off. The catalog/TileRequest heal path re-sends a tile in "
+      "full and is what recovers a consumer that gets it wrong. Default false "
+      "reproduces the full-tile stream exactly. Read at configure.";
+    publish_dirty_subwindow_ =
+      declare_parameter("publish_dirty_subwindow", false, subwindow_desc);
+    if (publish_dirty_subwindow_) {
+      RCLCPP_WARN(get_logger(),
+        "publish_dirty_subwindow is ENABLED: ~/coverage_tiles carries dirty "
+        "sub-window patches, not whole tiles. Verify the consumer applies "
+        "window_col/window_row/window_width/window_height before trusting the "
+        "operator coverage view.");
+    }
     sonar_tile_publisher_ =
       create_publisher<marine_interfaces::msg::SonarVisualizationTile>(
       "~/coverage_tiles", rclcpp::QoS(10).best_effort());
@@ -754,6 +780,9 @@ private:
   std::size_t disk_serve_tiles_per_tick_ = 4;
   std::size_t disk_serve_queue_max_depth_ = 64;
   double disk_serve_interval_s_ = 0.5;
+  // Sub-window push opt-in (see the parameter descriptor in on_configure).
+  // False reproduces the pre-sub-window whole-tile stream byte for byte.
+  bool publish_dirty_subwindow_ = false;
 
   // Long-duration bounding parameters (#70, ADR-0001).
   std::size_t max_resident_tiles_ = 64;
@@ -898,6 +927,13 @@ private:
     const std::int64_t version = pub_time.nanoseconds();
 
     const std::set<gggs::GridIndex> dirty = geo_map_sheet_->publishDirtyGrids();
+    // Sub-window accounting for the operator's enable/disable decision: cells
+    // actually put on the wire this cycle against what the whole-tile stream
+    // would have sent. Counted, not estimated -- the win depends entirely on
+    // track geometry (a diagonal line's bounding box degrades toward the full
+    // tile), so a measured ratio from this survey beats any table.
+    std::size_t window_cells = 0;
+    std::size_t full_cells = 0;
     for (const auto & index : dirty) {
       auto grid = geo_map_sheet_->gridAt(index);
       if(!grid) {
@@ -914,12 +950,33 @@ private:
       tiles_publisher_->publish(*message);
 
       // Quantized display tile (#78): push the changed tile and register its
-      // version in the catalog. quantizeTile returns nullopt for an all-empty
-      // tile, which the GridMap path already skipped above.
-      if (auto vt = cube::quantizeTile(*grid, stamp)) {
+      // version in the catalog. Either quantizer returns nullopt when there is
+      // nothing to show (an all-empty tile, which the GridMap path already
+      // skipped above; or, for a sub-window, a dirty box with no finite depth).
+      //
+      // This is the ONLY sub-window site. The catalog/TileRequest serve and the
+      // from-disk serve stay whole-tile on purpose: they exist to repair a
+      // consumer that has diverged, and a patch cannot repair divergence.
+      std::optional<marine_interfaces::msg::SonarVisualizationTile> vt;
+      if (publish_dirty_subwindow_) {
+        vt = cube::quantizeTileWindow(*grid, stamp, grid->publishDirtyCells());
+      } else {
+        vt = cube::quantizeTile(*grid, stamp);
+      }
+      if (vt) {
         sonar_tile_publisher_->publish(*vt);
         catalog_builder_.update(index, version);
+        window_cells += static_cast<std::size_t>(vt->window_width) * vt->window_height;
+        full_cells += static_cast<std::size_t>(vt->width) * vt->height;
       }
+    }
+    if (publish_dirty_subwindow_ && full_cells > 0) {
+      // 4 bytes/cell across the three bands (depth int16 + two uint8).
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Sub-window coverage push: %zu of %zu cells (%.2f%%), ~%zu B instead of "
+        "~%zu B this cycle", window_cells, full_cells,
+        100.0 * static_cast<double>(window_cells) / static_cast<double>(full_cells),
+        window_cells * 4, full_cells * 4);
     }
     geo_map_sheet_->clearPublishDirtyGrids();
   }
