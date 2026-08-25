@@ -624,7 +624,7 @@ TEST_F(GeoGridDirtyCellsTest, SeedAndReloadPathsDoNotDirtyCells)
   EXPECT_TRUE(g.publishDirtyCells().empty());
 }
 
-TEST(CellBox, WholeTileCoversEveryCell)
+TEST(CellBoxTest, WholeTileCoversEveryCell)
 {
   const CellBox box = CellBox::wholeTile();
   EXPECT_FALSE(box.empty());
@@ -634,7 +634,7 @@ TEST(CellBox, WholeTileCoversEveryCell)
   EXPECT_EQ(box.columns(), gggs::cell_columns_per_grid);
 }
 
-TEST(CellBox, DefaultIsEmptyAndExpandMakesItOneCell)
+TEST(CellBoxTest, DefaultIsEmptyAndExpandMakesItOneCell)
 {
   CellBox box;
   EXPECT_TRUE(box.empty());
