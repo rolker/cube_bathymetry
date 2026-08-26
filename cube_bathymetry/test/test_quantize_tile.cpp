@@ -43,6 +43,26 @@ int16_t depthRaw(const marine_interfaces::msg::VisualizationBand & band, std::si
   return v;
 }
 
+// Geographic position of the fractional lattice coordinate (row_f, col_f).
+//
+// Soundings must be placed through these rather than by typing a latitude and
+// longitude: a 1 m GGGS tile spans only ~0.0078 deg, so two hand-picked
+// positions a thousandth of a degree apart are very likely to straddle a tile
+// boundary and leave one of them out of the grid entirely. Nodes sit on the
+// cells' SW-CORNER lattice, and insert()'s influence radius is under half a
+// cell for these test errors, so touchdowns are offset by a QUARTER cell to
+// land inside node (row, col).
+double latAt(const gggs::GridIndex & grid_index, double row_f)
+{
+  return grid_index.southLatitude() +
+         row_f / gggs::cell_rows_per_grid * grid_index.latitudinalSpan();
+}
+double lonAt(const gggs::GridIndex & grid_index, double col_f)
+{
+  return grid_index.westLongitude() +
+         col_f / gggs::cell_columns_per_grid * grid_index.longitudinalSpan();
+}
+
 // Row-major band index of GGGS cell (row, col).
 std::size_t idx(uint16_t row, uint16_t col)
 {
@@ -156,9 +176,12 @@ TEST(QuantizeTile, BackscatterBandAutoRangesOverInsertedIntensities)
       g.insert(s);
     };
   // Two well-separated spots with distinct backscatter (dB) so the auto-range
-  // spans a real interval, not the single-value degenerate case.
-  insert(43.0700, -70.7600, -30.0f, -40.0f);  // low
-  insert(43.0710, -70.7610, -30.0f, -10.0f);  // high
+  // spans a real interval, not the single-value degenerate case. Placed on the
+  // lattice: hand-typed positions 0.0010 deg apart straddle the tile's north
+  // edge here, which silently left the high touchdown out of the grid and made
+  // this a single-value test that still passed every assertion below.
+  insert(latAt(grid_index, 200.25), lonAt(grid_index, 200.25), -30.0f, -40.0f);  // low
+  insert(latAt(grid_index, 600.25), lonAt(grid_index, 600.25), -30.0f, -10.0f);  // high
 
   builtin_interfaces::msg::Time stamp;
   const auto maybe = cube::quantizeTile(g, stamp);
@@ -166,9 +189,12 @@ TEST(QuantizeTile, BackscatterBandAutoRangesOverInsertedIntensities)
   const auto & bs = maybe->bands[2];
   ASSERT_EQ(bs.name, "backscatter");
 
-  // Auto-range: offset is the min intensity (-40 dB); scale is a real span.
+  // Auto-range: offset is the min intensity (-40 dB) and the scale spans the
+  // real 30 dB interval, not the 1.0 unit span the degenerate single-value
+  // case falls back to.
   EXPECT_NEAR(bs.offset, -40.0, 1.0);
   EXPECT_GT(bs.scale, 0.0);
+  EXPECT_NEAR(bs.scale, 30.0 / 254.0, 1.0 / 254.0);
 
   std::size_t finite = 0;
   const int nodata = static_cast<int>(std::lround(bs.nodata));
@@ -447,8 +473,8 @@ TEST(QuantizeTileWindow, BackscatterAutoRangeIsScopedToTheWindow)
       g.insert(s);
     };
   for (int i = 0; i < 20; ++i) {
-    insert(43.0700, -70.7600, -30.0f, -40.0f);   // low backscatter
-    insert(43.0710, -70.7610, -30.0f, -10.0f);   // high backscatter
+    insert(latAt(grid_index, 200.25), lonAt(grid_index, 200.25), -30.0f, -40.0f);  // low
+    insert(latAt(grid_index, 600.25), lonAt(grid_index, 600.25), -30.0f, -10.0f);  // high
   }
 
   builtin_interfaces::msg::Time stamp;
@@ -457,15 +483,10 @@ TEST(QuantizeTileWindow, BackscatterAutoRangeIsScopedToTheWindow)
   const double full_offset = full->bands[2].offset;
 
   // A window around only the LOW touchdown cannot see the high one -- they are
-  // ~137 m (~137 cells) apart -- so its auto-range is narrower than the tile's.
-  const gggs::CellIndex low_cell(grid_index, gggs::geoPoint(43.0700, -70.7600));
-  const auto clampLow = [](int v) {
-      return static_cast<uint16_t>(std::max(0, v));
-    };
+  // 400 cells apart -- so its auto-range is narrower than the tile's.
   cube::CellBox low;
-  low.expand(clampLow(low_cell.row() - 2), clampLow(low_cell.column() - 2));
-  low.expand(
-    static_cast<uint16_t>(low_cell.row() + 2), static_cast<uint16_t>(low_cell.column() + 2));
+  low.expand(198, 198);
+  low.expand(202, 202);
 
   const auto patch = cube::quantizeTileWindow(g, stamp, low);
   ASSERT_TRUE(patch.has_value()) << "the low touchdown's own cell must carry a depth";
