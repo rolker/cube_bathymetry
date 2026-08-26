@@ -253,17 +253,18 @@ public:
         if (primed.total() == 0) {
           RCLCPP_WARN(get_logger(),
             "prior_store_dir='%s' primed no tiles (%zu level-mismatched "
-            "skipped); predicted surface NOT seeded -- blunder gate and live "
+            "skipped, %zu matched the survey level but held no data over it); "
+            "predicted surface NOT seeded -- blunder gate and live "
             "slope correction INACTIVE. Check the path and that the store has "
             "reference/ or chart/ tiles at the survey level.",
-            prior_store_dir_.c_str(), primed.level_mismatched);
+            prior_store_dir_.c_str(), primed.level_mismatched, primed.empty_tiles);
         } else {
           RCLCPP_INFO(get_logger(),
             "Primed predicted surface from prior store '%s': %zu Reference + "
-            "%zu Chart tile(s), %zu level-mismatched skipped. Blunder gate "
-            "active (#91); live slope correction active (#59).",
+            "%zu Chart tile(s), %zu level-mismatched skipped, %zu matched but "
+            "empty. Blunder gate active (#91); live slope correction active (#59).",
             prior_store_dir_.c_str(), primed.reference_tiles,
-            primed.chart_tiles, primed.level_mismatched);
+            primed.chart_tiles, primed.level_mismatched, primed.empty_tiles);
           // Bound the prime to the resident budget (#70 pattern, same as the
           // draft prime below). Evicted prior-primed tiles get their gate
           // re-primed on revisit (reloadEvictedTile, #118); bounded RAM wins
@@ -1260,22 +1261,23 @@ private:
         const auto pne = index.northEastPosition();
         marine_bathymetry_store::loadWindow(
           prior_scratch, prior_store_dir_, psw, pne, nullptr);
+        // A MATCH IS NOT A PRIME (#137): key on the primed CELL count, never on the
+        // tile being found. An all-NaN prior tile matches this index and seeds
+        // nothing, and the INFO below tells the operator the gate is back on.
         bool primed = false;
         const auto & chart_tiles =
           prior_scratch.tiles(marine_bathymetry_store::SourceLayer::Chart);
         auto chart_it = chart_tiles.find(index);
         if (chart_it != chart_tiles.end()) {
-          cube::primeFromTile(chart_it->second, *geo_map_sheet_,
-            /*seed_settled=*/false);
-          primed = true;
+          primed = cube::primeFromTile(chart_it->second, *geo_map_sheet_,
+              /*seed_settled=*/false) > 0;
         }
         const auto & ref_tiles =
           prior_scratch.tiles(marine_bathymetry_store::SourceLayer::Reference);
         auto ref_it = ref_tiles.find(index);
         if (ref_it != ref_tiles.end()) {
-          cube::primeFromTile(ref_it->second, *geo_map_sheet_,
-            /*seed_settled=*/false);
-          primed = true;
+          primed = cube::primeFromTile(ref_it->second, *geo_map_sheet_,
+              /*seed_settled=*/false) > 0 || primed;
         }
         if (primed) {
           // Observability (#118): gate re-activation must be visible; throttled

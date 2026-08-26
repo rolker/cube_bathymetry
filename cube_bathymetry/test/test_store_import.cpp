@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -774,6 +775,61 @@ TEST(StoreImport, WelfordFromCellInvertsEncode)
     const double recon_var = (w.m2 / (w.n - 1)) / w.n;
     EXPECT_NEAR(recon_var, static_cast<double>(var), 1e-5);
   }
+}
+
+// A MATCHED prior tile is not a PRIMED one, on the LIVE-node path too (#137
+// review). primeFromPriorLayers used to increment its per-layer count on the mere
+// existence of a survey-level tile, so an all-NaN prior tile made the node log
+// "Blunder gate active (#91); live slope correction active (#59)" over a sheet
+// where nothing was gated at all -- the operator-facing half of the very defect
+// this issue exists to close.
+TEST(StoreImport, PrimeFromPriorLayersDoesNotCountAMatchedButEmptyTile)
+{
+  const gggs::GridIndex index =
+    gggs::Level::fromCellSize(1.0f).gridIndex(43.07, -70.76);
+  const double kNoData = std::numeric_limits<double>::quiet_NaN();
+
+  marine_bathymetry_store::BathymetryTile hollow(index);
+  for (gggs::CellAreaIterator it(index); it.valid(); it.next()) {
+    hollow.set(
+      (*it).row(), (*it).column(),
+      marine_bathymetry_store::BathyCell{kNoData, kNoData});
+  }
+  std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+  tiles.emplace(index, std::move(hollow));
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(
+    1.0f, /*reference_writable=*/true);
+  store.importTiles(
+    marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+
+  GeoMapSheet primed(1.0f);
+  const PriorLayerPrimeResult r = primeFromPriorLayers(store, primed);
+  EXPECT_EQ(r.total(), 0u)
+    << "a tile that primed no cell gates nothing and must not be counted as a "
+    "primed tile -- the caller keys its 'blunder gate active' message on this";
+  EXPECT_EQ(r.reference_tiles, 0u);
+  EXPECT_EQ(r.empty_tiles, 1u)
+    << "the matched-but-empty tile must be surfaced under its own count so the "
+    "caller can tell it apart from a level mismatch (a different remedy)";
+  EXPECT_EQ(r.level_mismatched, 0u)
+    << "the tile IS at the survey level -- reporting it as a level mismatch would "
+    "send the operator after the wrong fault";
+
+  // And the gate really is off: a deep blunder settles, exactly as with no prior.
+  primed.addSoundings(makeDeepSoundings(-150.0f));
+  std::size_t accepted_deep = 0;
+  for (const auto & grid : primed.grids()) {
+    for (const auto & v : grid->values()) {
+      if (!std::isnan(v.depth) && v.depth < -100.0f) {
+        ++accepted_deep;
+      }
+    }
+  }
+  EXPECT_GT(accepted_deep, 0u)
+    << "an all-NaN prior gates nothing, so the deep sounding must settle -- "
+    "otherwise this test is not exercising the ungated case";
 }
 
 }  // namespace cube

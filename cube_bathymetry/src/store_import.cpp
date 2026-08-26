@@ -364,8 +364,15 @@ PriorLayerPrimeResult primeFromPriorLayers(
           ++result.level_mismatched;
           continue;
         }
-        primeFromTile(grid_tile.second, map_sheet, /*seed_settled=*/false);
-        ++primed;
+        // A MATCH IS NOT A PRIME (#137): an all-NaN prior tile matches this survey
+        // level and seeds nothing, so counting it as a primed tile told the operator
+        // the blunder gate was active on a tile that gates nothing. Key on the CELL
+        // count, the contract primeFromTile's return value exists to serve.
+        if (primeFromTile(grid_tile.second, map_sheet, /*seed_settled=*/false) > 0) {
+          ++primed;
+        } else {
+          ++result.empty_tiles;
+        }
       }
     };
 

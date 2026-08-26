@@ -276,11 +276,23 @@ namespace cube
   /// Tiles skipped because they are not at the sheet's survey level (a
   /// multi-level prior store); surfaced so the caller can log the coverage gap.
     std::size_t level_mismatched = 0;
+  /// Tiles that MATCHED the survey level and primed NOT ONE cell (all-NaN over this
+  /// area). They gate nothing, so they are not counted in @ref reference_tiles /
+  /// @ref chart_tiles — a caller that reported a matched tile as a live gate was
+  /// telling the operator the blunder gate was on when it was off (#137).
+    std::size_t empty_tiles = 0;
+  /// Tiles that primed at least one cell. Zero means the gate is OFF everywhere,
+  /// whatever `tiles()` held.
     std::size_t total() const {return reference_tiles + chart_tiles;}
   };
 
 /// @brief Prime @p map_sheet's predicted surface from BOTH prior layers of
 ///        @p store (predicted-only, seed_settled=false), exact-level tiles only.
+///
+/// A MATCH IS NOT A PRIME (#137): a tile that matches the survey level but holds no
+/// finite depth over this area primes nothing and gates nothing, so it is counted in
+/// @ref PriorLayerPrimeResult::empty_tiles, never in the per-layer prime counts a
+/// caller keys its "blunder gate active" message on.
 ///
 /// The live-node prior prime (#91) and the offline Chart-gate fix (#119) share
 /// the same semantics: `Chart` tiles are primed first (lowest-priority layer),
