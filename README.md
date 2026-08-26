@@ -22,6 +22,44 @@ lookup `map_frame ← header.frame_id` at the ping stamp. Consumers read fields 
 name** (`cube_bathymetry_node` and `bag_to_geotiff` both use named PointCloud2
 iterators), so the field order is not load-bearing.
 
+## Live coverage stream parameters (`cube_bathymetry_node`)
+
+`~/coverage_tiles` is the live seafloor-coverage view the shore operator sees,
+and it goes over a rate-limited link — 1,500,000 B/s on BizzyBoat's VPN, shared
+with telemetry, costmap, video and TF. A whole tile is 960x960 cells x 3 bands =
+**3,686,400 B** of payload, so these three parameters decide whether coverage is
+a rounding error on that link or the thing that takes it down. It took it down on
+2026-08-25 (cube_bathymetry#112, ADR-0001 addendums 1 and 2).
+
+| Parameter | Type / default | When read | What it does |
+|---|---|---|---|
+| `publish_dirty_subwindow` | bool, **`true`** | configure (`read_only`; a runtime set is REFUSED, not silently ignored) | Send only each tile's dirty sub-window as a patch, instead of the whole tile. Measured on the 2026-08-25 Appledore bags: the coverage stream costs 56.0 kB/s on transit and 85.7 kB/s on station as whole tiles, against 11.2 and 9.1 kB/s as patches with the default refresh — 80% and 89% less. Peak single message falls from 1,120,845 B to 172,040 B compressed. `false` reproduces the whole-tile stream byte for byte. |
+| `subwindow_refresh_interval` | double seconds, **`60.0`** | **runtime** (validated and applied to the live tracker) | How long a patched tile may go without being re-sent WHOLE. This is what makes patching safe: the live push is best-effort and a lost patch is not discoverable by the consumer, so a periodic whole re-send bounds the gap without depending on the consumer noticing anything. `0` disables the heal — only safe against a consumer that tracks patch possession itself. Measured cost: 300 s -> 7.9/3.5 kB/s, 60 s -> 11.2/9.1, 30 s -> 15.2/16.1 (transit/station). |
+| `subwindow_refresh_tiles_per_cycle` | int, **`2`**, refused above `8` | **runtime** (same path) | Whole tiles re-sent per 5 s drain tick to clear outstanding patch debt, over and above the tiles that changed. Bounds the heal so it cannot become the burst it exists to prevent: at ~183 kB compressed per whole tile, `8` is already ~293 kB/s of the operator's link. `0` disables the quiet-tile drain, which leaves a tile the vessel has moved off unhealed. |
+
+**The heal latency is a target under load, not a bound.** The drain clears at
+most `subwindow_refresh_tiles_per_cycle` tiles per tick — 24 per minute at the
+defaults — so a line-end turn that quiets more tiles than that at once heals
+them oldest-first over longer than `subwindow_refresh_interval`. A throttled
+WARN says so when it happens. Sustained saturation is worse than not
+sub-windowing at all: the drain's own ceiling (~73 kB/s) exceeds the 56.0 kB/s
+transit stream it replaces.
+
+**Consumer contract.** A consumer must (a) apply the band data at
+`window_row`/`window_col` rather than over the whole tile, and (b) dequantize
+per message — the backscatter band's scale/offset is auto-ranged over the
+window, so it varies between patches (uma ADR-0008 D1). It need NOT track patch
+possession: the catalog version is bumped only on a whole send, so a consumer
+that keys possession on either rule converges. Both in-tree consumers are
+correct today — CAMP's `SonarLiveTile::applyPatch` and `marine_web_view`'s
+`coverage_renderer` — and they use opposite possession rules, which is why the
+producer, not the consumer, carries the guarantee.
+
+**Not solved here.** This bounds the typical message, not the worst one. A
+diagonal survey line's dirty bounding box still degrades toward the full tile;
+fixed-size chunking is what cube_bathymetry#112 actually asks for and it
+remains open.
+
 ## Exported libraries for other repos
 
 Most of this package's CMake targets exist to keep the node's own dependencies
