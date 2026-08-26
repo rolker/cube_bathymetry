@@ -23,7 +23,9 @@
 #ifndef CUBE_BATHYMETRY__GEO_GRID_H_
 #define CUBE_BATHYMETRY__GEO_GRID_H_
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -35,6 +37,73 @@
 
 namespace cube
 {
+
+/// @brief Inclusive bounding box of cells within ONE tile, in that tile's
+///        (row, column) coordinates. Empty until something expands it.
+///
+/// Accumulated by @ref GeoGrid::insert over the cells a sounding batch actually
+/// wrote, and consumed by the incremental display-tile publish so it can emit
+/// only the changed sub-window (`SonarVisualizationTile`'s
+/// `window_col`/`window_row`/`window_width`/`window_height`, ADR-0001 § 4
+/// sub-window addendum).
+///
+/// A bounding BOX rather than a per-cell mask is deliberate: it is four uint16
+/// per tile (against a 960x960 bitset), @ref expand is O(1) on the
+/// profiler-hot insert path (cube#63/#107), and the wire contract carries a
+/// rectangular window anyway -- a mask could not be transmitted without
+/// changing the message. The cost is over-coverage: a diagonal or two-lobed
+/// change set sends unchanged cells inside its hull, degrading to the full
+/// tile in the worst case (which is exactly today's behaviour, never worse).
+  struct CellBox
+  {
+  /// Inclusive bounds. The empty box is encoded as min > max, so a
+  /// default-constructed CellBox is empty and @ref expand needs no branch.
+    uint16_t min_row = std::numeric_limits < uint16_t > ::max();
+    uint16_t min_col = std::numeric_limits < uint16_t > ::max();
+    uint16_t max_row = 0;
+    uint16_t max_col = 0;
+
+    bool empty() const noexcept
+    {
+      return min_row > max_row || min_col > max_col;
+    }
+
+    void expand(uint16_t row, uint16_t column) noexcept
+    {
+      min_row = std::min(min_row, row);
+      max_row = std::max(max_row, row);
+      min_col = std::min(min_col, column);
+      max_col = std::max(max_col, column);
+    }
+
+    void clear() noexcept
+    {
+      *this = CellBox();
+    }
+
+  /// Number of cell rows covered (0 when empty).
+    uint16_t rows() const noexcept
+    {
+      return empty() ? 0 : static_cast < uint16_t > (max_row - min_row + 1);
+    }
+
+  /// Number of cell columns covered (0 when empty).
+    uint16_t columns() const noexcept
+    {
+      return empty() ? 0 : static_cast < uint16_t > (max_col - min_col + 1);
+    }
+
+  /// @brief The box covering every cell of a GGGS tile (the full-tile window).
+    static CellBox wholeTile() noexcept
+    {
+      CellBox box;
+      box.min_row = 0;
+      box.min_col = 0;
+      box.max_row = static_cast < uint16_t > (gggs::GridIndex::cellRowCount() - 1);
+      box.max_col = static_cast < uint16_t > (gggs::GridIndex::cellColumnCount() - 1);
+      return box;
+    }
+  };
 
   class GeoGrid
   {
@@ -167,6 +236,33 @@ public:
     void setSettledIntensityWelfordAt(
       const gggs::CellIndex & cell, const IntensityWelford & intensity);
 
+  /// @brief Bounding box of the cells @ref insert has written since the last
+  ///        @ref clearPublishDirtyCells(); empty when nothing has changed.
+  ///
+  /// The cell-resolution companion to `GeoMapSheet::publishDirtyGrids()`: that
+  /// set says WHICH tiles changed, this box says WHERE inside one of them, so
+  /// the incremental publish can send a sub-window instead of 3.7 MB of whole
+  /// tile (ADR-0001 § 4 sub-window addendum). Only the *publish* stream reads
+  /// it -- the save path writes whole tiles and needs no bounds.
+  ///
+  /// Tracked HERE and not in GeoMapSheet because only @ref insert knows which
+  /// cells its per-sounding influence-radius gate actually accepted; the sheet
+  /// sees a single bool per grid, and recomputing a box from the sounding
+  /// bounds would duplicate the radius math the two are meant to share (#104).
+  ///
+  /// The seed/reload accessors (@ref setPredictedDepthAt,
+  /// @ref setSettledDepthAt, @ref setSettledIntensityWelfordAt) deliberately do
+  /// NOT expand it, matching their existing no-dirty-mark contract: they
+  /// reproduce already-persisted data the consumer either holds or will heal
+  /// via the catalog/TileRequest path.
+    const CellBox & publishDirtyCells() const {return publish_dirty_cells_;}
+
+  /// @brief Reset the publish-dirty cell box (called after a publish).
+  ///
+  /// `GeoMapSheet::clearPublishDirtyGrids()` calls this for every grid in the
+  /// publish-dirty set, so the set and the boxes always clear together.
+    void clearPublishDirtyCells() {publish_dirty_cells_.clear();}
+
 private:
   /// Pack a cell's (row, column) into a single uint32 hash-map key. Every node
   /// in this grid shares `index_` as its `gggs::CellIndex::grid()`, and row/
@@ -188,6 +284,10 @@ private:
 
   // std::vector<std::shared_ptr<Node> > nodes_;
     std::unordered_map < uint32_t, std::shared_ptr < Node >> nodes_;
+
+  /// Cells written since the last clearPublishDirtyCells(). See
+  /// @ref publishDirtyCells.
+    CellBox publish_dirty_cells_;
   };
 
 }  // namespace cube

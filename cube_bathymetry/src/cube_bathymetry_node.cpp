@@ -22,11 +22,14 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -35,11 +38,13 @@
 
 #include "tf2_ros/transform_listener.h"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/create_timer.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "cube_bathymetry/coverage_refresh.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/grid_projection.h"
 #include "geometry_msgs/msg/point_stamped.hpp"
@@ -109,6 +114,21 @@ public:
     // fresh sheet's serving.
     disk_serve_queue_.clear();
     disk_serve_queued_.clear();
+    // The refresh queue describes a SHEET that is about to be replaced. Carried
+    // across a reconfigure it would claim tiles had been sent whole when the new
+    // sheet has never sent them at all, suppressing the heal for exactly the
+    // tiles a restart is most likely to have left a consumer stale on.
+    // Handle first, then the state it reads: the callback must be unregistered
+    // before the tracker it reconfigures is cleared, so a set arriving
+    // mid-teardown cannot reconfigure a tracker that is about to be reset.
+    refresh_parameters_handle_.reset();
+    refresh_tracker_.clear();
+    // The saving ledger describes one sheet's traffic too; carried across a
+    // reconfigure it would report a ratio over two different configurations.
+    saving_report_last_s_ = 0.0;
+    report_window_cells_ = 0;
+    report_full_cells_ = 0;
+    report_refresh_cells_ = 0;
     // Reset the tile-version registry too (#78): a fresh sheet must not advertise
     // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
@@ -508,6 +528,111 @@ public:
     } else {
       disk_serve_interval_s_ = interval_raw;
     }
+    // Dirty sub-window push (ADR-0001 section 4 sub-window addendum). ON by
+    // default: the whole-tile refresh queue below removed the silent failure
+    // mode that kept it opt-in, and the cost of leaving it off is measured, not
+    // theoretical. Both 2026-08-25 Appledore bags -- the deployment where these
+    // tiles collapsed the operator link -- replayed through this chain: the
+    // whole-tile stream costs 56.0 kB/s on transit and 85.7 kB/s on station
+    // against a 1.5 MB/s connection shared with every other topic, and patches
+    // with a 60 s refresh cost 11.2 and 9.1 kB/s. The largest single message
+    // falls from 1,120,845 B to 172,040 B, which matters twice over:
+    // udp_bridge's can_send() admits a message only if the WHOLE thing fits the
+    // instantaneous budget, so the biggest messages are precisely the ones a
+    // congested link stops carrying at all -- measured at 100% dropped for
+    // coverage_tiles on 2026-08-05 while smaller topics recovered.
+    rcl_interfaces::msg::ParameterDescriptor subwindow_desc;
+    subwindow_desc.description =
+      "Publish only each tile's dirty sub-window on ~/coverage_tiles instead of "
+      "the whole tile (SonarVisualizationTile window_col/row/width/height). "
+      "REQUIRES a consumer that (a) patches bands in at the window offset and "
+      "(b) dequantizes per message -- the backscatter band's scale/offset is "
+      "auto-ranged over the window, so it varies between patches. A consumer "
+      "that ignores the window fields would paint a patch over the whole tile "
+      "and corrupt the operator's coverage view, so verify (a) before enabling "
+      "against a new consumer. The live push is best-effort and a lost patch is "
+      "NOT discoverable by the consumer -- the catalog version is bumped on a "
+      "patch exactly as on a whole tile, so a consumer that records "
+      "header.stamp as its held version matches the catalog and never "
+      "re-requests. subwindow_refresh_interval is what makes that survivable: "
+      "every patched tile is re-sent WHOLE within that interval, so a dropped "
+      "patch is a gap of bounded duration rather than a permanent one. Set "
+      "false reproduces the whole-tile stream byte for byte. Read at "
+      "configure; read_only, so a runtime set is rejected rather than silently "
+      "ignored.";
+    // read_only enforces the "Read at configure" promise above. Without it a
+    // runtime `ros2 param set publish_dirty_subwindow false` SUCCEEDS, reads
+    // back false via `ros2 param get`, and changes nothing on the wire --
+    // accepted, reads back, inert. Under rmw_zenoh a `param set` can also drop
+    // silently, so the operator's set -> get habit cannot catch that here.
+    // Launch/YAML overrides are unaffected: read_only only rejects a set after
+    // declaration.
+    subwindow_desc.read_only = true;
+    publish_dirty_subwindow_ =
+      declare_parameter("publish_dirty_subwindow", true, subwindow_desc);
+
+    rcl_interfaces::msg::ParameterDescriptor refresh_desc;
+    refresh_desc.description =
+      "Seconds a patched coverage tile may go without being re-sent WHOLE. "
+      "SETTABLE AT RUNTIME -- a set is validated and applied to the live "
+      "tracker, not stored and ignored. The latency is a TARGET UNDER LOAD, "
+      "not a bound: the drain clears at most "
+      "subwindow_refresh_tiles_per_cycle tiles per 5 s tick, so a turn that "
+      "quiets more tiles than that at once heals them oldest-first over "
+      "longer than this interval. A throttled WARN says so when it happens, "
+      "rather than leaving a guarantee to be inferred. "
+      "This is the heal for a lost sub-window patch, and it does not depend on "
+      "the consumer noticing anything. Lower heals faster and costs more: "
+      "measured on the 2026-08-25 Appledore bags, 300s/60s/30s cost 7.9/11.2/"
+      "15.2 kB/s on transit and 3.5/9.1/16.1 kB/s on station, against 56.0 and "
+      "85.7 kB/s for the whole-tile stream this replaces. 0 disables the "
+      "refresh entirely, which makes a lost patch permanent -- only safe "
+      "against a consumer that tracks patch possession and re-requests.";
+    const double refresh_raw = declare_parameter("subwindow_refresh_interval", 60.0, refresh_desc);
+    if (!std::isfinite(refresh_raw) || refresh_raw < 0.0) {
+      RCLCPP_WARN(get_logger(),
+        "subwindow_refresh_interval=%g is not a non-negative finite duration; "
+        "using default 60s", refresh_raw);
+      subwindow_refresh_interval_s_ = 60.0;
+    } else {
+      subwindow_refresh_interval_s_ = refresh_raw;
+    }
+
+    rcl_interfaces::msg::ParameterDescriptor refresh_budget_desc;
+    refresh_budget_desc.description =
+      "Maximum whole tiles re-sent per publish cycle to heal outstanding "
+      "patches, over and above the tiles that changed this cycle. Bounds the "
+      "heal so it can never become the burst it exists to prevent. 0 disables "
+      "the drain, which leaves a tile the vessel has moved off unhealed -- "
+      "publishDirtyTiles only ever visits tiles that are still changing. "
+      "SETTABLE AT RUNTIME, and refused above 8: at ~183 kB compressed per "
+      "whole tile and a 5 s tick, 8 is already ~293 kB/s of a 1.5 MB/s "
+      "operator link, and more would make this heal the burst it exists to "
+      "prevent.";
+    const int64_t refresh_budget = declare_parameter(
+      "subwindow_refresh_tiles_per_cycle", 2, refresh_budget_desc);
+    if (refresh_budget < 0) {
+      RCLCPP_WARN(get_logger(),
+        "subwindow_refresh_tiles_per_cycle=%" PRId64 " is negative; using "
+        "default 2", refresh_budget);
+      subwindow_refresh_tiles_per_cycle_ = 2;
+    } else {
+      subwindow_refresh_tiles_per_cycle_ = static_cast<std::size_t>(refresh_budget);
+    }
+
+    refresh_tracker_.configure(
+      subwindow_refresh_interval_s_, subwindow_refresh_tiles_per_cycle_);
+
+    if (publish_dirty_subwindow_ && subwindow_refresh_interval_s_ == 0.0) {
+      RCLCPP_WARN(get_logger(),
+        "publish_dirty_subwindow is ENABLED with subwindow_refresh_interval 0: "
+        "patched tiles are NEVER re-sent whole. A dropped best-effort patch "
+        "then leaves a PERMANENT gap in the operator's coverage display, and "
+        "the consumer cannot discover it -- the catalog version is bumped on a "
+        "patch, so a consumer keying possession on header.stamp matches the "
+        "catalog and never re-requests. Only safe against a consumer that "
+        "tracks patch possession itself.");
+    }
     sonar_tile_publisher_ =
       create_publisher<marine_interfaces::msg::SonarVisualizationTile>(
       "~/coverage_tiles", rclcpp::QoS(10).best_effort());
@@ -549,6 +674,19 @@ public:
         "angular-response curve will be ignored.");
     }
 
+    // REGISTERED LAST, after every declare_parameter above. rclcpp invokes an
+    // OnSetParameters callback for declare_parameter() as well as
+    // set_parameter(), so a callback registered earlier would also see every
+    // YAML override on its way in -- and a rejection there throws
+    // InvalidParameterValueException out of on_configure, which
+    // rclcpp_lifecycle SWALLOWS, leaving a half-configured node that looks to
+    // the operator like it transitioned. Registering last means the callback
+    // only ever sees a genuine runtime set. (Same trap, same reasoning as
+    // udp_bridge#75.)
+    refresh_parameters_handle_ = add_on_set_parameters_callback(
+      std::bind(&CubeBathymetry::applyRefreshParameters, this,
+      std::placeholders::_1));
+
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
 
@@ -571,6 +709,26 @@ public:
       catalog_timer_ = create_wall_timer(
         std::chrono::duration<double>(catalog_interval_s_),
         std::bind(&CubeBathymetry::publishCatalog, this));
+    }
+    // Whole-tile refresh drain (#112). Independent of the ping path on purpose
+    // -- see drainRefreshQueue. The tick is the same 5 s as the coverage
+    // publish cadence, so subwindow_refresh_tiles_per_cycle keeps meaning "per
+    // publish cycle" whichever path drains it.
+    //
+    // ON THE NODE CLOCK, NOT A WALL TIMER. drainRefreshQueue asks the tracker
+    // what is due using now(), which under use_sim_time is the SIM clock, so a
+    // wall timer put the drain's cadence and its own due-check on two
+    // different clocks. That is incoherent on exactly the route this feature
+    // is meant to be validated on before it is trusted in the field: replay a
+    // bag. Replayed slower than real time the sim clock lags, no tile ever
+    // reaches its interval, and the heal silently never fires; paused, it
+    // never fires at all while the timer keeps ticking. On the boat
+    // use_sim_time is false and this is the same timer it always was.
+    if (publish_dirty_subwindow_ && !refresh_timer_) {
+      refresh_timer_ = rclcpp::create_timer(
+        this, get_clock(),
+        rclcpp::Duration::from_seconds(kRefreshDrainIntervalSeconds),
+        std::bind(&CubeBathymetry::drainRefreshQueue, this));
     }
     // Disk-serve drain (#106): trickle from-disk catch-up of requested
     // evicted tiles. Only meaningful with a draft store to serve from.
@@ -599,6 +757,10 @@ public:
     if (disk_serve_timer_) {
       disk_serve_timer_->cancel();
       disk_serve_timer_.reset();
+    }
+    if (refresh_timer_) {
+      refresh_timer_->cancel();
+      refresh_timer_.reset();
     }
     // Pending catch-up work is dropped with the timer: requests are only
     // accepted while ACTIVE, and a consumer re-requests via the catalog
@@ -754,6 +916,45 @@ private:
   std::size_t disk_serve_tiles_per_tick_ = 4;
   std::size_t disk_serve_queue_max_depth_ = 64;
   double disk_serve_interval_s_ = 0.5;
+  // Sub-window push opt-in (see the parameter descriptor in on_configure).
+  // False reproduces the pre-sub-window whole-tile stream byte for byte.
+  bool publish_dirty_subwindow_ = true;
+
+  // Whole-tile refresh queue (#112). The live push is best-effort, so a lost
+  // sub-window patch leaves a gap the consumer cannot discover: the catalog
+  // version is bumped on a patch, so a consumer that records header.stamp as
+  // its held version matches the catalog and never re-requests. Re-sending
+  // each patched tile IN FULL on a slow cadence heals such a gap within a
+  // bounded time WITHOUT depending on the consumer's possession semantics --
+  // which is what makes the sub-window stream safe against the consumers we
+  // actually have (CAMP's SonarLiveTile::applyPatch advances its held version
+  // from a patch; camp#121).
+  //
+  // last_full_tile_publish_ is when each tile last went out whole;
+  // patched_since_full_ is the tiles holding unconfirmed patches. A tile is
+  // owed a refresh when it is in the set AND its last whole send is older than
+  // subwindow_refresh_interval_s_.
+  cube::CoverageRefreshTracker refresh_tracker_;
+  rclcpp::TimerBase::SharedPtr refresh_timer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    refresh_parameters_handle_;
+  /// Upper bound on the drain budget. At ~183 kB compressed per whole tile and
+  /// a 5 s tick, 8 is already ~293 kB/s -- a fifth of the operator link. A
+  /// field YAML typo of 20 would put 20 whole tiles on the wire in one tick,
+  /// which is precisely the burst this budget exists to prevent.
+  static constexpr int64_t kMaxRefreshTilesPerCycle = 8;
+  /// Drain tick. Matches the coverage publish cadence in pingCallback so the
+  /// per-cycle budget means the same thing on both paths.
+  static constexpr double kRefreshDrainIntervalSeconds = 5.0;
+  // Reporting window for the sub-window saving ledger (maybeReportCoverageSaving).
+  static constexpr double kSavingReportIntervalSeconds = 30.0;
+  // Sub-window saving ledger, accumulated over one reporting window.
+  double saving_report_last_s_ = 0.0;   // 0 = no window open yet
+  std::size_t report_window_cells_ = 0;
+  std::size_t report_full_cells_ = 0;
+  std::size_t report_refresh_cells_ = 0;
+  double subwindow_refresh_interval_s_ = 60.0;
+  std::size_t subwindow_refresh_tiles_per_cycle_ = 2;
 
   // Long-duration bounding parameters (#70, ADR-0001).
   std::size_t max_resident_tiles_ = 64;
@@ -885,6 +1086,225 @@ private:
       ca_window_radius_m_ << "m window");
   }
 
+  // --- whole-tile refresh queue (#112) ------------------------------------
+  //
+  // Policy lives in cube::CoverageRefreshTracker (coverage_refresh.h), node-free
+  // so it can be unit-tested directly; this is the wiring. See that header for
+  // WHY a patched tile must be re-sent whole on a cadence.
+
+  /// Re-send, whole, the tiles the tracker says are owed a refresh and were not
+  /// already published this cycle.
+  /// Validate and apply a runtime change to the two refresh tunables.
+  ///
+  /// These are LIVE, not configure-time. The descriptor invites the operator to
+  /// retune the interval on a struggling link -- it tabulates the measured cost
+  /// of 300/60/30 s -- so making them read_only would contradict the advice
+  /// they give. What must not happen is the third option: accepted, reads back,
+  /// inert. That trap cost a wrong diagnosis and roughly three minutes of
+  /// operator-link outage on udp_bridge at Appledore, and commit 1665651 closed
+  /// it on this node's publish_dirty_subwindow -- which IS genuinely
+  /// configure-time, so read_only is right there and would be wrong here.
+  ///
+  /// The whole batch is validated before any of it is applied, so one bad value
+  /// in a multi-parameter set cannot leave half the change in force.
+  rcl_interfaces::msg::SetParametersResult applyRefreshParameters(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+
+    double interval = subwindow_refresh_interval_s_;
+    std::size_t budget = subwindow_refresh_tiles_per_cycle_;
+    bool touched = false;
+
+    for (const auto & parameter : parameters) {
+      if (parameter.get_name() == "subwindow_refresh_interval") {
+        const double value = parameter.as_double();
+        if (!std::isfinite(value) || value < 0.0) {
+          result.successful = false;
+          result.reason =
+            "subwindow_refresh_interval must be a finite duration >= 0 "
+            "(0 disables the heal)";
+          return result;
+        }
+        interval = value;
+        touched = true;
+      } else if (parameter.get_name() == "subwindow_refresh_tiles_per_cycle") {
+        const int64_t value = parameter.as_int();
+        if (value < 0 || value > kMaxRefreshTilesPerCycle) {
+          result.successful = false;
+          result.reason =
+            "subwindow_refresh_tiles_per_cycle must be in [0, " +
+            std::to_string(kMaxRefreshTilesPerCycle) +
+            "]; a larger budget would make this heal the burst it exists to "
+            "prevent";
+          return result;
+        }
+        budget = static_cast<std::size_t>(value);
+        touched = true;
+      }
+    }
+    if (!touched) {
+      return result;   // nothing of ours in this batch
+    }
+
+    subwindow_refresh_interval_s_ = interval;
+    subwindow_refresh_tiles_per_cycle_ = budget;
+    refresh_tracker_.configure(interval, budget);
+    RCLCPP_INFO(get_logger(),
+      "Coverage refresh retuned at runtime: interval %.1f s, %zu tile(s) per "
+      "cycle", interval, budget);
+    return result;
+  }
+
+  /// Report what sub-window mode actually saved, NET OF ITS OWN HEAL.
+  ///
+  /// The point of this line is that an operator uses it to decide whether to
+  /// leave the mode on over a constrained link, so it must not flatter the
+  /// mode. It previously reported the dirty cycle's patch cells against the
+  /// whole tiles those cycles would have sent -- and left out the drain's
+  /// whole-tile re-sends entirely, which at a 60 s interval are the DOMINANT
+  /// cost. A ratio that omits the larger half of the bill is not a saving.
+  ///
+  /// Accumulated over a fixed window rather than sampled per cycle: the heal
+  /// and the patches arrive on different cadences, so any single cycle is
+  /// unrepresentative of both. Reported from whichever of the two paths runs,
+  /// so the numbers still arrive once the pings stop and only the heal is left.
+  ///
+  /// The byte figures are UNCOMPRESSED cell bytes (4 B/cell across depth int16
+  /// + two uint8). udp_bridge zlib-compresses every packet, and coverage tiles
+  /// compress hard, so the link carries substantially less than this: read the
+  /// RATIO, not the rate. For measured on-the-wire bytes, run import_bag
+  /// --tile-size-report over a bag of the survey.
+  void maybeReportCoverageSaving()
+  {
+    const double now_s = now().seconds();
+    if (saving_report_last_s_ == 0.0) {
+      saving_report_last_s_ = now_s;   // start the first window here
+      return;
+    }
+    if (now_s - saving_report_last_s_ < kSavingReportIntervalSeconds) {
+      return;
+    }
+    saving_report_last_s_ = now_s;
+    if (report_full_cells_ == 0) {
+      report_window_cells_ = 0;
+      report_refresh_cells_ = 0;
+      return;   // nothing changed this window; there is no ratio to state
+    }
+    const std::size_t sent = report_window_cells_ + report_refresh_cells_;
+    RCLCPP_INFO(get_logger(),
+      "Sub-window coverage push: %zu cells sent (%zu patched + %zu re-sent "
+      "whole by the heal) against %zu the whole-tile mode would have sent "
+      "(%.1f%%), ~%zu B against ~%zu B uncompressed over the last %.0f s",
+      sent, report_window_cells_, report_refresh_cells_, report_full_cells_,
+      100.0 * static_cast<double>(sent) / static_cast<double>(report_full_cells_),
+      sent * 4, report_full_cells_ * 4, kSavingReportIntervalSeconds);
+    report_window_cells_ = 0;
+    report_full_cells_ = 0;
+    report_refresh_cells_ = 0;
+  }
+
+  /// Timer callback: heal tiles that have gone quiet still owing a whole send.
+  ///
+  /// ON A WALL TIMER, NOT THE PING PATH, and that is the whole point.
+  /// publishDirtyTiles only ever visits tiles that are still CHANGING, and it
+  /// reached this drain only via pingCallback -> publishBounded, which is gated
+  /// on ping arrival, on a 5 s ping-stamp interval, and on a TF fix
+  /// (publishBounded early-returns on a transform miss). Every one of those
+  /// gates fails in exactly the situation the heal exists for: the vessel has
+  /// finished a line, the sonar is off, it is in transit, or TF has gapped --
+  /// so the tile whose last patch was dropped is the tile that would never be
+  /// visited again, and its gap would outlive the survey. Driven from here the
+  /// heal is independent of all of it; quantizeTile needs no transform, so a TF
+  /// gap cannot stall it either.
+  void drainRefreshQueue()
+  {
+    if (!publish_dirty_subwindow_ || !geo_map_sheet_) {
+      return;
+    }
+    const rclcpp::Time pub_time = now();
+    const builtin_interfaces::msg::Time stamp = pub_time;
+    const std::int64_t version = pub_time.nanoseconds();
+    // Nothing was published by this callback's own cycle; the exclusion set is
+    // only meaningful when the drain shares a cycle with publishDirtyTiles.
+    const std::set<gggs::GridIndex> published_this_cycle;
+    std::size_t dropped = 0;
+    const auto due = refresh_tracker_.dueForRefresh(
+      published_this_cycle, pub_time.seconds(),
+      [this](const gggs::GridIndex & index) {
+        return static_cast<bool>(geo_map_sheet_->gridAt(index));
+      },
+      &dropped);
+
+    if (dropped > 0) {
+      // A tile that left RAM while owing a refresh cannot be quantized here, so
+      // its debt is unpayable and would otherwise sit in the set forever. Rare
+      // in practice -- a just-patched tile is the WARMEST thing in the sheet and
+      // eviction takes the coldest, so a 60s drain empties the debt long before
+      // max_resident_tiles newer tiles could displace it. Surfaced rather than
+      // silently forgotten: the consumer keeps whatever gap it has, and the
+      // durable fix is to serve the refresh from the draft store the way a
+      // TileRequest already is (#106).
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "%zu coverage tile(s) left RAM still owing a whole-tile refresh; any "
+        "sub-window patch lost on them stays missing at the consumer until the "
+        "tile is revisited", dropped);
+    }
+
+    for (const auto & index : due) {
+      auto grid = geo_map_sheet_->gridAt(index);
+      if (!grid) {
+        continue;
+      }
+      const auto vt = cube::quantizeTile(*grid, stamp);
+      if (!vt) {
+        // Nothing displayable, so there is no gap to heal either.
+        refresh_tracker_.forget(index);
+        continue;
+      }
+      sonar_tile_publisher_->publish(*vt);
+      catalog_builder_.update(index, version);
+      refresh_tracker_.notePublished(index, pub_time.seconds(), true);
+      // Charged to the sub-window saving report. These are whole tiles the
+      // whole-tile mode would NEVER have sent -- it has no heal to pay for --
+      // so they are pure additional cost of this mode and belong on the same
+      // ledger as the saving they offset.
+      report_refresh_cells_ +=
+        static_cast<std::size_t>(vt->width) * vt->height;
+    }
+    RCLCPP_DEBUG(get_logger(),
+      "Coverage refresh: re-sent %zu whole tile(s); %zu still owed",
+      due.size(), refresh_tracker_.owedCount());
+
+    // The heal latency is a target under load, not a bound (see
+    // CoverageRefreshTracker). When the backlog outruns the budget, the
+    // operator's coverage can carry gaps older than subwindow_refresh_interval
+    // implies -- and the only other signal is the DEBUG line above, which is
+    // off in the field. Say it at WARN rather than let a guarantee be inferred
+    // that is not being met.
+    if (subwindow_refresh_interval_s_ > 0.0 &&
+      refresh_tracker_.backlogExceedsBudget(
+        subwindow_refresh_interval_s_ / kRefreshDrainIntervalSeconds))
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Coverage refresh is behind: %zu tile(s) owe a whole-tile re-send, "
+        "more than the %.0f this budget clears in one %.0f s interval. A "
+        "sub-window patch lost on those tiles stays missing longer than the "
+        "interval implies. Raise subwindow_refresh_tiles_per_cycle (costs "
+        "link bandwidth) or accept the longer heal.",
+        refresh_tracker_.owedCount(),
+        static_cast<double>(subwindow_refresh_tiles_per_cycle_) *
+        (subwindow_refresh_interval_s_ / kRefreshDrainIntervalSeconds),
+        subwindow_refresh_interval_s_);
+    }
+
+    // Also from here: once the vessel stops pinging, this is the only path
+    // still running, and the heal it pays for is precisely what the report
+    // exists to expose.
+    maybeReportCoverageSaving();
+  }
+
   // Incremental coverage: emit each changed tile as its own GridMap on ~/tiles,
   // then clear the publish-dirty set. Bounds per-message size to one tile and
   // per-cycle cost to the tiles that actually changed.
@@ -898,6 +1318,17 @@ private:
     const std::int64_t version = pub_time.nanoseconds();
 
     const std::set<gggs::GridIndex> dirty = geo_map_sheet_->publishDirtyGrids();
+    // Sub-window accounting for the operator's enable/disable decision: cells
+    // actually put on the wire this cycle against what the whole-tile stream
+    // would have sent. Counted, not estimated -- the win depends entirely on
+    // track geometry (a diagonal line's bounding box degrades toward the full
+    // tile), so a measured ratio from this survey beats any table.
+    std::size_t window_cells = 0;
+    std::size_t full_cells = 0;
+    // What actually reached the wire this cycle -- not the same as `dirty`: a
+    // tile can be dirty and still publish nothing (evicted, or no displayable
+    // cell). The refresh drain must not treat those as already handled.
+    std::set<gggs::GridIndex> published_this_cycle;
     for (const auto & index : dirty) {
       auto grid = geo_map_sheet_->gridAt(index);
       if(!grid) {
@@ -914,12 +1345,68 @@ private:
       tiles_publisher_->publish(*message);
 
       // Quantized display tile (#78): push the changed tile and register its
-      // version in the catalog. quantizeTile returns nullopt for an all-empty
-      // tile, which the GridMap path already skipped above.
-      if (auto vt = cube::quantizeTile(*grid, stamp)) {
-        sonar_tile_publisher_->publish(*vt);
-        catalog_builder_.update(index, version);
+      // version in the catalog. Either quantizer returns nullopt when there is
+      // nothing to show (an all-empty tile, which the GridMap path already
+      // skipped above; or, for a sub-window, a dirty box with no finite depth).
+      //
+      // This is the ONLY sub-window site. The catalog/TileRequest serve and the
+      // from-disk serve stay whole-tile on purpose: they exist to repair a
+      // consumer that has diverged, and a patch cannot repair divergence.
+      std::optional<marine_interfaces::msg::SonarVisualizationTile> vt;
+      // A tile whose last whole send has aged past the refresh interval goes out
+      // WHOLE even though it is dirty: that is the heal, and doing it here (in
+      // the tile's own dirty cycle) costs one message rather than two.
+      const bool refresh_due = publish_dirty_subwindow_ &&
+        refresh_tracker_.refreshDue(index, pub_time.seconds());
+      if (publish_dirty_subwindow_ && !refresh_due) {
+        vt = cube::quantizeTileWindow(*grid, stamp, grid->publishDirtyCells());
+      } else {
+        vt = cube::quantizeTile(*grid, stamp);
       }
+      if (vt) {
+        sonar_tile_publisher_->publish(*vt);
+        const bool sent_whole = cube::isWholeTileWindow(
+          vt->window_col, vt->window_row, vt->window_width, vt->window_height,
+          vt->width, vt->height);
+        // THE CATALOG VERSION IS BUMPED ONLY ON A WHOLE SEND, so it keeps
+        // meaning "at this version you hold the WHOLE tile" rather than "this
+        // is when the newest patch went out". Bumping it on a patch breaks
+        // both consumers, in opposite directions:
+        //
+        //  - marine_web_view takes possession only from a whole tile (on
+        //    purpose) and re-requests anything whose catalog version exceeds
+        //    what it holds. Bumped on a patch, EVERY patched tile is
+        //    re-requested in full every catalog round, served immediately and
+        //    unthrottled by tileRequestCallback -- more traffic than the
+        //    whole-tile stream this sub-window mode exists to replace.
+        //  - CAMP takes possession from a patch, so its held version matched
+        //    the bumped catalog and it never re-requested at all: a dropped
+        //    patch became a permanent invisible hole.
+        //
+        // Not bumping fixes both. The web view's held version now equals the
+        // catalog and it stops asking; CAMP's runs ahead of it and it does not
+        // ask either; and if either MISSES a whole-tile refresh, its held
+        // version falls behind the catalog and the documented
+        // catalog/TileRequest heal fires as SonarVisualizationTile.msg
+        // promises. The refresh queue covers what anti-entropy cannot see.
+        if (sent_whole) {
+          catalog_builder_.update(index, version);
+        }
+        refresh_tracker_.notePublished(index, pub_time.seconds(), sent_whole);
+        published_this_cycle.insert(index);
+        window_cells += static_cast<std::size_t>(vt->window_width) * vt->window_height;
+        full_cells += static_cast<std::size_t>(vt->width) * vt->height;
+      }
+    }
+    // The quiet-tile drain does NOT run here. It is on refresh_timer_, a WALL
+    // timer, because everything on this path is gated on ping arrival and on a
+    // TF fix -- and the tiles that need healing most are the ones the vessel
+    // has finished with, whose pings have stopped. See drainRefreshQueue.
+
+    if (publish_dirty_subwindow_) {
+      report_window_cells_ += window_cells;
+      report_full_cells_ += full_cells;
+      maybeReportCoverageSaving();
     }
     geo_map_sheet_->clearPublishDirtyGrids();
   }
@@ -983,7 +1470,8 @@ private:
         return idx.level() == ti.level && idx.row() == ti.row &&
                idx.column() == ti.col;
       };
-    const builtin_interfaces::msg::Time stamp = now();
+    const rclcpp::Time serve_time = now();
+    const builtin_interfaces::msg::Time stamp = serve_time;
     std::size_t served = 0;
     std::size_t queued = 0;
     std::size_t overflow = 0;
@@ -993,6 +1481,14 @@ private:
         if (grid && matches(grid->index(), ti)) {
           if (auto vt = cube::quantizeTile(*grid, stamp)) {
             sonar_tile_publisher_->publish(*vt);
+            // This IS a whole send, freshly quantized from the resident tile,
+            // so it discharges the refresh debt exactly as the drain's re-send
+            // does. Without this the tracker still believed the tile owed a
+            // whole-tile heal and re-sent the same ~183 kB within the interval
+            // -- paid on the operator link this whole mode exists to protect,
+            // to fix a gap the request had already closed.
+            refresh_tracker_.notePublished(
+              grid->index(), serve_time.seconds(), true);
             ++served;
           }
           handled = true;
@@ -1165,12 +1661,36 @@ private:
   void trimResidentToBudget()
   {
     const std::set<gggs::GridIndex> still_dirty = geo_map_sheet_->dirtyGrids();
+    std::size_t owing = 0;
     for (const auto & index : geo_map_sheet_->coldTiles(max_resident_tiles_)) {
       if (still_dirty.count(index)) {
         continue;  // unsaved -- never drop (would lose data); retry next cycle
       }
       geo_map_sheet_->dropTile(index);
       evicted_indices_.insert(index);
+      // A tile that leaves RAM can no longer be quantized, so a whole-tile
+      // refresh it still owed is unpayable from here. Discharge the record at
+      // the moment of eviction rather than leaving it for the drain to reap:
+      //
+      //  - the drain reaps lazily inside dueForRefresh, whose early return is
+      //    taken whole when the heal is disabled (interval 0 or budget 0, both
+      //    documented values), so with the heal off the debt set grew for the
+      //    life of the sheet -- unbounded by anything, on the long-duration
+      //    node whose whole eviction design exists to bound RAM;
+      //  - and this is the last moment anything knows the tile existed, so it
+      //    is the only place the operator can be TOLD. The consumer keeps
+      //    whatever gap it has until the tile is revisited.
+      if (refresh_tracker_.owesRefresh(index)) {
+        ++owing;
+        refresh_tracker_.forget(index);
+      }
+    }
+    if (owing > 0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "%zu coverage tile(s) evicted while still owing a whole-tile refresh; "
+        "any sub-window patch lost on them stays missing at the consumer until "
+        "the tile is revisited (durable fix: serve the refresh from the draft "
+        "store, as a TileRequest already is -- #106)", owing);
     }
   }
 

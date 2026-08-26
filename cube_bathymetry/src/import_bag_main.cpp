@@ -28,11 +28,14 @@
 // -> per-sounding lookupTransform("earth", frame_id, stamp) -> GeoSounding ->
 // GeoMapSheet) but writes marine_bathymetry_store draft tiles instead of a GeoTIFF.
 
+#include <zlib.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <deque>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -40,6 +43,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -47,9 +51,11 @@
 #include <vector>
 
 #include "cube_bathymetry/angular_response_curve.h"
+#include "cube_bathymetry/coverage_refresh.h"
 #include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
+#include "cube_bathymetry/quantize_tile.h"
 #include "cube_bathymetry/store_import.h"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "marine_autonomy/gz4d_geo.h"
@@ -63,6 +69,8 @@
 #include "rosbag2_transport/reader_writer_factory.hpp"
 #include "cube_bathymetry/sonar_info_curve.h"
 #include "marine_interfaces/msg/sonar_info.hpp"
+#include "marine_interfaces/msg/sonar_visualization_tile.hpp"
+#include "rclcpp/serialization.hpp"
 
 namespace
 {
@@ -175,6 +183,30 @@ bool loadCurveFromBagSonarInfo(
     "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
     "curve (header '# tl_removed: true' + '# absorption_db_per_m: <a>') also makes "
     "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
+  std::cout << "  --tile-size-report <csv>: measure the live coverage stream's "
+    "per-message size instead of guessing it (cube_bathymetry#112). Every "
+    "--tile-report-interval seconds of BAG time, each dirty tile is quantized "
+    "BOTH ways -- whole tile and dirty sub-window -- from the same dirty set, "
+    "serialized, and compressed with zlib at the default level, which is what "
+    "udp_bridge does to every packet before fragmenting it (packet.cpp). The "
+    "compressed column is the one that matters: a whole tile is mostly nodata, "
+    "and nodata compresses to almost nothing, so the cell-count saving and the "
+    "wire saving are NOT the same number. Writes one CSV row per tile per "
+    "cycle; the dirty set is then cleared exactly as the node clears it.\n";
+  std::cout << "  --tile-report-interval <seconds>: report cadence, default 5.0 "
+    "to match the live node's own coverage publish cadence.\n";
+  std::cout << "  --tile-refresh-interval <seconds>: the whole-tile refresh "
+    "interval the report MODELS (default 60.0, the node's own default for "
+    "subwindow_refresh_interval). The node does not send every dirty tile as a "
+    "sub-window -- a tile whose last whole send has aged past this goes out "
+    "whole, and a tile that has gone quiet still owing one is re-sent whole by "
+    "the refresh drain. Both are real traffic and the second is the dominant "
+    "cost at 60 s, so the source,sent,sent_serialized,sent_compressed columns "
+    "are what the boat would actually put on the wire; the full_* and window_* "
+    "columns remain the two extremes for comparison. 0 models the heal off.\n";
+  std::cout << "  --tile-refresh-budget <tiles>: whole tiles the modelled "
+    "refresh drain may re-send per cycle (default 2, the node's own default "
+    "for subwindow_refresh_tiles_per_cycle). 0 models the heal off.\n";
   std::cout << "  --max-resident-tiles <N>: bound resident-tile RAM (cube#92). When "
     "the in-memory GGGS tile count exceeds N, the coldest tiles are persisted to "
     "the -o store (and their backscatter to --bs-store), their per-cell intensity "
@@ -394,6 +426,344 @@ private:
 };
 
 
+namespace
+{
+
+/// Coverage-message size report (cube_bathymetry#112).
+///
+/// Quantizes each dirty tile BOTH ways from the SAME dirty set -- whole tile
+/// and dirty sub-window -- and records serialized and zlib-compressed sizes,
+/// then clears the dirty set exactly as cube_bathymetry_node::publishDirtyTiles
+/// does. The compressed column is the one that matters: udp_bridge compresses
+/// every packet before fragmenting it, so the cell-count saving and the wire
+/// saving are different numbers.
+///
+/// It also MODELS THE SHIPPED POLICY rather than only the two extremes. The
+/// node does not send every dirty tile as a sub-window: a tile whose last whole
+/// send has aged past subwindow_refresh_interval goes out whole instead, and a
+/// tile that has gone quiet still owing a whole send is re-sent whole by the
+/// refresh drain. Both are real traffic, the second is the dominant cost at a
+/// 60 s interval, and a report that omits them answers a question nobody is
+/// asking -- "what would pure sub-window mode cost?" -- while the operator
+/// needs the cost of the mode that actually ships. The `sent_*` columns are
+/// that number, produced by the SAME CoverageRefreshTracker the node runs.
+///
+/// The drain is modelled once per report cycle, which is exact at the default
+/// --tile-report-interval of 5.0 s because that is also the node's drain tick.
+class TileSizeReporter
+{
+public:
+  TileSizeReporter(
+    const std::string & path, double interval_s,
+    double refresh_interval_s, std::size_t refresh_tiles_per_cycle)
+  : out_(path), interval_ns_(static_cast<int64_t>(interval_s * 1e9))
+  {
+    refresh_.configure(refresh_interval_s, refresh_tiles_per_cycle);
+    if (out_) {
+      out_ << "bag_time_s,level,tile_row,tile_col,dirty_rows,dirty_cols,"
+           << "dirty_cells,full_cells,full_serialized,full_compressed,"
+           << "window_serialized,window_compressed,"
+           << "source,sent,sent_serialized,sent_compressed\n";
+    }
+    checkStream("writing the header");
+  }
+
+  bool good() const {return static_cast<bool>(out_);}
+
+  /// Did every write reach the file? A truncated CSV is worse than none: it is
+  /// the evidence base for a fleet-wide default, and a short file still parses,
+  /// still plots, and still looks like a complete survey.
+  bool ok() const {return !failed_;}
+
+  /// Flush and close, reporting a failure that only surfaces at close (a full
+  /// disk usually does).
+  bool finish()
+  {
+    out_.flush();
+    checkStream("flushing");
+    out_.close();
+    if (out_.fail() && !failed_) {
+      failed_ = true;
+      std::cerr << "error: --tile-size-report could not be closed cleanly; "
+                << "the CSV is incomplete" << std::endl;
+    }
+    return !failed_;
+  }
+
+  /// Report and clear, if a report interval of BAG time has elapsed.
+  void maybeReport(cube::GeoMapSheet & sheet, int64_t ping_ns)
+  {
+    if (last_ns_ != std::numeric_limits<int64_t>::min() &&
+      ping_ns - last_ns_ < interval_ns_)
+    {
+      return;
+    }
+    last_ns_ = ping_ns;
+
+    builtin_interfaces::msg::Time stamp;
+    stamp.sec = static_cast<int32_t>(ping_ns / 1000000000LL);
+    stamp.nanosec = static_cast<uint32_t>(ping_ns % 1000000000LL);
+    // BAG time drives the refresh policy, exactly as the node's clock drives
+    // it live. Wall time here would make the heal fire on how long the import
+    // took rather than on how long the survey was.
+    const double bag_s = static_cast<double>(ping_ns) * 1e-9;
+
+    std::set<gggs::GridIndex> published_this_cycle;
+    for (const auto & index : sheet.publishDirtyGrids()) {
+      auto grid = sheet.gridAt(index);
+      if (!grid) {
+        continue;
+      }
+      const cube::CellBox box = grid->publishDirtyCells();
+      const auto full = cube::quantizeTile(*grid, stamp);
+      const auto window = cube::quantizeTileWindow(*grid, stamp, box);
+      if (!full || !window) {
+        // Nothing displayable this cycle; the node publishes neither.
+        continue;
+      }
+      std::size_t full_serialized = 0;
+      std::size_t full_compressed = 0;
+      std::size_t window_serialized = 0;
+      std::size_t window_compressed = 0;
+      measure(*full, full_serialized, full_compressed);
+      measure(*window, window_serialized, window_compressed);
+
+      // What the node would ACTUALLY send for this tile this cycle, decided by
+      // the same tracker on the same rule: a tile due a refresh -- including a
+      // tile that has never been sent whole -- goes out whole even though it
+      // is dirty, because doing it here costs one message instead of two.
+      const bool whole = refresh_.refreshDue(index, bag_s);
+      refresh_.notePublished(index, bag_s, whole);
+      published_this_cycle.insert(index);
+
+      writeRow(
+        bag_s, *full, box, full_serialized, full_compressed,
+        window_serialized, window_compressed, "dirty",
+        whole ? "whole" : "window",
+        whole ? full_serialized : window_serialized,
+        whole ? full_compressed : window_compressed);
+    }
+
+    // The quiet-tile drain: tiles no longer changing that still owe a whole
+    // send. The node runs this on its own 5 s timer; modelled once per report
+    // cycle, which is that same tick at the default --tile-report-interval.
+    // Without it the report omits the dominant cost of sub-window mode.
+    std::size_t dropped = 0;
+    const auto due = refresh_.dueForRefresh(
+      published_this_cycle, bag_s,
+      [&sheet](const gggs::GridIndex & index) {
+        return static_cast<bool>(sheet.gridAt(index));
+      },
+      &dropped);
+    unpayable_ += dropped;
+    for (const auto & index : due) {
+      auto grid = sheet.gridAt(index);
+      if (!grid) {
+        continue;
+      }
+      const auto full = cube::quantizeTile(*grid, stamp);
+      if (!full) {
+        refresh_.forget(index);
+        continue;
+      }
+      std::size_t serialized = 0;
+      std::size_t compressed = 0;
+      measure(*full, serialized, compressed);
+      refresh_.notePublished(index, bag_s, true);
+      // A heal re-sends the WHOLE tile and has no sub-window alternative, so
+      // the dirty-box columns are empty rather than zero: zero rows would read
+      // as a measured empty window.
+      writeRow(
+        bag_s, *full, std::nullopt, serialized, compressed, 0, 0,
+        "heal", "whole", serialized, compressed);
+    }
+    sheet.clearPublishDirtyGrids();
+  }
+
+  /// Tiles that left RAM still owing a whole-tile refresh over the whole run.
+  /// Their gap is unpayable, so the modelled traffic is a LOWER bound by
+  /// exactly that many whole tiles -- worth stating rather than absorbing.
+  std::size_t unpayableRefreshes() const {return unpayable_;}
+
+private:
+  /// One CSV row. `box` is absent for a heal, whose whole-tile re-send has no
+  /// dirty window to report.
+  void writeRow(
+    double bag_s,
+    const marine_interfaces::msg::SonarVisualizationTile & tile,
+    const std::optional<cube::CellBox> & box,
+    std::size_t full_serialized, std::size_t full_compressed,
+    std::size_t window_serialized, std::size_t window_compressed,
+    const char * source, const char * sent,
+    std::size_t sent_serialized, std::size_t sent_compressed)
+  {
+    // Level via the message's uint8 mirror: gggs::Level has no numeric
+    // stream operator and silently writes an empty field.
+    out_ << std::fixed << std::setprecision(3)
+         << bag_s << ','
+         << static_cast<unsigned>(tile.index.level) << ','
+         << tile.index.row << ',' << tile.index.col << ',';
+    if (box) {
+      out_ << box->rows() << ',' << box->columns() << ','
+           << (static_cast<std::size_t>(box->rows()) * box->columns()) << ',';
+    } else {
+      out_ << ",,,";
+    }
+    out_ << (static_cast<std::size_t>(tile.width) * tile.height) << ','
+         << full_serialized << ',' << full_compressed << ',';
+    if (box) {
+      out_ << window_serialized << ',' << window_compressed << ',';
+    } else {
+      out_ << ",,";
+    }
+    out_ << source << ',' << sent << ','
+         << sent_serialized << ',' << sent_compressed << '\n';
+    checkStream("writing a row");
+  }
+
+  /// Say it the first time the stream goes bad, once, and remember. A CSV that
+  /// stops mid-survey is indistinguishable from a survey that stopped.
+  void checkStream(const char * doing)
+  {
+    if (out_ || failed_) {
+      return;
+    }
+    failed_ = true;
+    std::cerr << "error: --tile-size-report failed while " << doing
+              << "; the CSV is incomplete and must not be used as evidence"
+              << std::endl;
+  }
+
+  /// Serialized size, and the size udp_bridge would actually put on the wire.
+  /// zlib's ::compress() at the default level is exactly what packet.cpp does,
+  /// and udp_bridge keeps the compressed form only when it is smaller -- so a
+  /// payload that does not compress is charged at its serialized size.
+  void measure(
+    const marine_interfaces::msg::SonarVisualizationTile & tile,
+    std::size_t & serialized, std::size_t & compressed)
+  {
+    rclcpp::SerializedMessage serialized_msg;
+    serializer_.serialize_message(&tile, &serialized_msg);
+    const auto & rcl = serialized_msg.get_rcl_serialized_message();
+    serialized = rcl.buffer_length;
+    uLongf bound = compressBound(static_cast<uLong>(serialized));
+    std::vector<Bytef> buffer(bound);
+    if (::compress(
+        buffer.data(), &bound, rcl.buffer, static_cast<uLong>(serialized)) == Z_OK)
+    {
+      compressed = std::min<std::size_t>(serialized, bound);
+    } else {
+      compressed = serialized;
+    }
+  }
+
+  std::ofstream out_;
+  int64_t interval_ns_;
+  int64_t last_ns_ = std::numeric_limits<int64_t>::min();
+  bool failed_ = false;
+  std::size_t unpayable_ = 0;
+  cube::CoverageRefreshTracker refresh_;
+  rclcpp::Serialization<marine_interfaces::msg::SonarVisualizationTile> serializer_;
+};
+
+/// Build the reporter, or report why it could not be built. Returns nullopt
+/// both when no report was asked for and when the file could not be opened;
+/// the caller distinguishes them by whether a path was given.
+std::optional<TileSizeReporter> makeTileReporter(
+  const std::string & path, double interval_s,
+  double refresh_interval_s, int refresh_tiles_per_cycle)
+{
+  if (path.empty()) {
+    return std::nullopt;
+  }
+  // Validated here rather than at the parse site so the two modelled-policy
+  // options stay one concern in one place: 0 is legal for both and means "model
+  // the heal switched off", which is a configuration the node supports and an
+  // operator may well want to measure.
+  if (!(refresh_interval_s >= 0.0) || refresh_tiles_per_cycle < 0) {
+    std::cerr << "error: --tile-refresh-interval and --tile-refresh-budget must "
+      "be >= 0 (0 models the heal switched off)" << std::endl;
+    return std::nullopt;
+  }
+  TileSizeReporter reporter(
+    path, interval_s, refresh_interval_s,
+    static_cast<std::size_t>(refresh_tiles_per_cycle));
+  if (!reporter.good()) {
+    std::cerr << "error: cannot write --tile-size-report " << path << std::endl;
+    return std::nullopt;
+  }
+  return reporter;
+}
+
+/// What the pass actually wrote, and the two empty-output cases that are worth
+/// a warning rather than a silent zero.
+///
+/// The on-disk store is the union of tiles evicted during the pass and tiles
+/// still resident at finalize (cube#92), so the counts are reported together:
+/// an import that evicted heavily and one that never evicted produce identical
+/// stores, and only this line distinguishes them when a build looks slow.
+template<typename AccumulatorT>
+void reportPersisted(
+  const AccumulatorT & accumulator, const std::string & store_dir,
+  const std::string & bs_store_dir, std::size_t evicted_count,
+  std::size_t resident_before_final, double build_secs)
+{
+  std::cout << "Persisted " << accumulator.bathyTilesPersisted()
+            << " bathy tile(s) to " << store_dir << " (survey layer; "
+            << evicted_count << " evicted mid-pass, "
+            << resident_before_final << " resident at end; build: "
+            << build_secs << "s)." << std::endl;
+
+  if (accumulator.bathyTilesPersisted() == 0) {
+    std::cerr << "WARNING: no tiles had finite data -- nothing imported. Check "
+      "the projector frame overrides and the detections topic." << std::endl;
+  }
+
+  // The co-estimated backscatter was surfaced into the --bs-store layer (#80)
+  // from the SAME CUBE pass, incrementally under eviction (newest-finite-wins
+  // merge, cube#92). By default UNCORRECTED; --backscatter-correction empirical
+  // applies the per-beam angular-response correction at node-output (cube#81).
+  if (!bs_store_dir.empty()) {
+    std::cout << "Persisted " << accumulator.backscatterTilesPersisted()
+              << " backscatter tile(s) to " << bs_store_dir << "." << std::endl;
+    if (accumulator.backscatterTilesPersisted() == 0) {
+      std::cerr << "WARNING: no cells had finite backscatter -- nothing written "
+        "to the backscatter store. Check that the detections carry intensities."
+                << std::endl;
+    }
+  }
+}
+
+/// Close the size report and say what it is worth. False means the run failed:
+/// the report is the reason a --tile-size-report run was asked for, and a CSV
+/// that could not be written completely still parses, still plots, and still
+/// looks like a complete survey that happened to be quieter -- which is how a
+/// bad number becomes a fleet-wide default.
+bool finishTileReport(
+  std::optional<TileSizeReporter> & reporter, const std::string & path,
+  double refresh_interval_s, int refresh_tiles_per_cycle)
+{
+  if (!reporter) {
+    return true;
+  }
+  if (reporter->unpayableRefreshes() > 0) {
+    std::cerr << "NOTE: " << reporter->unpayableRefreshes()
+              << " modelled tile(s) left RAM still owing a whole-tile "
+      "refresh; their re-sends are absent from the CSV, so the "
+      "modelled traffic is a lower bound by that many whole tiles."
+              << std::endl;
+  }
+  if (!reporter->finish()) {
+    return false;
+  }
+  std::cout << "Wrote coverage size report to " << path
+            << " (modelled refresh: " << refresh_interval_s << "s, "
+            << refresh_tiles_per_cycle << " tile(s)/cycle)." << std::endl;
+  return true;
+}
+
+}  // namespace
+
 int main(int argc, char * argv[])
 {
   std::vector<std::string> arguments(argv + 1, argv + argc);
@@ -411,6 +781,22 @@ int main(int argc, char * argv[])
   double resolution = 1.0;
   std::string iho_order = "order1a";
   int ping_count_limit = 0;
+  // Coverage-message size report (cube_bathymetry#112). Off unless a path is
+  // given; measures what the live coverage stream would put on the operator
+  // link, whole-tile against dirty-sub-window, on the SAME dirty set.
+  std::string tile_size_report_path;
+  // Matches the live node's coverage publish cadence: cube_bathymetry_node
+  // republishes the dirty set when a ping's stamp is more than 5 s past the
+  // last publish, so a report on any other interval would measure a dirty
+  // region the boat never actually sends as one message.
+  double tile_report_interval_s = 5.0;
+  // The refresh policy the report MODELS. Defaults track the node's own
+  // parameter defaults (subwindow_refresh_interval,
+  // subwindow_refresh_tiles_per_cycle), so the CSV describes the shipped
+  // configuration unless it is told otherwise -- and can be re-run at other
+  // values to choose one from measurement rather than from the cost table.
+  double tile_refresh_interval_s = 60.0;
+  int tile_refresh_tiles_per_cycle = 2;
   // Bounded-RAM eviction budget (cube#92). Default 256 resident tiles: generous
   // for offline (each ~960x960-cell GeoGrid + CUBE state is the heavy object), so
   // small/medium surveys never evict (identical output to the old path) while a
@@ -523,6 +909,21 @@ int main(int argc, char * argv[])
         usage();
       }
       max_resident_tiles = static_cast<std::size_t>(v);
+    } else if (*arg == "--tile-size-report") {
+      tile_size_report_path = next_value("--tile-size-report");
+    } else if (*arg == "--tile-report-interval") {
+      tile_report_interval_s = parse_double(
+        "--tile-report-interval", next_value("--tile-report-interval"));
+      if (!(tile_report_interval_s > 0.0)) {
+        std::cerr << "error: --tile-report-interval must be > 0\n";
+        usage();
+      }
+    } else if (*arg == "--tile-refresh-interval") {
+      tile_refresh_interval_s = parse_double(
+        "--tile-refresh-interval", next_value("--tile-refresh-interval"));
+    } else if (*arg == "--tile-refresh-budget") {
+      tile_refresh_tiles_per_cycle = parse_int(
+        "--tile-refresh-budget", next_value("--tile-refresh-budget"));
     } else if (*arg == "-l") {
       ping_count_limit = parse_int("-l", next_value("-l"));
     } else if (*arg == "--platform") {
@@ -792,6 +1193,13 @@ int main(int argc, char * argv[])
 
   bool limit_reached = false;
 
+  auto tile_reporter = makeTileReporter(
+    tile_size_report_path, tile_report_interval_s, tile_refresh_interval_s,
+    tile_refresh_tiles_per_cycle);
+  if (!tile_size_report_path.empty() && !tile_reporter) {
+    return 1;
+  }
+
   // Project + georeference one ping into the GeoMapSheet.
   auto process_detection =
     [&](const marine_acoustic_msgs::msg::SonarDetections & detections, int64_t ping_ns) {
@@ -887,6 +1295,9 @@ int main(int argc, char * argv[])
         // addSoundings (no eviction).
         accumulator.addBatch(soundings);
         ping_count++;
+        if (tile_reporter) {
+          tile_reporter->maybeReport(geo_map_sheet, ping_ns);
+        }
       } catch (const tf2::TransformException & e) {
         // A ping with no earth transform in the (bounded) buffer at its stamp --
         // e.g. before the first earth fix, or a TF gap wider than the cache
@@ -1039,29 +1450,15 @@ int main(int argc, char * argv[])
   accumulator.finalize(
     store_metadata.empty() ? nullptr : &store_metadata,
     (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
-  std::cout << "Persisted " << accumulator.bathyTilesPersisted()
-            << " bathy tile(s) to " << store_dir << " (survey layer; "
-            << evicted_count << " evicted mid-pass, "
-            << resident_before_final << " resident at end; build: "
-            << phase_secs() << "s)." << std::endl;
+  reportPersisted(
+    accumulator, store_dir, bs_store_dir, evicted_count,
+    resident_before_final, phase_secs());
 
-  if (accumulator.bathyTilesPersisted() == 0) {
-    std::cerr << "WARNING: no tiles had finite data -- nothing imported. Check "
-      "the projector frame overrides and the detections topic." << std::endl;
-  }
-
-  // The co-estimated backscatter was surfaced into the --bs-store layer (#80) from
-  // the SAME CUBE pass, incrementally under eviction (newest-finite-wins merge,
-  // cube#92). By default UNCORRECTED; --backscatter-correction empirical applies
-  // the per-beam angular-response correction at node-output (cube#81).
-  if (!bs_store_dir.empty()) {
-    std::cout << "Persisted " << accumulator.backscatterTilesPersisted()
-              << " backscatter tile(s) to " << bs_store_dir << "." << std::endl;
-    if (accumulator.backscatterTilesPersisted() == 0) {
-      std::cerr << "WARNING: no cells had finite backscatter -- nothing written to "
-        "the backscatter store. Check that the detections carry intensities."
-                << std::endl;
-    }
+  if (!finishTileReport(
+      tile_reporter, tile_size_report_path, tile_refresh_interval_s,
+      tile_refresh_tiles_per_cycle))
+  {
+    return 1;
   }
 
   std::cout << "done!" << std::endl;

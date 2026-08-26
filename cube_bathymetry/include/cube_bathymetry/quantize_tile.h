@@ -45,13 +45,45 @@ namespace cube
 ///
 /// The tile is GGGS-cell-aligned (no map-frame projection): band data is row-major
 /// in GGGS cell order, matching `GeoGrid::nodeRecords()` (`CellAreaIterator` order).
-/// v1 emits the **full tile window** (the per-tile dirty-set publish already bounds
-/// what is sent; a finer dirty sub-window is a later refinement). `stamp` is the
-/// tile version time (newest-wins, D3).
+/// This overload emits the **full tile window** and is the heal path: the
+/// catalog/TileRequest serve and the from-disk serve send a tile in full so a
+/// diverged consumer is repaired in one message. `stamp` is the tile version time
+/// (newest-wins, D3).
 ///
 /// @return nullopt when the tile has no finite-depth cell (nothing to display).
   std::optional < marine_interfaces::msg::SonarVisualizationTile >
   quantizeTile(const GeoGrid & grid, const builtin_interfaces::msg::Time & stamp);
+
+/// @brief Quantize only @p window of @p grid into a `SonarVisualizationTile`
+///        patch: the dirty sub-window the live push stream sends.
+///
+/// Same bands, dtypes and quantization as @ref quantizeTile. The difference is
+/// extent: `width`/`height` still carry the FULL tile size (the wire contract
+/// requires it), while `window_col`/`window_row`/`window_width`/`window_height`
+/// describe @p window and each band's `data` covers exactly that window,
+/// row-major, `window_width * window_height` values for its dtype. The consumer
+/// patches it in at the window offset; a lost or reordered patch is healed by
+/// the catalog/TileRequest path, which re-sends the tile in full.
+///
+/// **Backscatter auto-range is computed over the WINDOW**, not the whole tile.
+/// That keeps the full-window case byte-identical to @ref quantizeTile and
+/// gives a narrow patch better dynamic range, but it means successive patches
+/// to one tile can carry DIFFERENT `scale`/`offset` for the backscatter band.
+/// A consumer must therefore dequantize on receipt (`value = raw*scale +
+/// offset`, ADR-0008 D1) and store physical values -- one that stored raw
+/// counts and applied a single per-tile scale would mis-render older cells.
+/// The depth and uncertainty bands are fixed-scale and unaffected.
+///
+/// @param window Dirty cell bounds, typically `GeoGrid::publishDirtyCells()`.
+///               Clamped to the tile. `CellBox::wholeTile()` reproduces
+///               @ref quantizeTile exactly.
+/// @return nullopt when @p window is empty, lies outside the tile, or contains
+///         no finite-depth cell -- an all-nodata patch would blank cells the
+///         consumer holds.
+  std::optional < marine_interfaces::msg::SonarVisualizationTile >
+  quantizeTileWindow(
+    const GeoGrid & grid, const builtin_interfaces::msg::Time & stamp,
+    const CellBox & window);
 
 }  // namespace cube
 

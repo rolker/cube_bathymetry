@@ -156,6 +156,10 @@ public:
     std::set < gggs::GridIndex > publishDirtyGrids() const;
 
   /// @brief Clear the publish-dirty set (called after an incremental publish).
+  ///
+  /// Also resets each of those grids' `GeoGrid::publishDirtyCells()` box, so
+  /// the tile-level set and the cell-level bounds the sub-window publish reads
+  /// always clear together (ADR-0001 section 4 sub-window addendum).
     void clearPublishDirtyGrids();
 
   /// @brief The least-recently-touched grid indices beyond @p max_resident, in

@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <vector>
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "marine_autonomy/gggs.h"
@@ -462,6 +463,83 @@ TEST_F(GeoMapSheetTest, NonFiniteHorizontalErrorDoesNotPoisonBatchBounds)
   ms.addSoundings(batch);
   ASSERT_EQ(ms.grids().size(), 1u);
   EXPECT_TRUE(ms.dirtyGrids().count(home));
+}
+
+// --- Publish-dirty CELL bounds travel with the publish-dirty tile set --------
+//
+// The sub-window publish reads two pieces of state that must move as one: the
+// tile set (which tiles changed) and each tile's cell box (where inside it).
+// A box left behind after a publish re-sends already-sent cells; one cleared
+// early drops changed cells from the incremental stream entirely.
+
+TEST_F(GeoMapSheetTest, PublishDirtyCellBoxTracksAndClearsWithTheSet)
+{
+  GeoMapSheet ms(cell_size);
+
+  std::vector<GeoSounding> soundings;
+  gz4d::GeoPointLatLongDegrees point(43.0, -70.0, -10.0);
+  GeoSounding s(point);
+  s.sounding.vertical_error = 0.5f;
+  s.sounding.horizontal_error = 0.1f;
+  soundings.push_back(s);
+
+  ms.addSoundings(soundings);
+  const std::set<gggs::GridIndex> dirty = ms.publishDirtyGrids();
+  ASSERT_FALSE(dirty.empty());
+
+  // Every publish-dirty tile carries a non-empty, sub-tile box; every tile that
+  // is NOT publish-dirty carries an empty one (the invariant that lets the
+  // publish path trust the box without re-deriving it).
+  bool any_box = false;
+  for (const auto & g : ms.grids()) {
+    ASSERT_NE(g, nullptr);
+    const CellBox & box = g->publishDirtyCells();
+    if (dirty.count(g->index())) {
+      EXPECT_FALSE(box.empty()) << "a publish-dirty tile must know which cells changed";
+      EXPECT_LE(box.rows(), gggs::cell_rows_per_grid);
+      EXPECT_LE(box.columns(), gggs::cell_columns_per_grid);
+      any_box = true;
+    } else {
+      EXPECT_TRUE(box.empty()) << "an unchanged tile must advertise no dirty cells";
+    }
+  }
+  EXPECT_TRUE(any_box);
+
+  ms.clearPublishDirtyGrids();
+  EXPECT_TRUE(ms.publishDirtyGrids().empty());
+  for (const auto & g : ms.grids()) {
+    ASSERT_NE(g, nullptr);
+    EXPECT_TRUE(g->publishDirtyCells().empty())
+      << "clearPublishDirtyGrids must reset the cell boxes with the set";
+  }
+}
+
+// The save cadence and the publish cadence are independent (ADR-0001 section 4);
+// clearing the SAVE set must not touch the cell bounds the publish path owns.
+TEST_F(GeoMapSheetTest, ClearDirtyGridsLeavesPublishCellBoxIntact)
+{
+  GeoMapSheet ms(cell_size);
+
+  std::vector<GeoSounding> soundings;
+  gz4d::GeoPointLatLongDegrees point(43.0, -70.0, -10.0);
+  GeoSounding s(point);
+  s.sounding.vertical_error = 0.5f;
+  s.sounding.horizontal_error = 0.1f;
+  soundings.push_back(s);
+  ms.addSoundings(soundings);
+
+  ASSERT_FALSE(ms.publishDirtyGrids().empty());
+  ms.clearDirtyGrids();
+
+  bool any_box = false;
+  for (const auto & g : ms.grids()) {
+    ASSERT_NE(g, nullptr);
+    if (!g->publishDirtyCells().empty()) {
+      any_box = true;
+    }
+  }
+  EXPECT_TRUE(any_box)
+    << "a save must not consume the publish stream's dirty cell bounds";
 }
 
 }  // namespace cube

@@ -129,7 +129,17 @@ bool GeoGrid::insert(const GeoSounding & geo_sounding)
       if(!node) {
         node = std::make_shared<Node>();
       }
-      inserted = node->insert(distance, corrected, parameters_) || inserted;
+      // Per-cell result, not folded straight into `inserted`: the publish-dirty
+      // cell box needs to know WHICH cells this sounding actually wrote, so the
+      // incremental display-tile publish can send that sub-window instead of the
+      // whole 960x960 tile (ADR-0001 section 4 sub-window addendum). Four integer
+      // min/max per accepted cell -- negligible beside Node::insert's CUBE
+      // update, and it runs only for cells that passed the radius gate.
+      const bool wrote = node->insert(distance, corrected, parameters_);
+      if(wrote) {
+        publish_dirty_cells_.expand(i->row(), i->column());
+      }
+      inserted = wrote || inserted;
     }
     i.next();
   }
