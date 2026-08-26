@@ -15,3 +15,15 @@ issue: 137
 
 ### Actions
 - [ ] No actions — issue is plan-task-ready.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-08-25 23:45 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-137/plan.md` at `5e8cdf6`
+**Branch**: feature/issue-137 at `5e8cdf6`
+**Phases**: single
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
