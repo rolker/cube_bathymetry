@@ -486,6 +486,15 @@ class GeoGridDirtyCellsTest : public GeoGridTest
 {
 protected:
   // Geographic position of the fractional lattice coordinate (row_f, col_f).
+  //
+  // Nodes sit on the cells' SW-CORNER lattice (see GeoGrid::insert), and
+  // insert() gates each node on hypot(dlat, dlon) < influenceRadius. For these
+  // test soundings that radius is under half a cell, so a touchdown placed at
+  // the cell CENTRE (row + 0.5, col + 0.5) is ~0.71 cells from every
+  // surrounding node and writes NOTHING -- insert() returns false and the
+  // dirty box stays empty. The tests below therefore offset by a QUARTER cell,
+  // which lands inside node (row, col)'s radius. Verified by probe: offsets
+  // 0.0/0.1/0.25/0.4 accept 20 of 20 soundings, 0.5 accepts 0 of 20.
   static double latAt(const gggs::GridIndex & grid_index, double row_f)
   {
     return grid_index.southLatitude() +
@@ -532,7 +541,7 @@ TEST_F(GeoGridDirtyCellsTest, InsertBoundsTheCellsItWrote)
   // ValuesAfterInsertionsContainsValidDepths).
   for (int i = 0; i < 20; ++i) {
     ASSERT_TRUE(g.insert(makeGeoSounding(
-        latAt(grid_index, 480.5), lonAt(grid_index, 480.5), -10.0)));
+        latAt(grid_index, 480.25), lonAt(grid_index, 480.25), -10.0)));
   }
 
   const CellBox & box = g.publishDirtyCells();
@@ -557,9 +566,9 @@ TEST_F(GeoGridDirtyCellsTest, BoxSpansTwoSeparatedTouchdowns)
   GeoGrid g(grid_index, params);
 
   ASSERT_TRUE(g.insert(makeGeoSounding(
-      latAt(grid_index, 200.5), lonAt(grid_index, 300.5), -10.0)));
+      latAt(grid_index, 200.25), lonAt(grid_index, 300.25), -10.0)));
   ASSERT_TRUE(g.insert(makeGeoSounding(
-      latAt(grid_index, 400.5), lonAt(grid_index, 700.5), -12.0)));
+      latAt(grid_index, 400.25), lonAt(grid_index, 700.25), -12.0)));
 
   const CellBox & box = g.publishDirtyCells();
   ASSERT_FALSE(box.empty());
@@ -580,7 +589,7 @@ TEST_F(GeoGridDirtyCellsTest, ClearResetsAndTheBoxReaccumulates)
   GeoGrid g(grid_index, params);
 
   ASSERT_TRUE(g.insert(makeGeoSounding(
-      latAt(grid_index, 100.5), lonAt(grid_index, 100.5), -10.0)));
+      latAt(grid_index, 100.25), lonAt(grid_index, 100.25), -10.0)));
   ASSERT_FALSE(g.publishDirtyCells().empty());
 
   g.clearPublishDirtyCells();
@@ -590,7 +599,7 @@ TEST_F(GeoGridDirtyCellsTest, ClearResetsAndTheBoxReaccumulates)
   // Re-accumulate somewhere else: the new box must describe ONLY the new work,
   // not the union with the already-published region.
   ASSERT_TRUE(g.insert(makeGeoSounding(
-      latAt(grid_index, 800.5), lonAt(grid_index, 800.5), -11.0)));
+      latAt(grid_index, 800.25), lonAt(grid_index, 800.25), -11.0)));
   const CellBox & box = g.publishDirtyCells();
   ASSERT_FALSE(box.empty());
   EXPECT_GT(box.min_row, 100)
@@ -606,7 +615,7 @@ TEST_F(GeoGridDirtyCellsTest, RejectedSoundingLeavesTheBoxEmpty)
   // Door-gated at insert (non-positive vertical error): nothing is written, so
   // nothing may be advertised as dirty.
   auto bad = makeGeoSounding(
-    latAt(grid_index, 480.5), lonAt(grid_index, 480.5), -10.0, 0.0f);
+    latAt(grid_index, 480.25), lonAt(grid_index, 480.25), -10.0, 0.0f);
   EXPECT_FALSE(g.insert(bad));
   EXPECT_TRUE(g.publishDirtyCells().empty());
 }
