@@ -187,20 +187,20 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes)
 **Round**: 2 | **Ship**: continue — Round 1's eight must-fixes are all genuinely discharged and verified, but the fix pass opened three new holes of the same silent-inactive-gate class it was closing: the read-failure tally is unreachable whenever any tile primed, the audit-line dedup is dead on the `batch_regen` path while the line still prints "reported once per prior level", and the new public-header "a match is not a prime" contract is violated by the two live-node call sites the branch left alone
 
 ### Findings
-- [ ] (must-fix, cross-lens confirmed) `reportPriorPrimeOutcome` returns early on `hits > 0`, so `read_failures` is only ever REPORTED in the zero-hit case: a prior store that became unreadable for 499 of 500 tiles but primed one emits no run-level line at all — the same silent-gate-off the issue exists to close, with a different cause. Report read failures independently of the `hits == 0` gate — `cube_bathymetry/src/store_import.cpp:1021`
-- [ ] (must-fix, cross-lens confirmed) The cross-level audit line prints the literal claim "; reported once per prior level", but `audit_seen` lives in `ImportAccumulator::prior_tally_` and `BatchRegen::finalize` builds a FRESH accumulator per gathered tile — so on the authoritative rebuild path the dedup suppresses nothing, the line fires once per tile (exactly what the Round-1 fix set out to stop), and the printed promise is false. `merge()` unions `audit_seen` after the fact and never feeds it back. Same line is also hard-prefixed `import_bag:` on a `batch_regen` run, though `reportPriorPrimeOutcome` was given a `tool` parameter for precisely that reason — `cube_bathymetry/src/store_import.cpp:897-909`, `cube_bathymetry/src/batch_regen.cpp:341,353`
-- [ ] (must-fix) The new public-header contract — "a caller asking 'is the blunder gate on for this tile?' must key on this count, never on the fact that a tile was found (#137)" — is violated by the two LIVE-NODE prior-prime sites: `primeFromPriorLayers` does `primeFromTile(...); ++primed;`, discarding the now-available count, and `cube_bathymetry_node.cpp` sets `primed = true` on a bare `find()`. Both drive operator-facing "Blunder gate active (#91)" / "Re-primed prior gate" messages that can be false on an all-NaN prior. This is NOT deferred item 3 (which is about exact-level-only priming) — it is a one-line fix at each site now the return value exists, or else scope the header/README/ADR contract text explicitly to the offline importer — `cube_bathymetry/src/store_import.cpp:366-368`, `cube_bathymetry/src/cube_bathymetry_node.cpp:1263-1279`
-- [ ] (suggestion, cross-lens confirmed) Phase B stops at the FIRST candidate that primes >= 1 cell, so a one-cell sliver of data in the finest containing prior suppresses a coarser prior with full coverage — and the tally records a hit, so nothing warns. The comment says "actually holds data over this survey tile", which reads as coverage. Consider walking all candidates coarsest-first priming only still-unprimed cells, or gating the fall-through on a coverage fraction — `cube_bathymetry/src/store_import.cpp:887-908`
-- [ ] (suggestion) The guard fires only when `hits == 0` for the WHOLE run: 1 primed tile out of 500 warns nothing though 499 ran ungated. Partial coverage is the more likely field failure than total non-coverage; consider always reporting "primed N of M attempt(s)" — `cube_bathymetry/src/store_import.cpp:1021`
-- [ ] (suggestion) `layers_seen` is populated from every tile `loadWindow` returned, including the edge-adjacent coarse neighbours `findCrossLevelPriors` deliberately rejects — so a genuine no-coverage case on a boundary tile is reported to the operator as a level MISMATCH, which has a different remedy — `cube_bathymetry/src/store_import.cpp:964-971`
-- [ ] (suggestion) "N further tile(s) warm-started ... and never reached the prior rung" implies disjointness from `attempts`, but a tile warm-started on first touch, evicted, then revisited is counted in both (`reloadEvictedTile` always attempts the prior). Also "the output store's survey layer": the bathymetry layer rung 1 actually reads is `Processed` — `cube_bathymetry/src/store_import.cpp:1036`, `:1165`
-- [ ] (suggestion) Rung 1 still treats a MATCH as a prime — `primeFromTile(it->second, sheet_, true)`'s count is discarded and `survey_warm_starts` incremented unconditionally — so an empty `processed/` tile short-circuits the prior rung, and the new warning text positively vouches for those tiles. At minimum gate the increment on a non-zero prime — `cube_bathymetry/src/store_import.cpp:1140,1165`
-- [ ] (suggestion) Both prime helpers filter `std::isnan` only, not `std::isfinite`. Now that the primed COUNT is the gating signal, a +/-inf depth counts as a hit: it short-circuits the walk to a coarser prior with real data and suppresses the run-level warning, while the blunder limit is meaningless on it — `cube_bathymetry/src/store_import.cpp:264`, `:787`
-- [ ] (suggestion) `BatchRegen` has no `prior_outcome_reported_` equivalent and never clears `prior_tally_` (a second `finalize()` double-merges and re-emits); and unlike `ImportAccumulator::finalize` it structurally cannot emit the warning FIRST, so a gather-loop throw loses it. Inherent, but `batch_regen.h:107-110` implies parity — say so there — `cube_bathymetry/src/batch_regen.cpp:353-356`
-- [ ] (suggestion) `PriorPrimeTally::merge` unions `audit_seen` but nothing reads it after a merge — dead state that actively disguises the dedup must-fix above — `cube_bathymetry/src/store_import.cpp:1008`
-- [ ] (suggestion) Two of the Round-1 must-fix branches have no POSITIVE test: `read_failures` reporting ("FAILED to read the prior store") and the `survey_warm_starts` scoping clause. `NoUsablePriorEmitsWarning` asserts only their ABSENCE. Per the Quality Standard a bug fix carries its test — `cube_bathymetry/test/test_import_eviction.cpp:1541`
-- [ ] (suggestion) README live-node section is stale after this branch: "Exact survey level only — unlike the offline `reference/` path" (the offline path is now chart AND reference), and "Evicted prior-primed tiles ... **not reloadable on revisit** ... (deferred, #118)" is false — `cube_bathymetry_node.cpp:1255-1284` implements the revisit re-prime — `README.md:155`, `:163-165`
-- [ ] (suggestion) The README carries the shoal-bias note but not the false-reject trade-off or the UNBOUNDEDNESS of the chart fallback (an L2 tile is ~232 m/cell under an L10 survey) — that honest text lives only in ADR-0001. One sentence of it belongs where the operator will actually read it — `README.md:96-115`
+- [x] (must-fix, cross-lens confirmed) `reportPriorPrimeOutcome` returns early on `hits > 0`, so `read_failures` is only ever REPORTED in the zero-hit case: a prior store that became unreadable for 499 of 500 tiles but primed one emits no run-level line at all — the same silent-gate-off the issue exists to close, with a different cause. Report read failures independently of the `hits == 0` gate — `cube_bathymetry/src/store_import.cpp:1021`
+- [x] (must-fix, cross-lens confirmed) The cross-level audit line prints the literal claim "; reported once per prior level", but `audit_seen` lives in `ImportAccumulator::prior_tally_` and `BatchRegen::finalize` builds a FRESH accumulator per gathered tile — so on the authoritative rebuild path the dedup suppresses nothing, the line fires once per tile (exactly what the Round-1 fix set out to stop), and the printed promise is false. `merge()` unions `audit_seen` after the fact and never feeds it back. Same line is also hard-prefixed `import_bag:` on a `batch_regen` run, though `reportPriorPrimeOutcome` was given a `tool` parameter for precisely that reason — `cube_bathymetry/src/store_import.cpp:897-909`, `cube_bathymetry/src/batch_regen.cpp:341,353`
+- [x] (must-fix) The new public-header contract — "a caller asking 'is the blunder gate on for this tile?' must key on this count, never on the fact that a tile was found (#137)" — is violated by the two LIVE-NODE prior-prime sites: `primeFromPriorLayers` does `primeFromTile(...); ++primed;`, discarding the now-available count, and `cube_bathymetry_node.cpp` sets `primed = true` on a bare `find()`. Both drive operator-facing "Blunder gate active (#91)" / "Re-primed prior gate" messages that can be false on an all-NaN prior. This is NOT deferred item 3 (which is about exact-level-only priming) — it is a one-line fix at each site now the return value exists, or else scope the header/README/ADR contract text explicitly to the offline importer — `cube_bathymetry/src/store_import.cpp:366-368`, `cube_bathymetry/src/cube_bathymetry_node.cpp:1263-1279`
+- [x] (suggestion, cross-lens confirmed) Phase B stops at the FIRST candidate that primes >= 1 cell, so a one-cell sliver of data in the finest containing prior suppresses a coarser prior with full coverage — and the tally records a hit, so nothing warns. The comment says "actually holds data over this survey tile", which reads as coverage. Consider walking all candidates coarsest-first priming only still-unprimed cells, or gating the fall-through on a coverage fraction — `cube_bathymetry/src/store_import.cpp:887-908`
+- [x] (suggestion) The guard fires only when `hits == 0` for the WHOLE run: 1 primed tile out of 500 warns nothing though 499 ran ungated. Partial coverage is the more likely field failure than total non-coverage; consider always reporting "primed N of M attempt(s)" — `cube_bathymetry/src/store_import.cpp:1021`
+- [x] (suggestion) `layers_seen` is populated from every tile `loadWindow` returned, including the edge-adjacent coarse neighbours `findCrossLevelPriors` deliberately rejects — so a genuine no-coverage case on a boundary tile is reported to the operator as a level MISMATCH, which has a different remedy — `cube_bathymetry/src/store_import.cpp:964-971`
+- [x] (suggestion) "N further tile(s) warm-started ... and never reached the prior rung" implies disjointness from `attempts`, but a tile warm-started on first touch, evicted, then revisited is counted in both (`reloadEvictedTile` always attempts the prior). Also "the output store's survey layer": the bathymetry layer rung 1 actually reads is `Processed` — `cube_bathymetry/src/store_import.cpp:1036`, `:1165`
+- [x] (suggestion) Rung 1 still treats a MATCH as a prime — `primeFromTile(it->second, sheet_, true)`'s count is discarded and `survey_warm_starts` incremented unconditionally — so an empty `processed/` tile short-circuits the prior rung, and the new warning text positively vouches for those tiles. At minimum gate the increment on a non-zero prime — `cube_bathymetry/src/store_import.cpp:1140,1165`
+- [x] (suggestion) Both prime helpers filter `std::isnan` only, not `std::isfinite`. Now that the primed COUNT is the gating signal, a +/-inf depth counts as a hit: it short-circuits the walk to a coarser prior with real data and suppresses the run-level warning, while the blunder limit is meaningless on it — `cube_bathymetry/src/store_import.cpp:264`, `:787`
+- [x] (suggestion) `BatchRegen` has no `prior_outcome_reported_` equivalent and never clears `prior_tally_` (a second `finalize()` double-merges and re-emits); and unlike `ImportAccumulator::finalize` it structurally cannot emit the warning FIRST, so a gather-loop throw loses it. Inherent, but `batch_regen.h:107-110` implies parity — say so there — `cube_bathymetry/src/batch_regen.cpp:353-356`
+- [x] (suggestion) `PriorPrimeTally::merge` unions `audit_seen` but nothing reads it after a merge — dead state that actively disguises the dedup must-fix above — `cube_bathymetry/src/store_import.cpp:1008`
+- [x] (suggestion) Two of the Round-1 must-fix branches have no POSITIVE test: `read_failures` reporting ("FAILED to read the prior store") and the `survey_warm_starts` scoping clause. `NoUsablePriorEmitsWarning` asserts only their ABSENCE. Per the Quality Standard a bug fix carries its test — `cube_bathymetry/test/test_import_eviction.cpp:1541`
+- [x] (suggestion) README live-node section is stale after this branch: "Exact survey level only — unlike the offline `reference/` path" (the offline path is now chart AND reference), and "Evicted prior-primed tiles ... **not reloadable on revisit** ... (deferred, #118)" is false — `cube_bathymetry_node.cpp:1255-1284` implements the revisit re-prime — `README.md:155`, `:163-165`
+- [x] (suggestion) The README carries the shoal-bias note but not the false-reject trade-off or the UNBOUNDEDNESS of the chart fallback (an L2 tile is ~232 m/cell under an L10 survey) — that honest text lives only in ADR-0001. One sentence of it belongs where the operator will actually read it — `README.md:96-115`
 
 ### Verified independently
 - **Every fix-pass verification claim checked and holds.** `./sensors_ws/build.sh cube_bathymetry` clean (zero compiler warnings); `./sensors_ws/test.sh cube_bathymetry` = **563 tests, 0 errors, 0 failures, 68 skipped**, exactly as claimed. `ament_cpplint` and `ament_uncrustify` report "No problems found" over all eight changed C++ files.
@@ -218,8 +218,79 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes)
 The Round-1 fix pass is substantial and honest: all eight must-fixes are discharged, the documentation sweep is complete and accurate, the three new tests are real (two of them proven to fail against pre-fix behaviour by direct experiment here), and the suite/lint numbers are exactly as reported. The problem is that the rework opened three new instances of the very class of defect #137 exists to close — a diagnostic that reports "fine" when it is not. The read-failure tally cannot be reached whenever a single tile primed; the audit-line dedup is dead on `batch_regen` while the line still tells the operator it is deduplicated; and the branch asserted a package-wide "a match is not a prime" contract in a public header while leaving the two LIVE-node call sites — the safety-relevant ones — still counting matches.
 
 ### Recommended Actions
-- [ ] Un-gate the read-failure report from `hits == 0` so an intermittently unreadable prior store always produces a run-level line
-- [ ] Make the audit-line dedup run-scoped (hoist the tally, or pass a `PriorPrimeTally *` into each gather accumulator) — or drop the "reported once per prior level" claim from the line; and plumb the tool name so a `batch_regen` run does not attribute its gate diagnostics to `import_bag`
-- [ ] Either fix the two live-node match-is-a-prime call sites (one line each now the counts exist) or explicitly scope the new header/README/ADR contract text to the offline importer and record the live-node gap alongside deferred item 3
-- [ ] Add positive tests for the read-failure and warm-start clauses of the warning (the Quality Standard's "fix it completely: add the test")
-- [ ] Fix the two stale live-node README claims (offline path is now chart + reference; #118 revisit re-priming IS implemented)
+- [x] Un-gate the read-failure report from `hits == 0` so an intermittently unreadable prior store always produces a run-level line
+- [x] Make the audit-line dedup run-scoped (hoist the tally, or pass a `PriorPrimeTally *` into each gather accumulator) — or drop the "reported once per prior level" claim from the line; and plumb the tool name so a `batch_regen` run does not attribute its gate diagnostics to `import_bag`
+- [x] Either fix the two live-node match-is-a-prime call sites (one line each now the counts exist) or explicitly scope the new header/README/ADR contract text to the offline importer and record the live-node gap alongside deferred item 3
+- [x] Add positive tests for the read-failure and warm-start clauses of the warning (the Quality Standard's "fix it completely: add the test")
+- [x] Fix the two stale live-node README claims (offline path is now chart + reference; #118 revisit re-priming IS implemented)
+
+## Implementation
+**Status**: complete
+**When**: 2026-08-26 01:33 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-137 at `bd14d45`
+**Addressed**: `## Local Review (Pre-Push)` (2026-08-26 01:47 -04:00, verdict changes-requested, branch at `2e6b67e`) — Round 2, 3 must-fix + 11 suggestions
+**Commits**: `c9b9f8d`, `8209271`, `dee129f`, `fd2bd7e`, `5be5bf4`, `c1ae9bc`, `c464748`, `8513794`, `6284543`, `a29feb1`, `7e0a2a4`, `bd14d45`
+
+All three must-fixes were the same defect the issue exists to close — a diagnostic
+that reports "fine" when it is not — reintroduced by the Round-1 fix pass. All
+fourteen findings were actioned; **nothing was deferred**. The four items under
+plan.md's "Deferred — operator decides" are untouched and remain deferred; the
+live-node must-fix below is deliberately NOT deferred item 3 (the live node is
+still exact-level-only).
+
+One reviewer-offered choice was decided explicitly: for the third must-fix the
+reviewer allowed *either* fixing the two live-node call sites *or* scoping the new
+header/README/ADR contract text to the offline importer. **The call sites were
+fixed**, because the falsehood is in an operator-facing message on the *afloat*
+path, the counts the contract asks for already existed, and narrowing the contract
+would have left the live node quietly claiming a blunder gate it does not have.
+
+**Verification**: `./sensors_ws/build.sh cube_bathymetry` clean (only the
+pre-existing `test_tile_eviction_rss.cpp:130` unused-variable warning, in a file
+this branch does not touch); `./sensors_ws/test.sh cube_bathymetry` =
+**571 tests, 0 errors, 0 failures, 68 skipped** (was 563/0/68 — the eight new tests);
+`ament_cpplint` and `ament_uncrustify` report no problems over every changed file.
+
+**Every new test was run against the pre-fix behaviour and observed to FAIL**, by
+restoring in turn: the `hits > 0` early return, the per-accumulator tally and
+`import_bag` prefix, the unconditional `++primed`, the record-every-window-tile
+tally, the first-hit short-circuit, the unconditional warm start, and the `isnan`
+filter — then restoring the fix and re-running.
+`WarmStartedTilesAreScopedOutOfThePriorWarning` fails pre-fix on the corrected
+`processed/` wording only; its value is as the positive coverage that clause never
+had, which the review asked for.
+
+### Actions
+- [x] (must-fix) Un-gate the read-failure report from `hits == 0` — `store_import.cpp` `reportPriorPrimeOutcome` — `c9b9f8d`
+- [x] (must-fix) Make the audit-line dedup run-scoped and plumb the tool name — `usePriorTally` + `ImportAccumulatorConfig::tool`; `PriorPrimeTally::merge` deleted with its write-only `audit_seen` union — `8209271`
+- [x] (must-fix) Fix the two live-node match-is-a-prime call sites (chosen over scoping the contract text) — `store_import.cpp:primeFromPriorLayers`, `cube_bathymetry_node.cpp` revisit re-prime; `PriorLayerPrimeResult::empty_tiles` added — `dee129f`
+- [x] (suggestion) Phase B first-hit short-circuit → per-cell UNION of the usable priors, coarsest first, exact level last — `5be5bf4`, ADR-0001 `c1ae9bc`
+- [x] (suggestion) Report partial coverage ("primed only M of N attempt(s)") — `c9b9f8d`
+- [x] (suggestion) `layers_seen` split from `unusable_seen` so a boundary coverage gap is not reported as a level mismatch — `fd2bd7e`
+- [x] (suggestion) Warm-start clause: names the `processed/` layer, and states the two counts are not disjoint — `c9b9f8d`
+- [x] (suggestion) Rung 1 no longer treats a MATCH as a prime — an empty `processed/` tile falls through to the prior rung — `c464748`
+- [x] (suggestion) Both prime helpers filter `isfinite`, not `isnan` — `8513794`
+- [x] (suggestion) `BatchRegen` once-guard added; `batch_regen.h` says outright it cannot emit the warning first — `8209271`
+- [x] (suggestion) `PriorPrimeTally::merge`'s dead `audit_seen` union removed with `merge()` itself — `8209271`
+- [x] (suggestion) Positive tests for the read-failure and warm-start clauses — `c9b9f8d`
+- [x] (suggestion) Two stale live-node README claims corrected — `6284543`
+- [x] (suggestion) README carries the false-reject trade-off and the unbounded chart coarseness — `6284543`
+
+### Known gaps (recorded, not fixed)
+- The node's evicted-tile revisit re-prime has **no test harness** in this package
+  — there are no `prior_store_dir` node tests at all — so that one-line change is
+  covered by inspection plus the shared `primeFromTile` contract test
+  (`StoreImport.PrimeFromPriorLayersDoesNotCountAMatchedButEmptyTile`).
+  Pre-existing gap, not introduced here.
+- `ImportAccumulatorConfig::tool` prefixes the **prior-gate** diagnostics only;
+  the accumulator's other `import_bag:` lines (spill/persist/abort) are unchanged,
+  matching the finding's scope.
+- Pre-existing unused-variable compiler warning at
+  `test/test_tile_eviction_rss.cpp:130`, in a file this branch does not modify.
+
+### Next step
+Lifecycle: **Implementation** → **review-code** (re-review the Round-2 fixes)
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 137 --skill review-code
