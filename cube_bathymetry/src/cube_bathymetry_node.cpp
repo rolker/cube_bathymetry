@@ -117,6 +117,10 @@ public:
     // across a reconfigure it would claim tiles had been sent whole when the new
     // sheet has never sent them at all, suppressing the heal for exactly the
     // tiles a restart is most likely to have left a consumer stale on.
+    // Handle first, then the state it reads: the callback must be unregistered
+    // before the tracker it reconfigures is cleared, so a set arriving
+    // mid-teardown cannot reconfigure a tracker that is about to be reset.
+    refresh_parameters_handle_.reset();
     refresh_tracker_.clear();
     // Reset the tile-version registry too (#78): a fresh sheet must not advertise
     // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
@@ -563,6 +567,8 @@ public:
     rcl_interfaces::msg::ParameterDescriptor refresh_desc;
     refresh_desc.description =
       "Seconds a patched coverage tile may go without being re-sent WHOLE. "
+      "SETTABLE AT RUNTIME -- a set is validated and applied to the live "
+      "tracker, not stored and ignored. "
       "This is the heal for a lost sub-window patch, and it does not depend on "
       "the consumer noticing anything. Lower heals faster and costs more: "
       "measured on the 2026-08-25 Appledore bags, 300s/60s/30s cost 7.9/11.2/"
@@ -586,7 +592,11 @@ public:
       "patches, over and above the tiles that changed this cycle. Bounds the "
       "heal so it can never become the burst it exists to prevent. 0 disables "
       "the drain, which leaves a tile the vessel has moved off unhealed -- "
-      "publishDirtyTiles only ever visits tiles that are still changing.";
+      "publishDirtyTiles only ever visits tiles that are still changing. "
+      "SETTABLE AT RUNTIME, and refused above 8: at ~183 kB compressed per "
+      "whole tile and a 5 s tick, 8 is already ~293 kB/s of a 1.5 MB/s "
+      "operator link, and more would make this heal the burst it exists to "
+      "prevent.";
     const int64_t refresh_budget = declare_parameter(
       "subwindow_refresh_tiles_per_cycle", 2, refresh_budget_desc);
     if (refresh_budget < 0) {
@@ -651,6 +661,19 @@ public:
         "backscatter_angle_correction=none: any published SonarInfo "
         "angular-response curve will be ignored.");
     }
+
+    // REGISTERED LAST, after every declare_parameter above. rclcpp invokes an
+    // OnSetParameters callback for declare_parameter() as well as
+    // set_parameter(), so a callback registered earlier would also see every
+    // YAML override on its way in -- and a rejection there throws
+    // InvalidParameterValueException out of on_configure, which
+    // rclcpp_lifecycle SWALLOWS, leaving a half-configured node that looks to
+    // the operator like it transitioned. Registering last means the callback
+    // only ever sees a genuine runtime set. (Same trap, same reasoning as
+    // udp_bridge#75.)
+    refresh_parameters_handle_ = add_on_set_parameters_callback(
+      std::bind(&CubeBathymetry::applyRefreshParameters, this,
+      std::placeholders::_1));
 
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
@@ -890,6 +913,13 @@ private:
   // subwindow_refresh_interval_s_.
   cube::CoverageRefreshTracker refresh_tracker_;
   rclcpp::TimerBase::SharedPtr refresh_timer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    refresh_parameters_handle_;
+  /// Upper bound on the drain budget. At ~183 kB compressed per whole tile and
+  /// a 5 s tick, 8 is already ~293 kB/s -- a fifth of the operator link. A
+  /// field YAML typo of 20 would put 20 whole tiles on the wire in one tick,
+  /// which is precisely the burst this budget exists to prevent.
+  static constexpr int64_t kMaxRefreshTilesPerCycle = 8;
   /// Drain tick. Matches the coverage publish cadence in pingCallback so the
   /// per-cycle budget means the same thing on both paths.
   static constexpr double kRefreshDrainIntervalSeconds = 5.0;
@@ -1034,6 +1064,69 @@ private:
 
   /// Re-send, whole, the tiles the tracker says are owed a refresh and were not
   /// already published this cycle.
+  /// Validate and apply a runtime change to the two refresh tunables.
+  ///
+  /// These are LIVE, not configure-time. The descriptor invites the operator to
+  /// retune the interval on a struggling link -- it tabulates the measured cost
+  /// of 300/60/30 s -- so making them read_only would contradict the advice
+  /// they give. What must not happen is the third option: accepted, reads back,
+  /// inert. That trap cost a wrong diagnosis and roughly three minutes of
+  /// operator-link outage on udp_bridge at Appledore, and commit 1665651 closed
+  /// it on this node's publish_dirty_subwindow -- which IS genuinely
+  /// configure-time, so read_only is right there and would be wrong here.
+  ///
+  /// The whole batch is validated before any of it is applied, so one bad value
+  /// in a multi-parameter set cannot leave half the change in force.
+  rcl_interfaces::msg::SetParametersResult applyRefreshParameters(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+
+    double interval = subwindow_refresh_interval_s_;
+    std::size_t budget = subwindow_refresh_tiles_per_cycle_;
+    bool touched = false;
+
+    for (const auto & parameter : parameters) {
+      if (parameter.get_name() == "subwindow_refresh_interval") {
+        const double value = parameter.as_double();
+        if (!std::isfinite(value) || value < 0.0) {
+          result.successful = false;
+          result.reason =
+            "subwindow_refresh_interval must be a finite duration >= 0 "
+            "(0 disables the heal)";
+          return result;
+        }
+        interval = value;
+        touched = true;
+      } else if (parameter.get_name() == "subwindow_refresh_tiles_per_cycle") {
+        const int64_t value = parameter.as_int();
+        if (value < 0 || value > kMaxRefreshTilesPerCycle) {
+          result.successful = false;
+          result.reason =
+            "subwindow_refresh_tiles_per_cycle must be in [0, " +
+            std::to_string(kMaxRefreshTilesPerCycle) +
+            "]; a larger budget would make this heal the burst it exists to "
+            "prevent";
+          return result;
+        }
+        budget = static_cast<std::size_t>(value);
+        touched = true;
+      }
+    }
+    if (!touched) {
+      return result;   // nothing of ours in this batch
+    }
+
+    subwindow_refresh_interval_s_ = interval;
+    subwindow_refresh_tiles_per_cycle_ = budget;
+    refresh_tracker_.configure(interval, budget);
+    RCLCPP_INFO(get_logger(),
+      "Coverage refresh retuned at runtime: interval %.1f s, %zu tile(s) per "
+      "cycle", interval, budget);
+    return result;
+  }
+
   /// Timer callback: heal tiles that have gone quiet still owing a whole send.
   ///
   /// ON A WALL TIMER, NOT THE PING PATH, and that is the whole point.
