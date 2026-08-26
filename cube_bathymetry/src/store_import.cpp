@@ -878,30 +878,61 @@ std::vector<const marine_bathymetry_store::BathymetryTile *> findCrossLevelPrior
 // primed nothing falls through to the next candidate instead of short-circuiting the
 // ones that do have data.
 //
-// @p layer_name names the layer in the audit line. @p audit_seen, when non-null,
-// de-duplicates that line to the first occurrence per (layer, prior level) so a
-// large import does not bury the run-level warnings under one line per tile.
+// @p layer_name names the layer in the audit line, @p tool names the tool emitting
+// it. @p tally, when non-null, records what the window held for this tile (split
+// usable vs. unusable) and de-duplicates the audit line to the first occurrence per
+// (layer, prior level) so a large import does not bury the run-level warnings under
+// one line per tile -- which requires ONE tally for the whole run (see
+// ImportAccumulator::usePriorTally).
 // @return true only when at least one survey CELL was primed.
 bool primeLayerForTile(
   const std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> & tiles,
   const gggs::GridIndex & index, GeoMapSheet & sheet,
   marine_bathymetry_store::SourceLayer layer, const char * layer_name,
-  const char * tool,
-  std::set<std::pair<marine_bathymetry_store::SourceLayer, int>> * audit_seen)
+  const char * tool, PriorPrimeTally * tally)
 {
+  auto it = tiles.find(index);
+  const std::vector<const marine_bathymetry_store::BathymetryTile *> fallbacks =
+    findCrossLevelPriors(tiles, index);
+
+  // Record what the window held, split by whether it is USABLE for THIS survey tile
+  // (#137 review). loadWindow's overlap test is inclusive, so the window also
+  // returns coarse tiles that merely touch the survey tile's edge and share no cell
+  // with it; counting those as "prior tiles found over the surveyed area" reported a
+  // genuine boundary coverage gap to the operator as a level MISMATCH, which has a
+  // different remedy. Tiles FINER than the survey level are unusable too (no
+  // aggregation rule -- see findCrossLevelPriors), and are the case where naming the
+  // level really does help, so they land in the same set.
+  if (tally != nullptr) {
+    if (it != tiles.end()) {
+      tally->layers_seen.insert({layer, static_cast<int>(index.level())});
+    }
+    for (const marine_bathymetry_store::BathymetryTile * usable : fallbacks) {
+      tally->layers_seen.insert(
+        {layer, static_cast<int>(usable->index().level())});
+    }
+    for (const auto & entry : tiles) {
+      if (entry.first == index ||
+        std::find(fallbacks.begin(), fallbacks.end(), &entry.second) !=
+        fallbacks.end())
+      {
+        continue;  // usable, already recorded above
+      }
+      tally->unusable_seen.insert(
+        {layer, static_cast<int>(entry.first.level())});
+    }
+  }
+
   // Phase A -- exact same-level match: a prior tile at the survey GGGS level
   // coincides cell-for-cell with the survey tile, so prime it directly. An
   // exact-level tile that is all-NaN over this area primes nothing and falls
   // through to Phase B rather than suppressing a coarser prior that has data.
-  auto it = tiles.find(index);
   if (it != tiles.end() && primeFromTile(it->second, sheet, /*seed_settled=*/false) > 0) {
     return true;
   }
   // Phase B -- cross-level fallback (#115 for Reference, extended to Chart by #137),
   // walking finest-containing to coarsest until one actually primes a cell.
-  for (const marine_bathymetry_store::BathymetryTile * fallback :
-    findCrossLevelPriors(tiles, index))
-  {
+  for (const marine_bathymetry_store::BathymetryTile * fallback : fallbacks) {
     if (primeFromTileResample(*fallback, index, sheet) == 0) {
       continue;  // contains us, but holds no data here -- try the next-coarser prior
     }
@@ -909,7 +940,7 @@ bool primeLayerForTile(
     // log shows which cross-level prior was active. Reported once per (layer, level)
     // per run (#137) -- per-tile it drowned out the run-level warnings below.
     const int level = static_cast<int>(fallback->index().level());
-    if (audit_seen == nullptr || audit_seen->insert({layer, level}).second) {
+    if (tally == nullptr || tally->audit_seen.insert({layer, level}).second) {
       std::cerr << tool << ": " << layer_name << " blunder gate for survey tile "
                 << index << " seeded via cross-level fallback (" << layer_name
                 << " level " << level
@@ -970,17 +1001,11 @@ bool primePriorLayersForTile(
       {marine_bathymetry_store::SourceLayer::Reference, "reference"},
     };
     for (const auto & [layer, layer_name] : kLayers) {
-      const auto & tiles = ref.tiles(layer);
-      // Record what the window actually held BEFORE matching, so a run that primes
-      // nothing can still say which layers/levels were present (#137).
-      if (tally != nullptr) {
-        for (const auto & entry : tiles) {
-          tally->layers_seen.insert({layer, static_cast<int>(entry.first.level())});
-        }
-      }
+      // primeLayerForTile records what the window held (split usable vs. unusable
+      // for this tile) as well as priming it, so a run that primes nothing can still
+      // say which layers/levels were there (#137).
       if (primeLayerForTile(
-          tiles, index, sheet, layer, layer_name, tool,
-          tally != nullptr ? &tally->audit_seen : nullptr))
+          ref.tiles(layer), index, sheet, layer, layer_name, tool, tally))
       {
         primed = true;
       }
@@ -1039,6 +1064,20 @@ bool reportPriorPrimeOutcome(
         if (tally.read_failures >= tally.attempts) {
           std::cerr << " No prior tiles could be listed at all, because every "
             "windowed load failed.";
+        } else if (!tally.unusable_seen.empty()) {
+          // Present but unusable is NOT the same fault as absent (#137 review): a
+          // coarse tile that merely touches the survey tile's edge shares no cell
+          // with it, and a tile FINER than the survey level has no aggregation rule.
+          std::cerr << " No chart or reference tiles overlap the surveyed area. "
+            "(The prior windows did hold tiles that could not gate these tiles --"
+            " finer than the survey level, or coarse tiles that do not contain "
+            "them:";
+          for (const auto & [layer, level] : tally.unusable_seen) {
+            std::cerr << " " << marine_bathymetry_store::layerDirName(layer) << "@L"
+                      << level;
+          }
+          std::cerr << " vs survey level " << static_cast<int>(
+            gggs::Level::fromCellSize(cell_size_m).level()) << ".)";
         } else {
           std::cerr << " No chart or reference tiles overlap the surveyed area.";
         }

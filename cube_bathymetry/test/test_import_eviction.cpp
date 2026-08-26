@@ -1884,4 +1884,84 @@ TEST(ImportEviction, WarmStartedTilesAreScopedOutOfThePriorWarning)
   std::filesystem::remove_all(root);
 }
 
+// A prior tile that OVERLAPS the survey window but cannot gate it must not be
+// reported as a level MISMATCH (#137 review). loadWindow's overlap test is
+// inclusive, so a survey tile flush against a coarse-tile boundary also pulls in the
+// edge-adjacent coarse NEIGHBOUR -- a tile sharing no cell with it. Listing that
+// under "prior tiles found over the surveyed area ... vs survey level N" reads as
+// "your prior is at the wrong level" (regenerate it finer) when the real fault is a
+// coverage gap at the tile edge (extend the prior's coverage).
+TEST(ImportEviction, EdgeAdjacentCoarseNeighborIsNotReportedAsALevelMismatch)
+{
+  constexpr float kCoarseCellSize = 8.0f;
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  ASSERT_LT(coarse_level.level(), survey_level.level());
+
+  const std::string root = makeTempDir("edge_adjacent_only");
+  const std::string prior_dir = root + "/chart_store";
+
+  // Same boundary-flush geometry as BoundaryFlushCrossLevelChartRejectsDeepBlunder,
+  // but the chart data is written ONLY into the west NEIGHBOUR: nothing in the store
+  // contains the surveyed tile, so nothing can gate it.
+  const gggs::GridIndex container = coarse_level.gridIndex(43.0, -70.0);
+  const double lat = container.southLatitude() + container.latitudinalSpan() * 0.5;
+  const double lon = container.westLongitude() + container.longitudinalSpan() / 16.0;
+  const gggs::GridIndex survey_grid = survey_level.gridIndex(lat, lon);
+  ASSERT_NEAR(survey_grid.westLongitude(), container.westLongitude(), 1e-9)
+    << "test setup: the survey tile must be flush against the coarse west boundary";
+  const gggs::GridIndex west_neighbor = coarse_level.gridIndex(
+    lat, container.westLongitude() - container.longitudinalSpan() * 0.5);
+  ASSERT_NE(west_neighbor, container);
+
+  {
+    marine_bathymetry_store::BathymetryTile ctile(west_neighbor);
+    for (gggs::CellAreaIterator cit(west_neighbor); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(west_neighbor, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+    acc.finalize();
+    warned = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "nothing containing the survey tile exists, so the gate was off; stderr "
+    "was:\n" << warned;
+  EXPECT_NE(warned.find("No chart or reference tiles overlap the surveyed area"),
+    std::string::npos)
+    << "an edge-adjacent neighbour gates nothing and must be reported as a COVERAGE "
+    "gap, not as a prior tile found over the surveyed area; stderr was:\n" << warned;
+  EXPECT_NE(warned.find("coarse tiles that do not contain them"), std::string::npos)
+    << "the unusable tiles must still be named, so the operator can tell 'the prior "
+    "stops at this edge' from 'there is no prior at all'; stderr was:\n" << warned;
+  EXPECT_EQ(warned.find("Prior tiles usable over the surveyed area"),
+    std::string::npos)
+    << "no tile here is usable for the surveyed tile(s); stderr was:\n" << warned;
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube

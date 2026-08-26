@@ -343,10 +343,20 @@ namespace cube
   /// so returned before ever reaching the prior rung. They are NOT attempts, and
   /// the warning must not claim the gate was off for them.
     std::size_t survey_warm_starts = 0;
-  /// Every (layer, GGGS level) pair present in the prior windows this run loaded,
-  /// whether or not it primed. Reported by the warning so a level mismatch is
+  /// Every (layer, GGGS level) pair the prior windows held that is USABLE for the
+  /// tile it was loaded for — at the survey level, or a coarser tile that actually
+  /// CONTAINS it. Reported by the warning so a coverage hole in a present prior is
   /// visible ("chart@L7 vs survey level 10") instead of left to be inferred.
     std::set < std::pair < marine_bathymetry_store::SourceLayer, int >> layers_seen;
+  /// (layer, level) pairs the windows held that could NOT be used for the tile:
+  /// finer than the survey level (dropped — no aggregation rule), or coarse tiles
+  /// the inclusive window returned that do not contain the survey tile (the
+  /// edge-adjacent neighbours `findCrossLevelPriors` rejects). Kept apart from
+  /// @ref layers_seen because reporting them as a level MISMATCH sends the operator
+  /// after the wrong fault: a boundary tile with no containing prior is a coverage
+  /// gap, and the remedies differ (#137 review).
+    std::set < std::pair < marine_bathymetry_store::SourceLayer,
+      int >> unusable_seen;
   /// (layer, level) pairs whose cross-level-fallback audit line has already been
   /// logged this run; the line is emitted once per pair, not once per tile. This
   /// only holds when every tile of the run shares ONE tally — see
