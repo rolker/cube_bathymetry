@@ -157,3 +157,65 @@ same binary over the same bag gives byte-identical serialized sizes but 20 of
 233 COMPRESSED sizes differing by 1-2 bytes (aggregate ratio unchanged at
 20.29%). That is CDR alignment padding the serializer does not zero, not a
 finding.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-08-26 09:09 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**PR**: #136 at `54ade25`
+**Sources**: 2 effective (Copilot R1 @ `e5a32d7`, CI rollup @ `54ade25`) — plus the
+local timeline (`## Local Review (Pre-Push)` @ `8cadd48`, `## Implementation` @
+`d316d7b`), whose 17 findings were all dispositioned before this head
+**Cross-source confirmations**: 0
+**CI**: failures-noted (both checks red; neither caused by this diff)
+
+**THE CURRENT HEAD HAS NOT BEEN REVIEWED BY COPILOT.** Both review runs after
+`e5a32d7` — at `d80d33f` and at `54ade251` — returned "Copilot was unable to
+review this pull request because the user who requested the review has reached
+their quota limit", and the `copilot-pull-request-reviewer` check is red for
+that reason, not for a finding. So the multi-model review this workflow depends
+on has run against NONE of the 13 commits that followed `e5a32d7`, including
+every fix for the round-1 must-fixes and all 7 commits from this session. The
+red check is not a defect signal and must not be read as one; equally, a green
+board here would not mean the code was reviewed.
+
+### Findings
+- [ ] (valid, Copilot R1 @ `e5a32d7`) `dtypeSize()` treats every dtype other
+  than INT16 as one byte, so an unexpected dtype produces a misleading "band
+  does not cover the window" failure that accuses the message rather than the
+  helper. Stronger than Copilot argued: `VisualizationBand.msg` ALREADY declares
+  `UINT16 = 4` ("reserved for sidescan source rasters"), so this is wrong today
+  for a dtype the wire contract names, not merely for a hypothetical future one.
+  Fix: handle UINT8/INT16/UINT16 explicitly and `ADD_FAILURE()` on anything else
+  — `cube_bathymetry/test/test_quantize_tile.cpp:82`
+- [ ] (valid, CI @ `54ade25`) `ROS 2 Jazzy (industrial_ci)` fails in
+  `setup_upstream_workspace`, before cube_bathymetry is built at all:
+  `marine_web_view: Cannot locate rosdep definition for [marine_ais_msgs]`.
+  Upstream drift, not this diff — `marine_web_view` is a new package in the
+  `unh_marine_autonomy` monorepo that cube does not ship, and it will fail every
+  PR in this repo until fixed. The repo already has the pattern for exactly this
+  case, documented in `ci.yml` for `mission_manager*`: prune the package with
+  COLCON_IGNORE via `AFTER_SETUP_UPSTREAM_WORKSPACE` and add its unresolvable
+  key to `ROSDEP_SKIP_KEYS`, because rosdep does not honour COLCON_IGNORE. Fix:
+  add `marine_web_view` to the prune list and `marine_ais_msgs` to the skip
+  keys. (Cloning `rolker/marine_ais` into `upstream.repos` would also work but
+  contradicts the documented intent — "cube CI should not compile packages it
+  never ships") — `.github/workflows/ci.yml:84,85`
+
+### False positives
+- None. Copilot raised exactly one finding across three review attempts, and it
+  is valid.
+
+### Notes
+- No cross-source confirmations, and that is a fact about coverage rather than
+  about the code: the only Copilot review that completed predates every commit
+  the local review's findings were fixed in, so the two sources never examined
+  the same head.
+- Merge verification (ADR-0018): this is a project repo, so a full-scope
+  `ci_local.sh` attestation can satisfy the gate without hosted Actions — but
+  `ci_local.sh` builds `upstream.repos` as an underlay too, so it will hit the
+  SAME rosdep failure until the finding above is fixed. The CI fix is therefore
+  a prerequisite for either verification route, not optional tidying.
+- Local verification standing at `54ade25`: 602 tests, 0 failures, cpplint and
+  uncrustify clean (recorded in the `## Implementation` entry).
