@@ -28,6 +28,8 @@
 // -> per-sounding lookupTransform("earth", frame_id, stamp) -> GeoSounding ->
 // GeoMapSheet) but writes marine_bathymetry_store draft tiles instead of a GeoTIFF.
 
+#include <zlib.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -46,8 +48,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#include <zlib.h>
 
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/detections_projector.h"
@@ -411,6 +411,129 @@ private:
   std::map<std::string, Bag> readers_;
 };
 
+
+namespace
+{
+
+/// Coverage-message size report (cube_bathymetry#112).
+///
+/// Quantizes each dirty tile BOTH ways from the SAME dirty set -- whole tile
+/// and dirty sub-window -- and records serialized and zlib-compressed sizes,
+/// then clears the dirty set exactly as cube_bathymetry_node::publishDirtyTiles
+/// does. The compressed column is the one that matters: udp_bridge compresses
+/// every packet before fragmenting it, so the cell-count saving and the wire
+/// saving are different numbers.
+class TileSizeReporter
+{
+public:
+  TileSizeReporter(const std::string & path, double interval_s)
+  : out_(path), interval_ns_(static_cast<int64_t>(interval_s * 1e9))
+  {
+    if (out_) {
+      out_ << "bag_time_s,level,tile_row,tile_col,dirty_rows,dirty_cols,"
+           << "dirty_cells,full_cells,full_serialized,full_compressed,"
+           << "window_serialized,window_compressed\n";
+    }
+  }
+
+  bool good() const {return static_cast<bool>(out_);}
+
+  /// Report and clear, if a report interval of BAG time has elapsed.
+  void maybeReport(cube::GeoMapSheet & sheet, int64_t ping_ns)
+  {
+    if (last_ns_ != std::numeric_limits<int64_t>::min() &&
+      ping_ns - last_ns_ < interval_ns_)
+    {
+      return;
+    }
+    last_ns_ = ping_ns;
+
+    builtin_interfaces::msg::Time stamp;
+    stamp.sec = static_cast<int32_t>(ping_ns / 1000000000LL);
+    stamp.nanosec = static_cast<uint32_t>(ping_ns % 1000000000LL);
+
+    for (const auto & index : sheet.publishDirtyGrids()) {
+      auto grid = sheet.gridAt(index);
+      if (!grid) {
+        continue;
+      }
+      const cube::CellBox box = grid->publishDirtyCells();
+      const auto full = cube::quantizeTile(*grid, stamp);
+      const auto window = cube::quantizeTileWindow(*grid, stamp, box);
+      if (!full || !window) {
+        // Nothing displayable this cycle; the node publishes neither.
+        continue;
+      }
+      std::size_t full_serialized = 0;
+      std::size_t full_compressed = 0;
+      std::size_t window_serialized = 0;
+      std::size_t window_compressed = 0;
+      measure(*full, full_serialized, full_compressed);
+      measure(*window, window_serialized, window_compressed);
+
+      // Level via the message's uint8 mirror: gggs::Level has no numeric
+      // stream operator and silently writes an empty field.
+      out_ << std::fixed << std::setprecision(3)
+           << static_cast<double>(ping_ns) * 1e-9 << ','
+           << static_cast<unsigned>(full->index.level) << ','
+           << full->index.row << ',' << full->index.col << ','
+           << box.rows() << ',' << box.columns() << ','
+           << (static_cast<std::size_t>(box.rows()) * box.columns()) << ','
+           << (static_cast<std::size_t>(full->width) * full->height) << ','
+           << full_serialized << ',' << full_compressed << ','
+           << window_serialized << ',' << window_compressed << '\n';
+    }
+    sheet.clearPublishDirtyGrids();
+  }
+
+private:
+  /// Serialized size, and the size udp_bridge would actually put on the wire.
+  /// zlib's ::compress() at the default level is exactly what packet.cpp does,
+  /// and udp_bridge keeps the compressed form only when it is smaller -- so a
+  /// payload that does not compress is charged at its serialized size.
+  void measure(
+    const marine_interfaces::msg::SonarVisualizationTile & tile,
+    std::size_t & serialized, std::size_t & compressed)
+  {
+    rclcpp::SerializedMessage serialized_msg;
+    serializer_.serialize_message(&tile, &serialized_msg);
+    const auto & rcl = serialized_msg.get_rcl_serialized_message();
+    serialized = rcl.buffer_length;
+    uLongf bound = compressBound(static_cast<uLong>(serialized));
+    std::vector<Bytef> buffer(bound);
+    if (::compress(
+        buffer.data(), &bound, rcl.buffer, static_cast<uLong>(serialized)) == Z_OK)
+    {
+      compressed = std::min<std::size_t>(serialized, bound);
+    } else {
+      compressed = serialized;
+    }
+  }
+
+  std::ofstream out_;
+  int64_t interval_ns_;
+  int64_t last_ns_ = std::numeric_limits<int64_t>::min();
+  rclcpp::Serialization<marine_interfaces::msg::SonarVisualizationTile> serializer_;
+};
+
+/// Build the reporter, or report why it could not be built. Returns nullopt
+/// both when no report was asked for and when the file could not be opened;
+/// the caller distinguishes them by whether a path was given.
+std::optional<TileSizeReporter> makeTileReporter(
+  const std::string & path, double interval_s)
+{
+  if (path.empty()) {
+    return std::nullopt;
+  }
+  TileSizeReporter reporter(path, interval_s);
+  if (!reporter.good()) {
+    std::cerr << "error: cannot write --tile-size-report " << path << std::endl;
+    return std::nullopt;
+  }
+  return reporter;
+}
+
+}  // namespace
 
 int main(int argc, char * argv[])
 {
@@ -828,97 +951,10 @@ int main(int argc, char * argv[])
 
   bool limit_reached = false;
 
-  // Coverage-message size report (cube_bathymetry#112). Quantizes each dirty
-  // tile BOTH ways from the same dirty set and records serialized and
-  // zlib-compressed sizes, then clears the dirty set exactly as
-  // cube_bathymetry_node::publishDirtyTiles does.
-  std::ofstream tile_report;
-  int64_t last_tile_report_ns = std::numeric_limits<int64_t>::min();
-  const int64_t tile_report_interval_ns =
-    static_cast<int64_t>(tile_report_interval_s * 1e9);
-  rclcpp::Serialization<marine_interfaces::msg::SonarVisualizationTile> tile_serializer;
-  if (!tile_size_report_path.empty()) {
-    tile_report.open(tile_size_report_path);
-    if (!tile_report) {
-      std::cerr << "error: cannot write --tile-size-report "
-                << tile_size_report_path << std::endl;
-      return 1;
-    }
-    tile_report << "bag_time_s,level,tile_row,tile_col,dirty_rows,dirty_cols,"
-                << "dirty_cells,full_cells,full_serialized,full_compressed,"
-                << "window_serialized,window_compressed\n";
+  auto tile_reporter = makeTileReporter(tile_size_report_path, tile_report_interval_s);
+  if (!tile_size_report_path.empty() && !tile_reporter) {
+    return 1;
   }
-
-  // Serialized size, and the size udp_bridge would actually put on the wire.
-  // zlib's ::compress() at the default level is exactly what packet.cpp does,
-  // and udp_bridge keeps the compressed form only when it is smaller -- so a
-  // payload that does not compress is charged at its serialized size.
-  auto measure = [&tile_serializer](
-    const marine_interfaces::msg::SonarVisualizationTile & tile,
-    std::size_t & serialized, std::size_t & compressed) {
-      rclcpp::SerializedMessage serialized_msg;
-      tile_serializer.serialize_message(&tile, &serialized_msg);
-      const auto & rcl = serialized_msg.get_rcl_serialized_message();
-      serialized = rcl.buffer_length;
-      uLongf bound = compressBound(static_cast<uLong>(serialized));
-      std::vector<Bytef> buffer(bound);
-      if (::compress(buffer.data(), &bound, rcl.buffer,
-        static_cast<uLong>(serialized)) == Z_OK)
-      {
-        compressed = std::min<std::size_t>(serialized, bound);
-      } else {
-        compressed = serialized;
-      }
-    };
-
-  auto report_tile_sizes = [&](int64_t ping_ns) {
-      if (!tile_report) {
-        return;
-      }
-      if (last_tile_report_ns != std::numeric_limits<int64_t>::min() &&
-        ping_ns - last_tile_report_ns < tile_report_interval_ns)
-      {
-        return;
-      }
-      last_tile_report_ns = ping_ns;
-
-      builtin_interfaces::msg::Time stamp;
-      stamp.sec = static_cast<int32_t>(ping_ns / 1000000000LL);
-      stamp.nanosec = static_cast<uint32_t>(ping_ns % 1000000000LL);
-      const double bag_time_s = static_cast<double>(ping_ns) * 1e-9;
-
-      for (const auto & index : geo_map_sheet.publishDirtyGrids()) {
-        auto grid = geo_map_sheet.gridAt(index);
-        if (!grid) {
-          continue;
-        }
-        const cube::CellBox box = grid->publishDirtyCells();
-        const auto full = cube::quantizeTile(*grid, stamp);
-        const auto window = cube::quantizeTileWindow(*grid, stamp, box);
-        if (!full || !window) {
-          // Nothing displayable this cycle; the node publishes neither.
-          continue;
-        }
-        std::size_t full_serialized = 0;
-        std::size_t full_compressed = 0;
-        std::size_t window_serialized = 0;
-        std::size_t window_compressed = 0;
-        measure(*full, full_serialized, full_compressed);
-        measure(*window, window_serialized, window_compressed);
-
-        // Level via the message's uint8 mirror: gggs::Level has no numeric
-        // stream operator and silently writes an empty field.
-        tile_report << std::fixed << std::setprecision(3) << bag_time_s << ','
-                    << static_cast<unsigned>(full->index.level) << ','
-                    << full->index.row << ',' << full->index.col << ','
-                    << box.rows() << ',' << box.columns() << ','
-                    << (static_cast<std::size_t>(box.rows()) * box.columns()) << ','
-                    << (static_cast<std::size_t>(full->width) * full->height) << ','
-                    << full_serialized << ',' << full_compressed << ','
-                    << window_serialized << ',' << window_compressed << '\n';
-      }
-      geo_map_sheet.clearPublishDirtyGrids();
-    };
 
   // Project + georeference one ping into the GeoMapSheet.
   auto process_detection =
@@ -1015,7 +1051,9 @@ int main(int argc, char * argv[])
         // addSoundings (no eviction).
         accumulator.addBatch(soundings);
         ping_count++;
-        report_tile_sizes(ping_ns);
+        if (tile_reporter) {
+          tile_reporter->maybeReport(geo_map_sheet, ping_ns);
+        }
       } catch (const tf2::TransformException & e) {
         // A ping with no earth transform in the (bounded) buffer at its stamp --
         // e.g. before the first earth fix, or a TF gap wider than the cache
