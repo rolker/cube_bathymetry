@@ -153,3 +153,38 @@ Chart; `test_store_import.cpp` is untouched by this issue.
 ## Estimated Scope
 
 Single PR.
+
+## Implementation Notes (kept in sync with the branch)
+
+Implemented as planned, with these specifics worth recording:
+
+- The cross-level containment walk was extracted as **`findCrossLevelPrior`**
+  (free function in the anonymous namespace), and Phase A + Phase B were
+  factored together into **`primeLayerForTile(tiles, index, sheet,
+  layer_name)`**. `primePriorLayersForTile` now iterates a two-entry
+  `kLayers` array — `{Chart, "chart"}, {Reference, "reference"}` — so the
+  Chart-primes-first / Reference-overwrites priority invariant is explicit in
+  the data rather than implied by two hand-written blocks. The containment
+  logic moved verbatim; only its layer became a parameter.
+- The audit line is emitted from `primeLayerForTile` with the layer name
+  interpolated, so a chart fallback now logs `import_bag: chart blunder gate
+  for survey tile ... (chart level 7 -> survey level 10)`.
+- Silent-no-op tracking is `prior_prime_attempts_` / `prior_prime_hits_` plus
+  `prior_layers_seen_` (a `std::set<std::pair<SourceLayer, int>>`), fed by the
+  new `found_layers_out` out-param at **both** call sites (`seedNewTile` and
+  `reloadEvictedTile`). `finalize()` warns once when attempts > 0 and hits ==
+  0, naming the store, the tile count, and the layer@level pairs found versus
+  the survey level.
+- Both plan-review suggestions were folded in: the
+  `store_import.cpp` forward-declaration comment gained the `found_layers_out`
+  contract alongside the existing `read_ok` text, and
+  `NoUsablePriorEmitsWarning` carries an explicit note that
+  `testing::internal::CaptureStderr` is new to this file and why asserting on
+  stderr is unavoidable here (the warning *is* the behaviour under test).
+
+**Verified the tests bite**: with Chart's Phase B temporarily disabled to
+reproduce pre-#137 behaviour, `CoarseLevelChartSeedRejectsDeepBlunder` and
+`BoundaryFlushCrossLevelChartRejectsDeepBlunder` both FAIL, while the
+exact-level `ChartLayerSeedRejectsDeepBlunder` regression and
+`NoUsablePriorEmitsWarning` still pass. Restored, the full package suite is
+**560 tests, 0 failures** (was 557 before the three additions).

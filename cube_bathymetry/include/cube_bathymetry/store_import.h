@@ -28,6 +28,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cube_bathymetry/geo_grid.h"
@@ -497,6 +498,19 @@ private:
     std::string scratch_dir_;  // lazily created on first eviction; "" = none
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
+  /// Run-level prior-prime tally (#137), for the `finalize()` silent-no-op warning.
+  /// Counted only when a `--reference-store` was configured: `attempts` is every
+  /// call to the per-tile prime, `hits` those that primed at least one cell. All
+  /// attempts and no hits means the blunder gate never engaged for the whole run —
+  /// how a multi-level chart prior behaved before Chart gained the cross-level
+  /// fallback, and worth one loud line rather than silence.
+    std::size_t prior_prime_attempts_ = 0;
+    std::size_t prior_prime_hits_ = 0;
+  /// Every (layer, GGGS level) pair seen in the prior windows this run loaded,
+  /// whether or not it primed. Reported by the warning above so a level mismatch is
+  /// visible ("chart@L8 vs survey level 10") instead of left to be inferred.
+    std::set < std::pair < marine_bathymetry_store::SourceLayer, int >>
+    prior_layers_seen_;
   };
 
 }  // namespace cube

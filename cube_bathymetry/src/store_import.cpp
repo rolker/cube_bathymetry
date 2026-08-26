@@ -635,10 +635,15 @@ namespace
 // @p read_ok (optional out): set true when the windowed prior load completed, false
 // when it THREW -- distinct from the bool return ("did any rung prime a cell"), so a
 // caller can tell a transient read failure (retry) from a store with no prior here.
+// @p found_layers_out (optional out): every (layer, GGGS level) pair present in the
+// loaded window, whether or not it primed anything. The run-level no-prior warning
+// (#137) reports these so a level/area mismatch is visible rather than silent.
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  bool * read_ok = nullptr);
+  bool * read_ok = nullptr,
+  std::set<std::pair<marine_bathymetry_store::SourceLayer, int>> *
+  found_layers_out = nullptr);
 }  // namespace
 
 bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
@@ -659,10 +664,12 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   // prior-only cells.
   bool prior_read_ok = true;
   if (!cfg_.reference_store_dir.empty()) {
+    ++prior_prime_attempts_;
     if (primePriorLayersForTile(
         cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "revisit",
-        &prior_read_ok))
+        &prior_read_ok, &prior_layers_seen_))
     {
+      ++prior_prime_hits_;
       // Observability (#118): make gate re-activation visible in the import log.
       std::cerr << "import_bag: re-primed prior gate for revisited tile " <<
         index << std::endl;
@@ -779,11 +786,103 @@ void primeFromTileResample(
   }
 }
 
+// Find the finest COARSER tile in @p tiles that CONTAINS survey tile @p index, or
+// nullptr when none does. Extracted verbatim from the #115 Reference walk so Chart
+// can share it (#137) -- only its layer became a parameter; the containment logic
+// is unchanged and still covered by the boundary test.
+//
+// loadWindow ALSO returns tiles at coarser levels, but each is keyed by its own
+// (coarser) GridIndex, so an exact `tiles.find(index)` misses them and a
+// multi-level prior store (e.g. ENC exports at L2/L6/L7/L8 under an L10 survey)
+// leaves the blunder gate silently inactive. GGGS is nested, so exactly one coarse
+// tile per level contains this survey tile; pick the FINEST such tile (highest
+// level number below the survey level -- closest to the survey resolution, still
+// shoal-biased/conservative for a false-deep gate) and resample its shallow prior
+// onto the fine survey cells.
+//
+// Containment must be VERIFIED, not assumed from level alone: loadWindow's overlap
+// test is inclusive (tile_io.cpp tileOverlapsBox -- a coarse tile whose edge merely
+// touches the survey window counts as overlapping), so a survey tile flush against
+// a coarse-tile boundary ALSO pulls in the edge-adjacent coarse neighbor. That
+// neighbor shares no cell with the survey tile, and picking it would make
+// primeFromTileResample's grid-mismatch guard skip every fine cell -- reinstating
+// the #115 silent gate-off for boundary tiles. GGGS nesting gives the containing
+// coarse tile at any level as the one holding the survey tile's CENTER, so match on
+// that and reject any neighbor the inclusive window also returned.
+const marine_bathymetry_store::BathymetryTile * findCrossLevelPrior(
+  const std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> & tiles,
+  const gggs::GridIndex & index)
+{
+  const geographic_msgs::msg::GeoPoint survey_sw = index.southWestPosition();
+  const geographic_msgs::msg::GeoPoint survey_ne = index.northEastPosition();
+  const geographic_msgs::msg::GeoPoint survey_center = gggs::geoPoint(
+    0.5 * (survey_sw.latitude + survey_ne.latitude),
+    0.5 * (survey_sw.longitude + survey_ne.longitude));
+  const marine_bathymetry_store::BathymetryTile * fallback = nullptr;
+  for (const auto & entry : tiles) {
+    const gggs::GridIndex & cand = entry.first;
+    if (cand.level() >= index.level()) {
+      continue;  // not coarser than the survey tile
+    }
+    if (gggs::Level(cand.level()).gridIndex(survey_center) != cand) {
+      continue;  // edge-adjacent neighbor, not the tile that contains us
+    }
+    if (fallback == nullptr ||
+      cand.level() > fallback->index().level())
+    {
+      fallback = &entry.second;
+    }
+  }
+  return fallback;
+}
+
+// Prime ONE prior layer into @p sheet for survey tile @p index: Phase A (exact
+// same-level match) then, failing that, Phase B (the containment-checked
+// cross-level resample above). Predicted-only at both phases.
+//
+// Shared by Chart and Reference since #137. Before it, Phase B was Reference-only
+// -- and an ENC chart product is built on the chart scale ladder, so it essentially
+// never has a tile at the survey level. Chart's exact-level `find` therefore missed
+// every time on a real ENC prior and the gate stayed silently off for exactly the
+// product the Chart layer exists to hold.
+//
+// @p layer_name names the layer in the audit line. Returns true when it primed.
+bool primeLayerForTile(
+  const std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> & tiles,
+  const gggs::GridIndex & index, GeoMapSheet & sheet, const char * layer_name)
+{
+  // Phase A -- exact same-level match: a prior tile at the survey GGGS level
+  // coincides cell-for-cell with the survey tile, so prime it directly.
+  auto it = tiles.find(index);
+  if (it != tiles.end()) {
+    primeFromTile(it->second, sheet, /*seed_settled=*/false);
+    return true;
+  }
+  // Phase B -- cross-level fallback (#115 for Reference, extended to Chart by #137).
+  const marine_bathymetry_store::BathymetryTile * fallback =
+    findCrossLevelPrior(tiles, index);
+  if (fallback == nullptr) {
+    return false;
+  }
+  primeFromTileResample(*fallback, index, sheet);
+  // Auditability (#115): name the layer and the fallback level used so the import
+  // log shows which cross-level prior was active for this tile.
+  std::cerr << "import_bag: " << layer_name << " blunder gate for survey tile "
+            << index << " seeded via cross-level fallback (" << layer_name
+            << " level " << static_cast<int>(fallback->index().level())
+            << " -> survey level " << static_cast<int>(index.level()) << ")"
+            << std::endl;
+  return true;
+}
+
 // Prime the predicted surface of survey tile @p index from the prior store
 // (predicted-only at every rung -- the prior gates, never fills): windowed load,
-// Chart exact-level first (#119, lowest-priority layer), Reference exact-level
-// on top (overwrites where both cover a cell), else the #115 containment-checked
-// cross-level Reference fallback resample. A load error WARNs here and reports
+// then each layer runs Phase A (exact level) and, failing that, the #115
+// containment-checked cross-level resample. Chart primes FIRST (#119, the
+// lowest-priority layer), Reference second so it overwrites where both cover a
+// cell. Since #137 BOTH layers get the cross-level fallback -- it was
+// Reference-only before, which left an ENC chart prior unable to gate at all.
+// A load error WARNs here and reports
 // via @p read_ok; what happens next is the CALLER's contract:
 //   - seedNewTile (first touch): continue ungated -- the tile accumulates
 //     normally, it just has no prior gate.
@@ -792,11 +891,15 @@ void primeFromTileResample(
 //     the tile ARE dropped (the offline import is single-pass) -- gate
 //     integrity over one batch's coverage.
 // @p context names the caller in the audit/error lines.
+// @p found_layers_out (optional out): every (layer, GGGS level) pair present in the
+// loaded window, whether or not it primed. Fed to the run-level no-prior warning
+// (#137) so a level/area mismatch is reported instead of failing silently.
 // Returns true when any rung primed something.
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  bool * read_ok)
+  bool * read_ok,
+  std::set<std::pair<marine_bathymetry_store::SourceLayer, int>> * found_layers_out)
 {
   if (read_ok != nullptr) {
     *read_ok = true;  // flipped to false only if the windowed load below THROWS
@@ -808,78 +911,26 @@ bool primePriorLayersForTile(
     const auto sw = index.southWestPosition();
     const auto ne = index.northEastPosition();
     marine_bathymetry_store::loadWindow(ref, prior_store_dir, sw, ne, nullptr);
-    // Chart exact-level prime FIRST (#119): since the reference->chart layer
-    // split, official chart products live in the Chart layer, which this gate
-    // never consulted -- charted-waters imports ran ungated. Chart is the
-    // lowest-priority prior, so it primes before Reference below, which
-    // overwrites where both layers cover a cell. Chart cross-level resampling
-    // is deferred (the #115 fallback below stays Reference-only).
-    const auto & chart_tiles =
-      ref.tiles(marine_bathymetry_store::SourceLayer::Chart);
-    auto chart_it = chart_tiles.find(index);
-    if (chart_it != chart_tiles.end()) {
-      primeFromTile(chart_it->second, sheet, /*seed_settled=*/false);
-      primed = true;
-    }
-    const auto & tiles =
-      ref.tiles(marine_bathymetry_store::SourceLayer::Reference);
-    // Phase A -- exact same-level match: a reference tile at the survey GGGS level
-    // coincides cell-for-cell with the survey tile, so prime it directly.
-    auto it = tiles.find(index);
-    if (it != tiles.end()) {
-      primeFromTile(it->second, sheet, /*seed_settled=*/false);
-      primed = true;
-    } else {
-      // Phase B -- cross-level fallback (#115): loadWindow ALSO returns reference
-      // tiles at coarser levels, but each is keyed by its own (coarser) GridIndex,
-      // so the find() above missed them and, before this fix, a multi-level
-      // reference store (e.g. ENC exports at L5/L7/L8 under an L10 survey) left the
-      // blunder gate silently inactive. GGGS is nested, so exactly one coarse tile
-      // per level contains this survey tile; pick the FINEST such tile (highest
-      // level number below the survey level -- closest to the survey resolution,
-      // still shoal-biased/conservative for a false-deep gate) and resample its
-      // shallow prior onto the fine survey cells.
-      //
-      // Containment must be VERIFIED, not assumed from level alone: loadWindow's
-      // overlap test is inclusive (tile_io.cpp tileOverlapsBox -- a coarse tile
-      // whose edge merely touches the survey window counts as overlapping), so a
-      // survey tile flush against a coarse-tile boundary ALSO pulls in the
-      // edge-adjacent coarse neighbor. That neighbor shares no cell with the
-      // survey tile, and picking it would make primeFromTileResample's
-      // grid-mismatch guard skip every fine cell -- reinstating the #115 silent
-      // gate-off for boundary tiles. GGGS nesting gives the containing coarse
-      // tile at any level as the one holding the survey tile's CENTER, so match
-      // on that and reject any neighbor the inclusive window also returned.
-      const geographic_msgs::msg::GeoPoint survey_sw = index.southWestPosition();
-      const geographic_msgs::msg::GeoPoint survey_ne = index.northEastPosition();
-      const geographic_msgs::msg::GeoPoint survey_center = gggs::geoPoint(
-        0.5 * (survey_sw.latitude + survey_ne.latitude),
-        0.5 * (survey_sw.longitude + survey_ne.longitude));
-      const marine_bathymetry_store::BathymetryTile * fallback = nullptr;
-      for (const auto & entry : tiles) {
-        const gggs::GridIndex & cand = entry.first;
-        if (cand.level() >= index.level()) {
-          continue;  // not coarser than the survey tile
-        }
-        if (gggs::Level(cand.level()).gridIndex(survey_center) != cand) {
-          continue;  // edge-adjacent neighbor, not the tile that contains us
-        }
-        if (fallback == nullptr ||
-          cand.level() > fallback->index().level())
-        {
-          fallback = &entry.second;
+    // Chart FIRST (#119): since the reference->chart layer split, official chart
+    // products live in the Chart layer, which this gate never consulted --
+    // charted-waters imports ran ungated. Chart is the lowest-priority prior, so it
+    // primes before Reference, which overwrites where both layers cover a cell.
+    // Iterating in that order keeps the priority invariant explicit.
+    const std::pair<marine_bathymetry_store::SourceLayer, const char *> kLayers[] = {
+      {marine_bathymetry_store::SourceLayer::Chart, "chart"},
+      {marine_bathymetry_store::SourceLayer::Reference, "reference"},
+    };
+    for (const auto & [layer, layer_name] : kLayers) {
+      const auto & tiles = ref.tiles(layer);
+      // Record what the window actually held BEFORE matching, so a run that primes
+      // nothing can still say which layers/levels were present (#137).
+      if (found_layers_out != nullptr) {
+        for (const auto & entry : tiles) {
+          found_layers_out->insert({layer, static_cast<int>(entry.first.level())});
         }
       }
-      if (fallback != nullptr) {
-        primeFromTileResample(*fallback, index, sheet);
+      if (primeLayerForTile(tiles, index, sheet, layer_name)) {
         primed = true;
-        // Auditability (#115): name the fallback level used so the import log shows
-        // a cross-level prior was active for this tile.
-        std::cerr << "import_bag: reference blunder gate for survey tile " << index
-                  << " seeded via cross-level fallback (reference level "
-                  << static_cast<int>(fallback->index().level())
-                  << " -> survey level " << static_cast<int>(index.level()) << ")"
-                  << std::endl;
       }
     }
   } catch (const std::exception & e) {
@@ -1036,8 +1087,13 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
   // cell as measured data (no values() output, sheet stays clean) and seeds NO
   // backscatter. Shared with the revisit reload (#118) via primePriorLayersForTile.
   if (!cfg_.reference_store_dir.empty()) {
-    primePriorLayersForTile(
-      cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "first touch");
+    ++prior_prime_attempts_;
+    if (primePriorLayersForTile(
+        cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "first touch",
+        nullptr, &prior_layers_seen_))
+    {
+      ++prior_prime_hits_;
+    }
   }
 
   // else blank -- nothing to seed; still mark it seeded so we do not retry.
@@ -1177,6 +1233,29 @@ void ImportAccumulator::finalize(
   {
     std::filesystem::create_directories(cfg_.bs_store_dir);
     bs_metadata->save(cfg_.bs_store_dir);
+  }
+  // Silent-no-op guard (#137). A run given --reference-store that primed NOT ONE
+  // tile means the blunder gate was off for the whole import -- yet the startup
+  // banner announced prior seeding, so the operator reasonably concludes it was on.
+  // That is how an ENC chart prior behaved before this issue's fix: present,
+  // announced, and never consulted. Say so, and name what the prior store actually
+  // held, so a level or coverage mismatch is reported rather than inferred.
+  if (prior_prime_attempts_ > 0 && prior_prime_hits_ == 0) {
+    std::cerr << "import_bag: WARNING -- prior store '" << cfg_.reference_store_dir
+              << "' primed NOTHING for any of " << prior_prime_attempts_
+              << " tile(s): the blunder gate was INACTIVE for this entire run.";
+    if (prior_layers_seen_.empty()) {
+      std::cerr << " No chart or reference tiles overlap the surveyed area.";
+    } else {
+      std::cerr << " Prior tiles found over the surveyed area:";
+      for (const auto & [layer, level] : prior_layers_seen_) {
+        std::cerr << " " << marine_bathymetry_store::layerDirName(layer) << "@L"
+                  << level;
+      }
+      std::cerr << " vs survey level " << static_cast<int>(
+        gggs::Level::fromCellSize(cfg_.cell_size_m).level()) << ".";
+    }
+    std::cerr << std::endl;
   }
   // The spilled raw samples were only needed to reload an evicted tile mid-run;
   // the import is complete, so delete the scratch dir.
