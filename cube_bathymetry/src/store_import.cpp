@@ -735,9 +735,10 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
 
 namespace
 {
-// Cross-level reference prime (#115): seed the predicted surface of the FINE survey
-// grid @p survey_index from a COARSER reference tile @p coarse_tile by
-// nearest-neighbour resample. `loadWindow` returns reference tiles at any GGGS
+// Cross-level prior prime (#115 for `reference`, extended to `chart` by #137): seed
+// the predicted surface of the FINE survey grid @p survey_index from a COARSER PRIOR
+// tile @p coarse_tile -- either layer -- by nearest-neighbour resample. `loadWindow`
+// returns prior tiles at any GGGS
 // level, but a coarser tile is keyed by its own (different) GridIndex, so the
 // same-level `tiles.find(index)` in rung 2 misses it and the blunder gate would be
 // silently inactive (the bug #115 fixes). GGGS is nested, so the fine survey grid

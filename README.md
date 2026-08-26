@@ -94,16 +94,25 @@ On the first touch of each tile, both tools seed it with a two-rung precedence:
    first, then `reference/` **overwrites** where the two overlap a cell:
    - **`chart/`** (charted-waters gate, #119) — official chart products live in the
      `Chart` layer, which the gate previously never consulted, so charted-waters
-     imports ran ungated. Only an **exact survey-level** chart tile is primed;
-     there is **no** cross-level fallback for chart (coarse-chart resampling is
-     deferred).
-   - **`reference/`** (prior/contour) — a reference tile at the exact survey GGGS
-     level gates cell-for-cell; a **coarser** reference tile (a multi-level prior,
-     e.g. ENC exports at L5/L7/L8 under an L10 survey) is picked up by a level-walk
-     fallback (#115) that resamples the finest available coarser tile's shallow
-     prior onto the fine survey cells — coarse ENC generalization is shoal-biased,
-     the conservative direction for a false-deep gate. The fallback logs the
-     reference level it used, so the import is auditable.
+     imports ran ungated.
+   - **`reference/`** (prior/contour).
+
+   **Both** layers take an **exact survey-level** tile when one exists and
+   otherwise fall back to a **level-walk** (#115 for `reference/`, extended to
+   `chart/` by #137): the finest **containing** coarser tile that actually holds
+   data over this survey tile is resampled onto the fine survey cells. Chart needs
+   this most — an ENC product is built on the chart scale ladder (usage bands) and
+   essentially never has a tile at the survey GGGS level, so an exact-level-only
+   chart prime missed every time and the gate stayed silently off for exactly the
+   product the `Chart` layer exists to hold. Coarse ENC generalization is
+   shoal-biased, the conservative direction for a false-deep gate. A tile that
+   *matches* but is **no-data** over the survey tile primes nothing and is not
+   treated as a gate — the walk falls through to the next-coarser prior. The
+   fallback logs the layer and level it used (once per layer/level), so the import
+   is auditable, and a run whose prior primed **nothing at all** ends with an
+   explicit warning naming what the store did hold (`import_bag` at `finalize`,
+   `batch_regen` after its gather) rather than leaving the operator to infer a
+   working gate from the startup banner (#137).
 
    (Replaces the pre-#96 `--prior` flag, which loaded the whole prior into RAM up
    front and defeated eviction.)

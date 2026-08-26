@@ -142,11 +142,15 @@ bool loadCurveFromBagSonarInfo(
     "needed). The off-boat CUBE re-run is authoritative, so it always writes the "
     "`survey` layer (uma#248 collapsed the draft/processed split into one)\n";
   std::cout << "  --reference-store <store_dir>: seed the CUBE predicted surface "
-    "lazily, per tile on first touch, from this store's `reference` (prior) layer "
-    "so blunder rejection drops false-deep detections (#89, #96). Tiles at the survey "
+    "lazily, per tile on first touch, from BOTH of this store's prior layers -- "
+    "`chart` (official chart/ENC products) and `reference` (prior/contour) -- so "
+    "blunder rejection drops false-deep detections (#89, #96, #119). `chart` primes "
+    "first and `reference` overwrites where both cover a cell. Tiles at the survey "
     "GGGS level gate cell-for-cell; a coarser (multi-level) prior gates via a "
-    "level-walk fallback that resamples the finest coarser tile (#115). Predicted-"
-    "only: the coarse prior is NEVER settled as "
+    "level-walk fallback that resamples the finest CONTAINING coarser tile holding "
+    "data -- since #137 for BOTH layers, which matters because an ENC product is "
+    "built on the chart scale ladder and essentially never has a survey-level tile. "
+    "Predicted-only: the coarse prior is NEVER settled as "
     "measured data and seeds no backscatter. NOTE: a coarse/shallow-biased prior "
     "can also reject LEGITIMATE deeper-than-charted returns; the rejection margin "
     "is tunable via the blunder_* params. (A `survey` tile already in -o takes "
@@ -735,8 +739,11 @@ int main(int argc, char * argv[])
   cube::ImportAccumulator accumulator(geo_map_sheet, accumulator_config);
 
   if (!reference_store_dir.empty()) {
-    std::cout << "Reference-prior seeding from " << reference_store_dir
-              << " (lazy per-tile; predicted-only blunder gate, #96)." << std::endl;
+    std::cout << "Prior seeding (chart + reference layers) from "
+              << reference_store_dir
+              << " (lazy per-tile; predicted-only blunder gate, #96). A run that "
+      "primes nothing WARNS at the end (#137) -- this banner alone does not mean "
+      "the gate engaged." << std::endl;
   }
 
   if (max_resident_tiles > 0) {
