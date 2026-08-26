@@ -1436,8 +1436,8 @@ void ImportAccumulator::finalize(
   // Silent-no-op guard (#137), emitted FIRST: the persists below have no try around
   // them, so a throw there would swallow the warning entirely -- and the tally is
   // complete by now (nothing after this point primes anything). Once only: the tally
-  // is deliberately not cleared (batch-regen merges tallies after the fact), so a
-  // second finalize() would otherwise repeat the line.
+  // is deliberately not cleared (batch_regen's gather accumulators share one
+  // run-level tally), so a second finalize() would otherwise repeat the line.
   if (!prior_outcome_reported_) {
     prior_outcome_reported_ = true;
     reportPriorPrimeOutcome(

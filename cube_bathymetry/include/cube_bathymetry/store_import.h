@@ -538,7 +538,7 @@ public:
   /// FIRST, before the tile persists, so a persist that throws cannot swallow it,
   /// and once only, however many times this is called. `batch_regen` never calls
   /// this (see @ref persistResidentTile) and reports the same warning itself from
-  /// the merged per-tile tallies.
+  /// the one run-level tally its gather accumulators share (@ref usePriorTally).
     void finalize(
       const marine_bathymetry_store::StoreMetadata * bathy_metadata = nullptr,
       const marine_mbes_backscatter_store::StoreMetadata * bs_metadata = nullptr);
@@ -624,10 +624,11 @@ private:
   ///           @ref reference_store_dir: prime predicted-only
   ///           (`seed_settled=false`, blunder gate); NOT counted as measured data,
   ///           NO backscatter seed. `chart/` primes first and `reference/`
-  ///           overwrites where both cover a cell; since #137 BOTH layers take an
-  ///           exact-survey-level tile when there is one and otherwise fall back
-  ///           to resampling the finest CONTAINING coarser tile that holds data
-  ///           (the #115 level-walk, which was Reference-only before).
+  ///           overwrites where both cover a cell; since #137 BOTH layers walk
+  ///           the per-cell UNION of every CONTAINING coarser tile (coarsest
+  ///           first, the exact-survey-level tile last so it wins), rather than
+  ///           resampling a single tile (the #115 level-walk, which was
+  ///           Reference-only and single-tile before).
   ///        else blank (no prior). A no-op beyond marking @ref seeded_ when no
   ///        seed source is configured or found.
   /// @return false if the rung-1 survey seed threw (the on-disk survey tile exists
@@ -658,8 +659,8 @@ private:
   /// Non-null when a driver redirected the tally (@ref usePriorTally); not owned.
     PriorPrimeTally * shared_tally_ = nullptr;
   /// Guards @ref finalize's warning against a second emission: the tally is never
-  /// cleared (batch-regen merges it after the fact), so a second @ref finalize call
-  /// would otherwise repeat the line.
+  /// cleared (batch_regen's gather accumulators all share one run-level tally via
+  /// @ref usePriorTally), so a second @ref finalize call would otherwise repeat it.
     bool prior_outcome_reported_ = false;
   };
 

@@ -480,7 +480,7 @@ TEST(BatchRegen, PriorThatPrimesNothingWarnsFromGather)
   }
   EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
     << "batch_regen must emit the run-level prior warning exactly once from the "
-    "merged per-tile tallies; stderr was:\n" << warned;
+    "shared run-level tally; stderr was:\n" << warned;
   EXPECT_NE(warned.find("batch_regen: WARNING"), std::string::npos)
     << "the warning must name batch_regen, not import_bag; stderr was:\n" << warned;
 
