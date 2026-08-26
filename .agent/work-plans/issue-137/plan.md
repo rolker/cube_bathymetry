@@ -242,6 +242,102 @@ finding-by-finding:
   verified to FAIL against the pre-fix behaviour. Suite: **563 tests, 0
   failures** (was 560).
 
+### Round-2 review pass (pre-push `review-code`, verdict changes-requested)
+
+Round 1's eight must-fixes held up under re-review, but the fix pass had opened
+**three new instances of the same defect class the issue exists to close** — a
+diagnostic that reports "fine" when it is not — plus eleven suggestions. All
+fourteen were actioned; none were deferred.
+
+**The three must-fixes.**
+
+- **A read failure is now reported independently of the hit gate.**
+  `reportPriorPrimeOutcome` returned early on `hits > 0`, so the separately
+  tallied `read_failures` could only ever reach the operator in the zero-hit
+  case: a prior store unreadable for 499 of 500 tiles but readable for one
+  emitted no run-level line at all. It gets its own line whatever the rest of
+  the run did.
+- **The cross-level audit-line dedup is run-scoped.** `audit_seen` lived in each
+  `ImportAccumulator`'s own tally, and `BatchRegen::finalize` builds a fresh
+  accumulator per gathered tile — so on the authoritative rebuild path the dedup
+  suppressed nothing while the line printed "reported once per prior level".
+  Every gather accumulator is now pointed at the ONE run-level tally
+  (`ImportAccumulator::usePriorTally`) instead of merging into it afterwards;
+  `PriorPrimeTally::merge` is gone with it (it was the only caller, and its union
+  of `audit_seen` was write-only state that disguised the bug). The prior-gate
+  diagnostics take the tool name from `ImportAccumulatorConfig::tool`, so a
+  rebuild no longer attributes them to `import_bag`.
+- **Both LIVE-node prior-prime sites key on the primed CELL count.** The branch
+  asserted the "a match is not a prime" contract in a public header while leaving
+  the two safety-relevant call sites keying on a bare `find()`, driving
+  operator-facing "Blunder gate active (#91)" / "Re-primed prior gate" messages
+  that are false over an all-NaN prior. **Fixed rather than scoped to the offline
+  importer** (the reviewer allowed either): the falsehood is in an operator-facing
+  message on the *afloat* path, the counts already existed, and narrowing the
+  contract text would have left the live node quietly claiming a gate it does not
+  have. `PriorLayerPrimeResult` gained `empty_tiles` so a matched-but-empty tile
+  is reported apart from a level mismatch, which has a different remedy. This is
+  NOT deferred item 3, which remains deferred: the live node is still
+  exact-level-only.
+
+**The eleven suggestions**, all actioned:
+
+- The gate now covers the **per-cell UNION of the usable priors**, not the first
+  one to seed a cell: every containing coarser tile is primed coarsest-first, then
+  the exact-level tile last, so the finest prior with data still wins per cell and
+  a sliver of data in a finer prior can no longer suppress a coarser one with full
+  coverage. (This refines *which* prior gates a cell; it does not decide deferred
+  item 1, which is about **bounding how coarse** a prior may be — still unbounded,
+  still the operator's call.)
+- **Partial coverage is reported**: "primed only M of N attempt(s)". 1 primed tile
+  out of 500 used to warn nothing at all.
+- `layers_seen` is now recorded where usability is known and split from
+  `unusable_seen`: an edge-adjacent coarse neighbour (or a prior FINER than the
+  survey level) is reported as a coverage gap that names the unusable levels,
+  not as a level MISMATCH whose remedy is different.
+- The warm-start clause names the `processed/` layer (rung 1 reads `Processed`,
+  not `survey`) and says outright that a revisited tile is counted in BOTH
+  tallies rather than implying they partition the run.
+- **Rung 1 no longer treats a match as a prime**: an empty `processed/` tile
+  warm-starts nothing, so it falls through to the prior rung instead of
+  short-circuiting it while the warning vouched for it.
+- Both prime helpers filter **`isfinite`**, not `isnan`: now that the primed count
+  is the gating signal, a ±inf depth would have counted as a hit while the blunder
+  limit is meaningless on it.
+- `BatchRegen` has a `prior_outcome_reported_` once-guard, and `batch_regen.h`
+  says outright that it **cannot** emit the warning first (there is no tally until
+  the gather has run) — the one piece of `ImportAccumulator::finalize` parity that
+  is structurally unavailable, rather than left implied.
+- README: the live-node section's two stale claims are corrected (the offline path
+  is now chart **and** reference; #118's revisit re-priming IS implemented), and
+  the honest half of the trade-off — the false-reject mode and the **unbounded**
+  coarseness of the chart fallback — moved from ADR-0001 to where the operator
+  actually reads it.
+
+**Tests** (8 added, suite **571 tests, 0 failures, 68 skipped**, was 563):
+`ReadFailureIsReportedEvenWhenAnotherTilePrimed`,
+`WarmStartedTilesAreScopedOutOfThePriorWarning`,
+`EdgeAdjacentCoarseNeighborIsNotReportedAsALevelMismatch`,
+`SliverInTheFinestPriorDoesNotSuppressAFullCoverageCoarserPrior`,
+`EmptyProcessedTileFallsThroughToThePriorRung` (ImportEviction),
+`CrossLevelAuditLineIsRunScopedAndNamesBatchRegen` (BatchRegen),
+`PrimeFromPriorLayersDoesNotCountAMatchedButEmptyTile` and
+`PrimeFromTileTreatsNonFiniteDepthAsNoData` (StoreImport). **Every one was run
+against the pre-fix behaviour and observed to FAIL** — by restoring the old
+`hits > 0` early return, the per-accumulator tally and `import_bag` prefix, the
+unconditional `++primed`, the record-every-window-tile tally, the first-hit
+short-circuit, the unconditional warm start, and the `isnan` filter in turn, then
+restoring the fix. `WarmStartedTilesAreScopedOutOfThePriorWarning` fails pre-fix
+on the corrected `processed/` wording; its value is as the positive coverage the
+clause never had.
+
+**Known gap, not introduced here**: the node's evicted-tile revisit re-prime has
+no test harness in this package (there are no `prior_store_dir` node tests at
+all), so that one-line change is covered by inspection and by the shared
+`primeFromTile` contract test. Also pre-existing and untouched: an unused-variable
+compiler warning in `test/test_tile_eviction_rss.cpp:130`, in a file this branch
+does not modify.
+
 ### Deferred — operator decides, NOT implemented
 
 1. **Bound how coarse a Chart prior may be.** An L2 chart tile is ~232 m/cell
