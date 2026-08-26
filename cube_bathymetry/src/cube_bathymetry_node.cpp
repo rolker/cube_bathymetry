@@ -517,10 +517,19 @@ public:
     } else {
       disk_serve_interval_s_ = interval_raw;
     }
-    // Dirty sub-window push (ADR-0001 section 4 sub-window addendum). Still OFF
-    // by default here: the refresh queue below removes the SILENT failure mode,
-    // but flipping what every deployment sends is its own decision and its own
-    // commit.
+    // Dirty sub-window push (ADR-0001 section 4 sub-window addendum). ON by
+    // default: the whole-tile refresh queue below removed the silent failure
+    // mode that kept it opt-in, and the cost of leaving it off is measured, not
+    // theoretical. Both 2026-08-25 Appledore bags -- the deployment where these
+    // tiles collapsed the operator link -- replayed through this chain: the
+    // whole-tile stream costs 56.0 kB/s on transit and 85.7 kB/s on station
+    // against a 1.5 MB/s connection shared with every other topic, and patches
+    // with a 60 s refresh cost 11.2 and 9.1 kB/s. The largest single message
+    // falls from 1,120,845 B to 172,040 B, which matters twice over:
+    // udp_bridge's can_send() admits a message only if the WHOLE thing fits the
+    // instantaneous budget, so the biggest messages are precisely the ones a
+    // congested link stops carrying at all -- measured at 100% dropped for
+    // coverage_tiles on 2026-08-05 while smaller topics recovered.
     rcl_interfaces::msg::ParameterDescriptor subwindow_desc;
     subwindow_desc.description =
       "Publish only each tile's dirty sub-window on ~/coverage_tiles instead of "
@@ -537,20 +546,19 @@ public:
       "re-requests. subwindow_refresh_interval is what makes that survivable: "
       "every patched tile is re-sent WHOLE within that interval, so a dropped "
       "patch is a gap of bounded duration rather than a permanent one. Set "
-      "true to send patches; false (the default) reproduces the whole-tile "
-      "stream byte for byte. Read at "
+      "false reproduces the whole-tile stream byte for byte. Read at "
       "configure; read_only, so a runtime set is rejected rather than silently "
       "ignored.";
     // read_only enforces the "Read at configure" promise above. Without it a
-    // runtime `ros2 param set publish_dirty_subwindow true` SUCCEEDS, reads
-    // back true via `ros2 param get`, and changes nothing on the wire --
+    // runtime `ros2 param set publish_dirty_subwindow false` SUCCEEDS, reads
+    // back false via `ros2 param get`, and changes nothing on the wire --
     // accepted, reads back, inert. Under rmw_zenoh a `param set` can also drop
     // silently, so the operator's set -> get habit cannot catch that here.
     // Launch/YAML overrides are unaffected: read_only only rejects a set after
     // declaration.
     subwindow_desc.read_only = true;
     publish_dirty_subwindow_ =
-      declare_parameter("publish_dirty_subwindow", false, subwindow_desc);
+      declare_parameter("publish_dirty_subwindow", true, subwindow_desc);
 
     rcl_interfaces::msg::ParameterDescriptor refresh_desc;
     refresh_desc.description =
@@ -851,7 +859,7 @@ private:
   double disk_serve_interval_s_ = 0.5;
   // Sub-window push opt-in (see the parameter descriptor in on_configure).
   // False reproduces the pre-sub-window whole-tile stream byte for byte.
-  bool publish_dirty_subwindow_ = false;
+  bool publish_dirty_subwindow_ = true;
 
   // Whole-tile refresh queue (#112). The live push is best-effort, so a lost
   // sub-window patch leaves a gap the consumer cannot discover: the catalog
