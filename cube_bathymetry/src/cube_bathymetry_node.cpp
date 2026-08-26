@@ -123,6 +123,12 @@ public:
     // mid-teardown cannot reconfigure a tracker that is about to be reset.
     refresh_parameters_handle_.reset();
     refresh_tracker_.clear();
+    // The saving ledger describes one sheet's traffic too; carried across a
+    // reconfigure it would report a ratio over two different configurations.
+    saving_report_last_s_ = 0.0;
+    report_window_cells_ = 0;
+    report_full_cells_ = 0;
+    report_refresh_cells_ = 0;
     // Reset the tile-version registry too (#78): a fresh sheet must not advertise
     // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
@@ -940,6 +946,13 @@ private:
   /// Drain tick. Matches the coverage publish cadence in pingCallback so the
   /// per-cycle budget means the same thing on both paths.
   static constexpr double kRefreshDrainIntervalSeconds = 5.0;
+  // Reporting window for the sub-window saving ledger (maybeReportCoverageSaving).
+  static constexpr double kSavingReportIntervalSeconds = 30.0;
+  // Sub-window saving ledger, accumulated over one reporting window.
+  double saving_report_last_s_ = 0.0;   // 0 = no window open yet
+  std::size_t report_window_cells_ = 0;
+  std::size_t report_full_cells_ = 0;
+  std::size_t report_refresh_cells_ = 0;
   double subwindow_refresh_interval_s_ = 60.0;
   std::size_t subwindow_refresh_tiles_per_cycle_ = 2;
 
@@ -1144,6 +1157,54 @@ private:
     return result;
   }
 
+  /// Report what sub-window mode actually saved, NET OF ITS OWN HEAL.
+  ///
+  /// The point of this line is that an operator uses it to decide whether to
+  /// leave the mode on over a constrained link, so it must not flatter the
+  /// mode. It previously reported the dirty cycle's patch cells against the
+  /// whole tiles those cycles would have sent -- and left out the drain's
+  /// whole-tile re-sends entirely, which at a 60 s interval are the DOMINANT
+  /// cost. A ratio that omits the larger half of the bill is not a saving.
+  ///
+  /// Accumulated over a fixed window rather than sampled per cycle: the heal
+  /// and the patches arrive on different cadences, so any single cycle is
+  /// unrepresentative of both. Reported from whichever of the two paths runs,
+  /// so the numbers still arrive once the pings stop and only the heal is left.
+  ///
+  /// The byte figures are UNCOMPRESSED cell bytes (4 B/cell across depth int16
+  /// + two uint8). udp_bridge zlib-compresses every packet, and coverage tiles
+  /// compress hard, so the link carries substantially less than this: read the
+  /// RATIO, not the rate. For measured on-the-wire bytes, run import_bag
+  /// --tile-size-report over a bag of the survey.
+  void maybeReportCoverageSaving()
+  {
+    const double now_s = now().seconds();
+    if (saving_report_last_s_ == 0.0) {
+      saving_report_last_s_ = now_s;   // start the first window here
+      return;
+    }
+    if (now_s - saving_report_last_s_ < kSavingReportIntervalSeconds) {
+      return;
+    }
+    saving_report_last_s_ = now_s;
+    if (report_full_cells_ == 0) {
+      report_window_cells_ = 0;
+      report_refresh_cells_ = 0;
+      return;   // nothing changed this window; there is no ratio to state
+    }
+    const std::size_t sent = report_window_cells_ + report_refresh_cells_;
+    RCLCPP_INFO(get_logger(),
+      "Sub-window coverage push: %zu cells sent (%zu patched + %zu re-sent "
+      "whole by the heal) against %zu the whole-tile mode would have sent "
+      "(%.1f%%), ~%zu B against ~%zu B uncompressed over the last %.0f s",
+      sent, report_window_cells_, report_refresh_cells_, report_full_cells_,
+      100.0 * static_cast<double>(sent) / static_cast<double>(report_full_cells_),
+      sent * 4, report_full_cells_ * 4, kSavingReportIntervalSeconds);
+    report_window_cells_ = 0;
+    report_full_cells_ = 0;
+    report_refresh_cells_ = 0;
+  }
+
   /// Timer callback: heal tiles that have gone quiet still owing a whole send.
   ///
   /// ON A WALL TIMER, NOT THE PING PATH, and that is the whole point.
@@ -1205,6 +1266,12 @@ private:
       sonar_tile_publisher_->publish(*vt);
       catalog_builder_.update(index, version);
       refresh_tracker_.notePublished(index, pub_time.seconds(), true);
+      // Charged to the sub-window saving report. These are whole tiles the
+      // whole-tile mode would NEVER have sent -- it has no heal to pay for --
+      // so they are pure additional cost of this mode and belong on the same
+      // ledger as the saving they offset.
+      report_refresh_cells_ +=
+        static_cast<std::size_t>(vt->width) * vt->height;
     }
     RCLCPP_DEBUG(get_logger(),
       "Coverage refresh: re-sent %zu whole tile(s); %zu still owed",
@@ -1231,6 +1298,11 @@ private:
         (subwindow_refresh_interval_s_ / kRefreshDrainIntervalSeconds),
         subwindow_refresh_interval_s_);
     }
+
+    // Also from here: once the vessel stops pinging, this is the only path
+    // still running, and the heal it pays for is precisely what the report
+    // exists to expose.
+    maybeReportCoverageSaving();
   }
 
   // Incremental coverage: emit each changed tile as its own GridMap on ~/tiles,
@@ -1331,13 +1403,10 @@ private:
     // TF fix -- and the tiles that need healing most are the ones the vessel
     // has finished with, whose pings have stopped. See drainRefreshQueue.
 
-    if (publish_dirty_subwindow_ && full_cells > 0) {
-      // 4 bytes/cell across the three bands (depth int16 + two uint8).
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 30000,
-        "Sub-window coverage push: %zu of %zu cells (%.2f%%), ~%zu B instead of "
-        "~%zu B this cycle", window_cells, full_cells,
-        100.0 * static_cast<double>(window_cells) / static_cast<double>(full_cells),
-        window_cells * 4, full_cells * 4);
+    if (publish_dirty_subwindow_) {
+      report_window_cells_ += window_cells;
+      report_full_cells_ += full_cells;
+      maybeReportCoverageSaving();
     }
     geo_map_sheet_->clearPublishDirtyGrids();
   }
