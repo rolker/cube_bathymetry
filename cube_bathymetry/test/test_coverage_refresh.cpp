@@ -343,4 +343,41 @@ TEST(CoverageRefresh, AWholeSendFromAnyPathDischargesTheDebt)
   EXPECT_EQ(t.owedCount(), 0u);
 }
 
+// owesRefresh answers for ONE tile, which is what the eviction site needs: it
+// is dropping a specific tile and can only report the debt it is making
+// unpayable. owedCount (the whole set) cannot tell it that.
+TEST(CoverageRefresh, OwesRefreshIsPerTile)
+{
+  auto t = makeTracker();
+  t.notePublished(kA, 0.0, false);
+  EXPECT_TRUE(t.owesRefresh(kA));
+  EXPECT_FALSE(t.owesRefresh(kB));
+  EXPECT_EQ(t.owedCount(), 1u);
+}
+
+// forget() must work with the heal DISABLED, because that is the configuration
+// in which nothing else reaps: dueForRefresh returns early on interval 0 or
+// budget 0 -- both documented values -- so its lazy residency reaping never
+// runs and the debt set would grow for the life of the sheet. The node calls
+// forget() from the eviction path precisely so the bound does not depend on
+// the heal being switched on.
+TEST(CoverageRefresh, ForgetReapsEvenWhenTheHealIsDisabled)
+{
+  auto t = makeTracker(0.0, 0);               // heal off, both ways
+  t.notePublished(kA, 0.0, false);
+  t.notePublished(kB, 0.0, false);
+  ASSERT_EQ(t.owedCount(), 2u);
+
+  // The drain reaps nothing here -- that is the early return under test.
+  std::size_t dropped = 0;
+  EXPECT_TRUE(t.dueForRefresh({}, 1000.0,
+    [](const gggs::GridIndex &) {return false;}, &dropped).empty());
+  EXPECT_EQ(dropped, 0u);
+  EXPECT_EQ(t.owedCount(), 2u);
+
+  t.forget(kA);
+  EXPECT_FALSE(t.owesRefresh(kA));
+  EXPECT_EQ(t.owedCount(), 1u);
+}
+
 }  // namespace cube

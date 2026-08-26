@@ -1580,12 +1580,36 @@ private:
   void trimResidentToBudget()
   {
     const std::set<gggs::GridIndex> still_dirty = geo_map_sheet_->dirtyGrids();
+    std::size_t owing = 0;
     for (const auto & index : geo_map_sheet_->coldTiles(max_resident_tiles_)) {
       if (still_dirty.count(index)) {
         continue;  // unsaved -- never drop (would lose data); retry next cycle
       }
       geo_map_sheet_->dropTile(index);
       evicted_indices_.insert(index);
+      // A tile that leaves RAM can no longer be quantized, so a whole-tile
+      // refresh it still owed is unpayable from here. Discharge the record at
+      // the moment of eviction rather than leaving it for the drain to reap:
+      //
+      //  - the drain reaps lazily inside dueForRefresh, whose early return is
+      //    taken whole when the heal is disabled (interval 0 or budget 0, both
+      //    documented values), so with the heal off the debt set grew for the
+      //    life of the sheet -- unbounded by anything, on the long-duration
+      //    node whose whole eviction design exists to bound RAM;
+      //  - and this is the last moment anything knows the tile existed, so it
+      //    is the only place the operator can be TOLD. The consumer keeps
+      //    whatever gap it has until the tile is revisited.
+      if (refresh_tracker_.owesRefresh(index)) {
+        ++owing;
+        refresh_tracker_.forget(index);
+      }
+    }
+    if (owing > 0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "%zu coverage tile(s) evicted while still owing a whole-tile refresh; "
+        "any sub-window patch lost on them stays missing at the consumer until "
+        "the tile is revisited (durable fix: serve the refresh from the draft "
+        "store, as a TileRequest already is -- #106)", owing);
     }
   }
 

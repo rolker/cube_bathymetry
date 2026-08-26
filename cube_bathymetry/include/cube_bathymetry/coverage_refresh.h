@@ -201,6 +201,14 @@ public:
   /// Tiles currently holding unconfirmed patches.
     std::size_t owedCount() const {return patched_.size();}
 
+  /// Does this tile hold an unconfirmed patch? Lets the caller say so at the
+  /// moment a tile is dropped, which is the only moment the debt becomes
+  /// unpayable and the only moment anything still knows the tile existed.
+    bool owesRefresh(const gggs::GridIndex & index) const
+    {
+      return patched_.count(index) != 0;
+    }
+
   /// Forget a tile entirely (it is gone, and its debt with it).
     void forget(const gggs::GridIndex & index)
     {
