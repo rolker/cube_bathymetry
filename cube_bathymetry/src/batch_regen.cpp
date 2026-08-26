@@ -344,7 +344,16 @@ void BatchRegen::finalize(
     acc.persistResidentTile(idx);
     bathy_persisted_ += acc.bathyTilesPersisted();
     bs_persisted_ += acc.backscatterTilesPersisted();
+    // The gather drives ONE accumulator per tile and calls persistResidentTile,
+    // never ImportAccumulator::finalize -- so the silent-no-op prior guard (#137)
+    // that finalize() emits is unreachable from here, and batch_regen is the
+    // AUTHORITATIVE off-boat rebuild path that also takes --reference-store and
+    // prints the same "Reference-prior seeding from ..." banner. Merge each tile's
+    // tally and report once for the run below.
+    prior_tally_.merge(acc.priorPrimeTally());
   }
+  reportPriorPrimeOutcome(
+    prior_tally_, cfg_.reference_store_dir, cfg_.cell_size_m, "batch_regen");
 
   // Store-level provenance sidecars, written once (uma#248 StoreMetadata).
   if (!cfg_.store_dir.empty() && bathy_metadata != nullptr &&

@@ -104,6 +104,10 @@ public:
 
   /// @brief Gather every tile bucket, build + write each tile once, write the
   ///        store-level metadata, and delete the scratch scatter dir.
+  ///
+  /// Also emits the run-level prior-store WARNING (#137,
+  /// @ref reportPriorPrimeOutcome) when a configured `--reference-store` primed
+  /// nothing for any gathered tile, from the merged per-tile tallies.
     void finalize(
       const marine_bathymetry_store::StoreMetadata * bathy_metadata = nullptr,
       const marine_mbes_backscatter_store::StoreMetadata * bs_metadata = nullptr);
@@ -149,6 +153,12 @@ private:
 
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
+  /// Merged prior-prime tally across every per-tile gather accumulator (#137). The
+  /// gather calls @ref ImportAccumulator::persistResidentTile, never that class's
+  /// `finalize()`, so the silent-no-op prior warning it emits cannot fire from
+  /// here — yet batch_regen is the authoritative off-boat rebuild and takes the
+  /// same `--reference-store`. @ref finalize merges these and reports once.
+    PriorPrimeTally prior_tally_;
   };
 
 }  // namespace cube
