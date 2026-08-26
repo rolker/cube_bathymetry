@@ -219,3 +219,40 @@ board here would not mean the code was reviewed.
   a prerequisite for either verification route, not optional tidying.
 - Local verification standing at `54ade25`: 602 tests, 0 failures, cpplint and
   uncrustify clean (recorded in the `## Implementation` entry).
+
+## Implementation
+
+**Status**: complete
+**When**: 2026-08-26 09:24 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**Branch**: feature/issue-112 at `5589abc`
+**Scope**: both findings from the `## Integrated Review` at `54ade25`.
+
+**Verification**: `colcon test` EXECUTED: **602 tests, 0 errors, 0 failures**,
+70 skipped (cppcheck's own file skips, pre-existing). cpplint and uncrustify
+clean on both changed files. `ci.yml` re-parsed as YAML after editing.
+
+### Findings addressed
+- [x] (valid, Copilot R1 @ `e5a32d7`) `dtypeSize()` sized every non-INT16 dtype
+  at one byte — every dtype `VisualizationBand.msg` declares is now handled by
+  name, and anything else is an explicit `ADD_FAILURE` naming the value
+  (`5589abc`). Copilot argued it as future-proofing; the already-declared
+  `UINT16 = 4` makes it current, and the old fallback produced a failure that
+  accused the message rather than the helper
+- [x] (valid, CI @ `54ade25`) `marine_web_view: Cannot locate rosdep definition
+  for [marine_ais_msgs]` — pruned via COLCON_IGNORE and its key added to
+  `ROSDEP_SKIP_KEYS`, the same two-part treatment the block already documents
+  for `mission_manager*` (`172cd3b`). Cloning `marine_ais` into
+  `upstream.repos` was rejected: it would have cube CI compile a package it
+  never ships, which is what the surrounding comment says not to do. The
+  comment now names the rule rather than just the list
+
+### Notes
+- The CI fix is a prerequisite for BOTH merge-verification routes under
+  ADR-0018, not only hosted Actions: `ci_local.sh` builds `upstream.repos` as
+  an underlay and hits the identical rosdep failure.
+- STILL OPEN, and not a code finding: Copilot has reviewed none of the commits
+  after `e5a32d7` — three attempts, two refused for quota. Hosted CI going green
+  will not change that. A human read or a fresh Copilot run once quota resets is
+  the only way this head gets a second pair of eyes.
