@@ -81,5 +81,14 @@ jobs:
           # upstream.
           # (Option A — clone unh_marine_navigation + build the whole monorepo —
           # was considered in #76 and rejected: no benefit to cube correctness.)
-          ROSDEP_SKIP_KEYS: "marine_nav_interfaces marine_nav_tasks"
-          AFTER_SETUP_UPSTREAM_WORKSPACE: 'for p in mission_manager mission_manager_interfaces marine_autonomy_integration_tests; do find /root/upstream_ws/src -type d -name "$p" -exec touch {}/COLCON_IGNORE \; ; done'
+          #
+          # marine_web_view (added upstream since this list was last touched) is
+          # the same case as mission_manager*: outside cube's build graph, and
+          # carrying a source dep — marine_ais_msgs, from rolker/marine_ais —
+          # that rosdep cannot resolve. It broke every PR in this repo at
+          # setup_upstream_workspace, before cube_bathymetry was built at all.
+          # Pruned and skipped rather than cloned: adding marine_ais to
+          # upstream.repos would make cube CI compile a package it never ships,
+          # which is exactly what the paragraph above says not to do.
+          ROSDEP_SKIP_KEYS: "marine_nav_interfaces marine_nav_tasks marine_ais_msgs"
+          AFTER_SETUP_UPSTREAM_WORKSPACE: 'for p in mission_manager mission_manager_interfaces marine_autonomy_integration_tests marine_web_view; do find /root/upstream_ws/src -type d -name "$p" -exec touch {}/COLCON_IGNORE \; ; done'
