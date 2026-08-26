@@ -1085,10 +1085,10 @@ bool reportPriorPrimeOutcome(
           // Present but unusable is NOT the same fault as absent (#137 review): a
           // coarse tile that merely touches the survey tile's edge shares no cell
           // with it, and a tile FINER than the survey level has no aggregation rule.
-          std::cerr << " No chart or reference tiles overlap the surveyed area. "
-            "(The prior windows did hold tiles that could not gate these tiles --"
-            " finer than the survey level, or coarse tiles that do not contain "
-            "them:";
+          std::cerr << " No chart or reference tile is at the survey level or "
+            "CONTAINS the surveyed tile(s) -- a coverage gap, not a level mismatch. "
+            "The windows did hold overlapping tiles that cannot gate them (finer "
+            "than the survey level, or coarse tiles that do not contain them):";
           for (const auto & [layer, level] : tally.unusable_seen) {
             std::cerr << " " << marine_bathymetry_store::layerDirName(layer) << "@L"
                       << level;

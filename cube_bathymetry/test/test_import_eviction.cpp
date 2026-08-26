@@ -1950,8 +1950,7 @@ TEST(ImportEviction, EdgeAdjacentCoarseNeighborIsNotReportedAsALevelMismatch)
   EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
     << "nothing containing the survey tile exists, so the gate was off; stderr "
     "was:\n" << warned;
-  EXPECT_NE(warned.find("No chart or reference tiles overlap the surveyed area"),
-    std::string::npos)
+  EXPECT_NE(warned.find("a coverage gap, not a level mismatch"), std::string::npos)
     << "an edge-adjacent neighbour gates nothing and must be reported as a COVERAGE "
     "gap, not as a prior tile found over the surveyed area; stderr was:\n" << warned;
   EXPECT_NE(warned.find("coarse tiles that do not contain them"), std::string::npos)
