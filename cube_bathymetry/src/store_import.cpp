@@ -861,10 +861,10 @@ std::vector<const marine_bathymetry_store::BathymetryTile *> findCrossLevelPrior
   return candidates;
 }
 
-// Prime ONE prior layer into @p sheet for survey tile @p index: Phase A (exact
-// same-level match) then, failing that, Phase B (the containment-checked
-// cross-level resample above, finest containing prior first). Predicted-only at
-// both phases.
+// Prime ONE prior layer into @p sheet for survey tile @p index from EVERY usable
+// prior tile it holds -- the containment-checked cross-level candidates above,
+// coarsest first, then the exact same-level tile last so the finest prior with data
+// wins per cell. Predicted-only throughout.
 //
 // Shared by Chart and Reference since #137. Before it, Phase B was Reference-only
 // -- and an ENC chart product is built on the chart scale ladder, so it essentially
@@ -873,10 +873,10 @@ std::vector<const marine_bathymetry_store::BathymetryTile *> findCrossLevelPrior
 // product the Chart layer exists to hold.
 //
 // A MATCH IS NOT A PRIME (#137): both prime helpers skip NaN cells, so a prior tile
-// that covers this survey tile but holds no data over it primes nothing. Every phase
-// therefore keys on the CELL COUNT, not on the match -- and a phase that matched but
-// primed nothing falls through to the next candidate instead of short-circuiting the
-// ones that do have data.
+// that covers this survey tile but holds no data over it primes nothing. The return
+// value therefore keys on the CELL COUNT, not on any tile having matched -- and a
+// prior that holds no data here suppresses nothing, because every usable prior is
+// primed and the coverage is their per-cell UNION rather than the first hit.
 //
 // @p layer_name names the layer in the audit line, @p tool names the tool emitting
 // it. @p tally, when non-null, records what the window held for this tile (split
@@ -923,33 +923,44 @@ bool primeLayerForTile(
     }
   }
 
-  // Phase A -- exact same-level match: a prior tile at the survey GGGS level
-  // coincides cell-for-cell with the survey tile, so prime it directly. An
-  // exact-level tile that is all-NaN over this area primes nothing and falls
-  // through to Phase B rather than suppressing a coarser prior that has data.
-  if (it != tiles.end() && primeFromTile(it->second, sheet, /*seed_settled=*/false) > 0) {
-    return true;
-  }
-  // Phase B -- cross-level fallback (#115 for Reference, extended to Chart by #137),
-  // walking finest-containing to coarsest until one actually primes a cell.
-  for (const marine_bathymetry_store::BathymetryTile * fallback : fallbacks) {
-    if (primeFromTileResample(*fallback, index, sheet) == 0) {
-      continue;  // contains us, but holds no data here -- try the next-coarser prior
+  // COARSEST usable prior first, finest last, each overwriting the cells the
+  // previous one seeded -- so every cell ends up gated by the FINEST prior that has
+  // data there, and a cell no finer prior covers is still gated by a coarser one
+  // (#137 review). Stopping at the first prior that primed >= 1 cell was the bug:
+  // one sliver of data in the finest containing tile suppressed a coarser prior with
+  // full coverage over this tile, leaving most of the tile ungated while the tally
+  // recorded a hit, so nothing warned. `fallbacks` is finest-first, hence the
+  // reverse walk.
+  std::size_t primed_cells = 0;
+  for (auto fallback = fallbacks.rbegin(); fallback != fallbacks.rend(); ++fallback) {
+    const std::size_t n = primeFromTileResample(**fallback, index, sheet);
+    if (n == 0) {
+      continue;  // contains us, but holds no data here
     }
-    // Auditability (#115): name the layer and the fallback level used so the import
-    // log shows which cross-level prior was active. Reported once per (layer, level)
-    // per run (#137) -- per-tile it drowned out the run-level warnings below.
-    const int level = static_cast<int>(fallback->index().level());
+    primed_cells += n;
+    // Auditability (#115): name the layer and the cross-level prior used so the
+    // import log shows which prior is gating. Reported once per (layer, level) per
+    // run (#137) -- per-tile it drowned out the run-level warnings below, and that
+    // dedup only holds when the whole run shares one tally.
+    const int level = static_cast<int>((*fallback)->index().level());
     if (tally == nullptr || tally->audit_seen.insert({layer, level}).second) {
       std::cerr << tool << ": " << layer_name << " blunder gate for survey tile "
-                << index << " seeded via cross-level fallback (" << layer_name
+                << index << " seeded by cross-level resample (" << layer_name
                 << " level " << level
                 << " -> survey level " << static_cast<int>(index.level())
-                << "); reported once per prior level" << std::endl;
+                << "); a coarser prior gates only the cells no finer prior covers; "
+        "reported once per prior level" << std::endl;
     }
-    return true;
   }
-  return false;
+  // Exact same-level match LAST: a prior tile at the survey GGGS level coincides
+  // cell-for-cell with the survey tile, so it is the finest prior available and must
+  // win wherever it has data. An exact-level tile that is all-NaN over this area
+  // primes nothing and leaves the coarser priors' cells standing, rather than
+  // suppressing them (a MATCH IS NOT A PRIME).
+  if (it != tiles.end()) {
+    primed_cells += primeFromTile(it->second, sheet, /*seed_settled=*/false);
+  }
+  return primed_cells > 0;
 }
 
 // Prime the predicted surface of survey tile @p index from the prior store

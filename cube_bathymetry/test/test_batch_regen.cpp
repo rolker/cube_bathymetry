@@ -587,7 +587,7 @@ TEST(BatchRegen, CrossLevelAuditLineIsRunScopedAndNamesBatchRegen)
     log = capture.str();
   }
 
-  EXPECT_EQ(countOccurrences(log, "seeded via cross-level fallback"), 1u)
+  EXPECT_EQ(countOccurrences(log, "seeded by cross-level resample"), 1u)
     << "the audit line claims to be reported once per prior level, so it must be "
     "de-duplicated across the WHOLE rebuild, not per gather accumulator; stderr "
     "was:\n" << log;
