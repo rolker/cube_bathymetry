@@ -39,12 +39,18 @@ namespace cube
 /// @brief Whole-tile refresh policy for the incremental coverage push (#112).
 ///
 /// The live coverage stream is best-effort, and once it carries sub-window
-/// PATCHES a lost message is undiscoverable by the consumer: the producer bumps
-/// the tile's catalog version on a patch exactly as on a whole tile, so a
-/// consumer that records the message stamp as its held version matches the
-/// catalog and never re-requests. CAMP's SonarLiveTile does precisely that
-/// (camp#121), so a dropped patch would leave a permanent, invisible gap in the
-/// operator's coverage display while anti-entropy reported convergence.
+/// PATCHES a lost message can be undiscoverable by the consumer. CAMP's
+/// SonarLiveTile takes possession from a patch (camp#121) and records the
+/// message stamp as its held version, so its held version runs at or ahead of
+/// the catalog whether or not the patch it lost ever arrived -- anti-entropy
+/// reports convergence over a permanent, invisible gap.
+///
+/// The producer now bumps the catalog version ONLY on a whole send, which is
+/// what keeps the catalog meaning "at this version you hold the WHOLE tile"
+/// and stops the second consumer (marine_web_view, which takes possession only
+/// from a whole tile) re-requesting every patched tile in full. But that fixes
+/// only what anti-entropy CAN see: a consumer whose held version already
+/// matches the catalog still cannot discover a patch it never received.
 ///
 /// This tracker is the heal, and its whole point is that it does NOT depend on
 /// the consumer noticing anything: a tile that has received a patch is re-sent

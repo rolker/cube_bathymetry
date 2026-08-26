@@ -23,12 +23,15 @@
 // Whole-tile refresh policy for the sub-window coverage push (#112).
 //
 // The property under test is not "tiles get re-sent" but the reason they must:
-// a sub-window patch is best-effort AND its loss is undiscoverable by the
-// consumer, because the catalog version is bumped on a patch just as on a whole
-// tile. CAMP records the message stamp as its held version (camp#121), matches
-// the catalog, and never re-requests -- so a dropped patch would be a permanent
-// invisible hole. The tracker's job is to make every patched tile go out whole
-// within a bounded interval WITHOUT the consumer noticing anything.
+// a sub-window patch is best-effort AND its loss can be undiscoverable by the
+// consumer. CAMP takes possession from a patch and records the message stamp as
+// its held version (camp#121), so its held version sits at or ahead of the
+// catalog whether or not the patch it lost ever arrived, and it never
+// re-requests -- a dropped patch would be a permanent invisible hole.
+// (The producer bumps the catalog only on a whole send, which fixes what
+// anti-entropy CAN see; it cannot help a consumer already level with it.)
+// The tracker's job is to make every patched tile go out whole within a
+// bounded interval WITHOUT the consumer noticing anything.
 
 #include <gtest/gtest.h>
 
