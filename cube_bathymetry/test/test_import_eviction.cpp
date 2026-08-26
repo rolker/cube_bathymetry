@@ -2069,4 +2069,80 @@ TEST(ImportEviction, SliverInTheFinestPriorDoesNotSuppressAFullCoverageCoarserPr
   std::filesystem::remove_all(root);
 }
 
+// An EMPTY processed tile in the output store must not short-circuit the prior rung
+// (#137 review). Rung 1 returned on the mere existence of a `processed/` tile, so an
+// all-no-data tile (a tile written for an area that produced no accepted soundings)
+// left the survey tile ungated on a re-import -- and the run-level warning's scoping
+// clause then positively vouched for it as "warm-started".
+TEST(ImportEviction, EmptyProcessedTileFallsThroughToThePriorRung)
+{
+  const std::string root = makeTempDir("empty_processed_warm_start");
+  const std::string prior_dir = root + "/prior_store";
+  const std::string out = root + "/out";
+
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // A shallow reference prior at the survey level: it WILL gate the deep blunder,
+  // but only if rung 1 lets the tile reach it.
+  {
+    marine_bathymetry_store::BathymetryTile tile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+  // An existing OUTPUT store whose processed tile for this area is all no-data.
+  {
+    const double kNoData = std::numeric_limits<double>::quiet_NaN();
+    marine_bathymetry_store::BathymetryTile hollow(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      hollow.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{kNoData, kNoData});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(hollow));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Processed, std::move(tiles));
+    marine_bathymetry_store::save(store, out);
+  }
+
+  std::string log;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+    acc.finalize();
+    log = capture.str();
+  }
+
+  EXPECT_TRUE(loadBathyCells(out).empty())
+    << "the empty processed tile warm-starts nothing, so the tile must reach the "
+    "prior rung and be gated; import log was:\n" << log;
+  EXPECT_EQ(log.find("warm-started"), std::string::npos)
+    << "an empty processed tile must not be reported to the operator as a "
+    "warm-started tile; import log was:\n" << log;
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube

@@ -1228,8 +1228,13 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
       auto it = tiles.find(index);
       if (it != tiles.end()) {
         // Settled warm-start: the processed layer round-trips as a CUBE hypothesis
-        // and refines under new soundings (ADR-0001).
-        primeFromTile(it->second, sheet_, /*seed_settled=*/true);
+        // and refines under new soundings (ADR-0001). A MATCH IS NOT A PRIME (#137
+        // review): an on-disk processed tile that holds no data over this area
+        // warm-starts nothing, so it must not short-circuit the prior rung below --
+        // the tile would then run ungated on the strength of an empty file, and the
+        // run-level warning's scoping clause would positively vouch for it.
+        const std::size_t warm_started =
+          primeFromTile(it->second, sheet_, /*seed_settled=*/true);
         // Reconstruct each cell's corrected-intensity Welford from the survey
         // backscatter tile so the re-run's beams blend with the stored population
         // (lossless backscatter seed). welfordFromCell inverts the 3-band write.
@@ -1250,14 +1255,18 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
             }
           }
         }
-        // A tile warm-started from the output store's own survey layer returns
-        // HERE, before the prior rung -- it is not a prior-prime attempt, and the
-        // run-level warning must not claim the gate was off for it (#137).
-        if (!cfg_.reference_store_dir.empty()) {
-          ++priorTally().survey_warm_starts;
+        if (warm_started > 0) {
+          // A tile warm-started from the output store's own processed layer returns
+          // HERE, before the prior rung -- it is not a prior-prime attempt, and the
+          // run-level warning must not claim the gate was off for it (#137).
+          if (!cfg_.reference_store_dir.empty()) {
+            ++priorTally().survey_warm_starts;
+          }
+          seeded_.insert(index);
+          return true;
         }
-        seeded_.insert(index);
-        return true;
+        // else: the tile exists on disk but seeded no cell -- fall through to the
+        // prior rung so the blunder gate still gets its chance.
       }
     } catch (const std::exception & e) {
       // Distinguish a PERMANENT store-wide failure from a transient per-tile one.
