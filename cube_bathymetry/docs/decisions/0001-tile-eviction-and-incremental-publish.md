@@ -241,10 +241,16 @@ The startup-prime (#21) and revisit-reload (#70) paths generalize into a single
    backscatter, and is **not counted as measured data**. A prior tile at the
    survey level primes cell-for-cell; a **coarser** prior tile (a multi-level
    prior — `loadWindow` returns tiles at any level, keyed by their own level, so the
-   same-level lookup misses them) is handled by a level-walk fallback (#115): the
-   finest coarser tile *containing* this survey tile **that actually holds data
-   there** is resampled (nearest-neighbour on cell center) onto the fine survey
-   cells, and the fallback layer+level is logged for auditability. **#137 extended
+   same-level lookup misses them) is handled by a level walk (#115): **every**
+   coarser tile *containing* this survey tile is resampled (nearest-neighbour on
+   cell center) onto the fine survey cells, **coarsest first**, then the exact-level
+   tile last — so each survey cell ends up gated by the FINEST prior that holds data
+   there, and a cell no finer prior covers is still gated by a coarser one. Each
+   contributing layer+level is logged for auditability. The walk stopped at the first
+   containing tile that seeded *any* cell until #137's review round: one sliver of
+   data in the finest containing tile then suppressed a coarser prior with full
+   coverage, leaving most of the survey tile ungated while the run tally recorded a
+   hit — so nothing warned either. **#137 extended
    that fallback from `reference/` to `chart/` as well**, because an ENC chart
    product is built on the chart scale ladder and essentially never has a tile at
    the survey level — so the exact-level-only chart prime missed every time and the
@@ -264,9 +270,11 @@ The startup-prime (#21) and revisit-reload (#70) paths generalize into a single
    `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData` (gate-only, not settled),
    `test_import_eviction.CoarseLevelReferenceSeedRejectsDeepBlunder` and
    `.CoarseLevelChartSeedRejectsDeepBlunder` (the cross-level fallback gates a deep
-   blunder on each layer), and `.MatchedButEmptyChartPriorStillWarns` /
+   blunder on each layer), `.MatchedButEmptyChartPriorStillWarns` /
    `.EmptyExactLevelChartPriorFallsThroughToCoarsePrior` (a matched-but-no-data prior
-   is not a gate).
+   is not a gate), and
+   `.SliverInTheFinestPriorDoesNotSuppressAFullCoverageCoarserPrior` (the gate covers
+   the per-cell union of the usable priors, not the first one to seed a cell).
 3. else **blank**.
 
 `seed_settled` is thus the contract boundary between *measured* (survey: settled +
