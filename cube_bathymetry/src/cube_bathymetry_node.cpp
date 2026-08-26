@@ -568,7 +568,12 @@ public:
     refresh_desc.description =
       "Seconds a patched coverage tile may go without being re-sent WHOLE. "
       "SETTABLE AT RUNTIME -- a set is validated and applied to the live "
-      "tracker, not stored and ignored. "
+      "tracker, not stored and ignored. The latency is a TARGET UNDER LOAD, "
+      "not a bound: the drain clears at most "
+      "subwindow_refresh_tiles_per_cycle tiles per 5 s tick, so a turn that "
+      "quiets more tiles than that at once heals them oldest-first over "
+      "longer than this interval. A throttled WARN says so when it happens, "
+      "rather than leaving a guarantee to be inferred. "
       "This is the heal for a lost sub-window patch, and it does not depend on "
       "the consumer noticing anything. Lower heals faster and costs more: "
       "measured on the 2026-08-25 Appledore bags, 300s/60s/30s cost 7.9/11.2/"
@@ -1192,6 +1197,28 @@ private:
     RCLCPP_DEBUG(get_logger(),
       "Coverage refresh: re-sent %zu whole tile(s); %zu still owed",
       due.size(), refresh_tracker_.owedCount());
+
+    // The heal latency is a target under load, not a bound (see
+    // CoverageRefreshTracker). When the backlog outruns the budget, the
+    // operator's coverage can carry gaps older than subwindow_refresh_interval
+    // implies -- and the only other signal is the DEBUG line above, which is
+    // off in the field. Say it at WARN rather than let a guarantee be inferred
+    // that is not being met.
+    if (subwindow_refresh_interval_s_ > 0.0 &&
+      refresh_tracker_.backlogExceedsBudget(
+        subwindow_refresh_interval_s_ / kRefreshDrainIntervalSeconds))
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Coverage refresh is behind: %zu tile(s) owe a whole-tile re-send, "
+        "more than the %.0f this budget clears in one %.0f s interval. A "
+        "sub-window patch lost on those tiles stays missing longer than the "
+        "interval implies. Raise subwindow_refresh_tiles_per_cycle (costs "
+        "link bandwidth) or accept the longer heal.",
+        refresh_tracker_.owedCount(),
+        static_cast<double>(subwindow_refresh_tiles_per_cycle_) *
+        (subwindow_refresh_interval_s_ / kRefreshDrainIntervalSeconds),
+        subwindow_refresh_interval_s_);
+    }
   }
 
   // Incremental coverage: emit each changed tile as its own GridMap on ~/tiles,

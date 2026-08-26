@@ -47,9 +47,18 @@ namespace cube
 /// operator's coverage display while anti-entropy reported convergence.
 ///
 /// This tracker is the heal, and its whole point is that it does NOT depend on
-/// the consumer noticing anything: every tile that has received a patch is
-/// re-sent WHOLE within @ref interval seconds, so a lost patch is a gap of
-/// bounded duration instead of a permanent one.
+/// the consumer noticing anything: a tile that has received a patch is re-sent
+/// WHOLE within @ref interval seconds, BUDGET PERMITTING, so a lost patch is a
+/// gap of bounded duration instead of a permanent one.
+///
+/// "Budget permitting" is not a hedge. The drain clears at most
+/// `tiles_per_cycle` tiles per tick, so at the defaults it heals 24 quiet tiles
+/// per 60 s interval; a line-end turn that quiets more than that at once
+/// degrades the actual latency, oldest-debt-first, until the backlog clears.
+/// No tile is starved -- the ordering guarantees that -- but the interval is a
+/// target under load, not a bound. @ref backlogExceedsBudget lets the caller
+/// say so out loud rather than let the operator infer a guarantee that is not
+/// being met.
 ///
 /// Node-free by design (plain seconds, no rclcpp) so the policy is unit-tested
 /// directly rather than through the node, whose publish path has no test
@@ -164,6 +173,23 @@ public:
         out.push_back(entry.second);
     }
       return out;
+    }
+
+  /// Is the outstanding debt larger than the drain can clear in one interval?
+  ///
+  /// @param cycles_per_interval How many drain ticks fit in one interval.
+  /// The caller knows the tick period; the tracker deliberately does not.
+  /// True means the stated heal latency is NOT currently being met, which is
+  /// worth an operator-visible warning: the coverage they are looking at may
+  /// carry gaps older than the interval implies.
+    bool backlogExceedsBudget(double cycles_per_interval) const
+    {
+      if (tiles_per_cycle_ == 0 || interval_s_ <= 0.0 || cycles_per_interval <= 0.0) {
+        return false;  // the heal is off; there is no latency to fail to meet
+      }
+      const double clearable =
+        static_cast < double > (tiles_per_cycle_) * cycles_per_interval;
+      return static_cast < double > (patched_.size()) > clearable;
     }
 
   /// Tiles currently holding unconfirmed patches.

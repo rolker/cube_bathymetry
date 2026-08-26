@@ -246,9 +246,9 @@ TEST(CoverageRefresh, ClearForgetsEverything)
   EXPECT_EQ(t.owedCount(), 0u);
   // Due again immediately, and that is the point: after a clear this tracker
   // describes a sheet that has sent NOTHING whole, so the next message for any
-  // tile must be the whole tile. Treating a cleared tile as satisfied would
-  // suppress the heal for exactly the tiles a reconfigure is most likely to
-  // have left a consumer stale on.
+  // tile must be the whole tile. The alternative -- treating a cleared tile as
+  // satisfied -- would suppress the heal for exactly the tiles a reconfigure is
+  // most likely to have left a consumer stale on.
   EXPECT_TRUE(t.refreshDue(kA, 1000.0));
   // And nothing is measured from a whole send the new sheet never made.
   t.notePublished(kA, 2000.0, false);
@@ -271,6 +271,39 @@ TEST(CoverageRefresh, FirstMessageForATileIsAlwaysWhole)
   // And it stops being due once the whole tile has actually gone out.
   t.notePublished(kA, 1.0, true);
   EXPECT_FALSE(t.refreshDue(kA, 1.0));
+}
+
+// The backlog signal: true exactly when the outstanding debt is larger than
+// the drain can clear in one interval, i.e. when the stated latency is not
+// being met and the operator should be told rather than left to infer it.
+TEST(CoverageRefresh, BacklogExceedsBudgetReportsAnUnmeetableLatency)
+{
+  auto t = makeTracker(60.0, 2);          // 2 per tick
+  const double cycles_per_interval = 12;  // 60 s / 5 s tick -> clears 24
+  EXPECT_FALSE(t.backlogExceedsBudget(cycles_per_interval));
+
+  // 24 owed is exactly clearable; 25 is not.
+  std::vector<gggs::GridIndex> tiles;
+  for (int i = 0; i < 25; ++i) {
+    tiles.push_back(tileAt(43.07 + 0.01 * i, -70.76));
+  }
+  for (int i = 0; i < 24; ++i) {
+    t.notePublished(tiles[i], 0.0, true);
+    t.notePublished(tiles[i], 1.0, false);
+  }
+  EXPECT_FALSE(t.backlogExceedsBudget(cycles_per_interval)) << "24 is clearable";
+  t.notePublished(tiles[24], 0.0, true);
+  t.notePublished(tiles[24], 1.0, false);
+  EXPECT_TRUE(t.backlogExceedsBudget(cycles_per_interval));
+
+  // With the heal disabled there is no latency to fail to meet, so the signal
+  // must stay quiet rather than fire permanently.
+  auto disabled = makeTracker(0.0, 2);
+  disabled.notePublished(kA, 0.0, false);
+  EXPECT_FALSE(disabled.backlogExceedsBudget(cycles_per_interval));
+  auto no_budget = makeTracker(60.0, 0);
+  no_budget.notePublished(kA, 0.0, false);
+  EXPECT_FALSE(no_budget.backlogExceedsBudget(cycles_per_interval));
 }
 
 // The whole/patch decision is read off the window, which is what the consumer
