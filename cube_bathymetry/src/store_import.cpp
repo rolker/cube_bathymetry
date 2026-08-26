@@ -220,7 +220,7 @@ IntensityWelford welfordFromCell(
   return w;
 }
 
-void primeFromTileSkippingMask(
+std::size_t primeFromTileSkippingMask(
   const marine_bathymetry_store::BathymetryTile & tile,
   const marine_bathymetry_store::BathymetryTile * mask, GeoMapSheet & map_sheet,
   bool seed_settled)
@@ -249,7 +249,11 @@ void primeFromTileSkippingMask(
   const std::vector<double> * mask_depth = mask ? &mask->depthBand() : nullptr;
 
   // Walk the tile in GGGS cell order (row 0 = south, row-major) -- the same order
-  // BathymetryTile's bands use -- and prime every finite-depth cell.
+  // BathymetryTile's bands use -- and prime every finite-depth cell. `primed`
+  // counts the cells actually seeded (#137): a caller asking "did this tile gate
+  // anything?" must not read a MATCHED tile as a primed one -- an all-NaN prior
+  // tile over this area matches and primes nothing.
+  std::size_t primed = 0;
   gggs::CellAreaIterator it(grid);
   std::size_t k = 0;
   for (; it.valid() && k < depth.size(); it.next(), ++k) {
@@ -273,6 +277,7 @@ void primeFromTileSkippingMask(
     variance = std::max(variance, kPrimeVarianceFloor);
     map_sheet.setPredictedDepthAt(
       *it, static_cast<float>(d), static_cast<float>(variance));
+    ++primed;
 
     if (!seed_settled) {
       // Predicted-only prime (cube#89): seed the slope/blunder-rejection prior
@@ -292,14 +297,15 @@ void primeFromTileSkippingMask(
     // interval, exactly what seedSettledDepth() expects.
     map_sheet.setSettledDepthAt(*it, static_cast<float>(d), static_cast<float>(u));
   }
+  return primed;
 }
 
-void primeFromTile(
+std::size_t primeFromTile(
   const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
   bool seed_settled)
 {
   // No overlap mask: prime every finite-depth cell (the single-layer prime path).
-  primeFromTileSkippingMask(tile, /*mask=*/nullptr, map_sheet, seed_settled);
+  return primeFromTileSkippingMask(tile, /*mask=*/nullptr, map_sheet, seed_settled);
 }
 
 void loadIntoSheet(
@@ -635,15 +641,15 @@ namespace
 // @p read_ok (optional out): set true when the windowed prior load completed, false
 // when it THREW -- distinct from the bool return ("did any rung prime a cell"), so a
 // caller can tell a transient read failure (retry) from a store with no prior here.
-// @p found_layers_out (optional out): every (layer, GGGS level) pair present in the
-// loaded window, whether or not it primed anything. The run-level no-prior warning
-// (#137) reports these so a level/area mismatch is visible rather than silent.
+// @p tally (optional in/out): the run-level PriorPrimeTally (#137). This function
+// owns every field of it except `survey_warm_starts` -- it counts the attempt, the
+// hit (a hit is at least one primed CELL, never merely a matched tile), a read
+// failure, the (layer, level) pairs the window held, and the audit-line dedup set --
+// so the two call sites cannot drift in how they tally.
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  bool * read_ok = nullptr,
-  std::set<std::pair<marine_bathymetry_store::SourceLayer, int>> *
-  found_layers_out = nullptr);
+  bool * read_ok = nullptr, PriorPrimeTally * tally = nullptr);
 }  // namespace
 
 bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
@@ -664,12 +670,10 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   // prior-only cells.
   bool prior_read_ok = true;
   if (!cfg_.reference_store_dir.empty()) {
-    ++prior_prime_attempts_;
     if (primePriorLayersForTile(
         cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "revisit",
-        &prior_read_ok, &prior_layers_seen_))
+        &prior_read_ok, &prior_tally_))
     {
-      ++prior_prime_hits_;
       // Observability (#118): make gate re-activation visible in the import log.
       std::cerr << "import_bag: re-primed prior gate for revisited tile " <<
         index << std::endl;
@@ -743,7 +747,12 @@ namespace
 //
 // Predicted-only, exactly like primeFromTile(seed_settled=false): the coarse prior
 // turns the gate on but is never settled as measured data and seeds no backscatter.
-void primeFromTileResample(
+//
+// @return the number of survey cells actually PRIMED. A coarse tile can match this
+// survey tile geometrically and still prime nothing (every covering coarse cell is
+// NaN -- an ENC product with a hole over this area), so the caller must key "the
+// gate is on for this tile" on this count, never on the match (#137).
+std::size_t primeFromTileResample(
   const marine_bathymetry_store::BathymetryTile & coarse_tile,
   const gggs::GridIndex & survey_index, GeoMapSheet & map_sheet)
 {
@@ -759,6 +768,7 @@ void primeFromTileResample(
   const double half_cell_lon =
     survey_index.longitudinalSpan() / gggs::GridIndex::cellColumnCount() * 0.5;
 
+  std::size_t primed = 0;
   gggs::CellAreaIterator it(survey_index);
   for (; it.valid(); it.next()) {
     const geographic_msgs::msg::GeoPoint sw = (*it).position();
@@ -783,22 +793,25 @@ void primeFromTileResample(
     variance = std::max(variance, kPrimeVarianceFloor);
     map_sheet.setPredictedDepthAt(
       *it, static_cast<float>(cell.depth), static_cast<float>(variance));
+    ++primed;
   }
+  return primed;
 }
 
-// Find the finest COARSER tile in @p tiles that CONTAINS survey tile @p index, or
-// nullptr when none does. Extracted verbatim from the #115 Reference walk so Chart
-// can share it (#137) -- only its layer became a parameter; the containment logic
-// is unchanged and still covered by the boundary test.
+// Every COARSER tile in @p tiles that CONTAINS survey tile @p index, ordered FINEST
+// first (closest to the survey resolution). Empty when none does. Extracted from the
+// #115 Reference walk so Chart can share it (#137) -- the containment logic is
+// unchanged and still covered by the boundary test; it returns the whole ordered
+// candidate list rather than only the winner so the caller can fall through to the
+// next-coarser prior when the finest one holds no data over this survey tile.
 //
 // loadWindow ALSO returns tiles at coarser levels, but each is keyed by its own
 // (coarser) GridIndex, so an exact `tiles.find(index)` misses them and a
 // multi-level prior store (e.g. ENC exports at L2/L6/L7/L8 under an L10 survey)
 // leaves the blunder gate silently inactive. GGGS is nested, so exactly one coarse
-// tile per level contains this survey tile; pick the FINEST such tile (highest
-// level number below the survey level -- closest to the survey resolution, still
-// shoal-biased/conservative for a false-deep gate) and resample its shallow prior
-// onto the fine survey cells.
+// tile per level contains this survey tile; the finest one (highest level number
+// below the survey level) is preferred, and each coarser one is still
+// shoal-biased/conservative for a false-deep gate.
 //
 // Containment must be VERIFIED, not assumed from level alone: loadWindow's overlap
 // test is inclusive (tile_io.cpp tileOverlapsBox -- a coarse tile whose edge merely
@@ -809,7 +822,7 @@ void primeFromTileResample(
 // the #115 silent gate-off for boundary tiles. GGGS nesting gives the containing
 // coarse tile at any level as the one holding the survey tile's CENTER, so match on
 // that and reject any neighbor the inclusive window also returned.
-const marine_bathymetry_store::BathymetryTile * findCrossLevelPrior(
+std::vector<const marine_bathymetry_store::BathymetryTile *> findCrossLevelPriors(
   const std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> & tiles,
   const gggs::GridIndex & index)
 {
@@ -818,7 +831,7 @@ const marine_bathymetry_store::BathymetryTile * findCrossLevelPrior(
   const geographic_msgs::msg::GeoPoint survey_center = gggs::geoPoint(
     0.5 * (survey_sw.latitude + survey_ne.latitude),
     0.5 * (survey_sw.longitude + survey_ne.longitude));
-  const marine_bathymetry_store::BathymetryTile * fallback = nullptr;
+  std::vector<const marine_bathymetry_store::BathymetryTile *> candidates;
   for (const auto & entry : tiles) {
     const gggs::GridIndex & cand = entry.first;
     if (cand.level() >= index.level()) {
@@ -827,18 +840,23 @@ const marine_bathymetry_store::BathymetryTile * findCrossLevelPrior(
     if (gggs::Level(cand.level()).gridIndex(survey_center) != cand) {
       continue;  // edge-adjacent neighbor, not the tile that contains us
     }
-    if (fallback == nullptr ||
-      cand.level() > fallback->index().level())
-    {
-      fallback = &entry.second;
-    }
+    candidates.push_back(&entry.second);
   }
-  return fallback;
+  // Finest (highest level number) first. Stable: at most one containing tile exists
+  // per level, so the order is fully determined by the level.
+  std::sort(
+    candidates.begin(), candidates.end(),
+    [](const marine_bathymetry_store::BathymetryTile * a,
+    const marine_bathymetry_store::BathymetryTile * b) {
+      return a->index().level() > b->index().level();
+    });
+  return candidates;
 }
 
 // Prime ONE prior layer into @p sheet for survey tile @p index: Phase A (exact
 // same-level match) then, failing that, Phase B (the containment-checked
-// cross-level resample above). Predicted-only at both phases.
+// cross-level resample above, finest containing prior first). Predicted-only at
+// both phases.
 //
 // Shared by Chart and Reference since #137. Before it, Phase B was Reference-only
 // -- and an ENC chart product is built on the chart scale ladder, so it essentially
@@ -846,33 +864,52 @@ const marine_bathymetry_store::BathymetryTile * findCrossLevelPrior(
 // every time on a real ENC prior and the gate stayed silently off for exactly the
 // product the Chart layer exists to hold.
 //
-// @p layer_name names the layer in the audit line. Returns true when it primed.
+// A MATCH IS NOT A PRIME (#137): both prime helpers skip NaN cells, so a prior tile
+// that covers this survey tile but holds no data over it primes nothing. Every phase
+// therefore keys on the CELL COUNT, not on the match -- and a phase that matched but
+// primed nothing falls through to the next candidate instead of short-circuiting the
+// ones that do have data.
+//
+// @p layer_name names the layer in the audit line. @p audit_seen, when non-null,
+// de-duplicates that line to the first occurrence per (layer, prior level) so a
+// large import does not bury the run-level warnings under one line per tile.
+// @return true only when at least one survey CELL was primed.
 bool primeLayerForTile(
   const std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> & tiles,
-  const gggs::GridIndex & index, GeoMapSheet & sheet, const char * layer_name)
+  const gggs::GridIndex & index, GeoMapSheet & sheet,
+  marine_bathymetry_store::SourceLayer layer, const char * layer_name,
+  std::set<std::pair<marine_bathymetry_store::SourceLayer, int>> * audit_seen)
 {
   // Phase A -- exact same-level match: a prior tile at the survey GGGS level
-  // coincides cell-for-cell with the survey tile, so prime it directly.
+  // coincides cell-for-cell with the survey tile, so prime it directly. An
+  // exact-level tile that is all-NaN over this area primes nothing and falls
+  // through to Phase B rather than suppressing a coarser prior that has data.
   auto it = tiles.find(index);
-  if (it != tiles.end()) {
-    primeFromTile(it->second, sheet, /*seed_settled=*/false);
+  if (it != tiles.end() && primeFromTile(it->second, sheet, /*seed_settled=*/false) > 0) {
     return true;
   }
-  // Phase B -- cross-level fallback (#115 for Reference, extended to Chart by #137).
-  const marine_bathymetry_store::BathymetryTile * fallback =
-    findCrossLevelPrior(tiles, index);
-  if (fallback == nullptr) {
-    return false;
+  // Phase B -- cross-level fallback (#115 for Reference, extended to Chart by #137),
+  // walking finest-containing to coarsest until one actually primes a cell.
+  for (const marine_bathymetry_store::BathymetryTile * fallback :
+    findCrossLevelPriors(tiles, index))
+  {
+    if (primeFromTileResample(*fallback, index, sheet) == 0) {
+      continue;  // contains us, but holds no data here -- try the next-coarser prior
+    }
+    // Auditability (#115): name the layer and the fallback level used so the import
+    // log shows which cross-level prior was active. Reported once per (layer, level)
+    // per run (#137) -- per-tile it drowned out the run-level warnings below.
+    const int level = static_cast<int>(fallback->index().level());
+    if (audit_seen == nullptr || audit_seen->insert({layer, level}).second) {
+      std::cerr << "import_bag: " << layer_name << " blunder gate for survey tile "
+                << index << " seeded via cross-level fallback (" << layer_name
+                << " level " << level
+                << " -> survey level " << static_cast<int>(index.level())
+                << "); reported once per prior level" << std::endl;
+    }
+    return true;
   }
-  primeFromTileResample(*fallback, index, sheet);
-  // Auditability (#115): name the layer and the fallback level used so the import
-  // log shows which cross-level prior was active for this tile.
-  std::cerr << "import_bag: " << layer_name << " blunder gate for survey tile "
-            << index << " seeded via cross-level fallback (" << layer_name
-            << " level " << static_cast<int>(fallback->index().level())
-            << " -> survey level " << static_cast<int>(index.level()) << ")"
-            << std::endl;
-  return true;
+  return false;
 }
 
 // Prime the predicted surface of survey tile @p index from the prior store
@@ -891,18 +928,21 @@ bool primeLayerForTile(
 //     the tile ARE dropped (the offline import is single-pass) -- gate
 //     integrity over one batch's coverage.
 // @p context names the caller in the audit/error lines.
-// @p found_layers_out (optional out): every (layer, GGGS level) pair present in the
-// loaded window, whether or not it primed. Fed to the run-level no-prior warning
-// (#137) so a level/area mismatch is reported instead of failing silently.
-// Returns true when any rung primed something.
+// @p tally (optional in/out): the run-level PriorPrimeTally (#137). Every attempt,
+// hit, read failure, (layer, level) pair the window held, and audit-line dedup entry
+// is recorded HERE rather than at the call sites, so the two callers cannot drift.
+// Returns true when at least one CELL was primed (a matched-but-empty prior tile is
+// not a prime -- it gates nothing).
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  bool * read_ok,
-  std::set<std::pair<marine_bathymetry_store::SourceLayer, int>> * found_layers_out)
+  bool * read_ok, PriorPrimeTally * tally)
 {
   if (read_ok != nullptr) {
     *read_ok = true;  // flipped to false only if the windowed load below THROWS
+  }
+  if (tally != nullptr) {
+    ++tally->attempts;
   }
   bool primed = false;
   try {
@@ -924,12 +964,15 @@ bool primePriorLayersForTile(
       const auto & tiles = ref.tiles(layer);
       // Record what the window actually held BEFORE matching, so a run that primes
       // nothing can still say which layers/levels were present (#137).
-      if (found_layers_out != nullptr) {
+      if (tally != nullptr) {
         for (const auto & entry : tiles) {
-          found_layers_out->insert({layer, static_cast<int>(entry.first.level())});
+          tally->layers_seen.insert({layer, static_cast<int>(entry.first.level())});
         }
       }
-      if (primeLayerForTile(tiles, index, sheet, layer_name)) {
+      if (primeLayerForTile(
+          tiles, index, sheet, layer, layer_name,
+          tally != nullptr ? &tally->audit_seen : nullptr))
+      {
         primed = true;
       }
     }
@@ -937,14 +980,87 @@ bool primePriorLayersForTile(
     if (read_ok != nullptr) {
       *read_ok = false;  // transient read failure -- caller may keep the tile evicted
     }
+    // Tallied apart from a genuine no-coverage miss (#137): an unreadable, corrupt
+    // or permission-denied prior store must never be reported to the operator as
+    // "no prior tiles overlap the surveyed area" -- the remedies are different.
+    if (tally != nullptr) {
+      ++tally->read_failures;
+    }
     std::cerr << "import_bag: could not prior-seed tile " << index << " on " <<
       context << ": " << e.what() << " (no prior gate for this tile)" <<
       std::endl;
+  }
+  if (primed && tally != nullptr) {
+    ++tally->hits;
   }
   return primed;
 }
 
 }  // namespace
+
+void PriorPrimeTally::merge(const PriorPrimeTally & other)
+{
+  attempts += other.attempts;
+  hits += other.hits;
+  read_failures += other.read_failures;
+  survey_warm_starts += other.survey_warm_starts;
+  layers_seen.insert(other.layers_seen.begin(), other.layers_seen.end());
+  audit_seen.insert(other.audit_seen.begin(), other.audit_seen.end());
+}
+
+bool reportPriorPrimeOutcome(
+  const PriorPrimeTally & tally, const std::string & prior_store_dir,
+  float cell_size_m, const char * tool)
+{
+  // Silent-no-op guard (#137). A run given --reference-store that primed NOT ONE
+  // CELL means the blunder gate was off for every tile that consulted the prior --
+  // yet the startup banner announced prior seeding, so the operator reasonably
+  // concludes it was on. That is how an ENC chart prior behaved before this issue's
+  // fix: present, announced, and never consulted.
+  if (tally.attempts == 0 || tally.hits > 0) {
+    return false;
+  }
+  // "attempt(s)", not "tile(s)": an evicted tile that is revisited re-primes and so
+  // counts again (#137 review).
+  std::cerr << tool << ": WARNING -- prior store '" << prior_store_dir
+            << "' primed NOTHING on any of " << tally.attempts
+            << " prior-seed attempt(s) (first touch + evicted-tile revisits, so a "
+    "revisited tile counts more than once): the blunder gate was INACTIVE for "
+    "every tile that reached the prior rung.";
+  // Scope the claim (#137 review): a tile warm-started from the output store's own
+  // survey layer returns before the prior rung, so "this entire run" would be false
+  // on a mixed re-import where most tiles warm-started.
+  if (tally.survey_warm_starts > 0) {
+    std::cerr << " (" << tally.survey_warm_starts
+              << " further tile(s) warm-started from the output store's survey "
+      "layer and never reached the prior rung.)";
+  }
+  if (tally.read_failures > 0) {
+    // A store that could not be READ is a different fault with a different remedy
+    // than a store that does not cover the survey -- never conflate them.
+    std::cerr << " " << tally.read_failures << " of those attempt(s) FAILED to read "
+      "the prior store (see the per-tile errors above): this may be an unreadable, "
+      "corrupt or permission-denied store rather than a coverage gap.";
+  }
+  if (tally.layers_seen.empty()) {
+    if (tally.read_failures >= tally.attempts) {
+      std::cerr << " No prior tiles could be listed at all, because every windowed "
+        "load failed.";
+    } else {
+      std::cerr << " No chart or reference tiles overlap the surveyed area.";
+    }
+  } else {
+    std::cerr << " Prior tiles found over the surveyed area:";
+    for (const auto & [layer, level] : tally.layers_seen) {
+      std::cerr << " " << marine_bathymetry_store::layerDirName(layer) << "@L"
+                << level;
+    }
+    std::cerr << " vs survey level " << static_cast<int>(
+      gggs::Level::fromCellSize(cell_size_m).level()) << ".";
+  }
+  std::cerr << std::endl;
+  return true;
+}
 
 bool legacySurveyDirPersists(const std::string & store_dir)
 {
@@ -1041,6 +1157,12 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
             }
           }
         }
+        // A tile warm-started from the output store's own survey layer returns
+        // HERE, before the prior rung -- it is not a prior-prime attempt, and the
+        // run-level warning must not claim the gate was off for it (#137).
+        if (!cfg_.reference_store_dir.empty()) {
+          ++prior_tally_.survey_warm_starts;
+        }
         seeded_.insert(index);
         return true;
       }
@@ -1087,13 +1209,9 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
   // cell as measured data (no values() output, sheet stays clean) and seeds NO
   // backscatter. Shared with the revisit reload (#118) via primePriorLayersForTile.
   if (!cfg_.reference_store_dir.empty()) {
-    ++prior_prime_attempts_;
-    if (primePriorLayersForTile(
-        cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "first touch",
-        nullptr, &prior_layers_seen_))
-    {
-      ++prior_prime_hits_;
-    }
+    primePriorLayersForTile(
+      cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "first touch",
+      nullptr, &prior_tally_);
   }
 
   // else blank -- nothing to seed; still mark it seeded so we do not retry.
@@ -1207,6 +1325,16 @@ void ImportAccumulator::finalize(
   const marine_bathymetry_store::StoreMetadata * bathy_metadata,
   const marine_mbes_backscatter_store::StoreMetadata * bs_metadata)
 {
+  // Silent-no-op guard (#137), emitted FIRST: the persists below have no try around
+  // them, so a throw there would swallow the warning entirely -- and the tally is
+  // complete by now (nothing after this point primes anything). Once only: the tally
+  // is deliberately not cleared (batch-regen merges tallies after the fact), so a
+  // second finalize() would otherwise repeat the line.
+  if (!prior_outcome_reported_) {
+    prior_outcome_reported_ = true;
+    reportPriorPrimeOutcome(
+      prior_tally_, cfg_.reference_store_dir, cfg_.cell_size_m, "import_bag");
+  }
   // Persist every still-resident tile (evicted tiles are already durable). Snapshot
   // the indices first so the persist loop iterates a stable, deterministic order.
   std::vector<gggs::GridIndex> resident;
@@ -1233,29 +1361,6 @@ void ImportAccumulator::finalize(
   {
     std::filesystem::create_directories(cfg_.bs_store_dir);
     bs_metadata->save(cfg_.bs_store_dir);
-  }
-  // Silent-no-op guard (#137). A run given --reference-store that primed NOT ONE
-  // tile means the blunder gate was off for the whole import -- yet the startup
-  // banner announced prior seeding, so the operator reasonably concludes it was on.
-  // That is how an ENC chart prior behaved before this issue's fix: present,
-  // announced, and never consulted. Say so, and name what the prior store actually
-  // held, so a level or coverage mismatch is reported rather than inferred.
-  if (prior_prime_attempts_ > 0 && prior_prime_hits_ == 0) {
-    std::cerr << "import_bag: WARNING -- prior store '" << cfg_.reference_store_dir
-              << "' primed NOTHING for any of " << prior_prime_attempts_
-              << " tile(s): the blunder gate was INACTIVE for this entire run.";
-    if (prior_layers_seen_.empty()) {
-      std::cerr << " No chart or reference tiles overlap the surveyed area.";
-    } else {
-      std::cerr << " Prior tiles found over the surveyed area:";
-      for (const auto & [layer, level] : prior_layers_seen_) {
-        std::cerr << " " << marine_bathymetry_store::layerDirName(layer) << "@L"
-                  << level;
-      }
-      std::cerr << " vs survey level " << static_cast<int>(
-        gggs::Level::fromCellSize(cfg_.cell_size_m).level()) << ".";
-    }
-    std::cerr << std::endl;
   }
   // The spilled raw samples were only needed to reload an evicted tile mid-run;
   // the import is complete, so delete the scratch dir.
