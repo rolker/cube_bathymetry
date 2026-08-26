@@ -210,6 +210,11 @@ TEST(CoverageRefresh, EvictedTileIsDroppedAndReported)
 TEST(CoverageRefresh, ZeroIntervalDisablesTheRefresh)
 {
   auto t = makeTracker(0.0);
+  // The tile must have gone out WHOLE at least once first: a tile never sent
+  // whole is due regardless of the interval (FirstMessageForATileIsAlwaysWhole),
+  // and that rule is about possession, not about the periodic heal this test
+  // is switching off.
+  t.notePublished(kA, 0.0, true);
   t.notePublished(kA, 0.0, false);
   EXPECT_FALSE(t.refreshDue(kA, 1e9));
   const std::set<gggs::GridIndex> none;
@@ -239,11 +244,33 @@ TEST(CoverageRefresh, ClearForgetsEverything)
   ASSERT_EQ(t.owedCount(), 1u);
   t.clear();
   EXPECT_EQ(t.owedCount(), 0u);
-  EXPECT_FALSE(t.refreshDue(kA, 1000.0));
-  // And a tile re-patched after the clear is overdue on sight, not measured
-  // from a whole send the new sheet never made.
+  // Due again immediately, and that is the point: after a clear this tracker
+  // describes a sheet that has sent NOTHING whole, so the next message for any
+  // tile must be the whole tile. Treating a cleared tile as satisfied would
+  // suppress the heal for exactly the tiles a reconfigure is most likely to
+  // have left a consumer stale on.
+  EXPECT_TRUE(t.refreshDue(kA, 1000.0));
+  // And nothing is measured from a whole send the new sheet never made.
   t.notePublished(kA, 2000.0, false);
   EXPECT_TRUE(t.refreshDue(kA, 2000.0));
+}
+
+// A tile the tracker has never seen sent WHOLE is due on sight, whatever the
+// interval says and whether or not a patch is outstanding. A consumer cannot
+// apply a patch to a tile it never received, and with the catalog bumped only
+// on whole sends such a tile carries no version for the consumer to reconcile
+// against -- so the FIRST message for any tile has to be the whole tile.
+TEST(CoverageRefresh, FirstMessageForATileIsAlwaysWhole)
+{
+  auto t = makeTracker(60.0);
+  EXPECT_TRUE(t.refreshDue(kA, 0.0)) << "never sent whole";
+  // Still true with the periodic heal switched off: this is a possession
+  // requirement, not the periodic heal.
+  auto off = makeTracker(0.0);
+  EXPECT_TRUE(off.refreshDue(kA, 0.0));
+  // And it stops being due once the whole tile has actually gone out.
+  t.notePublished(kA, 1.0, true);
+  EXPECT_FALSE(t.refreshDue(kA, 1.0));
 }
 
 // The whole/patch decision is read off the window, which is what the consumer

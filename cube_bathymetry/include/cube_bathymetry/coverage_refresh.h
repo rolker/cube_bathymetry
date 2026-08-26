@@ -72,13 +72,20 @@ public:
   /// patches can: one that has only ever gone out whole is already healed.
     bool refreshDue(const gggs::GridIndex & index, double now_s) const
     {
-      if (interval_s_ <= 0.0 || patched_.count(index) == 0) {
-        return false;
-      }
       const auto it = last_full_.find(index);
       if (it == last_full_.end()) {
-      // Patched but never sent whole: overdue by definition.
+        // NEVER SENT WHOLE. Always due, and deliberately gated on neither the
+        // interval nor an outstanding patch: a consumer cannot apply a patch
+        // to a tile it has never received. A tile's FIRST message must be the
+        // whole tile, or one first touched on the last ping of a line reaches
+        // the operator as a patch over nothing -- and, since the catalog is
+        // bumped only on a whole send, carries no catalog version for the
+        // consumer to notice it is missing.
         return true;
+      }
+      if (interval_s_ <= 0.0 || patched_.count(index) == 0) {
+        // Periodic heal disabled, or nothing outstanding to heal.
+        return false;
       }
       return now_s - it->second >= interval_s_;
     }
