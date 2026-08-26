@@ -485,7 +485,7 @@ public:
     if (out_.fail() && !failed_) {
       failed_ = true;
       std::cerr << "error: --tile-size-report could not be closed cleanly; "
-        << "the CSV is incomplete" << std::endl;
+                << "the CSV is incomplete" << std::endl;
     }
     return !failed_;
   }
@@ -671,18 +671,95 @@ private:
 /// the caller distinguishes them by whether a path was given.
 std::optional<TileSizeReporter> makeTileReporter(
   const std::string & path, double interval_s,
-  double refresh_interval_s, std::size_t refresh_tiles_per_cycle)
+  double refresh_interval_s, int refresh_tiles_per_cycle)
 {
   if (path.empty()) {
     return std::nullopt;
   }
+  // Validated here rather than at the parse site so the two modelled-policy
+  // options stay one concern in one place: 0 is legal for both and means "model
+  // the heal switched off", which is a configuration the node supports and an
+  // operator may well want to measure.
+  if (!(refresh_interval_s >= 0.0) || refresh_tiles_per_cycle < 0) {
+    std::cerr << "error: --tile-refresh-interval and --tile-refresh-budget must "
+      "be >= 0 (0 models the heal switched off)" << std::endl;
+    return std::nullopt;
+  }
   TileSizeReporter reporter(
-    path, interval_s, refresh_interval_s, refresh_tiles_per_cycle);
+    path, interval_s, refresh_interval_s,
+    static_cast<std::size_t>(refresh_tiles_per_cycle));
   if (!reporter.good()) {
     std::cerr << "error: cannot write --tile-size-report " << path << std::endl;
     return std::nullopt;
   }
   return reporter;
+}
+
+/// What the pass actually wrote, and the two empty-output cases that are worth
+/// a warning rather than a silent zero.
+///
+/// The on-disk store is the union of tiles evicted during the pass and tiles
+/// still resident at finalize (cube#92), so the counts are reported together:
+/// an import that evicted heavily and one that never evicted produce identical
+/// stores, and only this line distinguishes them when a build looks slow.
+template<typename AccumulatorT>
+void reportPersisted(
+  const AccumulatorT & accumulator, const std::string & store_dir,
+  const std::string & bs_store_dir, std::size_t evicted_count,
+  std::size_t resident_before_final, double build_secs)
+{
+  std::cout << "Persisted " << accumulator.bathyTilesPersisted()
+            << " bathy tile(s) to " << store_dir << " (survey layer; "
+            << evicted_count << " evicted mid-pass, "
+            << resident_before_final << " resident at end; build: "
+            << build_secs << "s)." << std::endl;
+
+  if (accumulator.bathyTilesPersisted() == 0) {
+    std::cerr << "WARNING: no tiles had finite data -- nothing imported. Check "
+      "the projector frame overrides and the detections topic." << std::endl;
+  }
+
+  // The co-estimated backscatter was surfaced into the --bs-store layer (#80)
+  // from the SAME CUBE pass, incrementally under eviction (newest-finite-wins
+  // merge, cube#92). By default UNCORRECTED; --backscatter-correction empirical
+  // applies the per-beam angular-response correction at node-output (cube#81).
+  if (!bs_store_dir.empty()) {
+    std::cout << "Persisted " << accumulator.backscatterTilesPersisted()
+              << " backscatter tile(s) to " << bs_store_dir << "." << std::endl;
+    if (accumulator.backscatterTilesPersisted() == 0) {
+      std::cerr << "WARNING: no cells had finite backscatter -- nothing written "
+        "to the backscatter store. Check that the detections carry intensities."
+                << std::endl;
+    }
+  }
+}
+
+/// Close the size report and say what it is worth. False means the run failed:
+/// the report is the reason a --tile-size-report run was asked for, and a CSV
+/// that could not be written completely still parses, still plots, and still
+/// looks like a complete survey that happened to be quieter -- which is how a
+/// bad number becomes a fleet-wide default.
+bool finishTileReport(
+  std::optional<TileSizeReporter> & reporter, const std::string & path,
+  double refresh_interval_s, int refresh_tiles_per_cycle)
+{
+  if (!reporter) {
+    return true;
+  }
+  if (reporter->unpayableRefreshes() > 0) {
+    std::cerr << "NOTE: " << reporter->unpayableRefreshes()
+              << " modelled tile(s) left RAM still owing a whole-tile "
+      "refresh; their re-sends are absent from the CSV, so the "
+      "modelled traffic is a lower bound by that many whole tiles."
+              << std::endl;
+  }
+  if (!reporter->finish()) {
+    return false;
+  }
+  std::cout << "Wrote coverage size report to " << path
+            << " (modelled refresh: " << refresh_interval_s << "s, "
+            << refresh_tiles_per_cycle << " tile(s)/cycle)." << std::endl;
+  return true;
 }
 
 }  // namespace
@@ -844,19 +921,9 @@ int main(int argc, char * argv[])
     } else if (*arg == "--tile-refresh-interval") {
       tile_refresh_interval_s = parse_double(
         "--tile-refresh-interval", next_value("--tile-refresh-interval"));
-      if (!(tile_refresh_interval_s >= 0.0)) {
-        std::cerr << "error: --tile-refresh-interval must be >= 0 "
-          "(0 models the heal switched off)\n";
-        usage();
-      }
     } else if (*arg == "--tile-refresh-budget") {
       tile_refresh_tiles_per_cycle = parse_int(
         "--tile-refresh-budget", next_value("--tile-refresh-budget"));
-      if (tile_refresh_tiles_per_cycle < 0) {
-        std::cerr << "error: --tile-refresh-budget must be >= 0 "
-          "(0 models the heal switched off)\n";
-        usage();
-      }
     } else if (*arg == "-l") {
       ping_count_limit = parse_int("-l", next_value("-l"));
     } else if (*arg == "--platform") {
@@ -1128,7 +1195,7 @@ int main(int argc, char * argv[])
 
   auto tile_reporter = makeTileReporter(
     tile_size_report_path, tile_report_interval_s, tile_refresh_interval_s,
-    static_cast<std::size_t>(tile_refresh_tiles_per_cycle));
+    tile_refresh_tiles_per_cycle);
   if (!tile_size_report_path.empty() && !tile_reporter) {
     return 1;
   }
@@ -1383,50 +1450,15 @@ int main(int argc, char * argv[])
   accumulator.finalize(
     store_metadata.empty() ? nullptr : &store_metadata,
     (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
-  std::cout << "Persisted " << accumulator.bathyTilesPersisted()
-            << " bathy tile(s) to " << store_dir << " (survey layer; "
-            << evicted_count << " evicted mid-pass, "
-            << resident_before_final << " resident at end; build: "
-            << phase_secs() << "s)." << std::endl;
+  reportPersisted(
+    accumulator, store_dir, bs_store_dir, evicted_count,
+    resident_before_final, phase_secs());
 
-  if (accumulator.bathyTilesPersisted() == 0) {
-    std::cerr << "WARNING: no tiles had finite data -- nothing imported. Check "
-      "the projector frame overrides and the detections topic." << std::endl;
-  }
-
-  // The co-estimated backscatter was surfaced into the --bs-store layer (#80) from
-  // the SAME CUBE pass, incrementally under eviction (newest-finite-wins merge,
-  // cube#92). By default UNCORRECTED; --backscatter-correction empirical applies
-  // the per-beam angular-response correction at node-output (cube#81).
-  if (!bs_store_dir.empty()) {
-    std::cout << "Persisted " << accumulator.backscatterTilesPersisted()
-              << " backscatter tile(s) to " << bs_store_dir << "." << std::endl;
-    if (accumulator.backscatterTilesPersisted() == 0) {
-      std::cerr << "WARNING: no cells had finite backscatter -- nothing written to "
-        "the backscatter store. Check that the detections carry intensities."
-                << std::endl;
-    }
-  }
-
-  // The report is the reason the run was asked for when --tile-size-report is
-  // given, so a CSV that could not be written completely fails the run. A
-  // truncated file still parses and still plots -- it just describes a shorter
-  // survey than the one that happened, which is how a bad number becomes a
-  // fleet-wide default.
-  if (tile_reporter) {
-    if (tile_reporter->unpayableRefreshes() > 0) {
-      std::cerr << "NOTE: " << tile_reporter->unpayableRefreshes()
-                << " modelled tile(s) left RAM still owing a whole-tile "
-                   "refresh; their re-sends are absent from the CSV, so the "
-                   "modelled traffic is a lower bound by that many whole tiles."
-                << std::endl;
-    }
-    if (!tile_reporter->finish()) {
-      return 1;
-    }
-    std::cout << "Wrote coverage size report to " << tile_size_report_path
-              << " (modelled refresh: " << tile_refresh_interval_s << "s, "
-              << tile_refresh_tiles_per_cycle << " tile(s)/cycle)." << std::endl;
+  if (!finishTileReport(
+      tile_reporter, tile_size_report_path, tile_refresh_interval_s,
+      tile_refresh_tiles_per_cycle))
+  {
+    return 1;
   }
 
   std::cout << "done!" << std::endl;
