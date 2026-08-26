@@ -19,6 +19,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ZLIB REQUIRED)  # import_bag --tile-size-report (#112)
 find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(grid_map_core REQUIRED)
@@ -286,6 +287,7 @@ install(TARGETS bag_to_geotiff
 # Offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store epoch importer (#57).
 add_executable(import_bag src/import_bag_main.cpp)
 target_link_libraries(import_bag
+  cube_bathymetry_quantize_tile  # --tile-size-report coverage sizing (#112)
   cube_bathymetry_sonar_info_curve  # SonarInfo curve pre-pass (#102)
   cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
   marine_mbes_backscatter_store::marine_mbes_backscatter_store  # --bs-store output (#80)
@@ -297,6 +299,7 @@ target_link_libraries(import_bag
   rosbag2_transport::rosbag2_transport
   tf2_geometry_msgs::tf2_geometry_msgs
   tf2_ros::tf2_ros
+  ZLIB::ZLIB  # --tile-size-report: the same compression udp_bridge applies
 )
 
 install(TARGETS import_bag
