@@ -77,11 +77,31 @@ std::size_t windowIdx(
          (col - tile.window_col);
 }
 
-// Bytes per cell for a VisualizationBand dtype (UINT8=2, INT16=3, mirroring
-// sensor_msgs::PointField).
+// Bytes per cell for a VisualizationBand dtype. Every dtype the wire contract
+// DECLARES is handled by name; anything else fails the test where the unknown
+// dtype is, rather than being silently sized as one byte.
+//
+// The silent fallback was not merely future-proofing: VisualizationBand.msg
+// already declares UINT16 = 4 ("reserved for sidescan source rasters"), so a
+// band using a dtype the contract names would have been sized at half its
+// width -- and the resulting failure accuses the BAND of not covering the
+// window when the helper is the thing that is wrong. A test that lies about
+// which side of the contract broke is worse than one that fails loudly.
 std::size_t dtypeSize(uint8_t dtype)
 {
-  return dtype == 3 ? sizeof(int16_t) : sizeof(uint8_t);
+  switch (dtype) {
+    case marine_interfaces::msg::VisualizationBand::UINT8:
+      return sizeof(uint8_t);
+    case marine_interfaces::msg::VisualizationBand::INT16:
+      return sizeof(int16_t);
+    case marine_interfaces::msg::VisualizationBand::UINT16:
+      return sizeof(uint16_t);
+    default:
+      ADD_FAILURE() << "unknown VisualizationBand dtype " <<
+        static_cast<unsigned>(dtype) <<
+        "; add it here and to VisualizationBand.msg's documented set";
+      return 0;
+  }
 }
 
 // Every band's payload must cover exactly window_width * window_height cells
