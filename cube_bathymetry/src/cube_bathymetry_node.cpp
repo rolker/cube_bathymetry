@@ -675,6 +675,15 @@ public:
         std::chrono::duration<double>(catalog_interval_s_),
         std::bind(&CubeBathymetry::publishCatalog, this));
     }
+    // Whole-tile refresh drain (#112). Wall timer on purpose -- see
+    // drainRefreshQueue. The tick is the same 5 s as the coverage publish
+    // cadence, so subwindow_refresh_tiles_per_cycle keeps meaning "per publish
+    // cycle" whichever path drains it.
+    if (publish_dirty_subwindow_ && !refresh_timer_) {
+      refresh_timer_ = create_wall_timer(
+        std::chrono::duration<double>(kRefreshDrainIntervalSeconds),
+        std::bind(&CubeBathymetry::drainRefreshQueue, this));
+    }
     // Disk-serve drain (#106): trickle from-disk catch-up of requested
     // evicted tiles. Only meaningful with a draft store to serve from.
     if (!draft_dir_.empty() && !disk_serve_timer_) {
@@ -702,6 +711,10 @@ public:
     if (disk_serve_timer_) {
       disk_serve_timer_->cancel();
       disk_serve_timer_.reset();
+    }
+    if (refresh_timer_) {
+      refresh_timer_->cancel();
+      refresh_timer_.reset();
     }
     // Pending catch-up work is dropped with the timer: requests are only
     // accepted while ACTIVE, and a consumer re-requests via the catalog
@@ -876,6 +889,10 @@ private:
   // owed a refresh when it is in the set AND its last whole send is older than
   // subwindow_refresh_interval_s_.
   cube::CoverageRefreshTracker refresh_tracker_;
+  rclcpp::TimerBase::SharedPtr refresh_timer_;
+  /// Drain tick. Matches the coverage publish cadence in pingCallback so the
+  /// per-cycle budget means the same thing on both paths.
+  static constexpr double kRefreshDrainIntervalSeconds = 5.0;
   double subwindow_refresh_interval_s_ = 60.0;
   std::size_t subwindow_refresh_tiles_per_cycle_ = 2;
 
@@ -1017,12 +1034,30 @@ private:
 
   /// Re-send, whole, the tiles the tracker says are owed a refresh and were not
   /// already published this cycle.
-  void drainRefreshQueue(
-    const std::set<gggs::GridIndex> & published_this_cycle,
-    const builtin_interfaces::msg::Time & stamp,
-    const rclcpp::Time & pub_time,
-    std::int64_t version)
+  /// Timer callback: heal tiles that have gone quiet still owing a whole send.
+  ///
+  /// ON A WALL TIMER, NOT THE PING PATH, and that is the whole point.
+  /// publishDirtyTiles only ever visits tiles that are still CHANGING, and it
+  /// reached this drain only via pingCallback -> publishBounded, which is gated
+  /// on ping arrival, on a 5 s ping-stamp interval, and on a TF fix
+  /// (publishBounded early-returns on a transform miss). Every one of those
+  /// gates fails in exactly the situation the heal exists for: the vessel has
+  /// finished a line, the sonar is off, it is in transit, or TF has gapped --
+  /// so the tile whose last patch was dropped is the tile that would never be
+  /// visited again, and its gap would outlive the survey. Driven from here the
+  /// heal is independent of all of it; quantizeTile needs no transform, so a TF
+  /// gap cannot stall it either.
+  void drainRefreshQueue()
   {
+    if (!publish_dirty_subwindow_ || !geo_map_sheet_) {
+      return;
+    }
+    const rclcpp::Time pub_time = now();
+    const builtin_interfaces::msg::Time stamp = pub_time;
+    const std::int64_t version = pub_time.nanoseconds();
+    // Nothing was published by this callback's own cycle; the exclusion set is
+    // only meaningful when the drain shares a cycle with publishDirtyTiles.
+    const std::set<gggs::GridIndex> published_this_cycle;
     std::size_t dropped = 0;
     const auto due = refresh_tracker_.dueForRefresh(
       published_this_cycle, pub_time.seconds(),
@@ -1159,14 +1194,10 @@ private:
         full_cells += static_cast<std::size_t>(vt->width) * vt->height;
       }
     }
-    // Tiles that went quiet still owing a refresh. publishDirtyTiles only ever
-    // visits the DIRTY set, so without this a patch lost on a tile the vessel
-    // has since moved off would never be healed at all -- the gap would outlive
-    // the survey. Bounded per cycle so the heal can never become the burst it
-    // exists to prevent.
-    if (publish_dirty_subwindow_) {
-      drainRefreshQueue(published_this_cycle, stamp, pub_time, version);
-    }
+    // The quiet-tile drain does NOT run here. It is on refresh_timer_, a WALL
+    // timer, because everything on this path is gated on ping arrival and on a
+    // TF fix -- and the tiles that need healing most are the ones the vessel
+    // has finished with, whose pings have stopped. See drainRefreshQueue.
 
     if (publish_dirty_subwindow_ && full_cells > 0) {
       // 4 bytes/cell across the three bands (depth int16 + two uint8).
