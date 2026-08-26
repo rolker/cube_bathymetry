@@ -661,7 +661,8 @@ namespace
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  const char * tool, bool * read_ok = nullptr, PriorPrimeTally * tally = nullptr);
+  const char * tool, bool * read_ok = nullptr, PriorPrimeTally * tally = nullptr,
+  double relief_slope = 0.0);
 }  // namespace
 
 bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
@@ -684,7 +685,7 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   if (!cfg_.reference_store_dir.empty()) {
     if (primePriorLayersForTile(
         cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "revisit",
-        cfg_.tool.c_str(), &prior_read_ok, &priorTally()))
+        cfg_.tool.c_str(), &prior_read_ok, &priorTally(), cfg_.prior_relief_slope))
     {
       // Observability (#118): make gate re-activation visible in the import log.
       std::cerr << cfg_.tool << ": re-primed prior gate for revisited tile " <<
@@ -767,10 +768,38 @@ namespace
 // gate is on for this tile" on this count, never on the match (#137).
 std::size_t primeFromTileResample(
   const marine_bathymetry_store::BathymetryTile & coarse_tile,
-  const gggs::GridIndex & survey_index, GeoMapSheet & map_sheet)
+  const gggs::GridIndex & survey_index, GeoMapSheet & map_sheet,
+  double relief_slope)
 {
   const gggs::GridIndex & coarse_grid = coarse_tile.index();
   const gggs::Level ref_level(coarse_grid.level());
+
+  // Resample-gap relief allowance (#137, operator decision at the publish gate).
+  //
+  // Without this, a 232 m/cell L2 prior gates EXACTLY as hard as an exact-level
+  // one. `Node::insert` takes the MINIMUM of three blunder limits --
+  //   min(target - blunder_minimum,
+  //       target - blunder_percent*|target|,
+  //       target - blunder_scalar*sqrt(predicted_variance))
+  // -- and min() selects the most PERMISSIVE limit. A chart cell carrying no
+  // uncertainty band seeds sigma = 1 cm (kPrimeVarianceFloor), so the variance
+  // term is the most restrictive of the three and min() discards it: the gate
+  // collapses to the flat blunder_minimum whatever the prior's resolution. One
+  // L2 cell spanning a 3 m shoal and a 25 m channel would then gate every survey
+  // cell beneath it against a single blended depth, permanently rejecting the
+  // channel's real seafloor -- the offline import is single-pass, so a sounding
+  // rejected here is gone.
+  //
+  // The coarse cell reports ONE representative depth for a span of
+  // `ref_level.cellSize()` metres. The seabed under that span can plausibly
+  // deviate from it by about (slope * half-span), so add that as an independent
+  // 1-sigma relief term. The variance term then widens with the gap and becomes
+  // the binding (most permissive) limit exactly when the prior is too coarse to
+  // speak for the cell -- while an exact-level or near-level prior is unaffected,
+  // since its half-span is a fraction of a metre.
+  const double half_span_m = 0.5 * ref_level.cellSize();
+  const double relief_sigma = std::max(0.0, relief_slope) * half_span_m;
+  const double relief_variance = relief_sigma * relief_sigma;
 
   // gggs::CellIndex::position() returns the cell's SOUTH-WEST corner, not its
   // center; add half a survey cell in each axis so we resolve the coarse cell that
@@ -801,9 +830,13 @@ std::size_t primeFromTileResample(
       continue;  // no coarse prior here -- leave the fine survey cell ungated
     }
     // Same variance derivation as primeFromTile: sigma^2 floored at a small positive
-    // epsilon (Node::setPredictedDepth needs a finite positive variance).
+    // epsilon (Node::setPredictedDepth needs a finite positive variance), PLUS the
+    // resample-gap relief term derived above. The two are independent sources of
+    // doubt about this cell's prior depth -- the prior's own stated uncertainty, and
+    // the within-cell relief a coarse cell cannot resolve -- so their variances add.
     double variance = (std::isfinite(cell.uncertainty) && cell.uncertainty > 0.0) ?
       (cell.uncertainty * cell.uncertainty) : 0.0;
+    variance += relief_variance;
     variance = std::max(variance, kPrimeVarianceFloor);
     map_sheet.setPredictedDepthAt(
       *it, static_cast<float>(cell.depth), static_cast<float>(variance));
@@ -895,7 +928,7 @@ bool primeLayerForTile(
   const std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> & tiles,
   const gggs::GridIndex & index, GeoMapSheet & sheet,
   marine_bathymetry_store::SourceLayer layer, const char * layer_name,
-  const char * tool, PriorPrimeTally * tally)
+  const char * tool, PriorPrimeTally * tally, double relief_slope)
 {
   auto it = tiles.find(index);
   const std::vector<const marine_bathymetry_store::BathymetryTile *> fallbacks =
@@ -939,7 +972,8 @@ bool primeLayerForTile(
   // reverse walk.
   std::size_t primed_cells = 0;
   for (auto fallback = fallbacks.rbegin(); fallback != fallbacks.rend(); ++fallback) {
-    const std::size_t n = primeFromTileResample(**fallback, index, sheet);
+    const std::size_t n =
+      primeFromTileResample(**fallback, index, sheet, relief_slope);
     if (n == 0) {
       continue;  // contains us, but holds no data here
     }
@@ -993,7 +1027,7 @@ bool primeLayerForTile(
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  const char * tool, bool * read_ok, PriorPrimeTally * tally)
+  const char * tool, bool * read_ok, PriorPrimeTally * tally, double relief_slope)
 {
   if (read_ok != nullptr) {
     *read_ok = true;  // flipped to false only if the windowed load below THROWS
@@ -1022,7 +1056,8 @@ bool primePriorLayersForTile(
       // for this tile) as well as priming it, so a run that primes nothing can still
       // say which layers/levels were there (#137).
       if (primeLayerForTile(
-          ref.tiles(layer), index, sheet, layer, layer_name, tool, tally))
+          ref.tiles(layer), index, sheet, layer, layer_name, tool, tally,
+          relief_slope))
       {
         primed = true;
       }
@@ -1319,7 +1354,7 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
   if (!cfg_.reference_store_dir.empty()) {
     primePriorLayersForTile(
       cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "first touch",
-      cfg_.tool.c_str(), nullptr, &priorTally());
+      cfg_.tool.c_str(), nullptr, &priorTally(), cfg_.prior_relief_slope);
   }
 
   // else blank -- nothing to seed; still mark it seeded so we do not retry.

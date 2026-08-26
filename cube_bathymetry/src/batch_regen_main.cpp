@@ -115,6 +115,12 @@
   std::cout << "  -r <meters>: Grid resolution (nominal; snapped to GGGS). "
     "Default 1.0\n";
   std::cout << "  --iho-order <order>: CUBE IHO order (default order1a)\n";
+  std::cout << "  --prior-relief-slope <s>: relief allowance for a CROSS-LEVEL "
+    "prior prime, as a seabed slope (default 0.05). A coarse prior cell speaks "
+    "for a whole cell span, so its seeded 1-sigma is inflated by s * half-span; "
+    "without this a 232 m/cell L2 chart band gates exactly as hard as an "
+    "exact-level prior and can permanently reject a real channel bottom under a "
+    "blended cell. Raise it over steep seabed, set 0 to disable (#137).\n";
   std::cout << "  --backscatter-correction none|empirical: per-beam angular-response "
     "correction at node-output (default none = identity). 'empirical' subtracts the "
     "per-sonar curve from --backscatter-curve (cube#81). NOTE: import_bag's "
@@ -521,6 +527,7 @@ int main(int argc, char * argv[])
   std::string index_db_path;
   double resolution = 1.0;
   std::string iho_order = "order1a";
+  double prior_relief_slope = cube::ImportAccumulatorConfig{}.prior_relief_slope;
   int ping_count_limit = 0;
   // Backscatter angular-response correction (cube#81). Default none = identity.
   std::string backscatter_correction_str = "none";
@@ -599,6 +606,12 @@ int main(int argc, char * argv[])
       index_db_path = next_value("--index-db");
     } else if (*arg == "-r") {
       resolution = parse_double("-r", next_value("-r"));
+    } else if (*arg == "--prior-relief-slope") {
+      prior_relief_slope = std::stod(next_value("--prior-relief-slope"));
+      if (!std::isfinite(prior_relief_slope) || prior_relief_slope < 0.0) {
+        throw std::runtime_error(
+                "--prior-relief-slope must be a finite, non-negative slope");
+      }
     } else if (*arg == "--iho-order") {
       iho_order = next_value("--iho-order");
     } else if (*arg == "--backscatter-correction") {
@@ -830,6 +843,7 @@ int main(int argc, char * argv[])
   cube::ImportAccumulatorConfig regen_config;
   regen_config.store_dir = store_dir;
   regen_config.reference_store_dir = reference_store_dir;
+  regen_config.prior_relief_slope = prior_relief_slope;
   // Match the store level to the sheet's actual (GGGS-snapped) cell size so the
   // scatter routing + gather scratch stores tile identically.
   regen_config.cell_size_m =

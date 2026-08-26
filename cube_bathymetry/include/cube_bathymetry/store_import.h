@@ -459,6 +459,30 @@ namespace cube
   /// warning). @ref BatchRegen sets it to `batch_regen` for its gather so an
   /// authoritative rebuild's diagnostics are not attributed to `import_bag` (#137).
     std::string tool = "import_bag";
+  /// Relief allowance for a CROSS-LEVEL prior prime, as a seabed slope (rise over
+  /// run), exposed as `--prior-relief-slope` on both importers (#137).
+  ///
+  /// A coarse prior cell reports one depth for a span of `Level::cellSize()`
+  /// metres. This inflates the seeded 1-sigma by `slope * half-span`, so the
+  /// `blunder_scalar * sqrt(variance)` limit — the one `Node::insert`'s `min()`
+  /// otherwise always discards, because an uncertainty-less chart cell seeds
+  /// sigma = 1 cm — widens with the resample gap. Without it a 232 m/cell L2
+  /// prior gates exactly as hard as an exact-level one, and one coarse cell
+  /// spanning a shoal and a channel permanently rejects the channel's real
+  /// seafloor (the offline import is single-pass).
+  ///
+  /// **This default is a real decision, not a formality.** 0.05 (a 5 % slope, so
+  /// ±5.8 m of relief allowed under a 232 m L2 cell and ±0.02 m under a 1 m
+  /// exact-level one) is deliberately gentle: it is enough to stop a coarse
+  /// chart band from gating like a survey-resolution prior, while leaving a
+  /// near-level prior's behaviour unchanged. Raise it where the seabed is steep
+  /// (a rock ledge, a dredged channel wall) and false rejections matter more
+  /// than admitting a false deep; lower it toward 0 to restore the pre-#137
+  /// unbounded-confidence behaviour. Exactly 0 disables the allowance.
+  ///
+  /// Applies ONLY to the cross-level resample path: an exact-survey-level prior
+  /// primes through `primeFromTile`, which this does not touch.
+    double prior_relief_slope = 0.05;
   };
 
 /// @brief Bounded-RAM offline import accumulator (cube_bathymetry#92).

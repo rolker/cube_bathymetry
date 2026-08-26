@@ -261,12 +261,25 @@ The startup-prime (#21) and revisit-reload (#70) paths generalize into a single
    trade-off now applies to `chart/` too, and there it is the dominant gating path**
    (an official chart is the usual prior in charted waters, and the chart ladder
    means the resample gap can be large — an L2 chart tile is ~232 m/cell under an
-   L10 survey). Whether the cross-level chart fallback should bound how coarse a
-   prior may be, scale the blunder margin with the resample gap, or be opt-in is an
-   **open design question deferred to the operator** (#137 review); today it is
-   unbounded, and the audit line names the level used so a large gap is visible in
-   the import log. A run whose prior primed nothing at all warns explicitly rather
-   than failing silently (#137). Enforced by
+   L10 survey). Of the three options the #137 review put to the operator — bound how
+   coarse a prior may be, scale the blunder margin with the resample gap, or make the
+   chart fallback opt-in — **the operator chose to scale the margin** (2026-08-26).
+   A cross-level prime now inflates the seeded 1-sigma by
+   `prior_relief_slope * half-cell-span` (`--prior-relief-slope`, default 0.05).
+   This is what makes the variance limit bind at all: `Node::insert` takes the
+   `min()` of its three blunder limits, which selects the most *permissive*, so an
+   uncertainty-less chart cell seeding sigma = 1 cm made the variance term the most
+   restrictive and therefore always discarded — a 232 m/cell L2 prior gated exactly
+   as hard as an exact-level one, and one cell blending a shoal with a channel would
+   permanently reject the channel's real bottom (the offline import is single-pass).
+   The allowance scales with the gap, so a near-level prior is unaffected. Setting
+   the slope to 0 restores the previous unbounded-confidence behaviour. The audit
+   line still names the level used, so a large gap is visible in the import log, and
+   a run whose prior primed nothing at all warns explicitly rather than failing
+   silently (#137). Enforced by
+   `test_import_eviction.ResampleGapReliefAdmitsARealDeepUnderACoarsePrior` (a real
+   deeper-than-charted return survives a 232 m/cell prior at the default slope and is
+   rejected at slope 0),
    `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData` (gate-only, not settled),
    `test_import_eviction.CoarseLevelReferenceSeedRejectsDeepBlunder` and
    `.CoarseLevelChartSeedRejectsDeepBlunder` (the cross-level fallback gates a deep

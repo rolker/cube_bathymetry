@@ -119,12 +119,18 @@ On the first touch of each tile, both tools seed it with a two-rung precedence:
    generalization is shoal-biased, which is the conservative direction for a
    false-deep gate — but the same bias **falsely rejects legitimate deeper-than-
    charted returns**, and the widened gate exposes tiles that previously ran
-   ungated to that mode. How coarse a prior may gate is **not bounded**: an L2
-   chart tile is ~232 m/cell under an L10 (1 m) survey, and the audit line names
-   the level used precisely so a large gap is visible in the import log. Whether to
-   cap the level gap, scale the blunder margin with it, or make cross-level chart
-   priming opt-in is an open question held for the operator (ADR-0001 rung 2, #137).
-   The margin itself is tunable via the `blunder_*` parameters.
+   ungated to that mode. How coarse a prior may gate is **not capped** — an L2
+   chart tile is ~232 m/cell under an L10 (1 m) survey — but the **blunder margin
+   scales with the resample gap**: a cross-level prime inflates the seeded 1-sigma
+   by `--prior-relief-slope * half-cell-span` (default 0.05, a gentle 5 % seabed
+   slope), so a coarse band no longer gates as hard as a survey-resolution prior.
+   Without it the variance limit could never bind at all — `Node::insert` takes the
+   `min()` of its three blunder limits, which picks the most *permissive*, and an
+   uncertainty-less chart cell seeds sigma = 1 cm — so one L2 cell blending a shoal
+   with a channel would permanently reject the channel's real bottom. Raise the
+   slope over steep seabed; set it to 0 to restore the previous behaviour. The audit
+   line names the level used, so a large gap stays visible in the import log, and the
+   margin is additionally tunable via the `blunder_*` parameters.
 
    (Replaces the pre-#96 `--prior` flag, which loaded the whole prior into RAM up
    front and defeated eviction.)

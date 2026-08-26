@@ -2144,4 +2144,92 @@ TEST(ImportEviction, EmptyProcessedTileFallsThroughToThePriorRung)
   std::filesystem::remove_all(root);
 }
 
+// Resample-gap relief allowance (#137, operator decision). A prior coarse enough to
+// blend a shoal and a channel into one cell must NOT gate the survey as hard as an
+// exact-level prior would. `Node::insert` takes the MINIMUM of its three blunder
+// limits and min() selects the most PERMISSIVE, so an uncertainty-less chart cell
+// seeding sigma = 1 cm makes the variance term the most restrictive and therefore
+// discarded — the gate collapses to the flat blunder_minimum at every resolution.
+// Inflating the seeded 1-sigma by (relief_slope * half-span) makes the variance term
+// bind exactly when the prior is too coarse to speak for the cell.
+//
+// A ~28 m sounding under a ~20 m L7 (8 m/cell) prior is the discriminating case: it
+// is deeper than blunder_minimum (10 m) allows... no it is not — so use a coarse L2
+// prior, whose 232 m half-span buys metres of allowance, and a sounding just past
+// what the flat limit permits. With the allowance the sounding survives; with the
+// allowance disabled (slope 0, the pre-#137 behaviour) it is rejected.
+TEST(ImportEviction, ResampleGapReliefAdmitsARealDeepUnderACoarsePrior)
+{
+  // L2 is the coarsest band an ENC export carries — ~232 m/cell.
+  constexpr float kVeryCoarseCellSize = 232.0f * 960.0f / 960.0f;
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kVeryCoarseCellSize);
+  ASSERT_LT(coarse_level.level(), survey_level.level());
+  const double half_span = 0.5 * coarse_level.cellSize();
+  ASSERT_GT(half_span, 20.0) << "the coarse band must be coarse enough to matter";
+
+  const gggs::GridIndex survey_grid = survey_level.gridIndex(43.0, -70.0);
+  const double lat = survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double lon = survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // A shallow (-20 m) coarse chart prior over the whole containing coarse tile.
+  const std::string root = makeTempDir("relief_slope");
+  const std::string prior_dir = root + "/chart_store";
+  const gggs::GridIndex coarse_grid = coarse_level.gridIndex(lat, lon);
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/NAN});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kVeryCoarseCellSize, /*reference_writable=*/false,
+      /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  // A REAL deeper-than-charted return: 35 m where the blended coarse cell says 20 m.
+  // The flat blunder_minimum (10 m) rejects it; the relief allowance admits it.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(lat, lon, 35.0f, 40.0f));
+
+  const auto run = [&](double slope, const std::string & out) {
+      GeoMapSheet sheet(kCellSize);
+      ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+      cfg.reference_store_dir = prior_dir;
+      cfg.prior_relief_slope = slope;
+      ImportAccumulator acc(sheet, cfg);
+      for (const auto & b : batches) {
+        acc.addBatch(b);
+      }
+      acc.finalize();
+      return loadBathyCells(out);
+    };
+
+  // slope 0 == the pre-#137 behaviour: the coarse prior gates as hard as an
+  // exact-level one and the real deep is rejected.
+  const auto without = run(0.0, root + "/no_relief");
+  EXPECT_TRUE(without.empty())
+    << "with the allowance disabled the coarse prior should reject the real deep";
+
+  // The shipped default admits it: half_span is ~116 m, so 0.05 buys ~5.8 m of
+  // 1-sigma, and blunder_scalar * sigma exceeds the 10 m flat limit.
+  const auto with = run(ImportAccumulatorConfig{}.prior_relief_slope,
+      root + "/default_relief");
+  bool kept_real_deep = false;
+  for (const auto & [cell, du] : with) {
+    if (du.first < -30.0) {kept_real_deep = true;}
+  }
+  EXPECT_TRUE(kept_real_deep)
+    << "the resample-gap relief allowance must admit a real deeper-than-charted "
+       "return under a very coarse prior";
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube

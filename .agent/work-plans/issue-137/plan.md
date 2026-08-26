@@ -363,3 +363,32 @@ does not modify.
    lookup added for one `SourceLayer` must be checked against every other layer
    sharing the code path" — the third instance of the class (#115, #119, #137).
    Proposed for `.agent/knowledge/`, not written.
+
+## Operator decision, 2026-08-26 — resample-gap relief allowance IMPLEMENTED
+
+Deferred item 1 (the Chart coarseness bound) was decided by the operator at the
+publish checkpoint: **scale the blunder margin with the resample gap**, of the
+three options ADR-0001 recorded. No longer deferred.
+
+- `primeFromTileResample` inflates the seeded 1-sigma by
+  `prior_relief_slope * half-cell-span` of the coarse prior. Variances add: the
+  prior's own stated uncertainty and the within-cell relief it cannot resolve
+  are independent sources of doubt.
+- `ImportAccumulatorConfig::prior_relief_slope`, default **0.05**, exposed as
+  `--prior-relief-slope` on **both** `import_bag` and `batch_regen` with
+  finite/non-negative validation. Exactly 0 restores the pre-decision
+  unbounded-confidence behaviour. The default is documented as a decision, with
+  the reasoning for raising or lowering it, per the workspace rule that a
+  capability-limiting constant must be tunable and justified.
+- Applies ONLY to the cross-level resample path; an exact-level prior primes
+  through `primeFromTile`, untouched.
+- `ResampleGapReliefAdmitsARealDeepUnderACoarsePrior` is a **differential**
+  test: the same 35 m return under a 232 m/cell 20 m prior is rejected at slope
+  0 (the pre-decision behaviour) and admitted at the default. Both branches are
+  asserted in one run, so the test cannot pass vacuously.
+- ADR-0001 rung 2 and the README both rewritten from "open question held for the
+  operator" to the decision and its rationale.
+
+Suite: **572 tests, 0 failures** (was 571).
+
+Deferred items 2–4 remain deferred and are being filed as their own issues.
