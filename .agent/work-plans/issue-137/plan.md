@@ -83,9 +83,10 @@ Chart; `test_store_import.cpp` is untouched by this issue.
    if empty, say no tiles were found under any layer for the surveyed area.
 5. **Tests** (`test_import_eviction.cpp`, mirroring the three Reference
    precedents cited above):
-   - `CoarseLevelChartSeedRejectsDeepBlunder` — an L8-only Chart layer under
+   - `CoarseLevelChartSeedRejectsDeepBlunder` — a coarse-only Chart layer under
      an L10 survey (mirrors `CoarseLevelReferenceSeedRejectsDeepBlunder`,
-     `SourceLayer::Chart` instead of `Reference`).
+     `SourceLayer::Chart` instead of `Reference`). The 8 m fixture the test
+     actually uses is **L7**, not L8 as an earlier draft of this line said.
    - `BoundaryFlushCrossLevelChartRejectsDeepBlunder` — the containment vs.
      edge-adjacent-neighbor case for Chart (mirrors
      `BoundaryFlushCrossLevelReferenceRejectsDeepBlunder`).
@@ -122,7 +123,7 @@ Chart; `test_store_import.cpp` is untouched by this issue.
 
 | ADR | Triggered | How addressed |
 |---|---|---|
-| Project ADR-0008 (predicted-surface touchdown interpolation geometry) | No | Governs bilinear touchdown interpolation in a different function (`Node::insert`/`cube_grid_interpolate`); `primeFromTileResample` (nearest-neighbour resample for priming) is unchanged by this plan — Chart reuses the existing, already-ADR-compliant Reference resample path. |
+| Project ADR-0008 (predicted-surface touchdown interpolation geometry) | **Yes** | It names the Chart/Reference prior-seeding path, so it IS triggered — the earlier "No" was a wrong verdict, not a wrong compliance claim. The change **complies**: ADR-0008 governs bilinear touchdown interpolation in a different function (`Node::insert`/`cube_grid_interpolate`), and `primeFromTileResample` (nearest-neighbour resample for priming) keeps its existing geometry — Chart reuses the already-ADR-compliant Reference resample path unchanged. |
 | Workspace ADR-0008 (ROS 2 conventions) | No | No new params, topics, or interfaces — internal `import_bag` store-import logic only. |
 
 ## Consequences
@@ -188,3 +189,81 @@ reproduce pre-#137 behaviour, `CoarseLevelChartSeedRejectsDeepBlunder` and
 exact-level `ChartLayerSeedRejectsDeepBlunder` regression and
 `NoUsablePriorEmitsWarning` still pass. Restored, the full package suite is
 **560 tests, 0 failures** (was 557 before the three additions).
+
+### Round-1 review pass (pre-push `review-code`, verdict changes-requested)
+
+The core Chart cross-level fix reviewed clean. The *second* defect (the
+silent-no-op warning) had four correctness holes of its own, and four
+operator-facing documents still described the exact-level-only Chart behaviour
+this branch reverses. Both were fixed as coherent groups rather than
+finding-by-finding:
+
+- **A "hit" now means a primed CELL, not a matched tile.**
+  `primeFromTileSkippingMask` / `primeFromTile` / `primeFromTileResample` return
+  the number of cells they primed. A prior tile that covers the survey tile but
+  is no-data over it primed nothing yet counted as a hit, permanently
+  suppressing the warning — the header comment claiming otherwise was false.
+  Consequences taken with it: Phase A no longer short-circuits Phase B (a hollow
+  exact-level tile falls through), and `findCrossLevelPrior` became
+  `findCrossLevelPriors`, returning every containing coarser tile finest-first so
+  an empty finest prior falls through to the next-coarser one.
+- **`PriorPrimeTally`** replaced the three loose counters. It is a public struct
+  because `batch_regen` needs to merge one per gathered tile. It splits out
+  `read_failures` (an unreadable store must never be reported as "no tiles
+  overlap the surveyed area" — `found_layers_out` was populated *after*
+  `loadWindow` inside the same `try`) and `survey_warm_starts` (a rung-1
+  warm-start returns before the prior rung, so "INACTIVE for this entire run"
+  could be false; it now reads "for every tile that reached the prior rung" and
+  names the warm-started tiles separately). The unit is "attempt(s)", since a
+  revisited tile re-primes and counts again. `audit_seen` de-duplicates the
+  cross-level audit line to once per (layer, level).
+- **The guard is now reachable from `batch_regen`** — the authoritative off-boat
+  rebuild, which takes the same `--reference-store` and prints the same banner
+  but calls `persistResidentTile`, never `ImportAccumulator::finalize`. It merges
+  the per-tile tallies and calls the shared `reportPriorPrimeOutcome` once.
+- `reportPriorPrimeOutcome` is emitted **first** in `finalize()` (the persists
+  below have no `try` around them) and **once** (a second `finalize()` would
+  otherwise repeat it).
+- **Documentation sweep**: README seed precedence, both `--reference-store` help
+  strings, both startup banners (which now say outright that the banner is not
+  evidence the gate engaged), the `finalize` / `seedNewTile` /
+  `primeFromTileResample` Doxygen, and ADR-0001's rung 2 — including extending
+  its recorded widened-gate false-reject trade-off to Chart, where it is now the
+  dominant gating path.
+- **Tests**: `MatchedButEmptyChartPriorStillWarns`,
+  `EmptyExactLevelChartPriorFallsThroughToCoarsePrior`,
+  `BatchRegen.PriorThatPrimesNothingWarnsFromGather`; a `StderrCapture` RAII
+  wrapper in both test files (gtest's capture is single-capturer, and a throw
+  before the release aborts the whole binary at the next capture);
+  "exactly once" and second-`finalize()` assertions on the warning; the
+  cross-level audit line asserted in `CoarseLevelChartSeedRejectsDeepBlunder`;
+  and the no-prior baseline added to
+  `BoundaryFlushCrossLevelChartRejectsDeepBlunder`. All three new tests were
+  verified to FAIL against the pre-fix behaviour. Suite: **563 tests, 0
+  failures** (was 560).
+
+### Deferred — operator decides, NOT implemented
+
+1. **Bound how coarse a Chart prior may be.** An L2 chart tile is ~232 m/cell
+   under an L10 survey, and #137 makes Chart the dominant gating path — so the
+   coarse/shallow-biased false-reject mode (recorded in ADR-0001 for Reference)
+   now applies at potentially very large resample gaps. Options: cap the level
+   gap, scale the blunder margin with the gap, or make cross-level Chart priming
+   opt-in. **Explicitly held for the operator at the publish checkpoint**;
+   recorded in ADR-0001 as an open question, not decided. Today it is unbounded
+   and the audit line names the level used, so a large gap is visible in the log.
+2. **Priors FINER than the survey level are still dropped** (`cand.level() >=
+   index.level()`). Using one needs an aggregation rule — which of the N finer
+   cells gates a survey cell, shoalest or mean — and shoalest-wins is a
+   conservatism decision of the same kind as (1). Same checkpoint.
+3. **The live node's `primeFromPriorLayers` is still exact-level-only for both
+   layers**, so this issue's own premise (an ENC product never has a
+   survey-level tile) leaves the gate off *afloat*, where it is safety-relevant.
+   Deliberately out of scope here (whole-store bulk prime, different function),
+   and worth its own issue — **not filed**: per AGENTS.md the operator is asked
+   before an issue is opened, and a dispatched sub-agent cannot ask. Surfaced
+   at the publish checkpoint.
+4. **Instruction candidate (operator decides, not auto-applied)**: "a layer-keyed
+   lookup added for one `SourceLayer` must be checked against every other layer
+   sharing the code path" — the third instance of the class (#115, #119, #137).
+   Proposed for `.agent/knowledge/`, not written.
