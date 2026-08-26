@@ -88,6 +88,43 @@ std::vector<GeoSounding> surveyCell(
   return soundings;
 }
 
+// RAII stderr capture -- gtest's CaptureStderr/GetCapturedStderr is a SINGLE-capturer
+// facility, and a throw between the two leaves fd 2 redirected, aborting the binary
+// at the next capture. The destructor releases it.
+class StderrCapture
+{
+public:
+  StderrCapture() {testing::internal::CaptureStderr();}
+  ~StderrCapture()
+  {
+    if (!released_) {
+      testing::internal::GetCapturedStderr();
+    }
+  }
+  StderrCapture(const StderrCapture &) = delete;
+  StderrCapture & operator=(const StderrCapture &) = delete;
+  std::string str()
+  {
+    released_ = true;
+    return testing::internal::GetCapturedStderr();
+  }
+
+private:
+  bool released_ = false;
+};
+
+// Occurrences of @p needle in @p haystack -- for "emitted EXACTLY once" assertions.
+std::size_t countOccurrences(const std::string & haystack, const std::string & needle)
+{
+  std::size_t n = 0;
+  for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
+    pos = haystack.find(needle, pos + needle.size()))
+  {
+    ++n;
+  }
+  return n;
+}
+
 BatchRegen::SheetFactory sheetFactory()
 {
   return []() {return std::make_unique<GeoMapSheet>(kCellSize);};
@@ -389,6 +426,99 @@ TEST(BatchRegen, LegacySurveyStoreRefusedBeforeAnyWrite)
     marine_bathymetry_store::SourceLayer::Processed);
   EXPECT_FALSE(std::filesystem::exists(processed_dir))
     << "batch-regen must not create processed/ (or any output) when it refuses";
+
+  std::filesystem::remove_all(root);
+}
+
+// The silent-no-op prior guard must be reachable from the AUTHORITATIVE rebuild
+// (#137 review). BatchRegen::gather builds a fresh ImportAccumulator per tile and
+// calls persistResidentTile, never ImportAccumulator::finalize -- so the warning
+// finalize() emits could never fire here, even though batch_regen takes the same
+// --reference-store and prints the same "Reference-prior seeding from ..." banner.
+// A chart prior that gated nothing was therefore as silent from the tool the
+// workspace calls authoritative as it was before the fix.
+TEST(BatchRegen, PriorThatPrimesNothingWarnsFromGather)
+{
+  const std::string root = makeTempDir("prior_no_op_warning");
+  const std::string prior_dir = root + "/prior_store";
+
+  // A prior store whose only tile is FAR from the survey: the windowed load finds
+  // nothing usable and no tile ever primes.
+  {
+    const gggs::GridIndex far_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(10.0, 10.0);
+    marine_bathymetry_store::BathymetryTile tile(far_grid);
+    for (gggs::CellAreaIterator cit(far_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(far_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(43.0, -70.0, 20.0f, 40.0f));
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "");
+    cfg.reference_store_dir = prior_dir;
+    BatchRegen regen(sheetFactory(), cfg);
+    for (const auto & b : batches) {
+      regen.addBatch(b);
+    }
+    regen.finalize();
+    warned = capture.str();
+  }
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "batch_regen must emit the run-level prior warning exactly once from the "
+    "merged per-tile tallies; stderr was:\n" << warned;
+  EXPECT_NE(warned.find("batch_regen: WARNING"), std::string::npos)
+    << "the warning must name batch_regen, not import_bag; stderr was:\n" << warned;
+
+  // Companion no-false-positive check: a prior that DOES prime must stay quiet.
+  const std::string good_prior = root + "/good_prior";
+  {
+    const gggs::GridIndex survey_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+    marine_bathymetry_store::BathymetryTile tile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, good_prior);
+  }
+  std::string quiet;
+  {
+    StderrCapture capture;
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out2", "");
+    cfg.reference_store_dir = good_prior;
+    BatchRegen regen(sheetFactory(), cfg);
+    for (const auto & b : batches) {
+      regen.addBatch(b);
+    }
+    regen.finalize();
+    quiet = capture.str();
+  }
+  EXPECT_EQ(quiet.find("primed NOTHING"), std::string::npos)
+    << "an ordinary rebuild with a working prior must NOT warn; stderr was:\n"
+    << quiet;
 
   std::filesystem::remove_all(root);
 }
