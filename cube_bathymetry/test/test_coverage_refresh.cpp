@@ -324,4 +324,23 @@ TEST(CoverageRefresh, WholeTileWindowIsDecidedFromTheWindowItself)
   EXPECT_FALSE(isWholeTileWindow(1, 1, 960, 960, 960, 960));
 }
 
+// The debt is discharged by a whole send from ANY path, not only the drain's.
+// tileRequestCallback serves a freshly quantized whole tile straight from the
+// resident grid, so the gap the heal existed to close is already closed; a
+// tracker that did not know would re-send the same ~183 kB within the interval,
+// on the operator link this mode exists to protect.
+TEST(CoverageRefresh, AWholeSendFromAnyPathDischargesTheDebt)
+{
+  auto t = makeTracker();
+  t.notePublished(kA, 0.0, true);
+  t.notePublished(kA, 1.0, false);            // patched: now owes a heal
+  ASSERT_TRUE(t.owesRefresh(kA));
+  ASSERT_TRUE(t.refreshDue(kA, 100.0));
+
+  t.notePublished(kA, 2.0, true);             // a request serve, not the drain
+  EXPECT_FALSE(t.owesRefresh(kA));
+  EXPECT_FALSE(t.refreshDue(kA, 100.0));
+  EXPECT_EQ(t.owedCount(), 0u);
+}
+
 }  // namespace cube

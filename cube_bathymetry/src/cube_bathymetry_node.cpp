@@ -1389,7 +1389,8 @@ private:
         return idx.level() == ti.level && idx.row() == ti.row &&
                idx.column() == ti.col;
       };
-    const builtin_interfaces::msg::Time stamp = now();
+    const rclcpp::Time serve_time = now();
+    const builtin_interfaces::msg::Time stamp = serve_time;
     std::size_t served = 0;
     std::size_t queued = 0;
     std::size_t overflow = 0;
@@ -1399,6 +1400,14 @@ private:
         if (grid && matches(grid->index(), ti)) {
           if (auto vt = cube::quantizeTile(*grid, stamp)) {
             sonar_tile_publisher_->publish(*vt);
+            // This IS a whole send, freshly quantized from the resident tile,
+            // so it discharges the refresh debt exactly as the drain's re-send
+            // does. Without this the tracker still believed the tile owed a
+            // whole-tile heal and re-sent the same ~183 kB within the interval
+            // -- paid on the operator link this whole mode exists to protect,
+            // to fix a gap the request had already closed.
+            refresh_tracker_.notePublished(
+              grid->index(), serve_time.seconds(), true);
             ++served;
           }
           handled = true;
