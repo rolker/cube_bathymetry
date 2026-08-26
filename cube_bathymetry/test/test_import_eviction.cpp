@@ -1734,4 +1734,154 @@ TEST(ImportEviction, EmptyExactLevelChartPriorFallsThroughToCoarsePrior)
   std::filesystem::remove_all(root);
 }
 
+// A read failure must be REPORTED even when another tile primed (#137 review).
+// The run-level report used to return early whenever `hits > 0`, so the separately
+// tallied `read_failures` could only ever reach the operator in the zero-hit case:
+// a prior store that went unreadable for all but one tile emitted no run-level line
+// at all. That is the same silently-inactive gate this issue exists to close,
+// reached by a different route.
+TEST(ImportEviction, ReadFailureIsReportedEvenWhenAnotherTilePrimed)
+{
+  const std::string root = makeTempDir("prior_read_failure");
+  const std::string prior_dir = root + "/prior_store";
+
+  // Two survey areas, far enough apart that each one's prior window sees only its
+  // own prior tile: A gets a good reference tile, B's is corrupted on disk.
+  constexpr double kLatA = 43.0;
+  constexpr double kLonA = -70.0;
+  constexpr double kLatB = 44.0;
+  constexpr double kLonB = -71.0;
+  const gggs::Level level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::GridIndex grid_a = level.gridIndex(kLatA, kLonA);
+  const gggs::GridIndex grid_b = level.gridIndex(kLatB, kLonB);
+  ASSERT_NE(grid_a, grid_b);
+  {
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    for (const gggs::GridIndex & g : {grid_a, grid_b}) {
+      marine_bathymetry_store::BathymetryTile tile(g);
+      for (gggs::CellAreaIterator cit(g); cit.valid(); cit.next()) {
+        tile.set(
+          (*cit).row(), (*cit).column(),
+          marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+      }
+      tiles.emplace(g, std::move(tile));
+    }
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+  // Corrupt ONLY tile B's raster: the filename still parses (so the window still
+  // selects it) but the GDAL read throws -- an unreadable/corrupt store, not a
+  // coverage gap.
+  const std::string tile_b_path = prior_dir + "/" +
+    marine_bathymetry_store::layerDirName(
+    marine_bathymetry_store::SourceLayer::Reference) + "/" +
+    marine_bathymetry_store::tileFilename(grid_b);
+  ASSERT_TRUE(std::filesystem::is_regular_file(tile_b_path))
+    << "test setup: expected the reference tile at " << tile_b_path;
+  {
+    std::ofstream corrupt(tile_b_path, std::ios::binary | std::ios::trunc);
+    corrupt << "not a geotiff";
+  }
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(kLatA, kLonA, 20.0f, 40.0f));
+    acc.addBatch(surveyCell(kLatB, kLonB, 20.0f, 40.0f));
+    acc.finalize();
+    warned = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(warned, "FAILED to read the prior store"), 1u)
+    << "the read failure must be reported once at run level even though the OTHER "
+    "tile primed; stderr was:\n" << warned;
+  EXPECT_EQ(warned.find("primed NOTHING"), std::string::npos)
+    << "one tile DID prime, so the no-op warning must not claim otherwise; stderr "
+    "was:\n" << warned;
+  EXPECT_NE(warned.find("primed only "), std::string::npos)
+    << "partial coverage must be reported -- some attempts gated, some did not "
+    "(#137 review); stderr was:\n" << warned;
+
+  std::filesystem::remove_all(root);
+}
+
+// Positive coverage for the warm-start scoping clause (#137 review): the run-level
+// warning must SAY that some tiles never reached the prior rung, and must name the
+// layer they warm-started from correctly (`processed/` -- the layer rung 1 actually
+// reads -- not "survey"), and must not imply the two counts partition the run.
+TEST(ImportEviction, WarmStartedTilesAreScopedOutOfThePriorWarning)
+{
+  const std::string root = makeTempDir("warm_start_clause");
+  const std::string prior_dir = root + "/prior_store";
+  const std::string out = root + "/out";
+
+  // A prior store whose only tile is FAR from the survey: nothing it holds can prime.
+  {
+    const gggs::GridIndex far_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(10.0, 10.0);
+    marine_bathymetry_store::BathymetryTile tile(far_grid);
+    for (gggs::CellAreaIterator cit(far_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(far_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  // First pass with no prior: writes a `processed/` tile at A that the second pass
+  // will warm-start from (the incremental-import case).
+  constexpr double kLatA = 43.0;
+  constexpr double kLonA = -70.0;
+  constexpr double kLatB = 44.0;
+  constexpr double kLonB = -71.0;
+  {
+    std::vector<std::vector<GeoSounding>> first;
+    first.push_back(surveyCell(kLatA, kLonA, 20.0f, 40.0f));
+    runImport(first, out, "", /*budget=*/0);
+  }
+  ASSERT_FALSE(loadBathyCells(out).empty())
+    << "test setup: the first pass must leave a processed tile to warm-start from";
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(kLatA, kLonA, 20.0f, 40.0f));   // warm-starts (rung 1)
+    acc.addBatch(surveyCell(kLatB, kLonB, 20.0f, 40.0f));   // reaches the prior rung
+    acc.finalize();
+    warned = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "the tile that DID reach the prior rung primed nothing, so the warning must "
+    "fire exactly once; stderr was:\n" << warned;
+  EXPECT_NE(warned.find("tile touch(es) warm-started"), std::string::npos)
+    << "the warning must scope its claim by reporting the warm-started tile; "
+    "stderr was:\n" << warned;
+  EXPECT_NE(warned.find("'processed/' layer"), std::string::npos)
+    << "rung 1 reads the `processed/` layer -- naming a 'survey' layer sends the "
+    "operator to a directory that no longer exists (ADR-0010 D8); stderr was:\n"
+    << warned;
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube

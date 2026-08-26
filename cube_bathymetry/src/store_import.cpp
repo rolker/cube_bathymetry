@@ -1013,54 +1013,98 @@ bool reportPriorPrimeOutcome(
   const PriorPrimeTally & tally, const std::string & prior_store_dir,
   float cell_size_m, const char * tool)
 {
+  if (tally.attempts == 0) {
+    return false;  // the prior rung was never reached -- nothing to report on
+  }
+
+  // Scope clause shared by the coverage warnings below (#137 review). A tile
+  // warm-started from the output store's own `processed/` layer returns before the
+  // prior rung, so no warning may claim the gate was off for that touch. The two
+  // counts are NOT a partition: a tile that warm-started on first touch, was then
+  // evicted and revisited, DOES reach the prior rung on the revisit and is counted
+  // in `attempts` as well -- say so rather than implying disjointness.
+  const auto warmStartClause = [&tally]() {
+      if (tally.survey_warm_starts == 0) {
+        return;
+      }
+      std::cerr << " (Separately, " << tally.survey_warm_starts
+                << " tile touch(es) warm-started from the output store's "
+        "'processed/' layer and returned before the prior rung; such a tile is still "
+        "counted among the attempts above if it was later evicted and revisited.)";
+    };
+
+  // Which layers/levels the prior windows actually held -- so a level/coverage
+  // mismatch is visible ("chart@L7 vs survey level 10") instead of left to be
+  // inferred from an absence.
+  const auto layersSeenClause = [&tally, &cell_size_m]() {
+      if (tally.layers_seen.empty()) {
+        if (tally.read_failures >= tally.attempts) {
+          std::cerr << " No prior tiles could be listed at all, because every "
+            "windowed load failed.";
+        } else {
+          std::cerr << " No chart or reference tiles overlap the surveyed area.";
+        }
+        return;
+      }
+      std::cerr << " Prior tiles usable over the surveyed area:";
+      for (const auto & [layer, level] : tally.layers_seen) {
+        std::cerr << " " << marine_bathymetry_store::layerDirName(layer) << "@L"
+                  << level;
+      }
+      std::cerr << " vs survey level " << static_cast<int>(
+        gggs::Level::fromCellSize(cell_size_m).level()) << ".";
+    };
+
+  bool reported = false;
+
+  // Read failures are reported INDEPENDENTLY of whether anything primed (#137
+  // review). Gating this on `hits == 0` meant a prior store that went unreadable
+  // for 499 of 500 tiles but primed one emitted no run-level line at all -- the
+  // same silently-inactive gate this issue exists to close, reached by a different
+  // route. An unreadable store is its own fault with its own remedy, so it gets its
+  // own line whatever the rest of the run did.
+  if (tally.read_failures > 0) {
+    std::cerr << tool << ": WARNING -- " << tally.read_failures << " of "
+              << tally.attempts << " prior-seed attempt(s) FAILED to read the prior "
+      "store '" << prior_store_dir << "' (see the per-tile errors above): this may "
+      "be an unreadable, corrupt or permission-denied store rather than a coverage "
+      "gap, and the blunder gate was INACTIVE for those tile(s)." << std::endl;
+    reported = true;
+  }
+
   // Silent-no-op guard (#137). A run given --reference-store that primed NOT ONE
   // CELL means the blunder gate was off for every tile that consulted the prior --
   // yet the startup banner announced prior seeding, so the operator reasonably
   // concludes it was on. That is how an ENC chart prior behaved before this issue's
   // fix: present, announced, and never consulted.
-  if (tally.attempts == 0 || tally.hits > 0) {
-    return false;
+  if (tally.hits == 0) {
+    // "attempt(s)", not "tile(s)": an evicted tile that is revisited re-primes and
+    // so counts again (#137 review).
+    std::cerr << tool << ": WARNING -- prior store '" << prior_store_dir
+              << "' primed NOTHING on any of " << tally.attempts
+              << " prior-seed attempt(s) (first touch + evicted-tile revisits, so a "
+      "revisited tile counts more than once): the blunder gate was INACTIVE for "
+      "every tile that reached the prior rung.";
+    warmStartClause();
+    layersSeenClause();
+    std::cerr << std::endl;
+    reported = true;
+  } else if (tally.hits < tally.attempts) {
+    // Partial coverage is the likelier field failure than total non-coverage (#137
+    // review): 1 primed tile out of 500 used to warn nothing at all, though 499 ran
+    // ungated. A prior smaller than the survey is legitimate -- but the operator has
+    // to be told how much of the run it actually gated, not left to assume all of it.
+    std::cerr << tool << ": WARNING -- prior store '" << prior_store_dir
+              << "' primed only " << tally.hits << " of " << tally.attempts
+              << " prior-seed attempt(s): the blunder gate was INACTIVE for the "
+              << (tally.attempts - tally.hits)
+              << " attempt(s) the prior did not cover.";
+    warmStartClause();
+    layersSeenClause();
+    std::cerr << std::endl;
+    reported = true;
   }
-  // "attempt(s)", not "tile(s)": an evicted tile that is revisited re-primes and so
-  // counts again (#137 review).
-  std::cerr << tool << ": WARNING -- prior store '" << prior_store_dir
-            << "' primed NOTHING on any of " << tally.attempts
-            << " prior-seed attempt(s) (first touch + evicted-tile revisits, so a "
-    "revisited tile counts more than once): the blunder gate was INACTIVE for "
-    "every tile that reached the prior rung.";
-  // Scope the claim (#137 review): a tile warm-started from the output store's own
-  // survey layer returns before the prior rung, so "this entire run" would be false
-  // on a mixed re-import where most tiles warm-started.
-  if (tally.survey_warm_starts > 0) {
-    std::cerr << " (" << tally.survey_warm_starts
-              << " further tile(s) warm-started from the output store's survey "
-      "layer and never reached the prior rung.)";
-  }
-  if (tally.read_failures > 0) {
-    // A store that could not be READ is a different fault with a different remedy
-    // than a store that does not cover the survey -- never conflate them.
-    std::cerr << " " << tally.read_failures << " of those attempt(s) FAILED to read "
-      "the prior store (see the per-tile errors above): this may be an unreadable, "
-      "corrupt or permission-denied store rather than a coverage gap.";
-  }
-  if (tally.layers_seen.empty()) {
-    if (tally.read_failures >= tally.attempts) {
-      std::cerr << " No prior tiles could be listed at all, because every windowed "
-        "load failed.";
-    } else {
-      std::cerr << " No chart or reference tiles overlap the surveyed area.";
-    }
-  } else {
-    std::cerr << " Prior tiles found over the surveyed area:";
-    for (const auto & [layer, level] : tally.layers_seen) {
-      std::cerr << " " << marine_bathymetry_store::layerDirName(layer) << "@L"
-                << level;
-    }
-    std::cerr << " vs survey level " << static_cast<int>(
-      gggs::Level::fromCellSize(cell_size_m).level()) << ".";
-  }
-  std::cerr << std::endl;
-  return true;
+  return reported;
 }
 
 bool legacySurveyDirPersists(const std::string & store_dir)

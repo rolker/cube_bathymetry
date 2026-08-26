@@ -340,20 +340,30 @@ namespace cube
     void merge(const PriorPrimeTally & other);
   };
 
-/// @brief Emit the one-line prior-store WARNING when a configured prior primed
-///        NOTHING for any tile that reached it (#137).
+/// @brief Emit the run-level prior-store WARNING(s) describing how much of the run
+///        a configured prior actually gated (#137).
 ///
-/// Says which of the two indistinguishable causes applies — no overlapping prior
-/// tiles, a level/coverage mismatch (the layer@level pairs found are named), or a
-/// prior store that could not be READ at all — and scopes the claim to the tiles
-/// that actually consulted the prior, since a tile warm-started from the output
-/// store's survey layer never reaches the prior rung.
+/// Up to two lines, each independently gated:
+///  - **Read failures** — emitted whenever ANY attempt failed to read the store,
+///    *regardless of whether other tiles primed*. An unreadable/corrupt/permission-
+///    denied store is a different fault with a different remedy than a coverage gap,
+///    and tying it to the zero-hit case hid it completely on a run where a single
+///    tile primed (#137 review).
+///  - **Coverage** — "primed NOTHING on any of N attempt(s)" when nothing primed at
+///    all, or "primed only M of N attempt(s)" when the prior gated part of the run.
+///    Partial coverage is the likelier field failure than total non-coverage, so it
+///    is reported rather than left to be assumed away. Both name the layer@level
+///    pairs the prior windows held, so a level mismatch is visible.
+///
+/// Both coverage lines scope their claim to the tiles that actually consulted the
+/// prior, since a tile warm-started from the output store's `processed/` layer
+/// returns before the prior rung.
 ///
 /// @param tally            Run-level tally (see @ref PriorPrimeTally).
 /// @param prior_store_dir  The `--reference-store` dir, named in the warning.
 /// @param cell_size_m      Survey cell size, reported as the survey GGGS level.
 /// @param tool             Prefix for the line (`import_bag` / `batch_regen`).
-/// @return true when a warning was emitted.
+/// @return true when at least one line was emitted.
   bool reportPriorPrimeOutcome(
     const PriorPrimeTally & tally, const std::string & prior_store_dir,
     float cell_size_m, const char * tool);
