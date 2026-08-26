@@ -370,6 +370,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_quantize_tile test/test_quantize_tile.cpp)
   target_link_libraries(test_quantize_tile cube_bathymetry_quantize_tile)
 
+  # Header-only policy (#112); links the core lib for gggs::GridIndex only.
+  ament_add_gtest(test_coverage_refresh test/test_coverage_refresh.cpp)
+  target_link_libraries(test_coverage_refresh cube_bathymetry)
+
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
 

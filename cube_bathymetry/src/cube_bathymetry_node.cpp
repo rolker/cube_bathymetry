@@ -22,11 +22,14 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -40,6 +43,7 @@
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "cube_bathymetry/coverage_refresh.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/grid_projection.h"
 #include "geometry_msgs/msg/point_stamped.hpp"
@@ -109,6 +113,11 @@ public:
     // fresh sheet's serving.
     disk_serve_queue_.clear();
     disk_serve_queued_.clear();
+    // The refresh queue describes a SHEET that is about to be replaced. Carried
+    // across a reconfigure it would claim tiles had been sent whole when the new
+    // sheet has never sent them at all, suppressing the heal for exactly the
+    // tiles a restart is most likely to have left a consumer stale on.
+    refresh_tracker_.clear();
     // Reset the tile-version registry too (#78): a fresh sheet must not advertise
     // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
@@ -508,30 +517,28 @@ public:
     } else {
       disk_serve_interval_s_ = interval_raw;
     }
-    // Dirty sub-window push (ADR-0001 section 4 sub-window addendum). OFF by
-    // default: it is a change to what the CONSUMER must do, not just to what we
-    // send, and a consumer that ignores the window fields would paint a patch
-    // over the whole tile -- corrupting the operator's coverage view during a
-    // survey. Opt in only against a consumer known to implement the patch path.
+    // Dirty sub-window push (ADR-0001 section 4 sub-window addendum). Still OFF
+    // by default here: the refresh queue below removes the SILENT failure mode,
+    // but flipping what every deployment sends is its own decision and its own
+    // commit.
     rcl_interfaces::msg::ParameterDescriptor subwindow_desc;
     subwindow_desc.description =
       "Publish only each tile's dirty sub-window on ~/coverage_tiles instead of "
       "the whole tile (SonarVisualizationTile window_col/row/width/height). "
-      "REQUIRES a consumer that (a) patches bands in at the window offset, "
+      "REQUIRES a consumer that (a) patches bands in at the window offset and "
       "(b) dequantizes per message -- the backscatter band's scale/offset is "
-      "auto-ranged over the window, so it varies between patches -- and (c) "
-      "does NOT advance its held tile version from a patch. Get (c) wrong and "
-      "the failure is SILENT: the catalog version is bumped on a patch exactly "
-      "as on a whole tile, so a consumer that records header.stamp as its held "
-      "version -- what SonarVisualizationTile tells it to do -- matches the "
-      "catalog and never re-requests. One dropped best-effort patch then leaves "
-      "a PERMANENT, INVISIBLE gap in the operator's coverage display while "
-      "anti-entropy reports convergence. Get (c) right and the cost is only "
-      "WASTEFUL: such a consumer re-requests each patched tile in full via the "
-      "catalog, spending MORE bandwidth than leaving this off. The "
-      "catalog/TileRequest heal path re-sends a tile in full and is what "
-      "recovers a consumer that gets it wrong -- but only one that still asks. "
-      "Default false reproduces the full-tile stream exactly. Read at "
+      "auto-ranged over the window, so it varies between patches. A consumer "
+      "that ignores the window fields would paint a patch over the whole tile "
+      "and corrupt the operator's coverage view, so verify (a) before enabling "
+      "against a new consumer. The live push is best-effort and a lost patch is "
+      "NOT discoverable by the consumer -- the catalog version is bumped on a "
+      "patch exactly as on a whole tile, so a consumer that records "
+      "header.stamp as its held version matches the catalog and never "
+      "re-requests. subwindow_refresh_interval is what makes that survivable: "
+      "every patched tile is re-sent WHOLE within that interval, so a dropped "
+      "patch is a gap of bounded duration rather than a permanent one. Set "
+      "true to send patches; false (the default) reproduces the whole-tile "
+      "stream byte for byte. Read at "
       "configure; read_only, so a runtime set is rejected rather than silently "
       "ignored.";
     // read_only enforces the "Read at configure" promise above. Without it a
@@ -544,19 +551,57 @@ public:
     subwindow_desc.read_only = true;
     publish_dirty_subwindow_ =
       declare_parameter("publish_dirty_subwindow", false, subwindow_desc);
-    if (publish_dirty_subwindow_) {
+
+    rcl_interfaces::msg::ParameterDescriptor refresh_desc;
+    refresh_desc.description =
+      "Seconds a patched coverage tile may go without being re-sent WHOLE. "
+      "This is the heal for a lost sub-window patch, and it does not depend on "
+      "the consumer noticing anything. Lower heals faster and costs more: "
+      "measured on the 2026-08-25 Appledore bags, 300s/60s/30s cost 7.9/11.2/"
+      "15.2 kB/s on transit and 3.5/9.1/16.1 kB/s on station, against 56.0 and "
+      "85.7 kB/s for the whole-tile stream this replaces. 0 disables the "
+      "refresh entirely, which makes a lost patch permanent -- only safe "
+      "against a consumer that tracks patch possession and re-requests.";
+    const double refresh_raw = declare_parameter("subwindow_refresh_interval", 60.0, refresh_desc);
+    if (!std::isfinite(refresh_raw) || refresh_raw < 0.0) {
       RCLCPP_WARN(get_logger(),
-        "publish_dirty_subwindow is ENABLED: ~/coverage_tiles carries dirty "
-        "sub-window patches, not whole tiles. Before trusting the operator "
-        "coverage view, verify the consumer (a) applies "
-        "window_col/window_row/window_width/window_height and (b) does NOT "
-        "advance its held tile version from a patch. The catalog version is "
-        "bumped on a patch just as on a whole tile, so a consumer that records "
-        "header.stamp as possession matches the catalog, never re-requests, and "
-        "one dropped best-effort patch becomes a PERMANENT, INVISIBLE coverage "
-        "gap that anti-entropy reports as converged. A consumer that does "
-        "account for patch possession instead re-requests every patched tile in "
-        "full, costing more bandwidth than leaving this off.");
+        "subwindow_refresh_interval=%g is not a non-negative finite duration; "
+        "using default 60s", refresh_raw);
+      subwindow_refresh_interval_s_ = 60.0;
+    } else {
+      subwindow_refresh_interval_s_ = refresh_raw;
+    }
+
+    rcl_interfaces::msg::ParameterDescriptor refresh_budget_desc;
+    refresh_budget_desc.description =
+      "Maximum whole tiles re-sent per publish cycle to heal outstanding "
+      "patches, over and above the tiles that changed this cycle. Bounds the "
+      "heal so it can never become the burst it exists to prevent. 0 disables "
+      "the drain, which leaves a tile the vessel has moved off unhealed -- "
+      "publishDirtyTiles only ever visits tiles that are still changing.";
+    const int64_t refresh_budget = declare_parameter(
+      "subwindow_refresh_tiles_per_cycle", 2, refresh_budget_desc);
+    if (refresh_budget < 0) {
+      RCLCPP_WARN(get_logger(),
+        "subwindow_refresh_tiles_per_cycle=%" PRId64 " is negative; using "
+        "default 2", refresh_budget);
+      subwindow_refresh_tiles_per_cycle_ = 2;
+    } else {
+      subwindow_refresh_tiles_per_cycle_ = static_cast<std::size_t>(refresh_budget);
+    }
+
+    refresh_tracker_.configure(
+      subwindow_refresh_interval_s_, subwindow_refresh_tiles_per_cycle_);
+
+    if (publish_dirty_subwindow_ && subwindow_refresh_interval_s_ == 0.0) {
+      RCLCPP_WARN(get_logger(),
+        "publish_dirty_subwindow is ENABLED with subwindow_refresh_interval 0: "
+        "patched tiles are NEVER re-sent whole. A dropped best-effort patch "
+        "then leaves a PERMANENT gap in the operator's coverage display, and "
+        "the consumer cannot discover it -- the catalog version is bumped on a "
+        "patch, so a consumer keying possession on header.stamp matches the "
+        "catalog and never re-requests. Only safe against a consumer that "
+        "tracks patch possession itself.");
     }
     sonar_tile_publisher_ =
       create_publisher<marine_interfaces::msg::SonarVisualizationTile>(
@@ -808,6 +853,24 @@ private:
   // False reproduces the pre-sub-window whole-tile stream byte for byte.
   bool publish_dirty_subwindow_ = false;
 
+  // Whole-tile refresh queue (#112). The live push is best-effort, so a lost
+  // sub-window patch leaves a gap the consumer cannot discover: the catalog
+  // version is bumped on a patch, so a consumer that records header.stamp as
+  // its held version matches the catalog and never re-requests. Re-sending
+  // each patched tile IN FULL on a slow cadence heals such a gap within a
+  // bounded time WITHOUT depending on the consumer's possession semantics --
+  // which is what makes the sub-window stream safe against the consumers we
+  // actually have (CAMP's SonarLiveTile::applyPatch advances its held version
+  // from a patch; camp#121).
+  //
+  // last_full_tile_publish_ is when each tile last went out whole;
+  // patched_since_full_ is the tiles holding unconfirmed patches. A tile is
+  // owed a refresh when it is in the set AND its last whole send is older than
+  // subwindow_refresh_interval_s_.
+  cube::CoverageRefreshTracker refresh_tracker_;
+  double subwindow_refresh_interval_s_ = 60.0;
+  std::size_t subwindow_refresh_tiles_per_cycle_ = 2;
+
   // Long-duration bounding parameters (#70, ADR-0001).
   std::size_t max_resident_tiles_ = 64;
   double ca_window_radius_m_ = 200.0;
@@ -938,6 +1001,63 @@ private:
       ca_window_radius_m_ << "m window");
   }
 
+  // --- whole-tile refresh queue (#112) ------------------------------------
+  //
+  // Policy lives in cube::CoverageRefreshTracker (coverage_refresh.h), node-free
+  // so it can be unit-tested directly; this is the wiring. See that header for
+  // WHY a patched tile must be re-sent whole on a cadence.
+
+  /// Re-send, whole, the tiles the tracker says are owed a refresh and were not
+  /// already published this cycle.
+  void drainRefreshQueue(
+    const std::set<gggs::GridIndex> & published_this_cycle,
+    const builtin_interfaces::msg::Time & stamp,
+    const rclcpp::Time & pub_time,
+    std::int64_t version)
+  {
+    std::size_t dropped = 0;
+    const auto due = refresh_tracker_.dueForRefresh(
+      published_this_cycle, pub_time.seconds(),
+      [this](const gggs::GridIndex & index) {
+        return static_cast<bool>(geo_map_sheet_->gridAt(index));
+      },
+      &dropped);
+
+    if (dropped > 0) {
+      // A tile that left RAM while owing a refresh cannot be quantized here, so
+      // its debt is unpayable and would otherwise sit in the set forever. Rare
+      // in practice -- a just-patched tile is the WARMEST thing in the sheet and
+      // eviction takes the coldest, so a 60s drain empties the debt long before
+      // max_resident_tiles newer tiles could displace it. Surfaced rather than
+      // silently forgotten: the consumer keeps whatever gap it has, and the
+      // durable fix is to serve the refresh from the draft store the way a
+      // TileRequest already is (#106).
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 30000,
+        "%zu coverage tile(s) left RAM still owing a whole-tile refresh; any "
+        "sub-window patch lost on them stays missing at the consumer until the "
+        "tile is revisited", dropped);
+    }
+
+    for (const auto & index : due) {
+      auto grid = geo_map_sheet_->gridAt(index);
+      if (!grid) {
+        continue;
+      }
+      const auto vt = cube::quantizeTile(*grid, stamp);
+      if (!vt) {
+        // Nothing displayable, so there is no gap to heal either.
+        refresh_tracker_.forget(index);
+        continue;
+      }
+      sonar_tile_publisher_->publish(*vt);
+      catalog_builder_.update(index, version);
+      refresh_tracker_.notePublished(index, pub_time.seconds(), true);
+    }
+    RCLCPP_DEBUG(get_logger(),
+      "Coverage refresh: re-sent %zu whole tile(s); %zu still owed",
+      due.size(), refresh_tracker_.owedCount());
+  }
+
   // Incremental coverage: emit each changed tile as its own GridMap on ~/tiles,
   // then clear the publish-dirty set. Bounds per-message size to one tile and
   // per-cycle cost to the tiles that actually changed.
@@ -958,6 +1078,10 @@ private:
     // tile), so a measured ratio from this survey beats any table.
     std::size_t window_cells = 0;
     std::size_t full_cells = 0;
+    // What actually reached the wire this cycle -- not the same as `dirty`: a
+    // tile can be dirty and still publish nothing (evicted, or no displayable
+    // cell). The refresh drain must not treat those as already handled.
+    std::set<gggs::GridIndex> published_this_cycle;
     for (const auto & index : dirty) {
       auto grid = geo_map_sheet_->gridAt(index);
       if(!grid) {
@@ -982,7 +1106,12 @@ private:
       // from-disk serve stay whole-tile on purpose: they exist to repair a
       // consumer that has diverged, and a patch cannot repair divergence.
       std::optional<marine_interfaces::msg::SonarVisualizationTile> vt;
-      if (publish_dirty_subwindow_) {
+      // A tile whose last whole send has aged past the refresh interval goes out
+      // WHOLE even though it is dirty: that is the heal, and doing it here (in
+      // the tile's own dirty cycle) costs one message rather than two.
+      const bool refresh_due = publish_dirty_subwindow_ &&
+        refresh_tracker_.refreshDue(index, pub_time.seconds());
+      if (publish_dirty_subwindow_ && !refresh_due) {
         vt = cube::quantizeTileWindow(*grid, stamp, grid->publishDirtyCells());
       } else {
         vt = cube::quantizeTile(*grid, stamp);
@@ -990,10 +1119,25 @@ private:
       if (vt) {
         sonar_tile_publisher_->publish(*vt);
         catalog_builder_.update(index, version);
+        refresh_tracker_.notePublished(
+          index, pub_time.seconds(),
+          cube::isWholeTileWindow(
+            vt->window_col, vt->window_row, vt->window_width, vt->window_height,
+            vt->width, vt->height));
+        published_this_cycle.insert(index);
         window_cells += static_cast<std::size_t>(vt->window_width) * vt->window_height;
         full_cells += static_cast<std::size_t>(vt->width) * vt->height;
       }
     }
+    // Tiles that went quiet still owing a refresh. publishDirtyTiles only ever
+    // visits the DIRTY set, so without this a patch lost on a tile the vessel
+    // has since moved off would never be healed at all -- the gap would outlive
+    // the survey. Bounded per cycle so the heal can never become the burst it
+    // exists to prevent.
+    if (publish_dirty_subwindow_) {
+      drainRefreshQueue(published_this_cycle, stamp, pub_time, version);
+    }
+
     if (publish_dirty_subwindow_ && full_cells > 0) {
       // 4 bytes/cell across the three bands (depth int16 + two uint8).
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 30000,
