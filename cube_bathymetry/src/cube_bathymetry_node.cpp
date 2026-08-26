@@ -38,6 +38,7 @@
 
 #include "tf2_ros/transform_listener.h"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp/create_timer.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
@@ -703,13 +704,24 @@ public:
         std::chrono::duration<double>(catalog_interval_s_),
         std::bind(&CubeBathymetry::publishCatalog, this));
     }
-    // Whole-tile refresh drain (#112). Wall timer on purpose -- see
-    // drainRefreshQueue. The tick is the same 5 s as the coverage publish
-    // cadence, so subwindow_refresh_tiles_per_cycle keeps meaning "per publish
-    // cycle" whichever path drains it.
+    // Whole-tile refresh drain (#112). Independent of the ping path on purpose
+    // -- see drainRefreshQueue. The tick is the same 5 s as the coverage
+    // publish cadence, so subwindow_refresh_tiles_per_cycle keeps meaning "per
+    // publish cycle" whichever path drains it.
+    //
+    // ON THE NODE CLOCK, NOT A WALL TIMER. drainRefreshQueue asks the tracker
+    // what is due using now(), which under use_sim_time is the SIM clock, so a
+    // wall timer put the drain's cadence and its own due-check on two
+    // different clocks. That is incoherent on exactly the route this feature
+    // is meant to be validated on before it is trusted in the field: replay a
+    // bag. Replayed slower than real time the sim clock lags, no tile ever
+    // reaches its interval, and the heal silently never fires; paused, it
+    // never fires at all while the timer keeps ticking. On the boat
+    // use_sim_time is false and this is the same timer it always was.
     if (publish_dirty_subwindow_ && !refresh_timer_) {
-      refresh_timer_ = create_wall_timer(
-        std::chrono::duration<double>(kRefreshDrainIntervalSeconds),
+      refresh_timer_ = rclcpp::create_timer(
+        this, get_clock(),
+        rclcpp::Duration::from_seconds(kRefreshDrainIntervalSeconds),
         std::bind(&CubeBathymetry::drainRefreshQueue, this));
     }
     // Disk-serve drain (#106): trickle from-disk catch-up of requested
