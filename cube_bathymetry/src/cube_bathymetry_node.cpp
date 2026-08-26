@@ -1126,12 +1126,34 @@ private:
       }
       if (vt) {
         sonar_tile_publisher_->publish(*vt);
-        catalog_builder_.update(index, version);
-        refresh_tracker_.notePublished(
-          index, pub_time.seconds(),
-          cube::isWholeTileWindow(
-            vt->window_col, vt->window_row, vt->window_width, vt->window_height,
-            vt->width, vt->height));
+        const bool sent_whole = cube::isWholeTileWindow(
+          vt->window_col, vt->window_row, vt->window_width, vt->window_height,
+          vt->width, vt->height);
+        // THE CATALOG VERSION IS BUMPED ONLY ON A WHOLE SEND, so it keeps
+        // meaning "at this version you hold the WHOLE tile" rather than "this
+        // is when the newest patch went out". Bumping it on a patch breaks
+        // both consumers, in opposite directions:
+        //
+        //  - marine_web_view takes possession only from a whole tile (on
+        //    purpose) and re-requests anything whose catalog version exceeds
+        //    what it holds. Bumped on a patch, EVERY patched tile is
+        //    re-requested in full every catalog round, served immediately and
+        //    unthrottled by tileRequestCallback -- more traffic than the
+        //    whole-tile stream this sub-window mode exists to replace.
+        //  - CAMP takes possession from a patch, so its held version matched
+        //    the bumped catalog and it never re-requested at all: a dropped
+        //    patch became a permanent invisible hole.
+        //
+        // Not bumping fixes both. The web view's held version now equals the
+        // catalog and it stops asking; CAMP's runs ahead of it and it does not
+        // ask either; and if either MISSES a whole-tile refresh, its held
+        // version falls behind the catalog and the documented
+        // catalog/TileRequest heal fires as SonarVisualizationTile.msg
+        // promises. The refresh queue covers what anti-entropy cannot see.
+        if (sent_whole) {
+          catalog_builder_.update(index, version);
+        }
+        refresh_tracker_.notePublished(index, pub_time.seconds(), sent_whole);
         published_this_cycle.insert(index);
         window_cells += static_cast<std::size_t>(vt->window_width) * vt->window_height;
         full_cells += static_cast<std::size_t>(vt->width) * vt->height;
