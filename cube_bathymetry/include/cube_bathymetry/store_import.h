@@ -359,7 +359,7 @@ namespace cube
   /// after the wrong fault: a boundary tile with no containing prior is a coverage
   /// gap, and the remedies differ (#137 review).
     std::set < std::pair < marine_bathymetry_store::SourceLayer,
-      int >> unusable_seen;
+    int >> unusable_seen;
   /// (layer, level) pairs whose cross-level-fallback audit line has already been
   /// logged this run; the line is emitted once per pair, not once per tile. This
   /// only holds when every tile of the run shares ONE tally — see
