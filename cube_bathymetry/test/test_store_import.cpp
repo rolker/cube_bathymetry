@@ -832,4 +832,27 @@ TEST(StoreImport, PrimeFromPriorLayersDoesNotCountAMatchedButEmptyTile)
     "otherwise this test is not exercising the ungated case";
 }
 
+// An INFINITE prior depth is no-data, not a gate (#137 review). Both prime helpers
+// filtered `isnan` only, so a +/-inf cell counted toward the primed CELL COUNT --
+// the signal everything now keys on. It would have suppressed the run-level warning
+// and short-circuited the walk to a coarser prior that has real data, while
+// Node::insert's blunder limit (sqrt(depth - variance)) is meaningless on it.
+TEST(StoreImport, PrimeFromTileTreatsNonFiniteDepthAsNoData)
+{
+  const gggs::GridIndex index =
+    gggs::Level::fromCellSize(1.0f).gridIndex(43.07, -70.76);
+  const double kInf = std::numeric_limits<double>::infinity();
+
+  marine_bathymetry_store::BathymetryTile tile(index);
+  for (gggs::CellAreaIterator it(index); it.valid(); it.next()) {
+    tile.set(
+      (*it).row(), (*it).column(),
+      marine_bathymetry_store::BathyCell{-kInf, 0.5});
+  }
+
+  GeoMapSheet sheet(1.0f);
+  EXPECT_EQ(primeFromTile(tile, sheet, /*seed_settled=*/false), 0u)
+    << "an infinite depth gates nothing and must not be counted as a primed cell";
+}
+
 }  // namespace cube

@@ -257,11 +257,16 @@ std::size_t primeFromTileSkippingMask(
   gggs::CellAreaIterator it(grid);
   std::size_t k = 0;
   for (; it.valid() && k < depth.size(); it.next(), ++k) {
-    if (mask_depth && k < mask_depth->size() && !std::isnan((*mask_depth)[k])) {
+    if (mask_depth && k < mask_depth->size() && std::isfinite((*mask_depth)[k])) {
       continue;  // mask (Processed) already covers this cell -- do not layer under it
     }
     const double d = depth[k];
-    if (std::isnan(d)) {
+    // isfinite, not !isnan (#137 review): now that the primed CELL COUNT is the
+    // gating signal, a +/-inf depth would count as a hit -- suppressing the
+    // run-level warning and the coarser prior behind it -- while the blunder limit
+    // (sqrt(depth - variance)) is meaningless on it. A non-finite depth is no-data
+    // whichever bit pattern the producer wrote.
+    if (!std::isfinite(d)) {
       continue;  // no-data cell -- nothing to prime
     }
     // Variance from the stored 1-sigma uncertainty (sigma^2). Node::setPredictedDepth
@@ -791,7 +796,8 @@ std::size_t primeFromTileResample(
     }
     const marine_bathymetry_store::BathyCell cell =
       coarse_tile.get(coarse_cell.row(), coarse_cell.column());
-    if (std::isnan(cell.depth)) {
+    // isfinite, not !isnan -- see primeFromTile (#137 review).
+    if (!std::isfinite(cell.depth)) {
       continue;  // no coarse prior here -- leave the fine survey cell ungated
     }
     // Same variance derivation as primeFromTile: sigma^2 floored at a small positive

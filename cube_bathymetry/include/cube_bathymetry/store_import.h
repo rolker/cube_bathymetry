@@ -203,10 +203,13 @@ namespace cube
 ///   backscatter) with non-measured fill, so the prior only gates, it does not
 ///   fill; survey-falls-through-to-reference gap-filling stays a query-time concern.
 ///
-/// @return the number of cells actually primed. Zero is a real answer: an all-NaN
-///   (no-data-here) tile matches its GridIndex and primes nothing, so a caller
-///   asking "is the blunder gate on for this tile?" must key on this count, never
-///   on the fact that a tile was found (#137).
+/// @return the number of cells actually primed. Only cells whose stored depth is
+///   FINITE are primed — a non-finite depth (NaN or ±inf) is no-data, and an
+///   infinite one could neither gate (the blunder limit is meaningless on it) nor be
+///   allowed to count as coverage. Zero is a real answer: an all-no-data tile
+///   matches its GridIndex and primes nothing, so a caller asking "is the blunder
+///   gate on for this tile?" must key on this count, never on the fact that a tile
+///   was found (#137).
   std::size_t primeFromTile(
     const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
     bool seed_settled = true);
