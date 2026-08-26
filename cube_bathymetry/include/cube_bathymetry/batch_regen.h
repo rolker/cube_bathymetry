@@ -106,8 +106,12 @@ public:
   ///        store-level metadata, and delete the scratch scatter dir.
   ///
   /// Also emits the run-level prior-store WARNING (#137,
-  /// @ref reportPriorPrimeOutcome) when a configured `--reference-store` primed
-  /// nothing for any gathered tile, from the merged per-tile tallies.
+  /// @ref reportPriorPrimeOutcome) when a configured `--reference-store` did not
+  /// gate the whole run, from the tally every gather accumulator shares. Emitted
+  /// once, however many times this is called — but, unlike
+  /// @ref ImportAccumulator::finalize, it CANNOT be emitted first: there is no
+  /// tally until the gather loop has run, so a throw inside that loop loses the
+  /// line. That is inherent to gathering per tile, not parity this class provides.
     void finalize(
       const marine_bathymetry_store::StoreMetadata * bathy_metadata = nullptr,
       const marine_mbes_backscatter_store::StoreMetadata * bs_metadata = nullptr);
@@ -153,12 +157,18 @@ private:
 
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
-  /// Merged prior-prime tally across every per-tile gather accumulator (#137). The
-  /// gather calls @ref ImportAccumulator::persistResidentTile, never that class's
-  /// `finalize()`, so the silent-no-op prior warning it emits cannot fire from
-  /// here — yet batch_regen is the authoritative off-boat rebuild and takes the
-  /// same `--reference-store`. @ref finalize merges these and reports once.
+  /// The RUN-level prior-prime tally (#137). The gather calls
+  /// @ref ImportAccumulator::persistResidentTile, never that class's `finalize()`,
+  /// so the silent-no-op prior warning it emits cannot fire from here — yet
+  /// batch_regen is the authoritative off-boat rebuild and takes the same
+  /// `--reference-store`. Every per-tile gather accumulator is pointed at THIS
+  /// tally (@ref ImportAccumulator::usePriorTally) rather than merged into it
+  /// afterwards, because `audit_seen` de-duplicates the cross-level audit line and
+  /// a set merged after the fact suppresses nothing (#137 review).
     PriorPrimeTally prior_tally_;
+  /// Once-guard for the run-level warning, mirroring
+  /// @ref ImportAccumulator's — a second @ref finalize must not re-emit it.
+    bool prior_outcome_reported_ = false;
   };
 
 }  // namespace cube

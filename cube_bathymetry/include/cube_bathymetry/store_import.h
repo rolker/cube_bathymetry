@@ -309,8 +309,11 @@ namespace cube
 /// the cross-level fallback. The tally is what @ref reportPriorPrimeOutcome turns
 /// into that one loud line, and it is a plain struct (not private accumulator state)
 /// because the authoritative off-boat rebuild path, `batch_regen`, drives ONE
-/// @ref ImportAccumulator per tile and so has to merge per-tile tallies and report
-/// once for the run.
+/// @ref ImportAccumulator per tile and so has to hold the RUN-level tally itself and
+/// report once for the run. Each gather accumulator is pointed at that one tally via
+/// @ref ImportAccumulator::usePriorTally rather than accumulating its own and merging
+/// afterwards: `audit_seen` de-duplicates the cross-level audit line, and a dedup set
+/// that is merged only after the fact suppresses nothing at all (#137 review).
   struct PriorPrimeTally
   {
   /// Per-tile prime CALLS: first touch plus every evicted-tile revisit, so a
@@ -333,11 +336,10 @@ namespace cube
   /// visible ("chart@L7 vs survey level 10") instead of left to be inferred.
     std::set < std::pair < marine_bathymetry_store::SourceLayer, int >> layers_seen;
   /// (layer, level) pairs whose cross-level-fallback audit line has already been
-  /// logged this run; the line is emitted once per pair, not once per tile.
+  /// logged this run; the line is emitted once per pair, not once per tile. This
+  /// only holds when every tile of the run shares ONE tally — see
+  /// @ref ImportAccumulator::usePriorTally.
     std::set < std::pair < marine_bathymetry_store::SourceLayer, int >> audit_seen;
-
-  /// @brief Fold @p other into this tally (batch-regen merges one per gathered tile).
-    void merge(const PriorPrimeTally & other);
   };
 
 /// @brief Emit the run-level prior-store WARNING(s) describing how much of the run
@@ -427,6 +429,11 @@ namespace cube
   /// prior contents. The live import path leaves this false (its warm-start is the
   /// intended incremental-import behavior).
     bool skip_survey_seed = false;
+  /// Tool name prefixing this accumulator's operator-facing prior-gate diagnostics
+  /// (the per-tile prior read error, the cross-level audit line, and the run-level
+  /// warning). @ref BatchRegen sets it to `batch_regen` for its gather so an
+  /// authoritative rebuild's diagnostics are not attributed to `import_bag` (#137).
+    std::string tool = "import_bag";
   };
 
 /// @brief Bounded-RAM offline import accumulator (cube_bathymetry#92).
@@ -532,17 +539,41 @@ public:
     std::size_t bathyTilesPersisted() const {return bathy_persisted_;}
   /// @brief Cumulative backscatter tile writes (eviction + finalize).
     std::size_t backscatterTilesPersisted() const {return bs_persisted_;}
-  /// @brief This accumulator's prior-prime tally (#137). Exposed so a driver that
-  ///        runs MANY accumulators — `batch_regen`, one per gathered tile — can
-  ///        merge them and emit the run-level silent-no-op warning itself, which
-  ///        @ref finalize cannot do for it (batch-regen calls
-  ///        @ref persistResidentTile, never @ref finalize).
-    const PriorPrimeTally & priorPrimeTally() const {return prior_tally_;}
+  /// @brief Tally prior primes into @p tally (caller-owned) instead of into this
+  ///        accumulator's own, for a driver that runs MANY accumulators over one run.
+  ///
+  /// `batch_regen` builds one accumulator per gathered tile and reports the
+  /// silent-no-op warning itself (@ref finalize cannot do it for that path — the
+  /// gather calls @ref persistResidentTile). Pointing every gather accumulator at
+  /// the ONE run-level tally is what makes the run-scoped state in
+  /// @ref PriorPrimeTally actually run-scoped: merging per-tile tallies afterwards
+  /// sums the counters correctly but leaves `audit_seen` de-duplicating nothing, so
+  /// the cross-level audit line fired once per TILE while claiming in its own text
+  /// to be reported once per prior level (#137 review).
+  ///
+  /// @p tally must outlive this accumulator. Passing `nullptr` restores the
+  /// accumulator's own tally. Call before the first @ref addBatch.
+    void usePriorTally(PriorPrimeTally * tally) {shared_tally_ = tally;}
+
+  /// @brief The prior-prime tally this accumulator is writing to (#137) — its own,
+  ///        or the shared one set by @ref usePriorTally.
+    const PriorPrimeTally & priorPrimeTally() const {return priorTally();}
   /// @brief The scratch spill directory (empty until the first eviction). Exposed
   ///        for tests that assert it is cleaned up after @ref finalize.
     const std::string & scratchDir() const {return scratch_dir_;}
 
 private:
+  /// The tally prior primes are recorded in: @ref prior_tally_ unless a driver
+  /// redirected it with @ref usePriorTally.
+    PriorPrimeTally & priorTally()
+    {
+      return shared_tally_ != nullptr ? *shared_tally_ : prior_tally_;
+    }
+    const PriorPrimeTally & priorTally() const
+    {
+      return shared_tally_ != nullptr ? *shared_tally_ : prior_tally_;
+    }
+
     void evictColdTiles();
     void persistBathyTile(const gggs::GridIndex & index);
     void persistBackscatterTile(const gggs::GridIndex & index);
@@ -599,6 +630,8 @@ private:
   /// reached the prior rung — how a multi-level chart prior behaved before Chart
   /// gained the cross-level fallback, and worth one loud line rather than silence.
     PriorPrimeTally prior_tally_;
+  /// Non-null when a driver redirected the tally (@ref usePriorTally); not owned.
+    PriorPrimeTally * shared_tally_ = nullptr;
   /// Guards @ref finalize's warning against a second emission: the tally is never
   /// cleared (batch-regen merges it after the fact), so a second @ref finalize call
   /// would otherwise repeat the line.

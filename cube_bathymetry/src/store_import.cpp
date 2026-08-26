@@ -649,7 +649,7 @@ namespace
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  bool * read_ok = nullptr, PriorPrimeTally * tally = nullptr);
+  const char * tool, bool * read_ok = nullptr, PriorPrimeTally * tally = nullptr);
 }  // namespace
 
 bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
@@ -672,10 +672,10 @@ bool ImportAccumulator::reloadEvictedTile(const gggs::GridIndex & index)
   if (!cfg_.reference_store_dir.empty()) {
     if (primePriorLayersForTile(
         cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "revisit",
-        &prior_read_ok, &prior_tally_))
+        cfg_.tool.c_str(), &prior_read_ok, &priorTally()))
     {
       // Observability (#118): make gate re-activation visible in the import log.
-      std::cerr << "import_bag: re-primed prior gate for revisited tile " <<
+      std::cerr << cfg_.tool << ": re-primed prior gate for revisited tile " <<
         index << std::endl;
     }
   }
@@ -879,6 +879,7 @@ bool primeLayerForTile(
   const std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> & tiles,
   const gggs::GridIndex & index, GeoMapSheet & sheet,
   marine_bathymetry_store::SourceLayer layer, const char * layer_name,
+  const char * tool,
   std::set<std::pair<marine_bathymetry_store::SourceLayer, int>> * audit_seen)
 {
   // Phase A -- exact same-level match: a prior tile at the survey GGGS level
@@ -902,7 +903,7 @@ bool primeLayerForTile(
     // per run (#137) -- per-tile it drowned out the run-level warnings below.
     const int level = static_cast<int>(fallback->index().level());
     if (audit_seen == nullptr || audit_seen->insert({layer, level}).second) {
-      std::cerr << "import_bag: " << layer_name << " blunder gate for survey tile "
+      std::cerr << tool << ": " << layer_name << " blunder gate for survey tile "
                 << index << " seeded via cross-level fallback (" << layer_name
                 << " level " << level
                 << " -> survey level " << static_cast<int>(index.level())
@@ -937,7 +938,7 @@ bool primeLayerForTile(
 bool primePriorLayersForTile(
   const std::string & prior_store_dir, float cell_size_m,
   const gggs::GridIndex & index, GeoMapSheet & sheet, const char * context,
-  bool * read_ok, PriorPrimeTally * tally)
+  const char * tool, bool * read_ok, PriorPrimeTally * tally)
 {
   if (read_ok != nullptr) {
     *read_ok = true;  // flipped to false only if the windowed load below THROWS
@@ -971,7 +972,7 @@ bool primePriorLayersForTile(
         }
       }
       if (primeLayerForTile(
-          tiles, index, sheet, layer, layer_name,
+          tiles, index, sheet, layer, layer_name, tool,
           tally != nullptr ? &tally->audit_seen : nullptr))
       {
         primed = true;
@@ -987,7 +988,7 @@ bool primePriorLayersForTile(
     if (tally != nullptr) {
       ++tally->read_failures;
     }
-    std::cerr << "import_bag: could not prior-seed tile " << index << " on " <<
+    std::cerr << tool << ": could not prior-seed tile " << index << " on " <<
       context << ": " << e.what() << " (no prior gate for this tile)" <<
       std::endl;
   }
@@ -998,16 +999,6 @@ bool primePriorLayersForTile(
 }
 
 }  // namespace
-
-void PriorPrimeTally::merge(const PriorPrimeTally & other)
-{
-  attempts += other.attempts;
-  hits += other.hits;
-  read_failures += other.read_failures;
-  survey_warm_starts += other.survey_warm_starts;
-  layers_seen.insert(other.layers_seen.begin(), other.layers_seen.end());
-  audit_seen.insert(other.audit_seen.begin(), other.audit_seen.end());
-}
 
 bool reportPriorPrimeOutcome(
   const PriorPrimeTally & tally, const std::string & prior_store_dir,
@@ -1206,7 +1197,7 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
         // HERE, before the prior rung -- it is not a prior-prime attempt, and the
         // run-level warning must not claim the gate was off for it (#137).
         if (!cfg_.reference_store_dir.empty()) {
-          ++prior_tally_.survey_warm_starts;
+          ++priorTally().survey_warm_starts;
         }
         seeded_.insert(index);
         return true;
@@ -1256,7 +1247,7 @@ bool ImportAccumulator::seedNewTile(const gggs::GridIndex & index)
   if (!cfg_.reference_store_dir.empty()) {
     primePriorLayersForTile(
       cfg_.reference_store_dir, cfg_.cell_size_m, index, sheet_, "first touch",
-      nullptr, &prior_tally_);
+      cfg_.tool.c_str(), nullptr, &priorTally());
   }
 
   // else blank -- nothing to seed; still mark it seeded so we do not retry.
@@ -1378,7 +1369,8 @@ void ImportAccumulator::finalize(
   if (!prior_outcome_reported_) {
     prior_outcome_reported_ = true;
     reportPriorPrimeOutcome(
-      prior_tally_, cfg_.reference_store_dir, cfg_.cell_size_m, "import_bag");
+      priorTally(), cfg_.reference_store_dir, cfg_.cell_size_m,
+      cfg_.tool.c_str());
   }
   // Persist every still-resident tile (evicted tiles are already durable). Snapshot
   // the indices first so the persist loop iterates a stable, deterministic order.

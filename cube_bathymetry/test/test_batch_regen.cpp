@@ -523,4 +523,85 @@ TEST(BatchRegen, PriorThatPrimesNothingWarnsFromGather)
   std::filesystem::remove_all(root);
 }
 
+// The cross-level audit line must be de-duplicated ACROSS the whole rebuild, and
+// must name the tool that emitted it (#137 review). BatchRegen::finalize builds a
+// FRESH ImportAccumulator per gathered tile, so a tally merged after each tile
+// summed the counters correctly but left `audit_seen` de-duplicating nothing: the
+// line fired once per tile while its own text promised "reported once per prior
+// level", and it was hard-prefixed `import_bag:` on a rebuild the operator ran as
+// `batch_regen`. Two survey tiles inside ONE coarse chart tile therefore used to
+// produce two (or more) copies of a line claiming to be printed once.
+TEST(BatchRegen, CrossLevelAuditLineIsRunScopedAndNamesBatchRegen)
+{
+  constexpr float kCoarseCellSize = 8.0f;
+  const std::string root = makeTempDir("audit_dedup");
+  const std::string prior_dir = root + "/chart_store";
+
+  // Two survey positions well inside the SAME coarse chart tile (quarter and
+  // three-quarter points), so both survey tiles fall through to the same
+  // (layer, level) prior and would each emit the audit line without run-scoped
+  // dedup.
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::GridIndex coarse_grid = coarse_level.gridIndex(43.0, -70.0);
+  const double lat_a =
+    coarse_grid.southLatitude() + 0.25 * coarse_grid.latitudinalSpan();
+  const double lon_a =
+    coarse_grid.westLongitude() + 0.25 * coarse_grid.longitudinalSpan();
+  const double lat_b =
+    coarse_grid.southLatitude() + 0.75 * coarse_grid.latitudinalSpan();
+  const double lon_b =
+    coarse_grid.westLongitude() + 0.75 * coarse_grid.longitudinalSpan();
+  ASSERT_NE(survey_level.gridIndex(lat_a, lon_a), survey_level.gridIndex(lat_b, lon_b))
+    << "test setup: the two positions must land in DIFFERENT survey tiles";
+  ASSERT_EQ(coarse_level.gridIndex(lat_a, lon_a), coarse_grid);
+  ASSERT_EQ(coarse_level.gridIndex(lat_b, lon_b), coarse_grid);
+
+  // One coarse CHART tile with shallow data everywhere: no survey-level tile
+  // exists, so every gathered tile gates via the cross-level fallback.
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  std::string log;
+  {
+    StderrCapture capture;
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "");
+    cfg.reference_store_dir = prior_dir;
+    BatchRegen regen(sheetFactory(), cfg);
+    regen.addBatch(surveyCell(lat_a, lon_a, 150.0f, 40.0f));
+    regen.addBatch(surveyCell(lat_b, lon_b, 150.0f, 40.0f));
+    regen.finalize();
+    log = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(log, "seeded via cross-level fallback"), 1u)
+    << "the audit line claims to be reported once per prior level, so it must be "
+    "de-duplicated across the WHOLE rebuild, not per gather accumulator; stderr "
+    "was:\n" << log;
+  EXPECT_NE(log.find("batch_regen: chart blunder gate"), std::string::npos)
+    << "a rebuild's gate diagnostics must name batch_regen; stderr was:\n" << log;
+  EXPECT_EQ(log.find("import_bag:"), std::string::npos)
+    << "no line of a batch_regen run may be attributed to import_bag; stderr "
+    "was:\n" << log;
+  EXPECT_TRUE(loadBathyCells(root + "/out").empty())
+    << "the coarse chart prior must gate the deep blunder on BOTH tiles (otherwise "
+    "the dedup assertion above is not exercising a real fallback); stderr was:\n"
+    << log;
+
+  std::filesystem::remove_all(root);
+}
+
 }  // namespace cube
