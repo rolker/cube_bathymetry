@@ -40,3 +40,120 @@ Specialists: Governance, Claude Adversarial Lens A + Lens B. Static analysis via
 ### Notes
 - CROSS-REPO OBLIGATION (report only): bizzyboat.yaml has the three coverage entries commented out of the vpn topics_list with the restore condition written in — "RESTORE once tiles are patched or the link budget grows". This branch satisfies that condition, so merging without the config change ships a fix the operator cannot see. That repo is field-mode/gitcloud; file as a linked issue, and GATE it on the catalog-bump fix above. Its sizing comments are also stale (1,843,200 B and "~183 KB compressed" against a measured 3,686,400 B payload, 145-345 KB median, 1.12 MB peak).
 - VERIFIED CLEAN, worth recording because the prior work in this package failed here: all 597 tests were EXECUTED, not merely compiled. The four fixture fixes remove zero assertions; one STRENGTHENS a pre-existing test that had been silently vacuous (its two "well-separated" touchdowns straddled a tile boundary, making it a single-value test that still passed). Also clean: dirty-set lifecycle (no path loses a cell), eviction contract and the no-dirty-mark reload, tracker state machine (no starvation, no every-cycle re-send, both disable paths), quantizeTileWindow clamping and row-major packing, and the byte-identity claim for the whole-tile path verified by diff against origin/jazzy.
+
+## Implementation
+
+**Status**: complete
+**When**: 2026-08-26 08:56 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**Branch**: feature/issue-112 at `d316d7b` (7 commits on top of `d80d33f`)
+**Scope**: the SUGGESTIONS from the round-1 Local Review, plus one stale-doc
+defect found while checking them. All 7 must-fixes had already landed in
+`673c23e`..`d80d33f`; this pass closes what was left open.
+
+**Verification**: `colcon test` EXECUTED (not merely compiled): **602 tests,
+0 errors, 0 failures**, 70 skipped (all 70 are cppcheck's own file skips,
+pre-existing). cpplint and uncrustify clean on every changed file. The
+import_bag change is verified against a real bag rather than asserted --
+6000 pings (602 s) of `bag_2026-06-09T14.51.50_m3_detections`, 2 tiles,
+zlib-compressed as udp_bridge sends it:
+
+| mode | bytes | rate | vs whole-tile |
+|---|---|---|---|
+| whole-tile (today) | 2,957,492 | 4,913 B/s | 100% |
+| pure sub-window | 358,714 | 596 B/s | 12.1% |
+| **as shipped (patches + heal)** | **600,126** | **997 B/s** | **20.3%** |
+
+The heal is 40% of the shipped mode's traffic. That is the measurement the
+old report could not produce, and it is why the saving was being overstated
+by 1.7x to whoever decides whether to leave the mode on over a survey link.
+(Two tiles over ten minutes is a sample, not a fleet number: what it
+establishes is that the omitted half is the same order as the reported half.)
+
+### Findings addressed
+
+- [x] (suggestion) `.msg` contracts falsified by the flip — RESOLVED IN THIS
+  REPO, CROSS-REPO REMAINDER OPEN. The catalog-bump fix (`673c23e`) restored
+  the documented heal for both consumers. The comment-only corrections to
+  `SonarVisualizationTile.msg` / `TileCatalogEntry.msg` live in
+  `unh_marine_autonomy` and still need their own issue — surfaced to the user,
+  not filed unilaterally (cross-repo)
+- [x] (suggestion) `refreshDue` uses `now()` while the drain ran on a WALL
+  timer — the drain is now on the NODE clock (`34c60d1`), so cadence and
+  due-test share a clock under `use_sim_time`. This was the one that would
+  have corrupted the bag-replay validation route itself: played slower than
+  real time the heal never fires, and the run reports a saving the boat will
+  not reproduce
+- [x] (suggestion) The `--tile-size-report` numbers could not be reproduced
+  from the tool that produced them — the tool now MODELS the shipped policy
+  with the same `CoverageRefreshTracker` the node runs, driven by bag time
+  (`fb61f58`). Four new columns (`source,sent,sent_serialized,sent_compressed`)
+  plus `--tile-refresh-interval` / `--tile-refresh-budget`. Chosen over
+  "state the derivation" deliberately: a derivation ages out of step with the
+  code, a model does not
+- [x] (suggestion) A whole tile served via TileRequest did not discharge the
+  refresh debt — it does now (`981249b`). Worse than a wasted message in the
+  case that produces it: requests arrive in BURSTS after a restart or a link
+  outage, so every tile in the burst owed a duplicate whole send inside one
+  interval, against a link that had just been down
+- [x] (suggestion) Nothing called `forget()` on eviction; `patched_` grew for
+  the life of the sheet whenever the heal was disabled — eviction now
+  discharges the debt AND warns (`9daa9e2`). Eviction is also the last moment
+  anything knows the tile existed, so it is the only moment the operator can
+  be told the gap is unpayable
+- [x] (suggestion) `subwindow_refresh_tiles_per_cycle` unbounded — ALREADY
+  CLOSED by `b589811`'s `kMaxRefreshTilesPerCycle` validation, verified at
+  source this pass
+- [x] (suggestion) The throttled INFO overstated the saving to an operator
+  making a live link decision — rewritten as an accumulating ledger over a
+  fixed 30 s window that counts the heal's whole-tile re-sends, reported from
+  the drain as well as the publish path so it does not go quiet when the
+  pings stop, and labelled as uncompressed cell bytes with a pointer to the
+  tool that measures the wire (`32cc45b`)
+- [x] (found this pass, not in the review) The tracker's class comment and its
+  test file's header still argued from the pre-`673c23e` premise ("the producer
+  bumps the catalog version on a patch exactly as on a whole tile") — corrected
+  (`6e327e0`). Stale rationale is how a correct guard gets removed later by
+  someone who checks the claim and finds it false
+- [x] (found this pass, not in the review) `main()` in `import_bag_main.cpp`
+  was one line under cpplint's 500-line ceiling, so the new options tipped it
+  over — a REAL `colcon test` failure that `fb61f58` shipped, since the
+  pre-commit hooks here do not run cpplint. Fixed by extraction, not by
+  suppression (`d316d7b`)
+
+### Findings assessed, no change made
+
+- (suggestion) A written window with no finite depth publishes nothing, records
+  no debt, and has its box cleared. Traced: `quantizeTileWindow` returns
+  nullopt only when the ENTIRE window has no finite depth, so no displayable
+  cell is lost — a cell that is NaN now and never written again has nothing to
+  show, and one that later becomes finite is re-marked dirty by that write.
+  Whole-tile mode would have re-sent the tile's OTHER, already-delivered cells;
+  that is redundancy, not data
+- (suggestion) `on_configure` re-entry throws `ParameterAlreadyDeclaredException`
+  on its first line, so the cleanup->configure path is unreachable. Pre-existing
+  and whole-node, not introduced by #112; fixing it here would be an unrelated
+  lifecycle change on a boat-facing node. Worth its own issue
+
+### Still open (not code in this repo)
+
+- **CROSS-REPO, GATED CONDITION NOW MET**: `bizzyboat.yaml` has the three
+  coverage topics commented out of the VPN `topics_list` with the restore
+  condition written in — "RESTORE once tiles are patched or the link budget
+  grows". This branch satisfies it, so merging without that config change
+  ships a fix the operator cannot see. Field-mode/gitcloud repo. Its sizing
+  comments are also stale (1,843,200 B and "~183 KB compressed" against a
+  measured 3,686,400 B payload)
+- **#112 stays OPEN on its own terms**: fixed-size chunking — what the issue
+  actually asks for — is still not done. This branch bounds the message to the
+  dirty window, which is a large practical reduction but not a BOUND: a
+  diagonal track's bounding box degrades toward the full tile
+
+### Note
+
+Nondeterminism worth knowing before anyone diffs two reports: re-running the
+same binary over the same bag gives byte-identical serialized sizes but 20 of
+233 COMPRESSED sizes differing by 1-2 bytes (aggregate ratio unchanged at
+20.29%). That is CDR alignment padding the serializer does not zero, not a
+finding.
