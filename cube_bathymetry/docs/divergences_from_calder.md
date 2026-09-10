@@ -75,24 +75,39 @@ parameters with reasonable defaults:
   usable one and from the static `Device::across_track_beamwidth` otherwise
   (`error_model.cpp`, `swath_angle_error`). This is a generic stand-in for
   Calder's per-device `device_compute_angerr`, and can use live per-beam data
-  Calder did not have. See the **Angle error: units and validation (#144)**
-  section below for the unit normalization — that *is* a behavioural change,
-  made after #47 — and for the `1/cos(angle)` widening Calder applies to some
-  devices and this port still does not.
+  Calder did not have. See the **Angle error: units, validation and the
+  unconditional `/12` (#144)** section below for the unit normalization — that
+  *is* a behavioural change, made after #47 — for the `1/cos(angle)` widening
+  Calder applies to some devices and this port still does not, and for the
+  `/12` divisor this port applies to every beam where Calder applies it only
+  to amplitude detections.
 
-## 2b. Angle error: units and validation (#144)
+## 2b. Angle error: units, validation and the unconditional `/12` (#144)
 
-**Calder** (`original_cube/libsrc/ccom_core/device.c:808-820`, and again at `:895`
-and `:938`) forms the angular σ as
+**Calder** (`original_cube/libsrc/ccom_core/device.c:807-820`, and the same shape
+at `:895` and `:938`) forms the angular σ per device family, and — for the
+families that widen — branches on the bottom-detection method. Verbatim, from
+the `DEVICE_EM120` arm:
 
 ```c
-bw = DEG2RAD(devices[device->type].across_width) / cos(angle);
-rtn = bw / 12.0;
-rtn *= rtn;    /* Dealing with variances */
+        case DEVICE_EM120:
+            bw = DEG2RAD(devices[device->type].across_width)/cos(angle);
+            np = SOUNDING_GETWINDOWSZ(snd->flags);
+            if (SOUNDING_ISAMPDET(snd->flags)) {
+                rtn = bw/12.0;
+            } else {
+                if (np == 0) np = 1;
+                rtn = 0.2*bw/sqrt(np);
+            }
+            rtn *= rtn;    /* Dealing with variances */
+            break;
 ```
 
-— i.e. degrees converted to radians at the point of use, widened by `1/cos(angle)`
-for the beam's obliquity, divided by 12, and then squared into a variance.
+— i.e. degrees converted to radians at the point of use; for the flat-plate/FFT
+families widened by `1/cos(angle)` for the beam's obliquity; then divided by 12
+**for an amplitude detection**, or scaled by `0.2/√np` **for a phase
+detection**; then squared into a variance. Other families differ again: `EM300`
+uses `tan(K1·RBW)` / `tan(K2·RBW/√np)` and no `/12` at all.
 
 **Port, before #144**: the fallback consumed `Device::across_track_beamwidth` raw,
 in **degrees** (~57× too large, ~3,283× once squared into a variance), while the
@@ -175,15 +190,29 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
   document described. The `kongsberg_em_bridge` "leave empty" comment becomes stale
   once this normalization ships — flagged on `marine_tools#82`, not fixed here
   (different repo; see also `cube_bathymetry#30`).
-- **`/12`, not `/√12`, is confirmed.** The previously-open question is closed
-  against Calder's source above: he divides by `12.0`. The divisor is unchanged and
-  is now confirmed rather than assumed.
+- **`/12`, not `/√12`, is the right divisor — but Calder applies it only to
+  amplitude detections, and this port applies it unconditionally.** The
+  previously-open `/12` vs `/√12` question is closed against the source above:
+  where he divides, he divides by `12.0`, uniform-distribution style. What the
+  earlier note here over-claimed is the *scope*. `rtn = bw/12.0` sits inside
+  `if (SOUNDING_ISAMPDET(snd->flags))`; a phase detection takes
+  `rtn = 0.2*bw/sqrt(np)` instead, and `EM300` takes neither. **This port has no
+  detection-method input at all** — `marine_acoustic_msgs/SonarDetections`
+  carries no amplitude/phase flag and no bottom-detection window size (`np`) —
+  so it applies `beamwidth/12` to every beam of every sonar. That is a real
+  divergence, recorded here as one: for a phase-detected beam Calder's σ would
+  be `0.2·bw/√np`, which for a typical `np` of a few tens is several times
+  *smaller* than `bw/12`, so the port over-estimates the angular term on phase
+  detections. Narrowing it needs the flag and the window size to reach the
+  message, which is a driver-and-message-definition question, not an error-model
+  one.
 - **The `1/cos(angle)` widening is still NOT ported — deliberately, and this is
   the record of that gap.** It was restored during #144's implementation and then
   backed out before the PR, because it is not the error model's decision to make.
-  Calder applies the widening at only **three of his nine** device families —
+  Calder applies the widening at only **three of his eight** device families —
+  `device_compute_angerr`'s switch has eight family arms plus a `default` —
   EM120, EM3000/D and SB8125, each annotated *"flat plate and FFT beamformer"* —
-  and the other five do not widen. The term is therefore a property of the array
+  and the other five arms do not widen. The term is therefore a property of the array
   and its beamformer, not a universal geometric truth: applying it unconditionally
   would assert that every sonar we use is a flat-plate FFT beamformer, and applying
   it on top of a driver-reported per-beam width risks double-counting a width the
@@ -236,7 +265,8 @@ beamwidth fallback inflated the angular term by ~3,283× in variance; fixing tha
 (§2b) made this the leading residual.
 
 **Port, after #147**: `Platform::roll` and `Platform::pitch` are **radians**, and
-the four `* M_PI / 180.0` factors are gone. This is the same
+the six `* M_PI / 180.0` factors that converted them are gone (two in
+`swath_depth`, four in `compute`'s per-ping trig). This is the same
 boundary-normalization choice §2b made for the beamwidth, resolved the other way
 for a good reason: `Device` and `Vessel` are human-entered configuration read off
 datasheets and survey reports, so they stay in degrees and convert once at
@@ -244,16 +274,69 @@ construction; `Platform` is a *measurement*, filled by our own projector from TF
 with no degrees-facing configuration surface to preserve. Normalizing the type is
 cheaper than converting at the boundary and cannot drift.
 
-Sign convention, confirmed rather than assumed: roll is a right-handed rotation
-about REP-103's +x (forward) axis, which lifts +y (port), so `+ve is port side
-up` as documented; `beam_angle()` negates the starboard-positive `rx_angles`, so
-its `meas_angle` is port-positive too and the two add coherently — rolling port
-side up swings a port-side beam further from vertical.
+**Sign conventions stay Calder's; the producer converts (#144).** Units were
+normalized at the type here, but *signs* are not: every ported equation was
+derived under Calder's conventions, so `Platform` keeps them and
+`DetectionsProjector` converts at the boundary, exactly as it does for the
+beamwidth's degrees.
+
+- **Roll** — `+ve port side up` — coincides with REP-103 already: a
+  right-handed rotation about +x (forward) lifts +y (port). `beam_angle()`
+  negates the starboard-positive `rx_angles`, so its `meas_angle` is
+  port-positive too and the two add coherently — rolling port side up swings a
+  port-side beam further from vertical. No conversion; verified twice.
+- **Pitch** — `+ve bow up` — is the **opposite** of what `tf2::getEulerYPR`
+  returns for an FLU rotation (`pitch = -asin(R[2][0])`, a right-handed
+  rotation about +y/port, i.e. bow-down-positive), so the projector negates it.
+  An earlier revision of this document and of the `Platform` comment asserted
+  the two senses agreed; that claim was only half checked — the roll half was
+  right, the pitch half was not.
+- **Heave** — `+ve down` — is likewise opposite to the REP-103 `+up` TF
+  translation the projector reads, and is likewise negated there. Numerically
+  inert (heave enters only squared), but kept consistent deliberately: crossed
+  conventions inside one struct are what produced the pitch defect.
+
+The pitch sign is latent at the defaults: the only terms **odd** in
+`sin(pitch)` — `swath_heave`'s IMU lever-arm term, and the heading and pitch
+cross-terms of the static `horizontal_positioning_error` — are all multiplied
+by IMU/GPS lever arms that default to zero. That is why the sign test has to
+configure a non-zero lever arm.
 
 Pinned by `ErrorModelTest.PlatformRollIsRadiansAndSteersTheBeam`,
-`PlatformAttitudeEntersTheVerticalBudgetInRadians` and `PositiveRollIsPortSideUp`
+`PlatformAttitudeEntersTheVerticalBudgetInRadians`, `PositiveRollIsPortSideUp`
 — the first tests in the suite to use a non-zero attitude at all, which is why
-the defect survived so long.
+the defect survived so long — and
+`DetectionsProjectorTest.BowUpPitchFollowsCalderSignConvention`, which is the
+one that would fail if the negation were dropped.
+
+## 2d. Eqn. 3.49's pitch term: a porting error, FIXED — not a divergence (#144)
+
+Recorded here because this document is where the port-versus-Calder comparison
+lives, but this is a **fixed bug**, in the same category as the two under
+[#46](https://github.com/rolker/cube_bathymetry/issues/46) — not something the
+port keeps on purpose.
+
+**Calder** (`original_cube/libsrc/errmod/errmod_full.c:376-377`):
+
+```c
+    pitch_err = snd->range*snd->range * cosT*cosT * ws->sinP*ws->sinP
+                * ws->total_pitch_var;    /* Eqn. 3.49 */
+```
+
+where `cosT = cos(DEG2RAD(plat->roll) + meas_angle)` — the swath-geometry
+factor shared with Eqns. 3.47 and 3.48 immediately above it.
+
+**Port, before this fix**: `swath_depth` used `cos(pitch)²` in place of
+`cosT²`. The two sibling terms in the same function were faithful, so this was
+a transcription slip rather than a decision. Its effect is a factor of
+`1/cos²T`: unity at nadir, ~4× at a 60° beam, i.e. an over-estimate biased to
+the swath edge.
+
+**Port, after this fix**: `cosT²`, matching Calder. The slip is older than
+this branch, but it was numerically invisible while `sin(pitch)²` was ~3,283×
+too small (§2c) — #147 is what turns the term on, so it is corrected in the
+same pass. Pinned by
+`ErrorModelTest.DepthPitchTermUsesSwathAngleNotPitchCosine`.
 
 ## 3. IHO f(z) error model is not ported
 
