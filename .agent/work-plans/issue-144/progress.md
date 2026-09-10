@@ -182,3 +182,105 @@ The plan is well-grounded in source — every factual claim it makes was indepen
 
 ### Recommended Actions
 - [ ] During implementation, either fold the 5-arg `horizontal_positioning_error` overload's matching false doc comment into commit 1's doc-comment fix, or add one sentence to the plan/PR explaining why it's deliberately left for a later pass.
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-10 12:04 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**Branch**: `feature/issue-144`
+**Commits**: `57e3835` (unit normalization + validation + docs), `952c1da` (restore
+Calder's `1/cos(angle)` widening)
+
+### What was built
+
+**Commit 1 — `57e3835`, boundary normalization, validation and the doc corrections.**
+
+- `ErrorModel`'s constructor now computes `device_across_track_beamwidth_rad_` from
+  `device.across_track_beamwidth * M_PI / 180.0`, immediately above the existing
+  `along_track_beamwidth_coefficient` conversion it mirrors. `Device` itself is untouched and
+  stays degrees-valued, per settled decision 1.
+- `swath_angle_error` consumes that stored radian value as its default and reads
+  `ping_info.rx_beamwidths[i]` **unconverted**, accepting it only when
+  `std::isfinite(reported) && reported > 0.0f`. Both branches now carry radians; norbit's
+  zero-filled arrays fall back to the device value instead of silently zeroing the term.
+- The false "twice the nominal variance / approximate 95% confidence interval" comments are
+  gone from both `horizontal_positioning_error` overloads, replaced with wording that matches
+  the code (a variance in m^2 at one sigma, no confidence scaling, scaling lives at reporting).
+- `Sounding::vertical_error` / `horizontal_error` are documented as variances in m^2 at one
+  sigma with no confidence scaling, and the horizontal one is flagged as the radial
+  drms-derived quantity whose square root is a horizontal-plane radius.
+- `docs/divergences_from_calder.md`: the stale "Angle error" notes are replaced by a new
+  section **2b. Angle error: units, validation and angle widening (#144)** carrying Calder's
+  source snippet, the corrected statement that the fallback was the live path for every sonar
+  in service, the validation rule, the `marine_tools` follow-up flag, and the `/12`-confirmed
+  finding.
+- Tests added: `AngleErrorBranchesAgreeOnUnits`, `AngleErrorFallbackPinnedAtNadir`,
+  `AngleErrorFallsBackOnEmptyBeamwidths`, `AngleErrorFallsBackOnZeroFilledBeamwidths`,
+  `AngleErrorFallsBackOnNonFiniteBeamwidth`, `AngleErrorUsesReportedBeamwidthAsRadians`.
+
+**Commit 2 — `952c1da`, restore the `1/cos(angle)` widening.** `ang_meas` is now
+`(beamwidth / cos(meas_angle)) / 12.0`, squared — Calder's order of operations from
+`original_cube/libsrc/ccom_core/device.c:808-820`, so the widening is squared into the
+variance. Test `AngleErrorWidensWithObliquity` pins both the absolute expected value and the
+4x ratio at 60 degrees. Its divergences-doc bullet describes it as restoring a term the port
+dropped, as does the commit message.
+
+### Divergence from the plan (plan.md updated inline on this branch)
+
+The plan asserted that the existing tests which zero `across_track_beamwidth` remain valid,
+which held — but one existing test that does **not** zero it,
+`VerticalErrorIncreasesWithBeamAngle`, turned out to encode the bug and failed on the first
+run. It held the two-way travel time fixed, so the DEPTH shrank as the beam swung out, and
+asserted the total vertical error rose monotonically nadir -> 30 deg -> 60 deg. That only
+held because the ~3283x inflated angular term swamped every other contributor, so the budget
+tracked `sin^2(angle)` alone. With the term at its correct magnitude the measured-range error
+projects into depth as `cos^2(angle)` and shrinks off nadir, so the total dips at 30 deg
+before the angular term takes over.
+
+The test was **replaced, not loosened**, by two tests that pin properties actually true of
+the corrected model: `VerticalErrorIsWorseAtObliqueAngleAtConstantDepth` (nadir vs 60 deg at
+constant depth, the comparison that isolates beam obliquity from a shortening water column)
+and `AngularContributionToVerticalErrorRisesWithBeamAngle` (the monotone claim stated over
+the isolated angular term it applies to). Both the rewrite's in-code comment and `plan.md`
+record why. `plan.md` also records the widening test's comparison baseline (un-widened at the
+same angle, not nadir — the angular term reaches `vertical_error` multiplied by
+`sin^2(angle)`, which is zero at nadir).
+
+### Build and test results
+
+From the worktree root, `source setup.bash` then:
+
+- `./sensors_ws/build.sh cube_bathymetry` — **passed** both times (1 package finished; stderr
+  output is pre-existing `-Wunused-result` / `tmpnam` / `-Wunused-but-set-variable` warnings
+  in `bag_to_geotiff.cpp`, `test_angular_response_curve.cpp` and `test_tile_eviction_rss.cpp`,
+  none of them in files this branch touches).
+- `./sensors_ws/test.sh cube_bathymetry` after commit 1 — **609 tests, 0 errors, 0 failures,
+  70 skipped**.
+- `./sensors_ws/test.sh cube_bathymetry` after commit 2 — **610 tests, 0 errors, 0 failures,
+  70 skipped**.
+
+No test was skipped, disabled or loosened to reach green. The one intermediate failure
+(`VerticalErrorIncreasesWithBeamAngle`) is written up above; it was diagnosed to its cause and
+the test replaced with stronger assertions.
+
+This repo has no `.pre-commit-config.yaml` and no installed git hooks, so no pre-commit run
+applies; `cpplint`/`uncrustify` run as part of the colcon test suite above and are green.
+
+### Follow-up candidates (not acted on)
+
+- `horizontal_latency`'s doc comment in `error_model.h` still says "Compute approximate 95%
+  error bound due to latency errors" — the same class of false claim as the two the plan named,
+  in the same file, and the implementation applies no confidence scaling either. Left untouched
+  because the plan scoped the correction to the two `horizontal_positioning_error` overloads;
+  worth a one-line follow-up.
+- `marine_tools`: `kongsberg_em_bridge/node.py:547-550`'s "leave empty" comment is stale once
+  this merges. Flag on `marine_tools#82` after the PR lands, per the plan's Out of scope.
+- The restored widening shares the existing `tan(angle)` singularity at `|angle| -> 90 deg`
+  already present in the profile term. Neither is guarded, matching Calder; if a guard is ever
+  wanted it should cover both, not just the new term.
+
+### Next step
+
+Pre-push review (`/review-code`) against the two-commit diff, then open the PR. Nothing is
+pushed — the host performs pushes.
