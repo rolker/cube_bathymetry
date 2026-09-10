@@ -331,6 +331,42 @@ degrees" wording in the divergences doc (`across_track_beamwidth` is exposed by 
 YAML or launch file — cross-reference `cube_bathymetry#145`), the `rx_beamwidths` doc comment
 that says "transmit", and the README's missing units and stale field count.
 
+**Round-3 review corrections (deliberately narrow — round 3 verified every round-2 code
+change and found no correctness defect in anything this branch touches):**
+
+- **Three documentation must-fixes.** The divergences doc still named
+  `ProjectionDiagnostics::rejected_beamwidths` and re-asserted the rejection-only semantics
+  the rename replaced; the README's pose-sourcing table still described the boundary this PR
+  inverted (heave's sign backwards, pitch's negation unmentioned); and this plan said Calder
+  widens at three of *nine* device families where the divergences doc says **eight**.
+- **`ProjectionDiagnostics::missing_rx_angle_beams`**, the sibling of
+  `default_beamwidth_beams` and the one substantive code change of this pass. A beam with no
+  usable receive angle becomes a NaN sounding, which the range gate drops — so the drop was
+  reported as `filtered_range`, and a driver that omits `rx_angles` entirely produced
+  "0 soundings (all range-filtered)" plus a warning pointing at the `--*-frame` overrides,
+  the one part of the configuration that is fine. Counted in the same loop, over the same
+  beams, with the same `total` denominator; reported by all three offline tools and the live
+  node, and the "0 soundings" warning now names `rx_angles` when every beam lacked one.
+- **Lifecycle.** The round-2 activation gate now reads `LifecyclePublisher::is_activated()`
+  (`std::atomic<bool>`-backed) instead of `get_current_state()`, which returns a reference
+  into the state machine with no thread-safety guarantee — correct only under the
+  `SingleThreadedExecutor` `main()` happens to spin. `on_cleanup` now frees what
+  `on_configure` built instead of forwarding to the base and freeing nothing, and
+  inactive-with-data logs once per throttle window rather than being entirely silent.
+- **Tests and text.** A `test_projection_summary.cpp` pinning the run-summary's two branches
+  and three warning gates; the pitch-sign test's self-guard reshaped to match the
+  `EXPECT_FLOAT_EQ` it guards (`EXPECT_NE` is exact, the assertion tolerates 4 ULP); the
+  `(pi/180)^2` ratio corrected to `(180/pi)^2`; `per_beam_beamwidth_usable`'s "rejections"
+  wording; the tx-vs-rx default asymmetry stated at the site; both new operator-visible
+  warnings documented in the README; and `report_projection_summary`'s stream defaults
+  dropped so the installed header no longer pulls `<iostream>` into every consumer.
+- **Deliberately not done here**: the `test_import_eviction` timeout (pre-existing — 65 s
+  against `ament_add_gtest`'s 60 s default — and wants its own issue), a `tx_angles` NaN
+  guard (a field-behaviour decision, not a review fix), the long-`main` refactor, a
+  units/sign-boundary ADR or `AGENTS.md` note (instruction-file changes are Ask-First), and
+  the cross-repo follow-ups (`marine_perception_tools`, `imagenex_deltat`) — all carried to
+  the PR body.
+
 ## Files to Change
 
 | File | Change |
@@ -341,13 +377,14 @@ that says "transmit", and the README's missing units and stale field count.
 | `cube_bathymetry/src/detections_projector.cpp` | Document that `getEulerYPR`'s radians now go into radian-valued `Platform` fields (commit 2) |
 | `cube_bathymetry/test/test_error_model.cpp` | Add unit-agreement, regression-pin, and the validation-case tests (commit 1); add non-zero roll/pitch attitude tests (commit 2) |
 | `cube_bathymetry/docs/divergences_from_calder.md` | Correct the "Angle error" subsection: fallback-is-normal claim reversed, normalization + validation documented, `/12` divisor confirmed, the un-ported widening recorded against `#148`, the attitude unit fix recorded |
-| `README.md` | Units and confidence level on the published uncertainty fields; correct the field count (commit 3) |
-| `cube_bathymetry/include/cube_bathymetry/detections_projector.h` | `ProjectionDiagnostics::default_beamwidth_beams` (commit 2b) |
-| `cube_bathymetry/include/cube_bathymetry/projection_summary.h` | **New.** Header-only `cube::report_projection_summary()` + `ProjectionRunTotals`, replacing three verbatim copies of the run summary (commit 2b) |
-| `cube_bathymetry/src/detections_projector.cpp` | Count the beams that take the device-default beamwidth; negate pitch and heave at the boundary (commits 2b, 2c) |
-| `cube_bathymetry/src/detections_to_pointcloud.cpp` | Throttled warning for the default-beamwidth count; skip the callback unless active (commit 2b) |
+| `README.md` | Units and confidence level on the published uncertainty fields; correct the field count (commit 3); heave/pitch sign conventions in the pose-sourcing table and a section explaining the two projection warnings (round 3) |
+| `cube_bathymetry/include/cube_bathymetry/detections_projector.h` | `ProjectionDiagnostics::default_beamwidth_beams` (commit 2b); `missing_rx_angle_beams` (round 3) |
+| `cube_bathymetry/include/cube_bathymetry/projection_summary.h` | **New.** Header-only `cube::report_projection_summary()` + `ProjectionRunTotals`, replacing three verbatim copies of the run summary (commit 2b); receive-angle clause and warning, and the stream defaults dropped so the installed header no longer pulls in `<iostream>` (round 3) |
+| `cube_bathymetry/src/detections_projector.cpp` | Count the beams that take the device-default beamwidth; negate pitch and heave at the boundary (commits 2b, 2c); count the beams with no usable receive angle in the same loop (round 3) |
+| `cube_bathymetry/src/detections_to_pointcloud.cpp` | Throttled warning for the default-beamwidth count; skip the callback unless active (commit 2b); gate on the publisher's atomic activation flag, free the subscriptions in `on_cleanup`, throttled warning for the receive-angle count (round 3) |
 | `cube_bathymetry/src/import_bag_main.cpp`, `src/batch_regen_main.cpp`, `src/bag_to_geotiff.cpp` | Accumulate into `ProjectionRunTotals` and call the shared summary; `bag_to_geotiff`'s stale "6-field" comment corrected (commits 2b, 3) |
-| `cube_bathymetry/test/test_detections_projector.cpp` | Default-beamwidth counting (empty / short / over-long / range-gated) and the bow-up pitch-sign test (commits 2b, 2c) |
+| `cube_bathymetry/test/test_detections_projector.cpp` | Default-beamwidth counting (empty / short / over-long / range-gated) and the bow-up pitch-sign test (commits 2b, 2c); receive-angle counting and the reshaped sign-test guard (round 3) |
+| `cube_bathymetry/test/test_projection_summary.cpp` | **New (round 3).** Pins the run-summary's georeferencing branch, its three warning gates, and the receive-angle clauses |
 
 ## Principles Self-Check
 
@@ -409,6 +446,8 @@ commit's doc changes landing alongside its code. As implemented and reviewed, th
 nine rather than the three this plan first sketched: the beamwidth unit fix and validation,
 the attitude unit fix, the round-1 doc corrections, the constant-depth test rewrite, the
 diagnostic surface and its round-2 correction, the pitch-sign fix, the Eqn. 3.49 fix, the
-divergences-doc rewrite, and the round-2 wording and robustness fixes. No store re-measurement, no widening
+divergences-doc rewrite, and the round-2 wording and robustness fixes. Round 3 added the
+receive-angle diagnostic, the lifecycle follow-ups, the run-summary test, and a set of
+documentation corrections. No store re-measurement, no widening
 (`#148`), no cross-repo changes (the `marine_tools` and `ros2sonic` consequences are flagged
 only, as `marine_tools#82` and `rolker/ros2sonic#1`).

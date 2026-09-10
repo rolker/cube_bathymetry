@@ -720,10 +720,95 @@ Specialists: Static Analysis (clean), Governance, Plan Drift, Claude Adversarial
 - [x] (suggestion) neither new operator-visible signal is in README: the throttled default-beamwidth warning and the offline "N of M beams on the default beamwidth" line. The operationally important corollary — until `marine_tools#82` lands, 100% of M3 beams run on a hardcoded generic 2 degrees belonging to no sonar — lives only in the divergences doc, which an operator reading the warning will not find. — `README.md:11-13,271-276`
 - [x] (suggestion) `projection_summary.h` has no test, though it is new public API and the single reporting surface for all three offline tools, and both its "N of M" phrasing and the `reports_georeferencing = false` branch were review findings in their own right. A ~15-line `std::ostringstream` test pinning the two branches and the warning gate is cheap. — `cube_bathymetry/include/cube_bathymetry/projection_summary.h`
 - [x] (suggestion) `projection_summary.h` is a private helper for three tool `main()`s but sits in the installed public include dir, and its `std::cout`/`std::cerr` default arguments force `<iostream>` (and a `std::ios_base::Init` static) into every TU that includes it. `src/` would be a better home; if it stays public, dropping the defaults drops the dependency. — `cube_bathymetry/include/cube_bathymetry/projection_summary.h:74-77` (partly deferred: the stream defaults and their `<iostream>` dependency are gone; the header stays in the public include dir — moving an installed header is a placement decision for the operator, and the three tools plus the new test all include it by package path)
-- [ ] (suggestion, repeat of round 2) `main()` in `import_bag_main.cpp` measures ~483 of cpplint's 500 counted lines (re-measured by the static pass with cpplint's own rule; the round-2 figure of 490 was an over-count). Still no ticket for the long-`main` pattern across the three tools. — `cube_bathymetry/src/import_bag_main.cpp:768-1451`
-- [ ] (suggestion) the units/sign boundary rule — Device/Vessel degrees because human-entered config, Platform radians because measurement, signs stay Calder's and the producer converts — is stated five times in comments and in a Calder-comparison document, and nowhere a future author would look. `#145` adds the first human-entered device/vessel config surface, which is exactly where it has to be re-decided. A short repo ADR or two lines in the repo's `AGENTS.md` "Review Context" would make it discoverable. — `cube_bathymetry/AGENTS.md:44-51`
-- [ ] (out of scope — needs its own issue, not this PR) `test_import_eviction` exceeds the 60 s `ament_add_gtest` default outright (65.0 s alone and unloaded on this host); `test_batch_regen` at 24.9 s joins it under load. Pre-existing; raise the TIMEOUT or split the slow cases. See the timeout note above. — `cube_bathymetry/CMakeLists.txt:420,429`
-- [ ] (out of scope — cross-repo follow-ups, cross-confirmed by both lenses) `marine_perception_tools/src/sounding_uncertainty.hpp:108-129` documents the #144 bug as *current* cube behaviour and quotes both branches this PR removed; its numbers now agree with cube exactly, but its rationale is false in every particular. `marine_perception_tools/src/mbes_geometry.hpp:85-86` resolves a missing `rx_angles[i]` to `0.0` while claiming to mirror the importer "exactly" — after this PR the viewer draws the beam at nadir where the importer drops it. Separate repo (mpt).
-- [ ] (out of scope — follow-up) `imagenex_deltat/nodes/deltat.py:132-134` publishes `max(0.1, depth*0.01)` — a standard deviation in metres — into the same `vertical_uncertainty`/`horizontal_uncertainty` field names that this PR's README now makes normatively **variances in m²**, consumed as such at `cube_bathymetry_node.cpp:2058-2059`. Formalising the contract is the moment to file the mismatch.
-- [ ] (out of scope — untouched here, apparently unticketed) `Ping::detection_flags` ("0 means good") is declared and never read anywhere in the package, so sonar-flagged bad detections are filtered nowhere in the chain. — `cube_bathymetry/include/cube_bathymetry/error_model.h:249`
-- [ ] (PR-body carry items — nothing carries them today; no PR exists) (1) the body must close **both** `#144` and `#147`. (2) ADR-0003 mixed-store disclosure: `build_fingerprint.json` is unimplemented and `package.xml` is still `0.0.0`, and `StoreMetadata` has no version field either, so nothing invalidates pre-#144 tiles. (3) `Vessel::gps_drms = 2.0` contributes 4 m² to `horizontal_error` at the default on RTK boats. (4) name the `PRIMARY_STATE_ACTIVE` gate as a behaviour change belonging to neither closed issue. (5) **new, and deployment-relevant**: warm-start priming seeds variance from stored uncertainty and the blunder gate is `target - blunder_scalar*sqrt(var)` (`store_import.h:184-199`), so draft tiles already on the boats carry the pre-#144 inflated uncertainty and will warm-start the live node with a prior ~3 orders of magnitude too weak and a blunder gate ~57x too wide — blunder rejection effectively off wherever an old draft tile primes the surface. Separately, GeoTIFF import resolves contention by lowest uncertainty (`geotiff_import.hpp:39,108,160-164`), so post-fix cells will systematically beat pre-fix cells on the model change alone. This is a purge-or-regen-draft-tiles-at-deploy note, **not** the store re-measurement the operator dropped.
+- [x] (suggestion, repeat of round 2) `main()` in `import_bag_main.cpp` measures ~483 of cpplint's 500 counted lines (re-measured by the static pass with cpplint's own rule; the round-2 figure of 490 was an over-count). Still no ticket for the long-`main` pattern across the three tools. — `cube_bathymetry/src/import_bag_main.cpp:768-1451` (deferred: splitting a 483-line main is a refactor of its own, not a round-3 fix pass, and no ticket exists yet to hang it on — carried to the PR body as a follow-up to file)
+- [x] (suggestion) the units/sign boundary rule — Device/Vessel degrees because human-entered config, Platform radians because measurement, signs stay Calder's and the producer converts — is stated five times in comments and in a Calder-comparison document, and nowhere a future author would look. `#145` adds the first human-entered device/vessel config surface, which is exactly where it has to be re-decided. A short repo ADR or two lines in the repo's `AGENTS.md` "Review Context" would make it discoverable. — `cube_bathymetry/AGENTS.md:44-51` (deferred: both remedies the finding offers — a repo ADR, or lines in the repo's AGENTS.md — are instruction-file/governance changes, which are Ask-First under the workspace rules; raised for the operator in the PR body instead)
+- [x] (out of scope — needs its own issue, not this PR) `test_import_eviction` exceeds the 60 s `ament_add_gtest` default outright (65.0 s alone and unloaded on this host); `test_batch_regen` at 24.9 s joins it under load. Pre-existing; raise the TIMEOUT or split the slow cases. See the timeout note above. — `cube_bathymetry/CMakeLists.txt:420,429` (deferred: out of scope and pre-existing, per the round-3 note and the dispatch instruction — wants its own issue; timing re-measured in this pass, see below)
+- [x] (out of scope — cross-repo follow-ups, cross-confirmed by both lenses) `marine_perception_tools/src/sounding_uncertainty.hpp:108-129` documents the #144 bug as *current* cube behaviour and quotes both branches this PR removed; its numbers now agree with cube exactly, but its rationale is false in every particular. `marine_perception_tools/src/mbes_geometry.hpp:85-86` resolves a missing `rx_angles[i]` to `0.0` while claiming to mirror the importer "exactly" — after this PR the viewer draws the beam at nadir where the importer drops it. Separate repo (mpt). (deferred: separate repo (mpt); carried to the PR body as cross-repo follow-ups)
+- [x] (out of scope — follow-up) `imagenex_deltat/nodes/deltat.py:132-134` publishes `max(0.1, depth*0.01)` — a standard deviation in metres — into the same `vertical_uncertainty`/`horizontal_uncertainty` field names that this PR's README now makes normatively **variances in m²**, consumed as such at `cube_bathymetry_node.cpp:2058-2059`. Formalising the contract is the moment to file the mismatch. (deferred: separate repo; carried to the PR body as a follow-up)
+- [x] (out of scope — untouched here, apparently unticketed) `Ping::detection_flags` ("0 means good") is declared and never read anywhere in the package, so sonar-flagged bad detections are filtered nowhere in the chain. — `cube_bathymetry/include/cube_bathymetry/error_model.h:249` (deferred: untouched by this branch and unticketed; carried to the PR body as a follow-up to file)
+- [x] (PR-body carry items — nothing carries them today; no PR exists) (1) the body must close **both** `#144` and `#147`. (2) ADR-0003 mixed-store disclosure: `build_fingerprint.json` is unimplemented and `package.xml` is still `0.0.0`, and `StoreMetadata` has no version field either, so nothing invalidates pre-#144 tiles. (3) `Vessel::gps_drms = 2.0` contributes 4 m² to `horizontal_error` at the default on RTK boats. (4) name the `PRIMARY_STATE_ACTIVE` gate as a behaviour change belonging to neither closed issue. (5) **new, and deployment-relevant**: warm-start priming seeds variance from stored uncertainty and the blunder gate is `target - blunder_scalar*sqrt(var)` (`store_import.h:184-199`), so draft tiles already on the boats carry the pre-#144 inflated uncertainty and will warm-start the live node with a prior ~3 orders of magnitude too weak and a blunder gate ~57x too wide — blunder rejection effectively off wherever an old draft tile primes the surface. Separately, GeoTIFF import resolves contention by lowest uncertainty (`geotiff_import.hpp:39,108,160-164`), so post-fix cells will systematically beat pre-fix cells on the model change alone. This is a purge-or-regen-draft-tiles-at-deploy note, **not** the store re-measurement the operator dropped. (deferred: by construction these belong in the PR body, which does not exist yet; items (2), (3) and (5) are explicitly the operator's to decide and were left untouched here)
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-10 13:35 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**Branch**: feature/issue-144 at `e40e78c`
+**Addressed**: `## Local Review (Pre-Push)` (round 3, 2026-09-10 13:14 -04:00, branch at `45fadc3`) — 3 must-fix + 12 suggestions + 4 out-of-scope/carry items
+**Commits**: `1b29c22`, `d78bab2`, `c0b3edf`, `eab454a`, `2bea9af`, `88670db`, `88c29f9`, `aeb7b80`, `a8be2bd`, `e40e78c`
+
+A deliberately narrow pass: round 3 verified every round-2 code change and found no
+correctness defect, so the only substantive code change here is the receive-angle
+diagnostic the review named as its strongest suggestion, plus the two lifecycle
+follow-ups. Everything else is documentation, comments and tests.
+
+**The one behavioural addition**: `ProjectionDiagnostics::missing_rx_angle_beams`. A beam
+whose `rx_angles` entry is absent or non-finite becomes a NaN sounding that the range gate
+drops, and that drop was reported only as `filtered_range` — so a driver that omits
+`rx_angles` entirely produced "0 soundings (all range-filtered)" and a warning pointing the
+operator at their `--*-frame` overrides, the one part of the configuration that is fine. The
+counter is the exact sibling of `default_beamwidth_beams`: same loop, same domain
+(`two_way_travel_times`), same `total` denominator, reported by the live node and all three
+offline tools. The "0 soundings" warning now names `rx_angles` instead of the frames when
+every beam lacked one.
+
+**Two lifecycle follow-ups, both weighed rather than applied reflexively.** The activation
+gate now reads `LifecyclePublisher::is_activated()` (`std::atomic<bool>`-backed) rather than
+`get_current_state()`, which hands back a reference into the state machine with no
+thread-safety guarantee — correct today only because `main()` spins a
+`SingleThreadedExecutor`. The null check on the publisher additionally covers `unconfigured`,
+where it does not exist. `on_cleanup` now resets the subscriptions, publisher, TF listener
+and projector instead of forwarding to the base and freeing nothing; `on_configure`'s
+`declare_parameter` calls are already `has_parameter`-guarded, so configure → cleanup →
+configure works. Because the gate also suppresses `LifecyclePublisher`'s own one-shot "not
+activated" warning, inactive-with-data now logs (throttled) rather than being entirely
+silent. `detections_to_pointcloud` has no test target, so both are covered by the build and
+by inspection only — worth a reviewer's eye.
+
+**Build**: `./sensors_ws/build.sh cube_bathymetry` — clean. The remaining stderr is
+pre-existing (GDAL `warn_unused_result`, an unused parameter in `swath_angle_error`, an
+unused variable in `test_tile_eviction_rss`); no new warnings from this pass.
+
+**Test**: `./sensors_ws/test.sh cube_bathymetry` — **637 tests, 0 errors, 0 failures, 72
+skipped**; all 31 ctest targets Passed, including `copyright`, `cpplint`, `uncrustify`,
+`lint_cmake`, `cppcheck`, `flake8`, `pep257`, `xmllint`. New: `test_projection_summary` (7
+cases) and `DetectionsProjectorTest.MissingReceiveAngleBeamsAreCounted`.
+
+**`test_import_eviction` timing, measured not assumed**: it **passed at 45.56 s** in this
+run (load average ~2.6-3.9 on 16 cores) against the `TIMEOUT 60` that `ament_add_gtest`
+sets at `CMakeLists.txt:426` — 76% of its budget, 14 s of headroom. `test_batch_regen` took
+18.49 s. That does not contradict round 3's 65.0 s measurement so much as bound it: the test
+is *marginal*, not flaky, and whether it lands at 45 s or 65 s depends on machine state. The
+verdict stands — it wants its own issue to raise the TIMEOUT or split the slow cases, and it
+was not touched here. No test was skipped, disabled or loosened in this pass.
+
+### Actions
+- [x] (must-fix) divergences doc named the removed `rejected_beamwidths` and re-asserted rejection-only semantics — `cube_bathymetry/docs/divergences_from_calder.md` (`1b29c22`)
+- [x] (must-fix) README pose-sourcing table: heave sign inverted, pitch negation unstated — `README.md` (`d78bab2`)
+- [x] (must-fix) plan said nine device families where the divergences doc says eight — `.agent/work-plans/issue-144/plan.md:113` (`c0b3edf`)
+- [x] (suggestion, cross-confirmed) truncated/absent `rx_angles` reported as range-filtered — added `missing_rx_angle_beams` end to end, and corrected `sounding.h`'s "propagates into the position and the TPU" comment (`eab454a`)
+- [x] (suggestion) lifecycle gate read the unsynchronised `get_current_state()` — now the publisher's atomic flag (`2bea9af`)
+- [x] (suggestion) `on_cleanup` freed nothing, and the gate silenced the publisher's own warning — both fixed (`2bea9af`)
+- [x] (suggestion) sign test's `EXPECT_NE` self-guard was a different shape from the `EXPECT_FLOAT_EQ` it guards (`88670db`)
+- [x] (suggestion) `(pi/180)^2 == ~3283x` inverted (`88c29f9`)
+- [x] (suggestion) `per_beam_beamwidth_usable`'s "rejections" wording (`88c29f9`)
+- [x] (suggestion) neither new operator-visible signal was in the README (`aeb7b80`)
+- [x] (suggestion) `projection_summary.h` had no test — 7 cases pinning both branches and the three warning gates (`a8be2bd`)
+- [x] (suggestion) `projection_summary.h`'s `<iostream>` dependency — stream defaults dropped; **partly deferred**: the header stays in the public include dir, since moving an installed header is a placement decision for the operator
+- [x] (suggestion) `tx_angle`'s 0 default beside the `rx_angle` NaN guard — asymmetry documented at the site; **partly deferred**: tx keeps the 0 default, because an unsteered fan legitimately omits `tx_angles` and NaN-guarding it would drop every one of its soundings. A field-behaviour decision, not a review fix (`e40e78c`)
+- [x] (suggestion, repeat) `import_bag_main.cpp`'s 483-line `main()` — **deferred**: a refactor of its own, and no ticket exists to hang it on. Carried to the PR body
+- [x] (suggestion) units/sign boundary rule is undiscoverable — **deferred**: both remedies the finding offers (a repo ADR, or lines in the repo's `AGENTS.md`) are instruction-file/governance changes, which are Ask-First. Raised for the operator in the PR body
+- [x] (out of scope) `test_import_eviction` timeout — **deferred**: pre-existing, wants its own issue; re-timed here (45.56 s this run, see above)
+- [x] (out of scope) `marine_perception_tools` `sounding_uncertainty.hpp` / `mbes_geometry.hpp` — **deferred**: separate repo
+- [x] (out of scope) `imagenex_deltat` publishes a standard deviation into the variance fields — **deferred**: separate repo
+- [x] (out of scope) `Ping::detection_flags` declared and never read — **deferred**: untouched by this branch, unticketed
+- [x] (PR-body carry items) — **deferred**: no PR exists yet. Items (2) mixed-store disclosure, (3) `gps_drms`, and (5) draft tiles priming the blunder gate from pre-fix variance are explicitly the operator's to decide and were left untouched, per the dispatch instruction
+
+### Not done, and worth the operator's attention
+- The two lifecycle changes alter node behaviour (`on_cleanup` now tears down; the inactive
+  path now logs at INFO) and have no automated coverage, because `detections_to_pointcloud`
+  has no test target. They were applied because round 3 raised both and each closes a real
+  gap, but they are the riskiest thing in this otherwise documentation-heavy pass.
+- Nothing was done about the deployment consequence (draft tiles on the boats priming the
+  blunder gate from pre-fix variance), the mixed-store disclosure, or `gps_drms` — all three
+  await the operator's decision.
