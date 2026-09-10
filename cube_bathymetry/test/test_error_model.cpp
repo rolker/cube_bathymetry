@@ -981,4 +981,44 @@ TEST_F(ErrorModelTest, PositiveRollIsPortSideUp)
   EXPECT_NEAR(port_depth, -kIsolatedRange * std::cos(0.25 + 0.3), 1e-4);
 }
 
+// #144: Eqn. 3.49's pitch term is scaled by cos^2 T -- cos(roll + beam angle),
+// the swath-geometry factor -- not by cos^2(pitch). The port had cos_pitch^2
+// here while the two sibling terms in the same function were faithful
+// (original_cube/libsrc/errmod/errmod_full.c:376-377). Pinned in closed form
+// at an oblique beam, where the two factors are furthest apart.
+TEST_F(ErrorModelTest, DepthPitchTermUsesSwathAngleNotPitchCosine)
+{
+  auto platform = makePlatform();
+  const double pitch_rad = 0.35;
+  platform.pitch = static_cast<float>(pitch_rad);
+  platform.roll = 0.0f;
+
+  // Only pitch variance is left alive, so vertical_error IS the Eqn. 3.49
+  // term: the angular, range, along-track-beamwidth, heave and reduction
+  // terms are all zeroed by the isolating vessel/device.
+  Vessel v = angleIsolatingVessel();
+  const double pitch_sdev_deg = 0.5;
+  v.pitch_sdev = pitch_sdev_deg;
+  ErrorModel em(v, angleIsolatingDevice(0.0));
+
+  const float rx_angle = 1.0472f;  // ~60 deg to starboard
+  const double meas_angle = -static_cast<double>(rx_angle);
+  auto det = makeDetections({rx_angle}, 0.02f);
+  const double vertical = em.compute(det, platform).at(0).vertical_error;
+
+  const double pitch_var = (pitch_sdev_deg * M_PI / 180.0) * (pitch_sdev_deg * M_PI / 180.0);
+  const double cosT = std::cos(0.0 + meas_angle);
+  const double expected = kIsolatedRange * kIsolatedRange * cosT * cosT *
+    std::sin(pitch_rad) * std::sin(pitch_rad) * pitch_var;
+
+  EXPECT_NEAR(vertical, expected, 1e-6 * expected);
+
+  // The pre-fix form would have used cos^2(pitch) here, which at a 60-degree
+  // beam is 3.5x larger -- the assertion above fails if the slip comes back.
+  const double cos_pitch = std::cos(pitch_rad);
+  const double slipped = kIsolatedRange * kIsolatedRange * cos_pitch * cos_pitch *
+    std::sin(pitch_rad) * std::sin(pitch_rad) * pitch_var;
+  EXPECT_GT(slipped, 3.0 * expected);
+}
+
 }  // namespace cube

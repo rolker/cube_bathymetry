@@ -356,7 +356,14 @@ std::pair<double, double> ErrorModel::swath_depth(
   double angle_err = total_roll_variance * range * range *
     sinT * sinT * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch;
 
-  double pitch_err = range * range * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch *
+  // Eqn. 3.49. The leading factor is cosT^2 -- cos(roll + beam angle), the
+  // same swath-geometry factor the two terms above use -- NOT cos(pitch)^2.
+  // This port carried cos_pitch^2 here (a slip: the sibling terms are
+  // faithful), which over-estimated by 1/cos^2 T, ~4x at a 60-degree beam and
+  // worst at the swath edge. It was invisible while sin(pitch)^2 was ~3283x
+  // too small; #147 turns the term on, so it is corrected here.
+  // (original_cube/libsrc/errmod/errmod_full.c:376-377.)
+  double pitch_err = range * range * cosT * cosT *
     per_ping_sources.sin_pitch * per_ping_sources.sin_pitch *
     static_error_sources_.total_pitch_variance;
 
