@@ -26,7 +26,6 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
-#include "lifecycle_msgs/msg/state.hpp"
 
 #include "cube_bathymetry/detections_projector.h"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -149,6 +148,17 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_cleanup(const rclcpp_lifecycle::State & state)
   {
+    // Undo what on_configure built. This override used to forward to the base
+    // and free nothing, so a cleaned-up node kept its subscriptions and went
+    // on deserializing every ping for a projector nobody was reading (#144).
+    // on_configure re-creates all of it (its declare_parameter calls are
+    // has_parameter-guarded), so configure -> cleanup -> configure works.
+    detections_subscriber_.reset();
+    odom_subscriber_.reset();
+    pointcloud_publisher_.reset();
+    tf_listener_.reset();
+    tf_buffer_.reset();
+    projector_.reset();
     return LifecycleNode::on_cleanup(state);
   }
 
@@ -171,6 +181,31 @@ private:
 
   void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr & msg)
   {
+    // The subscription is created in on_configure and lives on through
+    // `inactive`, where the LifecyclePublisher silently drops anything we
+    // publish -- so every ping projected there is wasted work whose only
+    // visible effect is log noise. That noise got much louder in #144: a
+    // driver that reports no per-beam beamwidths (every M3 ping) now trips a
+    // throttled warning on each ping. Do nothing unless we are active.
+    //
+    // The gate reads the PUBLISHER's activation flag rather than the node's
+    // lifecycle state: `get_current_state()` returns a reference into the
+    // state machine that transitions mutate, with no thread-safety guarantee
+    // from rclcpp -- correct here only because main() spins a
+    // SingleThreadedExecutor, an unstated invariant one executor swap away
+    // from being wrong. `LifecyclePublisher::is_activated()` is backed by
+    // std::atomic<bool> and is exactly the condition that matters: when it is
+    // false everything below this point is discarded by the publisher. The
+    // null check covers `unconfigured`, where the publisher does not exist.
+    if(!pointcloud_publisher_ || !pointcloud_publisher_->is_activated()) {
+      // Skipping the work also skips LifecyclePublisher's own one-shot
+      // "publisher is not activated" warning, which would leave
+      // inactive-with-data entirely silent. Say it here instead, throttled.
+      RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        "Detections arriving while not active; not projecting");
+      return;
+    }
+
     const rclcpp::Time stamp(msg->header.stamp);
 
     // Speed over ground from odometry (latest cached value). The staleness gate
@@ -198,6 +233,23 @@ private:
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
         "No attitude TF (" << level_frame_ << " <- " << base_link_frame_ <<
         "); roll/pitch = NaN");
+    }
+    if(projection.diagnostics.default_beamwidth_beams > 0) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        projection.diagnostics.default_beamwidth_beams << " of " <<
+          projection.diagnostics.total <<
+          " beams took the generic device across-track beamwidth (rx_beamwidths"
+          " absent, too short, or reporting a value that is non-finite,"
+          " non-positive, or >= pi rad), so their angular uncertainty is a"
+          " default, not a measurement");
+    }
+    if(projection.diagnostics.missing_rx_angle_beams > 0) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        projection.diagnostics.missing_rx_angle_beams << " of " <<
+          projection.diagnostics.total <<
+          " beams reported no usable receive angle (rx_angles absent, too"
+          " short, or non-finite); their position and uncertainty are NaN and"
+          " the range gate drops them");
     }
     if(projection.diagnostics.filtered_range > 0) {
       RCLCPP_DEBUG_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,

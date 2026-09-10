@@ -105,12 +105,33 @@ ProjectionResult DetectionsProjector::project(
   // Attitude (roll/pitch) from TF at the ping stamp -- the SAME pose used
   // downstream to place the soundings, so the error budget is coherent.
   // Position and heading are not needed by the error model.
+  //
+  // getEulerYPR returns RADIANS and cube::Platform::roll/pitch are radians
+  // (#147), so these assignments are unit-clean. They were not before #147:
+  // Platform documented degrees and ErrorModel converted as degrees, so the
+  // one producer and the one consumer disagreed by 57.3x and attitude was
+  // effectively switched off.
+  //
+  // SIGN (#144): cube::Platform keeps Calder's conventions -- roll +ve is port
+  // side up, pitch +ve is BOW UP -- because every ported equation in
+  // ErrorModel was derived under them. tf2::getEulerYPR on an FLU (REP-103)
+  // rotation returns pitch = -asin(R[2][0]), a right-handed rotation about +y
+  // (port), which is bow *down* positive: the opposite sense. So pitch is
+  // negated HERE, at the boundary, exactly as the degrees->radians conversion
+  // is done at the boundary -- the internals then stay faithful to the
+  // equations they came from. Roll needs no flip: a right-handed rotation
+  // about +x (forward) lifts +y (port), which is already Calder's sense.
+  //
+  // Three terms are ODD in sin(pitch) and so change value under the flip:
+  // swath_heave's IMU lever-arm term (error_model.cpp), and the heading and
+  // pitch cross-terms of the static horizontal_positioning_error. They all
+  // vanish when the IMU/GPS offsets are zero, which is why this was latent.
   geometry_msgs::msg::TransformStamped level;
   if (lookupAtOrLatest(tf, params_.level_frame, params_.base_link_frame, stamp, level)) {
     double y, p, r;
     tf2::getEulerYPR(level.transform.rotation, y, p, r);
     platform.roll = static_cast<float>(r);
-    platform.pitch = static_cast<float>(p);
+    platform.pitch = static_cast<float>(-p);
     (void)y;  // yaw/heading unused by the error model
   } else {
     platform.roll = std::nan("");
@@ -120,9 +141,15 @@ ProjectionResult DetectionsProjector::project(
 
   // Heave = boat vertical offset from the tide-corrected surface. It enters the
   // budget only squared, so it is non-critical; default to 0 if absent.
+  //
+  // SIGN (#144): like pitch, cube::Platform::heave keeps Calder's convention
+  // (+ve DOWN) while the TF translation is REP-103 +up, so it is negated at
+  // this boundary too. Numerically this is inert -- swath_heave uses heave
+  // only squared -- but leaving the two conventions crossed here is what made
+  // the pitch sign wrong, so the struct is held to one convention throughout.
   geometry_msgs::msg::TransformStamped tide;
   if (lookupAtOrLatest(tf, params_.tide_frame, params_.base_link_frame, stamp, tide)) {
-    platform.heave = static_cast<float>(tide.transform.translation.z);
+    platform.heave = static_cast<float>(-tide.transform.translation.z);
   } else {
     platform.heave = 0.0f;
     result.diagnostics.missing_heave = 1;
@@ -133,6 +160,38 @@ ProjectionResult DetectionsProjector::project(
 
   platform.mean_speed = detections.ping_info.sound_speed;
   platform.surf_sspeed = detections.ping_info.sound_speed;
+
+  // Count the beams whose angular term will fall back to the generic device
+  // beamwidth -- either because the ping reports no per-beam value for that
+  // beam, or because the error model refuses the one it reports. The predicate
+  // is the model's own, so the two cannot drift apart, and the domain is the
+  // BEAMS (two_way_travel_times), matching swath_angle_error's own indexing.
+  //
+  // Counting rejections over rx_beamwidths instead would be silent in the
+  // commonest field case there is: kongsberg_em_bridge leaves rx_beamwidths
+  // empty on every M3 ping, so every beam runs on the hardcoded generic
+  // beamwidth while nothing at all is "rejected". A single-element array (a
+  // legitimate fixed-beamwidth encoding) reads the same way, and an over-long
+  // array would over-report. The projector never logs; the caller reports
+  // this (#144).
+  //
+  // The same loop counts beams with no usable RECEIVE ANGLE. Those soundings
+  // come out NaN (sounding.h / ErrorModel::beam_angle bounds-guard the array)
+  // and are then dropped by the range gate below, which would otherwise report
+  // them as range-filtered -- telling an operator whose driver omits
+  // `rx_angles` that their frame overrides are wrong when they are not (#144).
+  const auto & reported_beamwidths = detections.ping_info.rx_beamwidths;
+  const auto & reported_rx_angles = detections.rx_angles;
+  for (size_t i = 0; i < detections.two_way_travel_times.size(); ++i) {
+    if (i >= reported_beamwidths.size() ||
+      !cube::ErrorModel::per_beam_beamwidth_usable(reported_beamwidths[i]))
+    {
+      ++result.diagnostics.default_beamwidth_beams;
+    }
+    if (i >= reported_rx_angles.size() || !std::isfinite(reported_rx_angles[i])) {
+      ++result.diagnostics.missing_rx_angle_beams;
+    }
+  }
 
   auto soundings = error_model_->compute(detections, platform);
   result.diagnostics.total = soundings.size();

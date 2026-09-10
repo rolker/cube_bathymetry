@@ -23,6 +23,8 @@
 #ifndef CUBE_BATHYMETRY__SOUNDING_H_
 #define CUBE_BATHYMETRY__SOUNDING_H_
 
+#include <cmath>
+
 #include "cube_bathymetry/common.h"
 #include "geometry_msgs/msg/point.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -45,13 +47,34 @@ namespace cube
     // sonar_relative_position) so the tier-2 backscatter TL correction can read it
     // downstream (cube_bathymetry#87). Same value used for the geometry below.
     slant_range = static_cast < float > (range);
+    // tx_angle deliberately keeps its 0 default where rx_angle below takes
+    // NaN, and the asymmetry is a behaviour decision, not an oversight: an
+    // unsteered across-track fan has no transmit steering to report, so an
+    // absent tx_angles is a normal encoding of "no tilt" for those sonars,
+    // while an absent rx_angles means the across-track geometry -- the thing
+    // that places the sounding -- was never measured. Treating tx the same way
+    // would turn every sounding from such a driver into a NaN the range gate
+    // drops. Revisiting it needs a field decision; see #144's review notes.
     float tx_angle = 0.0;
     if(i < detections.tx_angles.size()) {
         tx_angle = detections.tx_angles[i];
     }
+    // rx_angles is bounds-guarded like every other per-beam array here (#144).
+    // A driver that reports fewer receive angles than travel times used to
+    // send the two reads below off the end of the vector. Absent -> NaN,
+    // rather than being read as 0 (a nadir beam that was never measured) or as
+    // whatever follows in memory.
+    //
+    // The NaN does not reach the product: it makes the position and the TPU
+    // NaN within this sounding, and DetectionsProjector's range gate then
+    // drops it (NaN fails both comparisons), counting the beam into
+    // ProjectionDiagnostics::missing_rx_angle_beams so the drop is reported as
+    // what it is.
+    const float rx_angle = (i < detections.rx_angles.size()) ?
+        detections.rx_angles[i] : std::nan("");
     sonar_relative_position.x = range * -sin(tx_angle);
-    sonar_relative_position.y = range * sin(detections.rx_angles[i]);
-    sonar_relative_position.z = range * cos(tx_angle) * cos(detections.rx_angles[i]);
+    sonar_relative_position.y = range * sin(rx_angle);
+    sonar_relative_position.z = range * cos(tx_angle) * cos(rx_angle);
 
     // Per-beam acoustic intensity (backscatter). Sonar-reported and usually
     // uncalibrated; for the Kongsberg M3 (via kongsberg_em_bridge) it is
@@ -68,15 +91,25 @@ namespace cube
     // deferred to cube_bathymetry#15); it is the per-beam geometry the deferred
     // node-output GeoCoder correction reconstructs the grazing angle from. Left
     // NaN when the source omits rx_angles for this beam.
-    if(i < detections.rx_angles.size()) {
-        beam_angle = detections.rx_angles[i];
-    }
+    beam_angle = rx_angle;
     }
 
   /// Depth relative to the sea surface. Positive is up above sea surface
   /// and negative is down below sea surface
     float depth = std::nan("");
+
+  /// Vertical total propagated uncertainty as a VARIANCE in m^2, at one sigma.
+  /// No confidence-interval scaling is applied: CUBE consumes this directly as
+  /// the measurement variance in its depth update, and any 95%/99% figure is
+  /// produced downstream at reporting time by scaling the square root
+  /// (CONF_95PC / CONF_99PC). A one-dimensional error about `depth`.
     float vertical_error = 0.0;
+
+  /// Horizontal total propagated uncertainty as a VARIANCE in m^2, at one
+  /// sigma, likewise with no confidence-interval scaling.
+  /// Not the same shape of quantity as `vertical_error`: this one is radial,
+  /// derived from the drms convention, so its square root is a radius in the
+  /// horizontal plane rather than an error along a single axis. See #144.
     float horizontal_error = 0.0;
 
   /// Per-beam acoustic intensity / backscatter (NaN when not reported).

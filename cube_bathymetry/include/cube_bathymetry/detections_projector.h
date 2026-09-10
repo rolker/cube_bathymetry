@@ -81,6 +81,40 @@ namespace cube
   /// 1 when the heave TF (tide_frame <- base_link_frame) was missing; heave
   /// defaults to 0 (it enters the budget only squared, so this is non-critical).
     size_t missing_heave = 0;
+
+  /// Beams in this ping whose angular uncertainty came from the generic
+  /// `Device::across_track_beamwidth` instead of from the ping, because the
+  /// sonar reported no usable per-beam receive beamwidth for them. That covers
+  /// both a value the error model refused (non-finite, non-positive, or
+  /// at/above `ErrorModel::kMaxPerBeamBeamwidthRad`) and the absence of a value
+  /// at all -- an EMPTY `rx_beamwidths`, or one shorter than the beam count.
+  ///
+  /// Counting the FALLBACK rather than the rejection is deliberate (#144). The
+  /// count exists to tell an operator that the angular part of the budget is a
+  /// default belonging to no particular sonar, and the commonest way for that
+  /// to happen is the one a rejection count cannot see: `kongsberg_em_bridge`
+  /// leaves `rx_beamwidths` empty on every M3 ping, so 100% of beams run on
+  /// the default while nothing is rejected. Counting over the beams
+  /// (`two_way_travel_times`) rather than over `rx_beamwidths` also stops an
+  /// over-long array inflating the figure past the beam count.
+  ///
+  /// The denominator is `total` (one sounding per beam, before range
+  /// filtering); the tools report "N of M beams".
+    size_t default_beamwidth_beams = 0;
+
+  /// Beams in this ping for which the sonar reported no usable receive angle
+  /// -- an `rx_angles` array that is empty, shorter than the beam count, or
+  /// carrying a non-finite value for that beam.
+  ///
+  /// Such a beam's angle reads NaN (#144, deliberately, rather than 0 -- a
+  /// nadir beam that was never measured), so its position and TPU are NaN and
+  /// the range gate drops it. Without this counter the drop lands in
+  /// `filtered_range` and the operator is told the soundings were
+  /// range-filtered -- which, for a driver that omits `rx_angles` entirely, is
+  /// a confident pointer at the frame configuration, the one thing that is
+  /// fine. Sibling of `default_beamwidth_beams`: same domain
+  /// (`two_way_travel_times`), same `total` denominator.
+    size_t missing_rx_angle_beams = 0;
   };
 
 /// Result of projecting one SonarDetections message: the (range-filtered)

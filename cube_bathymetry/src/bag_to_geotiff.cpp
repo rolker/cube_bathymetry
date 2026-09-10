@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <vector>
@@ -38,6 +39,7 @@
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
 #include "cube_bathymetry/detections_projector.h"
+#include "cube_bathymetry/projection_summary.h"
 #include "cube_bathymetry/map_sheet.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "geometry_msgs/msg/point_stamped.hpp"
@@ -80,10 +82,17 @@ bool bag_filter(const std::string & type)
   return false;
 }
 
-// Pack projected soundings into the same 6-field (x,y,z,intensity,
-// vertical_uncertainty,horizontal_uncertainty) PointCloud2 layout that
-// detections_to_pointcloud publishes, so the detections offline path feeds the
-// identical downstream soundings_buffer/grid machinery as a pre-projected bag.
+// Pack projected soundings into a 6-field (x,y,z,intensity,
+// vertical_uncertainty,horizontal_uncertainty) PointCloud2, so the detections
+// offline path feeds the identical downstream soundings_buffer/grid machinery
+// as a pre-projected bag.
+//
+// This is the first SIX of the seven fields detections_to_pointcloud
+// publishes: the seventh, `beam_angle`, is not emitted here. Consumers read
+// PointCloud2 fields by name and cube_bathymetry_node treats `beam_angle` as
+// optional (NaN-filling when it is absent), so the omission is safe -- but it
+// does mean the offline `-d` path carries no beam angle, and anything that
+// comes to depend on one has to add it here too.
 sensor_msgs::msg::PointCloud2::SharedPtr soundingsToPointCloud2(
   const std::vector<cube::Sounding> & soundings,
   const std_msgs::msg::Header & header)
@@ -339,11 +348,11 @@ int main(int argc, char *argv[])
   // Accumulated offline-projection diagnostics, surfaced at the end so a
   // misconfigured-frames or over-tight-range run is diagnosable rather than a
   // silently sparse/empty GeoTIFF (the failure mode #43 exists to kill).
-  size_t proj_pings = 0;
-  size_t proj_soundings = 0;
-  size_t proj_filtered_range = 0;
-  size_t proj_missing_attitude = 0;
-  size_t proj_missing_heave = 0;
+  // Whole-run projection totals; cube::report_projection_summary prints them.
+  // This tool does not georeference in the projection pass, so its summary
+  // line omits the georeferenced/dropped clause.
+  cube::ProjectionRunTotals proj_totals;
+  proj_totals.reports_georeferencing = false;
 
   BagReaders bag_readers(bagfile_names);
 
@@ -495,11 +504,14 @@ int main(int argc, char *argv[])
         rclcpp::Serialization<marine_acoustic_msgs::msg::SonarDetections>().deserialize_message(
           &serialized_message, &detections);
         auto projection = projector.project(detections, tfBuffer, std::nanf(""));
-        ++proj_pings;
-        proj_soundings += projection.soundings.size();
-        proj_filtered_range += projection.diagnostics.filtered_range;
-        proj_missing_attitude += projection.diagnostics.missing_attitude;
-        proj_missing_heave += projection.diagnostics.missing_heave;
+        ++proj_totals.pings;
+        proj_totals.soundings += projection.soundings.size();
+        proj_totals.filtered_range += projection.diagnostics.filtered_range;
+        proj_totals.missing_attitude += projection.diagnostics.missing_attitude;
+        proj_totals.missing_heave += projection.diagnostics.missing_heave;
+        proj_totals.beams += projection.diagnostics.total;
+        proj_totals.default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
+        proj_totals.missing_rx_angle_beams += projection.diagnostics.missing_rx_angle_beams;
         auto pc_message = soundingsToPointCloud2(projection.soundings, detections.header);
         soundings_buffer.push_back(std::make_pair(pc_message, last_nav));
         check_buffer = true;
@@ -589,15 +601,7 @@ int main(int argc, char *argv[])
   std::cout << "\ndone." << std::endl;
 
   if (!detections_topic.empty()) {
-    std::cout << "Offline projection: " << proj_pings << " pings, " << proj_soundings
-              << " soundings (" << proj_filtered_range << " range-filtered, "
-              << proj_missing_attitude << " missing attitude, "
-              << proj_missing_heave << " missing heave)" << std::endl;
-    if (proj_pings > 0 && proj_soundings == 0) {
-      std::cerr << "WARNING: projected 0 soundings from " << proj_pings
-                << " pings -- check the --*-frame overrides match the bag's namespaced "
-                << "frames (see README 'Configuring frames per platform')." << std::endl;
-    }
+    cube::report_projection_summary(proj_totals, std::cout, std::cerr);
   }
 
   std::cout << "Generating output..." << std::endl;

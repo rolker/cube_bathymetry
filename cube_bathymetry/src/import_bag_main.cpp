@@ -53,6 +53,7 @@
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/coverage_refresh.h"
 #include "cube_bathymetry/detections_projector.h"
+#include "cube_bathymetry/projection_summary.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/quantize_tile.h"
@@ -975,12 +976,8 @@ int main(int argc, char * argv[])
   // Accumulated offline-projection diagnostics, surfaced at the end so a
   // misconfigured-frames or over-tight-range run is diagnosable rather than a
   // silently sparse/empty import (the failure mode #43 exists to kill).
-  size_t proj_pings = 0;
-  size_t proj_soundings = 0;
-  size_t proj_filtered_range = 0;
-  size_t proj_missing_attitude = 0;
-  size_t proj_missing_heave = 0;
-  size_t proj_dropped_georef = 0;  // pings with no earth transform at their stamp
+  // Whole-run projection totals; cube::report_projection_summary prints them.
+  cube::ProjectionRunTotals proj_totals;
 
   // Main-pass read filter (cube#107): restrict each reader to the topics the
   // projection consumes. /tf and /tf_static are added per-bag inside Bag::open
@@ -1208,11 +1205,14 @@ int main(int argc, char * argv[])
       const float vessel_speed = speedAt(speed_by_ns, ping_ns);
 
       auto projection = projector.project(detections, tfBuffer, vessel_speed);
-      ++proj_pings;
-      proj_soundings += projection.soundings.size();
-      proj_filtered_range += projection.diagnostics.filtered_range;
-      proj_missing_attitude += projection.diagnostics.missing_attitude;
-      proj_missing_heave += projection.diagnostics.missing_heave;
+      ++proj_totals.pings;
+      proj_totals.soundings += projection.soundings.size();
+      proj_totals.beams += projection.diagnostics.total;
+      proj_totals.filtered_range += projection.diagnostics.filtered_range;
+      proj_totals.missing_attitude += projection.diagnostics.missing_attitude;
+      proj_totals.missing_heave += projection.diagnostics.missing_heave;
+      proj_totals.default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
+      proj_totals.missing_rx_angle_beams += projection.diagnostics.missing_rx_angle_beams;
 
       try {
         auto transform = tfBuffer.lookupTransform(
@@ -1303,8 +1303,8 @@ int main(int argc, char * argv[])
         // e.g. before the first earth fix, or a TF gap wider than the cache
         // window. Counted (not just logged) so an empty or sparse import is
         // diagnosable rather than silently dropped.
-        ++proj_dropped_georef;
-        if (proj_dropped_georef <= 5) {
+        ++proj_totals.dropped_georef;
+        if (proj_totals.dropped_georef <= 5) {
           std::cerr << "Transform Exception: " << e.what() << std::endl;
         }
       }
@@ -1404,7 +1404,7 @@ int main(int argc, char * argv[])
     {
       double progress = (tf_frontier_ns - begin_ns) / static_cast<double>(total_ns);
       std::cout << "\r  " << static_cast<int>(100 * progress) << "%  " << ping_count
-                << " pings (" << proj_dropped_georef << " dropped, " << pending.size()
+                << " pings (" << proj_totals.dropped_georef << " dropped, " << pending.size()
                 << " pending)      " << std::flush;
       last_report_time = now;
     }
@@ -1419,22 +1419,8 @@ int main(int argc, char * argv[])
   std::cout << "; projected " << ping_count << " pings in " << phase_secs() << "s." << std::endl;
 
   std::cout << "\ndone." << std::endl;
-  std::cout << "Offline projection: " << proj_pings << " pings projected, "
-            << ping_count << " georeferenced into the grid, " << proj_dropped_georef
-            << " dropped (no earth TF); " << proj_soundings << " soundings ("
-            << proj_filtered_range << " range-filtered, " << proj_missing_attitude
-            << " missing attitude, " << proj_missing_heave << " missing heave)" << std::endl;
-  if (proj_pings > 0 && proj_soundings == 0) {
-    std::cerr << "WARNING: projected 0 soundings from " << proj_pings
-              << " pings -- check the --*-frame overrides match the bag's "
-              << "namespaced frames (see README 'Configuring frames per platform')."
-              << std::endl;
-  }
-  if (ping_count == 0 && proj_dropped_georef > 0) {
-    std::cerr << "WARNING: every ping was dropped for lack of an earth transform -- "
-              << "check that the bag has a localization chain to the 'earth' frame."
-              << std::endl;
-  }
+  proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
+  cube::report_projection_summary(proj_totals, std::cout, std::cerr);
 
   std::cout << "Building store tiles..." << std::endl;
 

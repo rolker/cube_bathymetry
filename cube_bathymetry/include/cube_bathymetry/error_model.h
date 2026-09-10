@@ -55,9 +55,40 @@ namespace cube
     /* No latitude/longitude/heading: the error model never uses them. They were
      * inherited from Calder's Platform (where they fed georeferencing); in this
      * ROS port georeferencing is done by TF, so they were dead fields. */
-    float roll;  /* Roll in degrees, +ve is port side up */
-    float pitch;  /* Pitch in degrees, +ve is bow up */
-    float heave;  /* Heave in meters, +ve down */
+    /* RADIANS, not degrees (#147). Platform is filled by our own
+     * DetectionsProjector straight from tf2::getEulerYPR, which returns
+     * radians -- there is no human-typed, datasheet-facing configuration
+     * surface here of the kind that keeps Device/Vessel angles in degrees, so
+     * the units are normalized at the type instead of at the use site. Before
+     * #147 these were documented as degrees, converted as degrees by
+     * ErrorModel, and filled with radians by the one and only producer, which
+     * understated attitude by 57.3x and effectively switched it off.
+     *
+     * Sign conventions are CALDER'S, unchanged (#144). Every equation ported
+     * into ErrorModel was derived under them, so they are held here and the
+     * producer converts, exactly as it does for units.
+     *
+     * - roll: +ve port side up. This coincides with REP-103: a right-handed
+     *   rotation about +x (forward) lifts +y (port). No conversion needed --
+     *   verified twice.
+     * - pitch: +ve BOW UP. This is the OPPOSITE of what tf2::getEulerYPR
+     *   returns for an FLU rotation (pitch = -asin(R[2][0]), a right-handed
+     *   rotation about +y/port, i.e. bow-down positive), so DetectionsProjector
+     *   negates it at the boundary. An earlier revision of this comment
+     *   asserted the two senses agreed; that was only half checked -- the roll
+     *   half was right, the pitch half was not.
+     * - heave: +ve DOWN, likewise opposite to the REP-103 +up TF translation
+     *   the projector reads, and likewise negated there. Inert numerically
+     *   (heave enters only squared) but kept consistent on purpose.
+     *
+     * Three ported terms are ODD in sin(pitch) and so are sensitive to the
+     * pitch sign: swath_heave's IMU lever-arm term and the heading and pitch
+     * cross-terms of the static horizontal_positioning_error. All three vanish
+     * when the IMU/GPS offsets are zero, which is why a wrong sign stayed
+     * latent at the defaults. */
+    float roll;  /* Roll in radians, +ve is port side up */
+    float pitch;  /* Pitch in radians, +ve is bow up (negated by the producer) */
+    float heave;  /* Heave in meters, +ve down (negated by the producer) */
     float surf_sspeed;  /* Surface sound speed, m/s */
     float mean_speed;  /* Geometric mean equivalent sound speed, m/s */
     float vessel_speed;  /* Vessel's speed-over-ground, m/s */
@@ -209,7 +240,10 @@ namespace cube
     float sound_speed = 0.0;
   /// Sonar reported -3db transmit beamwidths in radians
     const std::vector < float > * tx_beamwidths = nullptr;
-  /// Sonar reported -3db transmit beamwidths in radians
+  /// Sonar reported -3db RECEIVE beamwidths in radians. (This said "transmit"
+  /// until #144 -- a copy-paste from the line above, on the very field whose
+  /// units that issue was about.) May be empty when the driver reports none;
+  /// values are validated before use, see ErrorModel::per_beam_beamwidth_usable.
     const std::vector < float > * rx_beamwidths = nullptr;
   /// Detection flags. 0 means good.
     const std::vector < uint8_t > * detection_flags = nullptr;
@@ -229,6 +263,35 @@ public:
     std::vector < Sounding > compute(const marine_acoustic_msgs::msg::SonarDetections & detections,
       const Platform & platform) const;
 
+  /// Largest per-beam receive beamwidth the model will accept, in radians.
+  /// This is a HARD PHYSICAL bound, not a plausibility clamp: a beam cannot
+  /// subtend half a turn or more, so anything at or above pi rad is nonsense
+  /// (a unit mix-up, a sentinel, or a corrupt field) rather than a wide beam.
+  ///
+  /// It is deliberately not tighter. `garmin_sidescan` reports 55 degrees
+  /// (0.96 rad) across-track for SideVu and 46 for ClearVu, and those are
+  /// CORRECT -- a sidescan does no across-track beamforming, so its receive
+  /// fan genuinely is that wide. Any clamp tight enough to be a "plausibility"
+  /// check would throw that legitimate data away.
+  ///
+  /// The corollary is that this ceiling does NOT catch a misplaced transmit
+  /// fan: an R2Sonic driver stamps the transmit horizontal fan (~2.27 rad,
+  /// 130 degrees) into `rx_beamwidths`, which is a real, correctly-scaled
+  /// measurement of the wrong quantity, and it passes this bound. That is a
+  /// driver fault and is fixed there, not laundered here. See the divergences
+  /// doc for the current tracking reference.
+    static constexpr float kMaxPerBeamBeamwidthRad = 3.14159265358979323846f;
+
+  /// True when a sonar-reported per-beam receive beamwidth (radians) is usable
+  /// as a measurement: finite, strictly positive, and below the physical
+  /// ceiling above. Public so a caller can count and report the beams that
+  /// fall back to the generic device beamwidth without duplicating the
+  /// predicate -- `DetectionsProjector` fills
+  /// `ProjectionDiagnostics::default_beamwidth_beams` with it. A refused value
+  /// is one way into that count; a value the ping never reported at all is the
+  /// commoner one, and the caller adds it.
+    static bool per_beam_beamwidth_usable(float beamwidth_rad);
+
 private:
   /// Compute induced and measured heave components.
   /// Returns variance of total heave component of vertical error.
@@ -238,18 +301,24 @@ private:
       const PerPingErrorSources & per_ping_sources) const;
 
   /// Compute variance of horizontal positioning error caused by
-  /// GPS antennae not being at the transducer head
-  /// Returns approximate 95% confidence interval for error
+  /// GPS antennae not being at the transducer head.
+  /// Returns a variance in m^2 at one sigma: no confidence-interval scaling is
+  /// applied here (see #144). Calder's own header claims a doubling to reach a
+  /// 95% interval, but neither his implementation nor this one applies it --
+  /// the confidence scaling lives at reporting time (CONF_95PC), not in the
+  /// error budget.
   /// This computes eqn. 3.90, summarizing the component of horizontal
   /// error due to misalignment of the GPS antennae and the tx head.
-  /// Note that in keeping with the report and spreadsheet, we return
-  /// twice the nominal variance in order to approximate the 95% conf.
-  /// interval assuming a Gaussian distribution.
     double horizontal_positioning_error(
       const Platform & platform,
       const PerPingErrorSources & per_ping_sources) const;
 
-  /// Compute approximate 95% error bound due to latency errors
+  /// Compute the horizontal error component due to latency errors.
+  /// Returns a variance in m^2 at one sigma: no confidence-interval scaling is
+  /// applied here (see #144). This header used to claim an "approximate 95%
+  /// error bound" -- the third copy of a claim the implementation has never
+  /// matched, alongside the two on horizontal_positioning_error. The 95%
+  /// scaling lives at reporting time (CONF_95PC), not in the error budget.
   /// We assume that the coefficients for eqn 3.100 have been pre-computed
   /// and stored in the workspace, and that the trig. functions for the
   /// current swath orientation have been computed.
@@ -309,10 +378,10 @@ private:
 
   /// Compute component of horizontal positioning error associated with
   /// ship attitude and offsets.
-  /// Returns approximate 95% confidence interval.
-  /// This assumes, per the spreadsheet and report, that we have to work
-  /// at the 95% confidence level due to the drms approximation. We
-  /// multiply the standard deviation estimate by 2.0 to approximate this.
+  /// Returns a variance in m^2 at one sigma: no confidence-interval scaling is
+  /// applied here (see #144). The stale claim that the estimate is multiplied
+  /// by 2.0 to reach a 95% interval never matched the implementation, here or
+  /// in Calder's.
   /// We are computing eqns. 3.77-3.82. Note that the spreadsheet
   /// does not include any component for the along-track beam angle,
   /// unlike the report, and we ignore it here also.
@@ -326,6 +395,15 @@ private:
     Vessel vessel_;
     StaticErrorSources static_error_sources_;
     Device device_;
+
+  /// `Device::across_track_beamwidth` converted from degrees to radians once,
+  /// in the constructor. `Device` itself stays degrees-valued (sonar datasheets
+  /// and every other angular field on `Device` and `Vessel` are in degrees);
+  /// this is the single boundary conversion, so use sites consume radians
+  /// without converting again. `Platform` is the deliberate exception -- it
+  /// holds radians outright (#147), being a measurement rather than
+  /// human-entered configuration. See #144 and docs/divergences_from_calder.md.
+    double device_across_track_beamwidth_rad_ = 0.0;
   };
 
 

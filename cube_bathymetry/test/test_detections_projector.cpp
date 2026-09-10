@@ -59,6 +59,22 @@ geometry_msgs::msg::TransformStamped identityTransform(
   return tfs;
 }
 
+// A (parent <- child) transform whose rotation is a right-handed rotation of
+// `angle_rad` about the +y (port) axis. Used to build a pitched attitude.
+geometry_msgs::msg::TransformStamped rotatedAboutY(
+  const std::string & parent, const std::string & child, double angle_rad)
+{
+  geometry_msgs::msg::TransformStamped tfs;
+  tfs.header.stamp = pingStamp();
+  tfs.header.frame_id = parent;
+  tfs.child_frame_id = child;
+  tfs.transform.rotation.x = 0.0;
+  tfs.transform.rotation.y = std::sin(angle_rad / 2.0);
+  tfs.transform.rotation.z = 0.0;
+  tfs.transform.rotation.w = std::cos(angle_rad / 2.0);
+  return tfs;
+}
+
 // Build a SonarDetections ping. rx_angles is one entry per beam; tx_angle is a
 // single transmit steering angle applied to all beams (matching the typical
 // across-track fan). travel_time is two-way, seconds.
@@ -270,6 +286,199 @@ TEST_F(DetectionsProjectorTest, NodeRegressionGeometryAndStaleSog)
     EXPECT_FLOAT_EQ(with_sog.soundings[i].horizontal_error,
       with_sog_again.soundings[i].horizontal_error);
   }
+}
+
+// #144: every beam whose angular budget falls back to the generic
+// Device::across_track_beamwidth is counted -- a refused value AND a missing
+// one. The count exists so an operator can see that the angular budget is a
+// default belonging to no particular sonar; counting only REJECTIONS would be
+// silent in the commonest real case (kongsberg_em_bridge leaves rx_beamwidths
+// empty on every M3 ping, so 100% of beams run on the default).
+TEST_F(DetectionsProjectorTest, DefaultBeamwidthBeamsAreCounted)
+{
+  DetectionsProjector projector(params_);
+  tf2::BufferCore buffer;
+  fillAttitudeBuffer(buffer, params_);
+
+  auto det = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  // Beam 0: zero-filled, as norbit_driver reports an unknown width.
+  // Beam 1: at the physical ceiling (pi rad) -- nonsense, rejected.
+  // Beam 2: garmin_sidescan's legitimate 55 degrees across-track -- accepted.
+  det.ping_info.rx_beamwidths = {
+    0.0f,
+    ErrorModel::kMaxPerBeamBeamwidthRad,
+    static_cast<float>(55.0 * M_PI / 180.0)};
+
+  auto result = projector.project(det, buffer, 0.0f);
+  EXPECT_EQ(result.diagnostics.default_beamwidth_beams, 2u);
+  EXPECT_EQ(result.diagnostics.total, 3u);  // the denominator the tools print
+
+  // The M3 case: NOTHING reported at all. Every beam takes the default, and
+  // the diagnostic has to say so -- this is the case a rejection count missed.
+  auto empty = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  ASSERT_TRUE(empty.ping_info.rx_beamwidths.empty());
+  auto empty_result = projector.project(empty, buffer, 0.0f);
+  EXPECT_EQ(empty_result.diagnostics.default_beamwidth_beams, 3u);
+  EXPECT_EQ(empty_result.diagnostics.total, 3u);
+
+  // A single-element array (a legitimate fixed-beamwidth encoding) covers only
+  // beam 0; the other two fall back.
+  auto one = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  one.ping_info.rx_beamwidths = {static_cast<float>(2.0 * M_PI / 180.0)};
+  EXPECT_EQ(projector.project(one, buffer, 0.0f).diagnostics.default_beamwidth_beams, 2u);
+
+  // An over-long array cannot inflate the count past the beam count.
+  auto over_long = makeDetections({0.0f}, 0.02f);
+  over_long.ping_info.rx_beamwidths = {0.0f, 0.0f, 0.0f, 0.0f};
+  auto over_long_result = projector.project(over_long, buffer, 0.0f);
+  EXPECT_EQ(over_long_result.diagnostics.default_beamwidth_beams, 1u);
+  EXPECT_EQ(over_long_result.diagnostics.total, 1u);
+
+  // Range-filtered beams are still beams: the count is over the ping's beams,
+  // not over the soundings that survive the gate.
+  ProjectorParams gated = params_;
+  gated.minimum_range = 100.0;  // 15 m soundings are all filtered out
+  DetectionsProjector gating_projector(gated);
+  auto gated_result = gating_projector.project(empty, buffer, 0.0f);
+  ASSERT_TRUE(gated_result.soundings.empty());
+  EXPECT_EQ(gated_result.diagnostics.default_beamwidth_beams, 3u);
+}
+
+// #144: a beam with no usable receive angle is reported as such, not as a
+// range-filtered sounding. The bounds guard makes the sounding NaN, the range
+// gate then drops it, and without this counter the operator is told "0
+// soundings (all range-filtered)" and pointed at their frame overrides -- the
+// one thing that is fine when the driver simply omits rx_angles.
+TEST_F(DetectionsProjectorTest, MissingReceiveAngleBeamsAreCounted)
+{
+  DetectionsProjector projector(params_);
+  tf2::BufferCore buffer;
+  fillAttitudeBuffer(buffer, params_);
+
+  // Fully populated: nothing missing.
+  auto full = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  auto full_result = projector.project(full, buffer, 0.0f);
+  EXPECT_EQ(full_result.diagnostics.missing_rx_angle_beams, 0u);
+  EXPECT_EQ(full_result.soundings.size(), 3u);
+
+  // Truncated array: the two unreported beams are NaN, dropped by the range
+  // gate, and counted here as well as in filtered_range.
+  auto truncated = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  truncated.rx_angles.resize(1);
+  auto truncated_result = projector.project(truncated, buffer, 0.0f);
+  EXPECT_EQ(truncated_result.diagnostics.total, 3u);
+  EXPECT_EQ(truncated_result.diagnostics.missing_rx_angle_beams, 2u);
+  EXPECT_EQ(truncated_result.diagnostics.filtered_range, 2u);
+  EXPECT_EQ(truncated_result.soundings.size(), 1u);
+
+  // Absent entirely -- the case that produces "0 soundings, all
+  // range-filtered" with no other signal.
+  auto absent = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  absent.rx_angles.clear();
+  auto absent_result = projector.project(absent, buffer, 0.0f);
+  EXPECT_TRUE(absent_result.soundings.empty());
+  EXPECT_EQ(absent_result.diagnostics.total, 3u);
+  EXPECT_EQ(absent_result.diagnostics.missing_rx_angle_beams, 3u);
+
+  // A reported-but-non-finite angle is the same failure with a value in it.
+  auto nan_angle = makeDetections({-0.2f, std::nanf(""), 0.2f}, 0.02f);
+  auto nan_result = projector.project(nan_angle, buffer, 0.0f);
+  EXPECT_EQ(nan_result.diagnostics.missing_rx_angle_beams, 1u);
+  EXPECT_EQ(nan_result.soundings.size(), 2u);
+
+  // An over-long array cannot push the count past the beam count.
+  auto over_long = makeDetections({0.0f}, 0.02f);
+  over_long.rx_angles = {0.0f, 0.0f, 0.0f};
+  auto over_long_result = projector.project(over_long, buffer, 0.0f);
+  EXPECT_EQ(over_long_result.diagnostics.total, 1u);
+  EXPECT_EQ(over_long_result.diagnostics.missing_rx_angle_beams, 0u);
+}
+
+// #144: cube::Platform keeps CALDER's sign conventions (pitch +ve bow up,
+// heave +ve down); the projector converts at the boundary, exactly as it does
+// for units. tf2::getEulerYPR returns the opposite pitch sense for an FLU
+// rotation, so the projector must negate it.
+//
+// This test needs NON-ZERO IMU/GPS lever arms: the only terms odd in
+// sin(pitch) -- swath_heave's IMU lever-arm term and the heading/pitch
+// cross-terms of the static horizontal positioning error -- are multiplied by
+// those offsets and vanish at the (zero) defaults. That is why the wrong sign
+// was latent, and why a zero-lever-arm test could never catch it.
+TEST_F(DetectionsProjectorTest, BowUpPitchFollowsCalderSignConvention)
+{
+  ProjectorParams params = params_;
+  params.vessel.gps_x = 3.0;   // m forward of the transducer
+  params.vessel.gps_z = 1.5;   // m above it
+  params.vessel.imu_x = 2.0;
+  params.vessel.imu_z = 1.0;
+  DetectionsProjector projector(params);
+
+  // Bow-up attitude. In the level frame, base_link's forward axis tilts UP, so
+  // the (level <- base_link) rotation has R[2][0] > 0 and getEulerYPR returns
+  // pitch = -asin(R[2][0]) < 0 -- bow-DOWN-positive. Calder's Platform wants
+  // bow-UP-positive, so the projector must hand the error model +kBowUpRad.
+  const double kBowUpRad = 0.20;
+  tf2::BufferCore buffer;
+  // Parent = level, child = base_link, so the stored rotation IS the
+  // (level <- base_link) one the projector looks up -- no inversion to reason
+  // about. base_link stays the parent of the tide frame, so the tree
+  // (level -> base_link -> tide) is still singly connected.
+  buffer.setTransform(
+    rotatedAboutY(params.level_frame, params.base_link_frame, -kBowUpRad), "test", true);
+  buffer.setTransform(
+    identityTransform(params.base_link_frame, params.tide_frame), "test", true);
+
+  auto det = makeDetections({0.35f}, 0.02f);
+  const float sog = 2.0f;
+  auto result = projector.project(det, buffer, sog);
+  ASSERT_EQ(result.soundings.size(), 1u);
+  ASSERT_EQ(result.diagnostics.missing_attitude, 0u);
+
+  // Reference: the same ping through the error model with Calder's convention.
+  cube::ErrorModel model(params.vessel, params.device);
+  cube::Platform bow_up;
+  bow_up.timestamp = static_cast<double>(kPingSec) +
+    static_cast<double>(kPingNanosec) * 1e-9;
+  bow_up.roll = 0.0f;
+  bow_up.pitch = static_cast<float>(kBowUpRad);
+  bow_up.heave = 0.0f;
+  bow_up.surf_sspeed = det.ping_info.sound_speed;
+  bow_up.mean_speed = det.ping_info.sound_speed;
+  bow_up.vessel_speed = sog;
+
+  cube::Platform wrong_sign = bow_up;
+  wrong_sign.pitch = -bow_up.pitch;
+
+  const auto expected = model.compute(det, bow_up);
+  const auto unflipped = model.compute(det, wrong_sign);
+  ASSERT_EQ(expected.size(), 1u);
+  ASSERT_EQ(unflipped.size(), 1u);
+
+  // The projector agrees with the Calder-convention reference...
+  EXPECT_FLOAT_EQ(result.soundings[0].vertical_error, expected[0].vertical_error);
+  EXPECT_FLOAT_EQ(result.soundings[0].horizontal_error, expected[0].horizontal_error);
+
+  // ...and the two signs are genuinely distinguishable at this lever arm, so
+  // the assertions above fail if the negation is dropped.
+  //
+  // The guard has to be the same SHAPE as the assertion it guards: EXPECT_NE
+  // is exact, while EXPECT_FLOAT_EQ tolerates 4 ULP (~5e-7 relative), so a
+  // future change that shrank the separation into that gap would leave the
+  // guard passing while the assertion above compared equal against the WRONG
+  // sign. Require a separation comfortably outside EXPECT_FLOAT_EQ's window:
+  // ~20x it, against measured separations of 2.9e-4 relative (vertical) and
+  // 3.3e-5 relative (horizontal) at these lever arms.
+  const float kMinRelativeSeparation = 1e-5f;
+  EXPECT_GT(
+    std::abs(expected[0].vertical_error - unflipped[0].vertical_error),
+    kMinRelativeSeparation * std::abs(expected[0].vertical_error))
+    << "vertical_error: " << expected[0].vertical_error << " vs "
+    << unflipped[0].vertical_error;
+  EXPECT_GT(
+    std::abs(expected[0].horizontal_error - unflipped[0].horizontal_error),
+    kMinRelativeSeparation * std::abs(expected[0].horizontal_error))
+    << "horizontal_error: " << expected[0].horizontal_error << " vs "
+    << unflipped[0].horizontal_error;
 }
 
 }  // namespace cube

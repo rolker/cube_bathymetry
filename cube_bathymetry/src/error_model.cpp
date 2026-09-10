@@ -58,6 +58,28 @@ ErrorModel::ErrorModel(const Vessel & vessel, const Device & device)
 
   static_error_sources_.sound_speed_profile_variance = vessel.svp_sdev * vessel.svp_sdev;
 
+  // Boundary normalization (#144): Device::across_track_beamwidth is documented
+  // in degrees, like every other angular field on Device and Vessel. Convert it
+  // to radians exactly once, here, the same way along_track_beamwidth is
+  // converted just below -- the bug this closes was a conversion that sat at
+  // the use site for one sibling field and nowhere at all for the other.
+  //
+  // "Documented in degrees" is the whole of it: the field is exposed by NO ROS
+  // parameter, no YAML and no launch file, so in practice it is permanently the
+  // hardcoded 2.0 that belongs to no particular sonar. Since every M3 ping
+  // leaves rx_beamwidths empty, that one constant is now the sole driver of the
+  // angular term for every M3 sounding, which is why giving the offline tools a
+  // device/vessel configuration matters --
+  // https://github.com/rolker/cube_bathymetry/issues/145.
+  //
+  // Note the asymmetry with the per-beam validation below: a reported 0.0 is
+  // rejected, but a Device::across_track_beamwidth of 0.0 (or negative, or NaN)
+  // is accepted as given. That is deliberate for now -- several tests set it to
+  // 0.0 precisely to isolate other terms, so a constructor that refused to
+  // build would break them -- but it does mean a misconfigured device silently
+  // deletes the term the per-beam path is guarded against deleting.
+  device_across_track_beamwidth_rad_ = device.across_track_beamwidth * M_PI / 180.0;
+
   static_error_sources_.along_track_beamwidth_coefficient = (1.0 -
     cos((device.along_track_beamwidth * M_PI / 180.0) / 2.0)) *
     (1.0 - cos((device.along_track_beamwidth * M_PI / 180.0) / 2.0));
@@ -199,11 +221,23 @@ double ErrorModel::horizontal_latency(
   return sog_error + jitter_error + head_error + pitch_error;
 }
 
+bool ErrorModel::per_beam_beamwidth_usable(float beamwidth_rad)
+{
+  return std::isfinite(beamwidth_rad) &&
+         beamwidth_rad > 0.0f &&
+         beamwidth_rad < kMaxPerBeamBeamwidthRad;
+}
+
 double ErrorModel::beam_angle(
   const marine_acoustic_msgs::msg::SonarDetections & detections,
   size_t i) const
 {
-  return -detections.rx_angles[i] + (M_PI / 180.0) * vessel_.static_roll;
+  // Bounds-guarded like Sounding's read of the same array (#144): a driver
+  // reporting fewer receive angles than travel times yields NaN here, which
+  // propagates into the uncertainty, instead of an out-of-bounds read.
+  const double rx_angle = (i < detections.rx_angles.size()) ?
+    static_cast<double>(detections.rx_angles[i]) : std::nan("");
+  return -rx_angle + (M_PI / 180.0) * vessel_.static_roll;
 }
 
 double ErrorModel::swath_angle_error(
@@ -233,10 +267,44 @@ double ErrorModel::swath_angle_error(
     static_error_sources_.sound_speed_profile_variance /
     (4.0 * platform.mean_speed * platform.mean_speed);
 
-  double ang_meas = device_.across_track_beamwidth / 12.0;
+  // Beamwidth for the angular-measurement term, in RADIANS from either source
+  // (#144). The device fallback was converted once in the constructor;
+  // marine_acoustic_msgs/PingInfo documents rx_beamwidths as radians already,
+  // so it is consumed unconverted. Previously the fallback was used raw in
+  // degrees (~57x too large) and the per-beam value was converted a second time
+  // (~57x too small) -- the two branches disagreed by (pi/180).
+  double beamwidth = device_across_track_beamwidth_rad_;
   if(i < detections.ping_info.rx_beamwidths.size()) {
-    ang_meas = detections.ping_info.rx_beamwidths[i] * (M_PI / 180.0) / 12.0;
+    const float reported = detections.ping_info.rx_beamwidths[i];
+    // A per-beam value is only a measurement when it is finite, strictly
+    // positive, and physically possible (see per_beam_beamwidth_usable and
+    // kMaxPerBeamBeamwidthRad). norbit_driver resizes rx_beamwidths to a
+    // zero-filled vector for beamwidths it does not report; trusting those
+    // zeros silently deletes the angular term instead of falling back to the
+    // device value.
+    //
+    // The pi-radian ceiling catches NONSENSE -- a unit mix-up, a sentinel, a
+    // corrupt field. It deliberately does NOT catch a real measurement of the
+    // wrong quantity: an R2Sonic driver stamps the ~2.27 rad TRANSMIT
+    // horizontal fan into rx_beamwidths, and that passes this bound. That is a
+    // driver fault, fixed in the driver, not something a consumer-side clamp
+    // should paper over -- a clamp tight enough to reject 2.27 rad would also
+    // reject garmin_sidescan's entirely legitimate 55 degrees across-track
+    // (0.96 rad), which is correct data in the right field because a sidescan
+    // does no across-track beamforming. (Tracking reference in the divergences
+    // doc; it lives in another repo and would rot here.)
+    //
+    // Falling back is not silent: DetectionsProjector counts every beam that
+    // lands on the device default -- refused value OR no value reported at all
+    // -- into ProjectionDiagnostics::default_beamwidth_beams, which the live
+    // node reports as a throttled warning and the offline tools fold into
+    // their run summary.
+    if(per_beam_beamwidth_usable(reported)) {
+      beamwidth = reported;
+    }
   }
+
+  double ang_meas = beamwidth / 12.0;
   ang_meas *= ang_meas;
 
   return ang_meas + ang_svp + ang_surf_speed + static_error_sources_.base_roll_variance;
@@ -271,8 +339,12 @@ std::pair<double, double> ErrorModel::swath_depth(
 ) const
 {
   double meas_angle = beam_angle(detections, i);
-  double cosT = cos((platform.roll * M_PI / 180.0) + meas_angle);
-  double sinT = sin((platform.roll * M_PI / 180.0) + meas_angle);
+  // platform.roll is RADIANS (#147), as is meas_angle -- no conversion. The
+  // pre-#147 `* M_PI / 180.0` here treated the projector's radians as degrees
+  // and shrank the vessel's roll by 57.3x before combining it with the beam
+  // angle, which is worst at the swath edge where the angular term dominates.
+  double cosT = cos(platform.roll + meas_angle);
+  double sinT = sin(platform.roll + meas_angle);
 
   double range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0;
 
@@ -291,7 +363,14 @@ std::pair<double, double> ErrorModel::swath_depth(
   double angle_err = total_roll_variance * range * range *
     sinT * sinT * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch;
 
-  double pitch_err = range * range * per_ping_sources.cos_pitch * per_ping_sources.cos_pitch *
+  // Eqn. 3.49. The leading factor is cosT^2 -- cos(roll + beam angle), the
+  // same swath-geometry factor the two terms above use -- NOT cos(pitch)^2.
+  // This port carried cos_pitch^2 here (a slip: the sibling terms are
+  // faithful), which over-estimated by 1/cos^2 T, ~4x at a 60-degree beam and
+  // worst at the swath edge. It was invisible while sin(pitch)^2 was ~3283x
+  // too small; #147 turns the term on, so it is corrected here.
+  // (original_cube/libsrc/errmod/errmod_full.c:376-377.)
+  double pitch_err = range * range * cosT * cosT *
     per_ping_sources.sin_pitch * per_ping_sources.sin_pitch *
     static_error_sources_.total_pitch_variance;
 
@@ -362,10 +441,13 @@ std::vector<Sounding> ErrorModel::compute(
   const marine_acoustic_msgs::msg::SonarDetections & detections, const Platform & platform) const
 {
   PerPingErrorSources per_ping_sources;
-  per_ping_sources.cos_pitch = cos(platform.pitch * M_PI / 180.0);
-  per_ping_sources.sin_pitch = sin(platform.pitch * M_PI / 180.0);
-  per_ping_sources.cos_roll = cos(platform.roll * M_PI / 180.0);
-  per_ping_sources.sin_roll = sin(platform.roll * M_PI / 180.0);
+  // Platform attitude is RADIANS (#147). Vessel's angular fields are still
+  // degrees and still converted -- those are human-entered survey/config
+  // values, this is a measurement from TF.
+  per_ping_sources.cos_pitch = cos(platform.pitch);
+  per_ping_sources.sin_pitch = sin(platform.pitch);
+  per_ping_sources.cos_roll = cos(platform.roll);
+  per_ping_sources.sin_roll = sin(platform.roll);
 
   per_ping_sources.total_heave_variance = swath_heave(platform, per_ping_sources);
 

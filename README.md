@@ -9,11 +9,27 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | Node | Subscribes | Publishes | Purpose |
 |---|---|---|---|
 | `detections_to_pointcloud` | `detections` (`marine_acoustic_msgs/SonarDetections`), `odom` (`nav_msgs/Odometry`) | `soundings` (`sensor_msgs/PointCloud2`) | Turns each beam detection into a sounding in the **sonar frame** (x/y/z from travel-time + beam angles) and attaches **per-sounding TPU** (`vertical_uncertainty`, `horizontal_uncertainty`) computed by `cube::ErrorModel`. Lifecycle node. |
-| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
+| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; note the OPPOSITE convention to `soundings` below — that layer is a confidence-scaled standard deviation in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
-`soundings` carries six `float32` fields per point, in order: `x`, `y`, `z`,
-`intensity`, `vertical_uncertainty`, `horizontal_uncertainty`. `intensity` is the
+`soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
+`intensity`, `vertical_uncertainty`, `horizontal_uncertainty`, `beam_angle`.
+
+**Read the two uncertainty fields carefully: despite the names, they are
+VARIANCES in m², at one sigma, with no confidence-interval scaling applied** —
+`cube::Sounding::vertical_error` / `horizontal_error` verbatim (see
+`include/cube_bathymetry/sounding.h`). A consumer that treats
+`vertical_uncertainty` as a σ in metres reads the wrong number, and in either
+direction: a variance and its own square root agree only at 1 m². Below that
+the raw value is the smaller of the two and the band is understated (0.25 m²
+read as 0.25 m against a true σ of 0.5 m); above it the raw value is larger
+and the band is overstated (4 m² — what the default `Vessel::gps_drms` of 2 m
+contributes to `horizontal_error` on its own — read as 4 m against a true σ of
+2 m). Take the square root. Any 95%/99% figure is produced downstream by
+scaling that square root. `vertical_uncertainty` is a one-dimensional error about depth;
+`horizontal_uncertainty` is radial (drms-derived), so its square root is a radius
+in the horizontal plane rather than an error along a single axis. `beam_angle` is
+the beam's incidence angle relative to nadir, in radians. `intensity` is the
 per-beam acoustic backscatter copied from `SonarDetections.intensities` — usually
 uncalibrated, but reflectivity in dB for the Kongsberg M3 (via `kongsberg_em_bridge`);
 it is `NaN` when the source omits intensities. The positions are in the detections'
@@ -218,8 +234,8 @@ consumes, and where each input now comes from:
 
 | Error-model input | Source |
 |---|---|
-| `roll`, `pitch` (dominant per-beam term) | TF: `level_frame ← base_link_frame` at the ping stamp (interpolated to the exact time, not "latest within 1 s") |
-| `heave` | TF: `z(base_link_frame) − z(tide_frame)` at the ping stamp; enters the budget only squared, so it defaults to `0` if the transform is absent |
+| `roll`, `pitch` (dominant per-beam term) | TF: `level_frame ← base_link_frame` at the ping stamp (interpolated to the exact time, not "latest within 1 s"). **Pitch is negated at the producer** (#144): `tf2::getEulerYPR` returns bow-down-positive pitch in FLU, while `cube::Platform` keeps Calder's bow-up-positive convention. Roll needs no flip — a right-handed rotation about +x already lifts port, which is Calder's sense |
+| `heave` | TF: `tide_frame ← base_link_frame` at the ping stamp, **negated** (#144): the transform's `z` is the boat above the tide-corrected surface (REP-103, +up), while `cube::Platform::heave` is Calder's +down. Enters the budget only squared, so the sign is numerically inert and it defaults to `0` if the transform is absent |
 | `vessel_speed` (SOG) | `/odom` twist (`hypot(linear.x, linear.y)`), cached |
 | `surf_sspeed`, `mean_speed` | `SonarDetections.ping_info.sound_speed` |
 | ~~`latitude`, `longitude`, `heading`~~ | **removed** (#32) — Calder used them for *georeferencing*, a job that moved to TF in the ROS port, so they were orphaned: written by the node, read by no consumer |
@@ -246,6 +262,17 @@ unported IHO f(z) model, `CONF_99PC`, and the nomination-uncertainty choice) is
 documented in
 [`cube_bathymetry/docs/divergences_from_calder.md`](cube_bathymetry/docs/divergences_from_calder.md),
 the deliverable of [#30](https://github.com/rolker/cube_bathymetry/issues/30).
+
+## Projection diagnostics (what the warnings mean)
+
+`detections_to_pointcloud` emits these throttled; `import_bag`, `batch_regen_bag`
+and `bag_to_geotiff` fold the same counts into their end-of-run summary line and
+warn once when either is non-zero.
+
+| Signal | What it means | What to do |
+|---|---|---|
+| `N of M beams took the generic device across-track beamwidth` | The ping reported no usable per-beam `rx_beamwidths` for those beams (absent, too short, or non-finite / non-positive / ≥ π rad), so the **angular** part of the uncertainty budget came from `Device::across_track_beamwidth` — a hardcoded generic value belonging to no particular sonar. The soundings are still produced and are still used. | Nothing operationally, but read the uncertainty as approximate. **Today this is 100% of M3 beams**: `kongsberg_em_bridge` deliberately leaves `rx_beamwidths` empty, so every M3 sounding's angular term is the generic 2°. Tracked in [`marine_tools#82`](https://github.com/rolker/marine_tools/issues/82); the reasoning is in [`divergences_from_calder.md`](cube_bathymetry/docs/divergences_from_calder.md). |
+| `N of M beams reported no usable receive angle` | `rx_angles` was absent, shorter than the beam count, or non-finite for those beams. The beam angle is deliberately `NaN` rather than `0` (which would be a nadir beam that was never measured), so the sounding's position and uncertainty are `NaN` and the range gate drops it. | A driver/message problem, **not** a frame or range-gate problem. If this equals the beam count, the run produces no soundings at all and the summary says so explicitly instead of pointing at the frame overrides. |
 
 ## Configuring frames per platform (REQUIRED)
 

@@ -178,20 +178,60 @@ TEST_F(ErrorModelTest, HorizontalErrorFloorsNonFiniteVesselSpeed)
   EXPECT_FLOAT_EQ(s_inf[0].horizontal_error, s_zero[0].horizontal_error);
 }
 
-TEST_F(ErrorModelTest, VerticalErrorIncreasesWithBeamAngle)
+// Rewritten for #144. This test previously held the two-way travel time fixed
+// (so the DEPTH shrank as the beam swung out) and asserted the total vertical
+// error rose monotonically nadir -> 30 deg -> 60 deg. That only held because
+// the angular term was inflated ~3283x by the degrees-as-radians bug: it
+// swamped every other term, so the budget tracked sin^2(angle) alone.
+//
+// With the angular term at its correct magnitude the picture is the real one:
+// the measured-range error projects into depth as cos^2(angle) and so SHRINKS
+// off nadir, while the angular term grows as sin^2(angle) * range^2. At shallow
+// depths with a narrow beam the shrinking range projection wins at moderate
+// angles, so the total dips at 30 deg before the angular term takes over. The
+// genuine, model-correct property is that an oblique beam is worse than nadir
+// once the angular term dominates -- asserted here at constant depth, which is
+// the comparison that isolates beam obliquity from a shortening water column.
+TEST_F(ErrorModelTest, VerticalErrorIsWorseAtObliqueAngleAtConstantDepth)
 {
   ErrorModel em(vessel, device);
   auto platform = makePlatform();
 
+  // Hold the DEPTH at 15 m rather than the slant range: travel time scales as
+  // 1/cos(angle) so depth = range*cos(angle) stays put.
+  //
+  // Three angles, not two -- and the third one says something the pair could
+  // not. The nadir-vs-60-degree comparison is a claim about ENDPOINTS, and a
+  // single pair cannot distinguish "rises monotonically" from "dips and then
+  // recovers". Measured at 30 degrees, the corrected model does the latter:
+  // holding depth fixed, the measured-range term projects into depth as
+  // cos^2(angle) and shrinks faster than the angular term's tan^2(angle) grows,
+  // until the angular term takes over somewhere past 30 degrees.
+  //
+  // So this test pins the SHAPE, dip included, rather than asserting a
+  // monotonicity that is not true of the total budget. (It is true of the
+  // angular contribution in isolation -- see
+  // AngularContributionToVerticalErrorRisesWithBeamAngle -- which is the claim
+  // the deleted VerticalErrorIncreasesWithBeamAngle was really reaching for.)
   auto det_nadir = makeDetections({0.0f}, 0.02f);
-  auto det_30deg = makeDetections({0.5236f}, 0.02f);  // ~30 degrees
-  auto det_60deg = makeDetections({1.0472f}, 0.02f);  // ~60 degrees
+  auto det_30deg = makeDetections({0.5236f}, 0.0230940f);  // ~30 deg, same 15 m depth
+  auto det_60deg = makeDetections({1.0472f}, 0.04f);       // ~60 deg, same 15 m depth
 
   auto s_nadir = em.compute(det_nadir, platform);
   auto s_30 = em.compute(det_30deg, platform);
   auto s_60 = em.compute(det_60deg, platform);
 
-  EXPECT_LT(s_nadir[0].vertical_error, s_30[0].vertical_error);
+  // Same depth for all three, by construction.
+  ASSERT_NEAR(s_nadir[0].depth, s_30[0].depth, 1e-3);
+  ASSERT_NEAR(s_nadir[0].depth, s_60[0].depth, 1e-3);
+
+  // The property this test is named for: an oblique beam is worse than a nadir
+  // beam at the same depth.
+  EXPECT_LT(s_nadir[0].vertical_error, s_60[0].vertical_error);
+
+  // ...but not by a monotone climb. Pinned so a future change that flattens or
+  // reverses the intermediate dip has to come here and say so deliberately.
+  EXPECT_LT(s_30[0].vertical_error, s_nadir[0].vertical_error);
   EXPECT_LT(s_30[0].vertical_error, s_60[0].vertical_error);
 }
 
@@ -548,6 +588,468 @@ TEST_F(ErrorModelTest, IntensityIsNaNWhenAbsent)
   auto soundings = em.compute(det, platform);
   ASSERT_EQ(soundings.size(), 1u);
   EXPECT_TRUE(std::isnan(soundings[0].intensity));
+}
+
+// --- #144: angular-measurement term units, validation ------------------------
+
+// Isolate swath_angle_error's beamwidth term (ang_meas). Everything else that
+// could reach vertical_error or horizontal_error is zeroed, so at nadir with
+// zero attitude:
+//     horizontal_error == ang_meas * range^2
+// and at beam angle A (roll = pitch = 0):
+//     vertical_error   == ang_meas * range^2 * sin^2(A)
+// where ang_meas = (beamwidth_rad / 12)^2.
+static Vessel angleIsolatingVessel()
+{
+  Vessel v{};
+  v.draft_sdev = 0.0;
+  v.ddraft_sdev = 0.0;
+  v.loading_sdev = 0.0;
+  v.tide_measured_sdev = 0.0;
+  v.tide_predicted_sdev = 0.0;
+  v.heave_fixed_sdev = 0.0;
+  v.heave_var_percent = 0.0;
+  v.gps_off_sdev = 0.0;
+  v.imu_off_sdev = 0.0;
+  v.gps_drms = 0.0;
+  v.gps_latency = 0.0;
+  v.gps_latency_sdev = 0.0;
+  v.imu_latency_sdev = 0.0;
+  v.tx_latency_sdev = 0.0;
+  v.sog_sdev = 0.0;
+  v.imu_rp_align_sdev = 0.0;
+  v.imu_g_align_sdev = 0.0;
+  v.roll_sdev = 0.0;         // kills base_roll_variance
+  v.pitch_sdev = 0.0;
+  v.pitch_stab_sdev = 0.0;
+  v.gyro_sdev = 0.0;
+  v.svp_sdev = 0.0;          // kills ang_svp and profile_err
+  v.surf_ss_sdev = 0.0;      // kills ang_surf_speed
+  v.static_roll = 0.0;
+  return v;
+}
+
+// Companion device: only the across-track beamwidth is left alive.
+static Device angleIsolatingDevice(double across_track_beamwidth_deg)
+{
+  Device d{};
+  d.across_track_beamwidth = across_track_beamwidth_deg;
+  d.along_track_beamwidth = 0.0;   // kills beamwidth_err
+  d.range_error_percent = 0.0;     // kills the range term
+  d.range_error_floor_m = 0.0;
+  return d;
+}
+
+// 0.02 s two-way at 1500 m/s -> 15 m range.
+static constexpr double kIsolatedRange = 15.0;
+
+TEST_F(ErrorModelTest, AngleErrorBranchesAgreeOnUnits)
+{
+  auto platform = makePlatform();
+  const double bw_deg = 3.0;
+  const double bw_rad = bw_deg * M_PI / 180.0;
+  Vessel v = angleIsolatingVessel();
+
+  // Fallback branch: no rx_beamwidths at all, device configured in degrees.
+  auto det_fallback = makeDetections({0.0f}, 0.02f);
+  ASSERT_TRUE(det_fallback.ping_info.rx_beamwidths.empty());
+  ErrorModel em_fallback(v, angleIsolatingDevice(bw_deg));
+  const double h_fallback =
+    em_fallback.compute(det_fallback, platform).at(0).horizontal_error;
+
+  // Per-beam branch: the same physical beamwidth, reported in radians as
+  // marine_acoustic_msgs/PingInfo specifies. The device value is deliberately
+  // different so a silent fallback would show up as a mismatch.
+  auto det_perbeam = makeDetections({0.0f}, 0.02f);
+  det_perbeam.ping_info.rx_beamwidths.push_back(static_cast<float>(bw_rad));
+  ErrorModel em_perbeam(v, angleIsolatingDevice(bw_deg * 10.0));
+  const double h_perbeam =
+    em_perbeam.compute(det_perbeam, platform).at(0).horizontal_error;
+
+  ASSERT_GT(h_fallback, 0.0);
+  // The two branches must agree: both are radians by the time they are used.
+  // Before #144 they disagreed by (180/pi)^2 == ~3283x.
+  EXPECT_NEAR(h_perbeam, h_fallback, 1e-6 * h_fallback);
+}
+
+// Pins the absolute magnitude of the fallback term against an independently
+// computed value. Deliberately NOT the stock 2-degree Device default: with the
+// default this would be the same arithmetic as
+// AngleErrorFallsBackOnEmptyBeamwidths and pin nothing that test does not, so
+// it uses a distinct width and shows the pin tracks the configured value.
+TEST_F(ErrorModelTest, AngleErrorFallbackPinnedAtNadir)
+{
+  auto platform = makePlatform();
+  const double bw_deg = 7.5;
+  Vessel v = angleIsolatingVessel();
+  Device d = angleIsolatingDevice(bw_deg);
+  auto det = makeDetections({0.0f}, 0.02f);
+
+  ErrorModel em(v, d);
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double bw_rad = bw_deg * M_PI / 180.0;
+  const double ang_meas = (bw_rad / 12.0) * (bw_rad / 12.0);
+  const double expected = ang_meas * kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+}
+
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnEmptyBeamwidths)
+{
+  auto platform = makePlatform();
+  // Today's real Kongsberg M3 behaviour: kongsberg_em_bridge leaves
+  // rx_beamwidths empty on purpose.
+  auto det = makeDetections({0.0f}, 0.02f);
+  ASSERT_TRUE(det.ping_info.rx_beamwidths.empty());
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+}
+
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnZeroFilledBeamwidths)
+{
+  auto platform = makePlatform();
+  // Today's real norbit behaviour: conversions.cpp resizes rx_beamwidths to a
+  // zero-filled vector for a value it does not report. A length-only check
+  // takes that 0.0 as a measurement and silently deletes the angular term.
+  auto det = makeDetections({0.0f}, 0.02f);
+  det.ping_info.rx_beamwidths.assign(1, 0.0f);
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_GT(h, 0.0);  // not silently zeroed
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+}
+
+// The 2-degree device fallback, as it reaches horizontal_error at nadir with
+// every other term isolated away. Shared by the rejection tests below, all of
+// which assert that a bad per-beam value lands exactly here.
+static double nadirFallbackHorizontalError()
+{
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  return (bw_rad / 12.0) * (bw_rad / 12.0) * kIsolatedRange * kIsolatedRange;
+}
+
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnNonFiniteBeamwidth)
+{
+  auto platform = makePlatform();
+  const double expected = nadirFallbackHorizontalError();
+
+  for (float bad : {std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity()})
+  {
+    auto det = makeDetections({0.0f}, 0.02f);
+    det.ping_info.rx_beamwidths.assign(1, bad);
+
+    ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+    const double h = em.compute(det, platform).at(0).horizontal_error;
+
+    ASSERT_TRUE(std::isfinite(h));
+    EXPECT_NEAR(h, expected, 1e-6 * expected);
+  }
+}
+
+// Finite but not a measurement. Kept separate from the non-finite cases: -0.01
+// used to sit in that test's list, where it was mislabelled -- it is perfectly
+// finite, and it is the positivity check, not isfinite(), that rejects it.
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnNonPositiveBeamwidth)
+{
+  auto platform = makePlatform();
+  const double expected = nadirFallbackHorizontalError();
+
+  for (float bad : {-0.01f, -1.0f, -0.0f}) {
+    auto det = makeDetections({0.0f}, 0.02f);
+    det.ping_info.rx_beamwidths.assign(1, bad);
+
+    ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+    const double h = em.compute(det, platform).at(0).horizontal_error;
+
+    EXPECT_NEAR(h, expected, 1e-6 * expected);
+  }
+}
+
+// The hard physical ceiling: a beam cannot subtend half a turn or more, so a
+// reported width at or above pi rad is nonsense (unit mix-up, sentinel, corrupt
+// field) and the device value is used instead.
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnPhysicallyImpossibleBeamwidth)
+{
+  auto platform = makePlatform();
+  const double expected = nadirFallbackHorizontalError();
+
+  for (float bad : {static_cast<float>(M_PI), 4.0f, 100.0f, 6.2831853f}) {
+    auto det = makeDetections({0.0f}, 0.02f);
+    det.ping_info.rx_beamwidths.assign(1, bad);
+
+    ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+    const double h = em.compute(det, platform).at(0).horizontal_error;
+
+    EXPECT_NEAR(h, expected, 1e-6 * expected) << "rejected value: " << bad;
+  }
+}
+
+// ...and the ceiling is a PHYSICAL bound, not a plausibility clamp.
+// garmin_sidescan reports 55 degrees across-track for SideVu (46 for ClearVu),
+// which is correct data in the right field -- a sidescan does no across-track
+// beamforming, so its receive fan genuinely is that wide. A clamp tight enough
+// to reject an R2Sonic driver's misplaced 2.27 rad transmit fan would throw
+// this away, which is exactly why no such clamp exists.
+TEST_F(ErrorModelTest, AngleErrorAcceptsWideButLegitimateSidescanBeamwidth)
+{
+  auto platform = makePlatform();
+  const double garmin_sidevu_rad = 55.0 * M_PI / 180.0;
+  auto det = makeDetections({0.0f}, 0.02f);
+  det.ping_info.rx_beamwidths.assign(1, static_cast<float>(garmin_sidevu_rad));
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double expected = (garmin_sidevu_rad / 12.0) * (garmin_sidevu_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-5 * expected);
+  // Used, not silently swapped for the 2-degree device default.
+  EXPECT_GT(h, 10.0 * nadirFallbackHorizontalError());
+}
+
+// The predicate the projector reuses to count rejections must agree with what
+// the model actually does, boundary included: pi is out, just below pi is in.
+TEST_F(ErrorModelTest, PerBeamBeamwidthUsablePredicateMatchesTheCeiling)
+{
+  EXPECT_TRUE(ErrorModel::per_beam_beamwidth_usable(0.96f));
+  EXPECT_TRUE(ErrorModel::per_beam_beamwidth_usable(2.27f));  // an R2Sonic driver's tx fan
+  EXPECT_TRUE(
+    ErrorModel::per_beam_beamwidth_usable(
+      std::nextafter(ErrorModel::kMaxPerBeamBeamwidthRad, 0.0f)));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(ErrorModel::kMaxPerBeamBeamwidthRad));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(0.0f));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(-1.0f));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(std::numeric_limits<float>::quiet_NaN()));
+}
+
+TEST_F(ErrorModelTest, AngleErrorUsesReportedBeamwidthAsRadians)
+{
+  auto platform = makePlatform();
+  // A real, usable per-beam value: 4 degrees expressed in radians, twice the
+  // device's 2-degree fallback.
+  const double reported_rad = 4.0 * M_PI / 180.0;
+  auto det = makeDetections({0.0f}, 0.02f);
+  det.ping_info.rx_beamwidths.assign(1, static_cast<float>(reported_rad));
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double expected = (reported_rad / 12.0) * (reported_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+
+  // And specifically NOT the pre-#144 double conversion, which would have
+  // scaled the reported radians by another pi/180.
+  const double double_converted = reported_rad * (M_PI / 180.0);
+  const double old_wrong = (double_converted / 12.0) * (double_converted / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_GT(h, 100.0 * old_wrong);
+}
+
+// The monotone property the old test was reaching for, stated over the term it
+// actually applies to: the angular-measurement contribution to the vertical
+// budget rises with beam angle. Isolated so no other term can mask it.
+TEST_F(ErrorModelTest, AngularContributionToVerticalErrorRisesWithBeamAngle)
+{
+  auto platform = makePlatform();
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+
+  auto vertical = [&](float rx_angle) {
+      auto det = makeDetections({rx_angle}, 0.02f);
+      return static_cast<double>(em.compute(det, platform).at(0).vertical_error);
+    };
+
+  const double v_nadir = vertical(0.0f);
+  const double v_30 = vertical(0.5236f);
+  const double v_60 = vertical(1.0472f);
+
+  EXPECT_NEAR(v_nadir, 0.0, 1e-12);  // sin^2(0) == 0
+  EXPECT_LT(v_nadir, v_30);
+  EXPECT_LT(v_30, v_60);
+}
+
+// --- #147: Platform::roll / Platform::pitch are RADIANS -------------------
+//
+// Every other test in this file zeroes attitude, which is exactly why nothing
+// caught the mismatch: DetectionsProjector fed tf2::getEulerYPR's radians into
+// fields ErrorModel converted as degrees, understating attitude by 57.3x. These
+// tests exercise NON-ZERO roll and pitch, and each one fails against the
+// pre-#147 code.
+
+// Roll steers the beam: the reported depth is -range * cos(roll + beam angle).
+// With the isolating config every other contributor is switched off, so this
+// pins the geometry directly.
+TEST_F(ErrorModelTest, PlatformRollIsRadiansAndSteersTheBeam)
+{
+  auto platform = makePlatform();
+  const double roll_rad = 0.25;      // ~14.3 degrees, a real sea state
+  platform.roll = static_cast<float>(roll_rad);
+
+  const float rx_angle = 0.2f;       // rad, starboard +  ->  meas_angle = -0.2
+  const double meas_angle = -static_cast<double>(rx_angle);
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  auto det = makeDetections({rx_angle}, 0.02f);
+  const double depth = em.compute(det, platform).at(0).depth;
+
+  const double expected = -kIsolatedRange * std::cos(roll_rad + meas_angle);
+  EXPECT_NEAR(depth, expected, 1e-4);
+
+  // And specifically NOT the pre-#147 reading, which took the radians for
+  // degrees and shrank the roll by 57.3x.
+  const double old_wrong =
+    -kIsolatedRange * std::cos(roll_rad * M_PI / 180.0 + meas_angle);
+  EXPECT_GT(std::abs(depth - old_wrong), 0.05);
+}
+
+// Roll and pitch together, against the closed form the isolating config leaves:
+//   vertical_error = (beamwidth_rad/12)^2 * range^2
+//                    * sin^2(roll + beam angle) * cos^2(pitch)
+// Both attitude angles therefore have to be radians for this to hold.
+TEST_F(ErrorModelTest, PlatformAttitudeEntersTheVerticalBudgetInRadians)
+{
+  auto platform = makePlatform();
+  const double roll_rad = 0.25;
+  const double pitch_rad = 0.35;
+  platform.roll = static_cast<float>(roll_rad);
+  platform.pitch = static_cast<float>(pitch_rad);
+
+  const float rx_angle = 0.2f;
+  const double meas_angle = -static_cast<double>(rx_angle);
+  const double bw_rad = 2.0 * M_PI / 180.0;
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  auto det = makeDetections({rx_angle}, 0.02f);
+  const double v = em.compute(det, platform).at(0).vertical_error;
+
+  const double sinT = std::sin(roll_rad + meas_angle);
+  const double cos_pitch = std::cos(pitch_rad);
+  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange * sinT * sinT * cos_pitch * cos_pitch;
+
+  EXPECT_NEAR(v, expected, 1e-5 * expected);
+
+  // The pre-#147 model read both angles as degrees. Distinguish the two: the
+  // sin^2 factor alone differs by more than a factor of ten here.
+  const double old_sinT = std::sin(roll_rad * M_PI / 180.0 + meas_angle);
+  const double old_cos_pitch = std::cos(pitch_rad * M_PI / 180.0);
+  const double old_wrong = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange * old_sinT * old_sinT *
+    old_cos_pitch * old_cos_pitch;
+  EXPECT_GT(old_wrong, 10.0 * v);
+}
+
+// Sign convention, confirmed rather than assumed. Platform documents "+ve is
+// port side up", and beam_angle() makes meas_angle +ve to PORT (it negates the
+// starboard-positive rx angle). Rolling the boat port-side-up therefore steers
+// a port-side beam further from vertical and a starboard-side beam towards it,
+// which the depths must show: at equal and opposite beam angles, the port beam
+// reads shallower (its |cos| is smaller) than the starboard one.
+TEST_F(ErrorModelTest, PositiveRollIsPortSideUp)
+{
+  auto platform = makePlatform();
+  platform.roll = 0.25f;  // rad, port side up
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  // rx_angle +0.3 is starboard, -0.3 is port (rx_angles are starboard-positive).
+  auto det = makeDetections({0.3f, -0.3f}, 0.02f);
+  const auto soundings = em.compute(det, platform);
+  ASSERT_EQ(soundings.size(), 2u);
+
+  const double starboard_depth = soundings.at(0).depth;
+  const double port_depth = soundings.at(1).depth;
+
+  // Depths are negative; the port beam is swung further off vertical, so its
+  // magnitude is the smaller of the two.
+  EXPECT_LT(std::abs(port_depth), std::abs(starboard_depth));
+
+  // Pin both against the closed form so the direction is not just a ratio.
+  EXPECT_NEAR(starboard_depth, -kIsolatedRange * std::cos(0.25 - 0.3), 1e-4);
+  EXPECT_NEAR(port_depth, -kIsolatedRange * std::cos(0.25 + 0.3), 1e-4);
+}
+
+// #144: Eqn. 3.49's pitch term is scaled by cos^2 T -- cos(roll + beam angle),
+// the swath-geometry factor -- not by cos^2(pitch). The port had cos_pitch^2
+// here while the two sibling terms in the same function were faithful
+// (original_cube/libsrc/errmod/errmod_full.c:376-377). Pinned in closed form
+// at an oblique beam, where the two factors are furthest apart.
+TEST_F(ErrorModelTest, DepthPitchTermUsesSwathAngleNotPitchCosine)
+{
+  auto platform = makePlatform();
+  const double pitch_rad = 0.35;
+  platform.pitch = static_cast<float>(pitch_rad);
+  platform.roll = 0.0f;
+
+  // Only pitch variance is left alive, so vertical_error IS the Eqn. 3.49
+  // term: the angular, range, along-track-beamwidth, heave and reduction
+  // terms are all zeroed by the isolating vessel/device.
+  Vessel v = angleIsolatingVessel();
+  const double pitch_sdev_deg = 0.5;
+  v.pitch_sdev = pitch_sdev_deg;
+  ErrorModel em(v, angleIsolatingDevice(0.0));
+
+  const float rx_angle = 1.0472f;  // ~60 deg to starboard
+  const double meas_angle = -static_cast<double>(rx_angle);
+  auto det = makeDetections({rx_angle}, 0.02f);
+  const double vertical = em.compute(det, platform).at(0).vertical_error;
+
+  const double pitch_var = (pitch_sdev_deg * M_PI / 180.0) * (pitch_sdev_deg * M_PI / 180.0);
+  const double cosT = std::cos(0.0 + meas_angle);
+  const double expected = kIsolatedRange * kIsolatedRange * cosT * cosT *
+    std::sin(pitch_rad) * std::sin(pitch_rad) * pitch_var;
+
+  EXPECT_NEAR(vertical, expected, 1e-6 * expected);
+
+  // The pre-fix form would have used cos^2(pitch) here, which at a 60-degree
+  // beam is 3.5x larger -- the assertion above fails if the slip comes back.
+  const double cos_pitch = std::cos(pitch_rad);
+  const double slipped = kIsolatedRange * kIsolatedRange * cos_pitch * cos_pitch *
+    std::sin(pitch_rad) * std::sin(pitch_rad) * pitch_var;
+  EXPECT_GT(slipped, 3.0 * expected);
+}
+
+// #144: a driver may report fewer receive angles than travel times. Both the
+// Sounding geometry and beam_angle() used to index rx_angles unguarded, which
+// is an out-of-bounds read; the surrounding per-beam arrays (tx_angles,
+// intensities) were already guarded. The short beam now yields NaN -- honest,
+// and NaN-safe downstream -- rather than undefined behaviour or a silent 0
+// (which would read as a nadir beam that was never measured).
+TEST_F(ErrorModelTest, ShortRxAnglesYieldNaNRatherThanReadingOffTheEnd)
+{
+  ErrorModel em(vessel, device);
+  auto platform = makePlatform();
+
+  auto det = makeDetections({0.2f, -0.2f}, 0.02f);
+  det.rx_angles.resize(1);  // two beams, one reported angle
+
+  const auto soundings = em.compute(det, platform);
+  ASSERT_EQ(soundings.size(), 2u);
+
+  // Beam 0 is fully reported and unaffected.
+  EXPECT_TRUE(std::isfinite(soundings[0].depth));
+  EXPECT_TRUE(std::isfinite(soundings[0].vertical_error));
+  EXPECT_FLOAT_EQ(soundings[0].beam_angle, 0.2f);
+
+  // Beam 1 has no angle: position, depth, TPU and beam_angle are all NaN.
+  EXPECT_TRUE(std::isnan(soundings[1].beam_angle));
+  EXPECT_TRUE(std::isnan(soundings[1].depth));
+  EXPECT_TRUE(std::isnan(soundings[1].vertical_error));
+  EXPECT_TRUE(std::isnan(soundings[1].horizontal_error));
+  EXPECT_TRUE(std::isnan(soundings[1].sonar_relative_position.y));
+  EXPECT_TRUE(std::isnan(soundings[1].sonar_relative_position.z));
 }
 
 }  // namespace cube
