@@ -500,21 +500,188 @@ Specialists: Static Analysis (clean), Governance, Plan Drift, Claude Adversarial
 **Adjudicated against a specialist.** The Governance pass raised the store/tile UINT8 `uncertainty` band (fixed 0.05 m scale, ADR-0001) as newly under-resolved. Checked and **dropped**: that band carries `stddev_to_confidence_interval_scale * sqrt(input_sample_variance)`, and `input_sample_variance` is a running sample variance of observed depths about the estimate (`hypothesis.cpp:102`), not the TPU. Affected only second-order, through which soundings the monitor admits — already covered by the tuned-constants consequence the divergences doc records.
 
 ### Findings
-- [ ] (must-fix) `Platform::pitch`'s documented sign is false and the claim is advertised as verified: `tf2::getEulerYPR` on `level_frame <- base_link` gives `pitch = -asin(R[2][0])`, so under REP-103 FLU bow-up is NEGATIVE pitch. Calder's `Platform` documents "+ve is bow up" and three ported terms are ODD in `sinP` (`error_model.cpp:115-117`, `:157-163`, `:178-180`), so the sign bites as soon as any IMU/GPS lever arm is non-zero — latent only because they all default to 0 and #145 is what will give them a surface. Decide: negate at the producer, or restate the convention and re-derive. No test can catch it (pitch reaches `vertical_error` only via the even `cos_pitch^2`). Derived independently by the lead reviewer and by Lens A. The ROLL half of the claim is correct — verified twice. — `cube_bathymetry/include/cube_bathymetry/error_model.h:69-72`
-- [ ] (must-fix) `swath_depth`'s pitch term uses `cos_pitch^2` where Calder's Eqn. 3.49 (`original_cube/libsrc/errmod/errmod_full.c:376-377`) uses `cosT^2` = `cos(roll + meas_angle)^2`; the sibling terms in the same function are faithful and the divergence is in no doc. Pre-existing, but `sinP^2` was ~3283x too small before #147, so this branch is what turns the term on — in a mis-formed state that over-estimates by `1/cos^2T` (~4x at 60 deg), biased to the swath edge. Fix, or record it in the divergences doc. — `cube_bathymetry/src/error_model.cpp:359-361`
-- [ ] (must-fix) the `/12`-is-confirmed claim is over-broad and the quoted C is not verbatim: Calder's `rtn = bw/12.0` sits inside `if (SOUNDING_ISAMPDET(snd->flags))`; phase detections use `0.2*bw/sqrt(np)` (`original_cube/libsrc/ccom_core/device.c:807-820`, same shape at `:893` and `:938`; EM300 uses neither). The port applies `/12` unconditionally — an unrecorded divergence, in the document whose job is to enumerate them. Mark the block abridged, show the branch, restate the closure. — `cube_bathymetry/docs/divergences_from_calder.md:85-95,178-180`
-- [ ] (must-fix) the plan is out of sync with the diff — the entire diagnostics surface is missing: six changed files absent from Files to Change (`detections_projector.h/.cpp`, `detections_to_pointcloud.cpp`, `bag_to_geotiff.cpp`, `batch_regen_main.cpp`, `import_bag_main.cpp`, plus `test_detections_projector.cpp`), the new public API (`per_beam_beamwidth_usable`, `kMaxPerBeamBeamwidthRad`) unlisted, `report_projection_summary()` unmentioned, README missing from Documentation & Instruction Impact, and `plan.md:227-232` still calls the constant-depth test a two-point comparison after `f579876` made it three and pinned the dip. Cross-confirmed by Plan Drift and Governance. — `.agent/work-plans/issue-144/plan.md:227-232,279-287`
-- [ ] (suggestion) `rejected_beamwidths` is silent in the operational case it exists for: `kongsberg_em_bridge` leaves `rx_beamwidths` EMPTY on every M3 ping, so every tool prints "0 rejected" while 100% of beams run on the hardcoded generic 2 deg; a single-element array (a legitimate fixed-beamwidth encoding) is the same. It also over-reports when the array is longer than the beam count and counts range-filtered beams. Count beams that TOOK THE FALLBACK, over `i < two_way_travel_times.size()`. Cross-confirmed by both adversarial passes, which each rated it must-fix; held at suggestion because the header states the counter's domain honestly. — `cube_bathymetry/src/detections_projector.cpp:143-149`
-- [ ] (suggestion) README's new warning says a consumer treating the value as sigma "will understate the error band by its own square root" — true only below 1.0. `horizontal_error` includes `total_gps_variance = gps_drms^2 = 4.0` m^2 at defaults, where reading it as a sigma OVERSTATES. Reword. — `README.md:18-27`
-- [ ] (suggestion) two lines above that bold variance warning, the same table advertises the `grid` output's `uncertainty` layer, which is the opposite convention — a confidence-scaled standard deviation in metres (`node.cpp:266`). One sentence closes the trap the block was written to prevent. — `README.md:12`
-- [ ] (suggestion) `soundingsToPointCloud2`'s comment claims "the same 6-field ... layout that detections_to_pointcloud publishes" — the exact count this PR just corrected in README to seven, in a file this PR edits. Corollary worth stating: the offline `-d` path therefore carries no `beam_angle`, which `cube_bathymetry_node` treats as optional and NaN-fills. — `cube_bathymetry/src/bag_to_geotiff.cpp:83-86`
-- [ ] (suggestion) `Platform::heave` is still documented "+ve down" while `DetectionsProjector` feeds `tide.transform.translation.z`, REP-103 +up. Harmless (it enters only squared), but this diff is the sign/units audit of this very struct. — `cube_bathymetry/include/cube_bathymetry/error_model.h:73`
-- [ ] (suggestion) "three of his NINE device families" — `device_compute_angerr`'s switch has EIGHT family branches (EM300; EM120; EM1000/1002/SB8101/SB8111; ELAC1180; SB9001/9003; HSWEEPDS/SB2112; EM3000/3000D; SB8125) plus `default`. Three of eight. Repeated in progress.md. — `cube_bathymetry/docs/divergences_from_calder.md:184`
-- [ ] (suggestion) "the four `* M_PI / 180.0` factors are gone" — six were removed: two in `swath_depth`, four in `compute`. Same miscount in the Implementation entry and in `plan.md:262,283`. — `cube_bathymetry/docs/divergences_from_calder.md:239`
-- [ ] (suggestion) the summary line reports a rejection count with no denominator; every other figure on the line is paired with a total. Print "N of M beams". — `cube_bathymetry/src/import_bag_main.cpp:785-791`
-- [ ] (suggestion) the run-summary line and its warning are now three verbatim copies across the three offline mains and only `import_bag` extracted a function; they will drift. Put `report_projection_summary()` in a shared header. (Checked: no early-exit path loses the count in any of the three.) — `cube_bathymetry/src/batch_regen_main.cpp:1074-1086`
-- [ ] (suggestion) `main()` in `import_bag_main.cpp` is now 490 of cpplint's 500 counted lines — it was exactly 500 on `origin/jazzy`, so the extraction bought 10 lines and the next addition re-breaks the gate. `bag_to_geotiff` (416) and `batch_regen_main` (467) are the same pattern. — `cube_bathymetry/src/import_bag_main.cpp:808`
-- [ ] (suggestion) `detections_subscriber_` is created in `on_configure` and not reset in `on_cleanup`, so the callback — and the new warning — runs in `inactive`, where the LifecyclePublisher silently drops the cloud. Pre-existing, but the new warning fires every ping for a zero-filling driver, so the noise floor is much higher. Consider gating on `PRIMARY_STATE_ACTIVE`. — `cube_bathymetry/src/detections_to_pointcloud.cpp:150-154,202-210`
-- [ ] (suggestion) `rx_angles[i]` is indexed unchecked in `beam_angle()` and in the `Sounding` constructor, while `sounding.h:71` bounds-guards the identical access ("NaN when the source omits rx_angles for this beam") — so the short-array case was already anticipated. This branch is specifically about hardening against driver-supplied array shape. — `cube_bathymetry/src/error_model.cpp:235`
-- [ ] (suggestion) plan nits: the divergences doc is cited as `docs/...` where it is `cube_bathymetry/docs/...` with stale line ranges; "Five decisions are settled" then lists six; the Approach narrates three commits where six landed. — `.agent/work-plans/issue-144/plan.md:55,203,286,317,326`
-- [ ] (suggestion) before `gh pr create`, confirm the two operator-deferred round-1 items actually reach the PR body — nothing carries them today: the ADR-0003 mixed-store point (`build_fingerprint.json` unimplemented, `package.xml` still 0.0.0, so nothing invalidates pre-#144 tiles) and `Vessel::gps_drms = 2.0` dominating `horizontal_error` on RTK boats. The body must also close both `#144` and `#147`. — `.agent/work-plans/issue-144/progress.md`
+- [x] (must-fix) `Platform::pitch`'s documented sign is false and the claim is advertised as verified: `tf2::getEulerYPR` on `level_frame <- base_link` gives `pitch = -asin(R[2][0])`, so under REP-103 FLU bow-up is NEGATIVE pitch. Calder's `Platform` documents "+ve is bow up" and three ported terms are ODD in `sinP` (`error_model.cpp:115-117`, `:157-163`, `:178-180`), so the sign bites as soon as any IMU/GPS lever arm is non-zero — latent only because they all default to 0 and #145 is what will give them a surface. Decide: negate at the producer, or restate the convention and re-derive. No test can catch it (pitch reaches `vertical_error` only via the even `cos_pitch^2`). Derived independently by the lead reviewer and by Lens A. The ROLL half of the claim is correct — verified twice. — `cube_bathymetry/include/cube_bathymetry/error_model.h:69-72`
+- [x] (must-fix) `swath_depth`'s pitch term uses `cos_pitch^2` where Calder's Eqn. 3.49 (`original_cube/libsrc/errmod/errmod_full.c:376-377`) uses `cosT^2` = `cos(roll + meas_angle)^2`; the sibling terms in the same function are faithful and the divergence is in no doc. Pre-existing, but `sinP^2` was ~3283x too small before #147, so this branch is what turns the term on — in a mis-formed state that over-estimates by `1/cos^2T` (~4x at 60 deg), biased to the swath edge. Fix, or record it in the divergences doc. — `cube_bathymetry/src/error_model.cpp:359-361`
+- [x] (must-fix) the `/12`-is-confirmed claim is over-broad and the quoted C is not verbatim: Calder's `rtn = bw/12.0` sits inside `if (SOUNDING_ISAMPDET(snd->flags))`; phase detections use `0.2*bw/sqrt(np)` (`original_cube/libsrc/ccom_core/device.c:807-820`, same shape at `:893` and `:938`; EM300 uses neither). The port applies `/12` unconditionally — an unrecorded divergence, in the document whose job is to enumerate them. Mark the block abridged, show the branch, restate the closure. — `cube_bathymetry/docs/divergences_from_calder.md:85-95,178-180`
+- [x] (must-fix) the plan is out of sync with the diff — the entire diagnostics surface is missing: six changed files absent from Files to Change (`detections_projector.h/.cpp`, `detections_to_pointcloud.cpp`, `bag_to_geotiff.cpp`, `batch_regen_main.cpp`, `import_bag_main.cpp`, plus `test_detections_projector.cpp`), the new public API (`per_beam_beamwidth_usable`, `kMaxPerBeamBeamwidthRad`) unlisted, `report_projection_summary()` unmentioned, README missing from Documentation & Instruction Impact, and `plan.md:227-232` still calls the constant-depth test a two-point comparison after `f579876` made it three and pinned the dip. Cross-confirmed by Plan Drift and Governance. — `.agent/work-plans/issue-144/plan.md:227-232,279-287`
+- [x] (suggestion) `rejected_beamwidths` is silent in the operational case it exists for: `kongsberg_em_bridge` leaves `rx_beamwidths` EMPTY on every M3 ping, so every tool prints "0 rejected" while 100% of beams run on the hardcoded generic 2 deg; a single-element array (a legitimate fixed-beamwidth encoding) is the same. It also over-reports when the array is longer than the beam count and counts range-filtered beams. Count beams that TOOK THE FALLBACK, over `i < two_way_travel_times.size()`. Cross-confirmed by both adversarial passes, which each rated it must-fix; held at suggestion because the header states the counter's domain honestly. — `cube_bathymetry/src/detections_projector.cpp:143-149`
+- [x] (suggestion) README's new warning says a consumer treating the value as sigma "will understate the error band by its own square root" — true only below 1.0. `horizontal_error` includes `total_gps_variance = gps_drms^2 = 4.0` m^2 at defaults, where reading it as a sigma OVERSTATES. Reword. — `README.md:18-27`
+- [x] (suggestion) two lines above that bold variance warning, the same table advertises the `grid` output's `uncertainty` layer, which is the opposite convention — a confidence-scaled standard deviation in metres (`node.cpp:266`). One sentence closes the trap the block was written to prevent. — `README.md:12`
+- [x] (suggestion) `soundingsToPointCloud2`'s comment claims "the same 6-field ... layout that detections_to_pointcloud publishes" — the exact count this PR just corrected in README to seven, in a file this PR edits. Corollary worth stating: the offline `-d` path therefore carries no `beam_angle`, which `cube_bathymetry_node` treats as optional and NaN-fills. — `cube_bathymetry/src/bag_to_geotiff.cpp:83-86`
+- [x] (suggestion) `Platform::heave` is still documented "+ve down" while `DetectionsProjector` feeds `tide.transform.translation.z`, REP-103 +up. Harmless (it enters only squared), but this diff is the sign/units audit of this very struct. — `cube_bathymetry/include/cube_bathymetry/error_model.h:73`
+- [x] (suggestion) "three of his NINE device families" — `device_compute_angerr`'s switch has EIGHT family branches (EM300; EM120; EM1000/1002/SB8101/SB8111; ELAC1180; SB9001/9003; HSWEEPDS/SB2112; EM3000/3000D; SB8125) plus `default`. Three of eight. Repeated in progress.md. — `cube_bathymetry/docs/divergences_from_calder.md:184`
+- [x] (suggestion) "the four `* M_PI / 180.0` factors are gone" — six were removed: two in `swath_depth`, four in `compute`. Same miscount in the Implementation entry and in `plan.md:262,283`. — `cube_bathymetry/docs/divergences_from_calder.md:239`
+- [x] (suggestion) the summary line reports a rejection count with no denominator; every other figure on the line is paired with a total. Print "N of M beams". — `cube_bathymetry/src/import_bag_main.cpp:785-791`
+- [x] (suggestion) the run-summary line and its warning are now three verbatim copies across the three offline mains and only `import_bag` extracted a function; they will drift. Put `report_projection_summary()` in a shared header. (Checked: no early-exit path loses the count in any of the three.) — `cube_bathymetry/src/batch_regen_main.cpp:1074-1086`
+- [x] (partially addressed: the shared summary keeps main() under the gate, but the underlying long-main pattern in all three tools is unchanged and unticketed) (suggestion) `main()` in `import_bag_main.cpp` is now 490 of cpplint's 500 counted lines — it was exactly 500 on `origin/jazzy`, so the extraction bought 10 lines and the next addition re-breaks the gate. `bag_to_geotiff` (416) and `batch_regen_main` (467) are the same pattern. — `cube_bathymetry/src/import_bag_main.cpp:808`
+- [x] (suggestion) `detections_subscriber_` is created in `on_configure` and not reset in `on_cleanup`, so the callback — and the new warning — runs in `inactive`, where the LifecyclePublisher silently drops the cloud. Pre-existing, but the new warning fires every ping for a zero-filling driver, so the noise floor is much higher. Consider gating on `PRIMARY_STATE_ACTIVE`. — `cube_bathymetry/src/detections_to_pointcloud.cpp:150-154,202-210`
+- [x] (suggestion) `rx_angles[i]` is indexed unchecked in `beam_angle()` and in the `Sounding` constructor, while `sounding.h:71` bounds-guards the identical access ("NaN when the source omits rx_angles for this beam") — so the short-array case was already anticipated. This branch is specifically about hardening against driver-supplied array shape. — `cube_bathymetry/src/error_model.cpp:235`
+- [x] (suggestion) plan nits: the divergences doc is cited as `docs/...` where it is `cube_bathymetry/docs/...` with stale line ranges; "Five decisions are settled" then lists six; the Approach narrates three commits where six landed. — `.agent/work-plans/issue-144/plan.md:55,203,286,317,326`
+- [x] (deferred: no PR exists yet and this sub-agent must not push; both items and the two-issue closing requirement are restated in the Implementation entry below for whoever opens it) (suggestion) before `gh pr create`, confirm the two operator-deferred round-1 items actually reach the PR body — nothing carries them today: the ADR-0003 mixed-store point (`build_fingerprint.json` unimplemented, `package.xml` still 0.0.0, so nothing invalidates pre-#144 tiles) and `Vessel::gps_drms = 2.0` dominating `horizontal_error` on RTK boats. The body must also close both `#144` and `#147`. — `.agent/work-plans/issue-144/progress.md`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-10 12:58 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**Branch**: `feature/issue-144` at `887bc5c`
+**Addressed**: `## Local Review (Pre-Push)` (round 2), 2026-09-10 11:57 -04:00, branch at `3e56683` — 4 must-fix, 14 suggestions
+**Commits**: `0d4ca5c`, `abc0f1a`, `9c3fbd5`, `247412d`, `fe7a535`, `337535c`, `887bc5c`
+
+### Build and test
+
+Real results, from the worktree root after `source setup.bash`:
+
+- `./sensors_ws/build.sh cube_bathymetry` — clean (the pre-existing GDAL
+  `warn_unused_result` and two unused-parameter warnings are unchanged).
+- `./sensors_ws/test.sh cube_bathymetry` — **624 tests, 0 errors, 0 failures, 71 skipped.**
+  Baseline at the start of this pass was 617/0/0/70; +7 tests (three new ones, and the
+  rewritten default-beamwidth test now covers four cases), +1 "skipped" which is cppcheck's
+  per-file skip for the new header.
+
+Two intermediate failures, both fixed rather than worked around, neither an assertion
+loosened:
+
+- `uncrustify` flagged a continuation indent in the new `rx_angles` guard in `sounding.h`.
+  Re-indented to what uncrustify wants.
+- One earlier run reported `test_import_eviction` as "the test did not generate a result
+  file" (1 error, 1 failure). It passed on every subsequent run, including the two full
+  clean runs above, and nothing in this pass touches import eviction — recorded as a flake,
+  not investigated further.
+
+### Actions
+
+**Must-fix**
+
+- [x] Pitch sign — implemented the operator's decision: negate at the producer.
+  `DetectionsProjector` now assigns `platform.pitch = -p` from `tf2::getEulerYPR`, and
+  `Platform` keeps Calder's bow-up-positive convention so every ported term stays faithful
+  to the equation it came from. Roll untouched. Heave is negated at the same boundary for
+  the same reason — Calder documents `+ve down` against the TF translation's REP-103 `+up`;
+  numerically inert (heave enters only squared), but crossed conventions inside one struct
+  are what produced the pitch defect in the first place. The "confirmed rather than
+  assumed" doc comment now says which half was actually checked. New test
+  `DetectionsProjectorTest.BowUpPitchFollowsCalderSignConvention` compares the projector's
+  output against the error model driven with `pitch = +bow_up`, and asserts the two signs
+  are distinguishable — it needs `gps_x/gps_z/imu_x/imu_z` non-zero, because the three
+  terms odd in `sin(pitch)` are all multiplied by lever arms that default to zero.
+  — `cube_bathymetry/src/detections_projector.cpp:114-140`,
+  `include/cube_bathymetry/error_model.h:67-91` (`0d4ca5c`)
+- [x] Eqn. 3.49's pitch term — implemented the operator's decision: fixed to match Calder.
+  `cos_pitch^2` -> `cosT^2`, the same swath-geometry factor the two faithful siblings use
+  (`errmod_full.c:376-377`). Pinned by
+  `ErrorModelTest.DepthPitchTermUsesSwathAngleNotPitchCosine`, in closed form at a
+  60-degree beam where the slipped form is 3.5x larger. Recorded in the divergences doc as
+  new §2d, a **fixed porting error** in the same category as the two under #46, explicitly
+  not a divergence. The commit message says it is pre-existing but that this branch makes
+  it live. — `cube_bathymetry/src/error_model.cpp:359-368` (`abc0f1a`, `9c3fbd5`)
+- [x] The `/12` claim — narrowed and re-quoted. The C block is now the verbatim
+  `DEVICE_EM120` arm showing `if (SOUNDING_ISAMPDET(...)) rtn = bw/12.0; else rtn =
+  0.2*bw/sqrt(np);`, and the note says EM300 uses neither. The unconditional `/12` this
+  port applies is recorded as its own real divergence, with what it costs (on a phase
+  detection Calder's sigma is `0.2*bw/sqrt(np)`, several times smaller for a typical `np`,
+  so the port over-estimates) and why narrowing it is not an error-model change (neither
+  the detection flag nor the window size exists in `SonarDetections`).
+  — `cube_bathymetry/docs/divergences_from_calder.md:83-120,186-205` (`9c3fbd5`)
+- [x] Plan out of sync — new **commit 2b** section covers the whole diagnostics surface
+  (the two new public `ErrorModel` members, `ProjectionDiagnostics`, the new
+  `projection_summary.h` and `report_projection_summary()`, the node's warning and its
+  lifecycle gate, the `rx_angles` hardening), new **commit 2c** covers the round-2 operator
+  decisions, six missing files plus the new header are in Files to Change, and README is in
+  Documentation & Instruction Impact. The constant-depth test is described as the
+  three-point comparison it became. — `.agent/work-plans/issue-144/plan.md` (`887bc5c`)
+
+**Suggestions**
+
+- [x] The default-beamwidth diagnostic — see the reconciliation note below.
+  `rejected_beamwidths` became `default_beamwidth_beams`, counted over
+  `two_way_travel_times` and reported as "N of M beams", with the denominator from
+  `diagnostics.total`. Covers empty, short, over-long and range-gated cases in
+  `DefaultBeamwidthBeamsAreCounted`. — `cube_bathymetry/src/detections_projector.cpp:164-183`
+  (`247412d`)
+- [x] README variance wording — both directions now stated, with the crossing point at
+  1 m² and the `gps_drms^2 = 4 m^2` example that overstates. — `README.md:18-28` (`fe7a535`)
+- [x] The `grid` layer's opposite convention — called out in the node table row, verified
+  against `node.cpp:266` (`stddev_to_confidence_interval_scale * sqrt(...)`, metres).
+  — `README.md:12` (`fe7a535`)
+- [x] `bag_to_geotiff`'s stale "6-field" comment — it is the first six of seven; the
+  corollary is stated (no `beam_angle` on the offline `-d` path, which
+  `cube_bathymetry_node` NaN-fills — verified at `cube_bathymetry_node.cpp:2008-2061`).
+  — `cube_bathymetry/src/bag_to_geotiff.cpp:83-95` (`fe7a535`)
+- [x] `Platform::heave` "+ve down" — resolved by negating at the producer rather than by
+  restating the convention, so the field keeps Calder's documented sense and the producer
+  converts, matching the pitch decision. — `include/cube_bathymetry/error_model.h:80-82`
+  (`0d4ca5c`)
+- [x] "three of nine" -> **three of eight**, with the count justified in place
+  (`device_compute_angerr`'s switch has eight family arms plus a `default`; counted at
+  `original_cube/libsrc/ccom_core/device.c:791-970`).
+  — `cube_bathymetry/docs/divergences_from_calder.md:210` (`9c3fbd5`)
+- [x] "four factors" -> **six**, itemised (two in `swath_depth`, four in `compute`).
+  — `cube_bathymetry/docs/divergences_from_calder.md:266` (`9c3fbd5`)
+- [x] Rejection count with no denominator — the shared summary prints "N of M beams" in
+  both the summary line and the warning. (`247412d`)
+- [x] Three verbatim copies of the run summary — extracted to header-only
+  `cube::report_projection_summary()` over a `ProjectionRunTotals` struct, in the new
+  `include/cube_bathymetry/projection_summary.h`. All three tools now accumulate straight
+  into that struct. Printed text is unchanged apart from the beamwidth clause;
+  `bag_to_geotiff` sets `reports_georeferencing = false` and keeps its shorter line.
+  — `cube_bathymetry/include/cube_bathymetry/projection_summary.h` (`247412d`, `337535c`)
+- [x] (partially addressed) `main()` at 490 of cpplint's 500 lines — the extraction plus
+  accumulating directly into `ProjectionRunTotals` keeps `import_bag_main`'s `main()` under
+  the gate (cpplint passes), but the underlying long-`main` pattern in all three tools is
+  untouched and has no ticket. Worth one if the next addition trips it.
+- [x] `detections_subscriber_` runs in `inactive` — the callback now returns early unless
+  the node is `PRIMARY_STATE_ACTIVE`. The subscription is still not reset in `on_cleanup`
+  (that would change the configure/cleanup contract for no benefit now that the callback is
+  inert), but the wasted projection and the per-ping warning are gone.
+  — `cube_bathymetry/src/detections_to_pointcloud.cpp:172-181` (`337535c`)
+- [x] `rx_angles[i]` indexed unchecked — bounds-guarded in both places (the `Sounding`
+  geometry and `ErrorModel::beam_angle()`), matching the guards already on `tx_angles`,
+  `intensities` and the `beam_angle` field two lines away. Absent is NaN, which propagates
+  into position and TPU rather than reading off the end or being taken for a nadir beam.
+  New test `ErrorModelTest.ShortRxAnglesYieldNaNRatherThanReadingOffTheEnd`.
+  — `include/cube_bathymetry/sounding.h:47-72`, `src/error_model.cpp:231-240` (`337535c`)
+- [x] Plan nits — paths corrected to `cube_bathymetry/docs/...` with the stale line ranges
+  dropped, "Five decisions" now reads six (plus the two settled at round 2, listed
+  separately), and the Approach narrates the nine commits that landed. (`887bc5c`)
+- [x] (deferred: no PR exists yet and this sub-agent must not push) PR-body items. Restated
+  here so whoever opens the PR carries them:
+  1. The PR body must close **both** `#144` and `#147`.
+  2. Operator-deferred round-1 item A — the ADR-0003 mixed-store point: `build_fingerprint.json`
+     is unimplemented and `package.xml` is still `0.0.0`, so nothing invalidates tiles built
+     before #144; a store can silently mix pre- and post-fix uncertainties.
+  3. Operator-deferred round-1 item B — `Vessel::gps_drms = 2.0` dominates `horizontal_error`
+     on RTK boats (4 m² of the budget at the default, before any other term).
+
+### Reconciliation: the two specialist must-fixes the lead reviewer did not list
+
+Asked to check how the round-2 lead disposed of the systemic-adversarial specialist's two
+must-fixes (the diagnostic being silent for empty/short `rx_beamwidths`, and the counter
+iterating the wrong domain). **They were not dropped.** The lead folded both into one
+suggestion — the first `- [ ] (suggestion)` in the round-2 Findings — and gave the reason
+explicitly: *"Cross-confirmed by both adversarial passes, which each rated it must-fix; held
+at suggestion because the header states the counter's domain honestly."* The suggestion text
+carries both halves, including the fix the specialists asked for ("Count beams that TOOK THE
+FALLBACK, over `i < two_way_travel_times.size()`").
+
+So there was a stated reason, and this pass followed the disposition — but the disposition
+was to fix it, at suggestion priority, and pre-push suggestions are actioned. Fixed on the
+merits regardless: an honest doc comment does not rescue a number that reads **zero for the
+most common real configuration in the field**. `kongsberg_em_bridge` leaves `rx_beamwidths`
+empty on every M3 ping, so 100% of M3 beams run on the hardcoded generic 2 degrees while
+every tool printed "0 rejected per-beam beamwidths". The counter now measures the thing an
+operator needs to know — how many beams' angular budget is a default — over the right
+domain, and the single-element-array and over-long-array cases the specialists also named
+are covered by tests.
+
+### Deliberately not done
+
+- **Correcting "three of nine" and "four factors" where they appear in earlier progress.md
+  entries.** The review noted both figures are repeated there. progress.md is an append-only
+  timeline; editing a past entry rewrites the record of what was believed at the time. The
+  corrected figures (three of **eight**, **six** factors) are recorded here and in the
+  divergences doc, which is the durable artefact.
+- **Resetting `detections_subscriber_` in `on_cleanup`.** See above — the callback is inert
+  outside `active`, which was the finding's actual concern.
+- **Any store re-measurement or reprocessing**, still out of scope by the operator's
+  standing decision (plan, "Out of scope").
