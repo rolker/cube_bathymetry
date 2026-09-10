@@ -1069,7 +1069,7 @@ int main(int argc, char * argv[])
 
   std::cout << "\ndone." << std::endl;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
-  cube::report_projection_summary(proj_totals);
+  cube::report_projection_summary(proj_totals, std::cout, std::cerr);
 
   std::cout << "Gathering per-tile buckets (exact rebuild)..." << std::endl;
 

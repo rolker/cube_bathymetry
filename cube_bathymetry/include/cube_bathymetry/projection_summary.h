@@ -23,7 +23,6 @@
 #define CUBE_BATHYMETRY__PROJECTION_SUMMARY_H_
 
 #include <cstddef>
-#include <iostream>
 #include <ostream>
 
 // Shared run summary for the three offline tools (import_bag, batch_regen,
@@ -73,11 +72,15 @@ namespace cube
 
 /// Print the offline-projection run summary, plus the warnings that only make
 /// sense once the whole pass is finished. `out` takes the summary, `err` the
-/// warnings, matching the tools' existing stdout/stderr split.
+/// warnings, matching the tools' existing stdout/stderr split. The streams are
+/// explicit rather than defaulted to std::cout/std::cerr: defaults would drag
+/// <iostream> -- and its std::ios_base::Init static -- into every translation
+/// unit that includes this installed header, and the tests want to read the
+/// text back out of an ostringstream anyway.
   inline void report_projection_summary(
     const ProjectionRunTotals & totals,
-    std::ostream & out = std::cout,
-    std::ostream & err = std::cerr)
+    std::ostream & out,
+    std::ostream & err)
   {
     out << "Offline projection: " << totals.pings << " pings";
     if (totals.reports_georeferencing) {

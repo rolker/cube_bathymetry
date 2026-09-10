@@ -377,6 +377,12 @@ if(BUILD_TESTING)
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
 
+  # Run-summary text for the three offline tools (#144): header-only, so the
+  # test needs the include dir and nothing else.
+  ament_add_gtest(test_projection_summary test/test_projection_summary.cpp)
+  target_include_directories(test_projection_summary PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
   ament_add_gtest(test_store_import test/test_store_import.cpp)
   target_link_libraries(test_store_import
     cube_bathymetry_store_import
