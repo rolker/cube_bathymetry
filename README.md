@@ -263,6 +263,17 @@ documented in
 [`cube_bathymetry/docs/divergences_from_calder.md`](cube_bathymetry/docs/divergences_from_calder.md),
 the deliverable of [#30](https://github.com/rolker/cube_bathymetry/issues/30).
 
+## Projection diagnostics (what the warnings mean)
+
+`detections_to_pointcloud` emits these throttled; `import_bag`, `batch_regen_bag`
+and `bag_to_geotiff` fold the same counts into their end-of-run summary line and
+warn once when either is non-zero.
+
+| Signal | What it means | What to do |
+|---|---|---|
+| `N of M beams took the generic device across-track beamwidth` | The ping reported no usable per-beam `rx_beamwidths` for those beams (absent, too short, or non-finite / non-positive / ≥ π rad), so the **angular** part of the uncertainty budget came from `Device::across_track_beamwidth` — a hardcoded generic value belonging to no particular sonar. The soundings are still produced and are still used. | Nothing operationally, but read the uncertainty as approximate. **Today this is 100% of M3 beams**: `kongsberg_em_bridge` deliberately leaves `rx_beamwidths` empty, so every M3 sounding's angular term is the generic 2°. Tracked in [`marine_tools#82`](https://github.com/rolker/marine_tools/issues/82); the reasoning is in [`divergences_from_calder.md`](cube_bathymetry/docs/divergences_from_calder.md). |
+| `N of M beams reported no usable receive angle` | `rx_angles` was absent, shorter than the beam count, or non-finite for those beams. The beam angle is deliberately `NaN` rather than `0` (which would be a nadir beam that was never measured), so the sounding's position and uncertainty are `NaN` and the range gate drops it. | A driver/message problem, **not** a frame or range-gate problem. If this equals the beam count, the run produces no soundings at all and the summary says so explicitly instead of pointing at the frame overrides. |
+
 ## Configuring frames per platform (REQUIRED)
 
 `detections_to_pointcloud`'s frame parameters default to the **unprefixed**
