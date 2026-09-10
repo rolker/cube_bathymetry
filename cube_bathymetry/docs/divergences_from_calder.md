@@ -174,14 +174,20 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
     [`rolker/ros2sonic#1`](https://github.com/rolker/ros2sonic/issues/1). It is an
     **upstream** bug, present on the USF-COMIT parent and on four SeawardScience
     branches, not a local divergence.
-  - **Rejections are not silent.** `DetectionsProjector` counts them into
-    `ProjectionDiagnostics::rejected_beamwidths` using the model's own predicate
-    (`ErrorModel::per_beam_beamwidth_usable`, public so the two cannot drift). The
+  - **The fallback is not silent.** `DetectionsProjector` counts the beams that
+    *took* the generic `Device::across_track_beamwidth` into
+    `ProjectionDiagnostics::default_beamwidth_beams`. That covers both a reported
+    value the model refuses (`ErrorModel::per_beam_beamwidth_usable`, public so
+    the two cannot drift) and -- the commoner case by far -- no reported value at
+    all, from an empty or too-short `rx_beamwidths`. The count is taken over the
+    beams (`two_way_travel_times`), with `ProjectionDiagnostics::total` as the
+    denominator, so the tools report "N of M beams". Counting *rejections* instead
+    would read 0 for every M3 ping, where `kongsberg_em_bridge` leaves the array
+    empty and so 100% of beams run on the default while nothing is rejected. The
     live node emits a throttled warning; `bag_to_geotiff`, `import_bag` and
     `batch_regen_bag` fold the count into their run summary and warn when it is
-    non-zero. A rejected beam falls back to the generic
-    `Device::across_track_beamwidth`, so the operator needs to know the angular
-    budget is being carried by a default.
+    non-zero, so the operator knows the angular budget is being carried by a
+    default.
 - **The fallback was the live path, not the rare one.** The pre-#144 note in this
   document had this backwards. `kongsberg_em_bridge/node.py:547-550` (repo
   `marine_tools`) deliberately leaves `rx_beamwidths` **empty** to dodge this very
