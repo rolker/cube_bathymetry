@@ -161,3 +161,24 @@ against whichever normalization boundary this issue lands.
 
 ### Open questions
 - [ ] No open questions — plan is review-plan-ready.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-10 09:52 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-144/plan.md` at `112b9ba`
+**PR**: PR-less
+**Verdict**: approve-with-suggestions
+
+### Findings
+- [ ] (suggestion) The plan's doc-comment fix targets only the 2-arg `horizontal_positioning_error` overload's false "twice the nominal variance" claim (`error_model.h:242-247`, per the owner's second comment). The 5-arg overload of the same function (declared `error_model.h:319-323`, doc comment `error_model.h:310-317`) carries the same class of false claim — "We multiply the standard deviation estimate by 2.0 to approximate this" — and its implementation (`error_model.cpp:319-356`) sums four terms with no factor of 2 anywhere, same as the 2-arg overload's implementation. The plan doesn't mention this second instance at all (not fixed, not flagged as out of scope). Since the justification for touching this doc comment is "unrelated function, bundled... since the file is already open," the same rationale applies here and it costs little to fold in — or, at minimum, the plan should say explicitly why it's left for later. — `plan.md:71` (Approach step 3)
+
+### Verification performed
+Independently verified against source (not assuming the plan's claims): `error_model.cpp:236-240` confirms the unit-mismatch bug exactly as described (fallback consumes undocumented-as-converted degrees; per-beam branch double-converts already-radian values). Installed `/opt/ros/jazzy/share/marine_acoustic_msgs/msg/PingInfo.msg:9-13` confirms `rx_beamwidths`/`tx_beamwidths` are documented "reported in radians". `norbit_driver/src/conversions.cpp:19-20,59-60,95-96` confirms zero-filled (not empty) beamwidth arrays. `kongsberg_em_bridge/node.py:547-550` confirms the deliberate-empty-arrays comment citing this exact mismatch and citing `cube_bathymetry#30`. `error_model.cpp:114-163` (2-arg `horizontal_positioning_error`) confirms no factor-of-2 in the implementation, matching the plan's claim about the false doc comment. All existing tests in `test/test_error_model.cpp` that zero `across_track_beamwidth` (lines 282, 332, 395, 420, 471) confirmed, leaving the fix's target term untested today. `docs/divergences_from_calder.md:73-91` confirmed to contain the backwards "normal path" framing and the "no behavioural change" claim the plan proposes to correct, nested under "## 2. Device error budget is parameterized" (not a "#47" subsection as such, but the plan's characterization — that it currently reads as a note inside that section rather than its own entry — is accurate). Read both scope-correcting owner comments on the issue directly (`gh issue view 144 --comments`); the plan's Context/Approach sections track them point-for-point. No ADR governs this class of change; ADR-0008 correctly assessed as not triggered (no new packages/topics/interfaces).
+
+### Summary
+The plan is well-grounded in source — every factual claim it makes was independently checked against the actual code, the installed message definition, and both driver repos, and all of them check out. Scope, file targeting, consequences, and the documentation-impact section are all sound, and the plan correctly incorporates both scope-correcting owner comments that the issue body itself was never updated to reflect. The one gap found is minor and doesn't block implementation: a second, sibling instance of the same false "×2" doc-comment bug that the plan already commits to fixing once, sitting a few lines away in the same header. Ready for implementation; addressing the finding (fix or explicit defer-with-reason) during implementation is a suggestion, not a blocker.
+
+### Recommended Actions
+- [ ] During implementation, either fold the 5-arg `horizontal_positioning_error` overload's matching false doc comment into commit 1's doc-comment fix, or add one sentence to the plan/PR explaining why it's deliberately left for a later pass.
