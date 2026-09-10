@@ -668,7 +668,7 @@ TEST_F(ErrorModelTest, AngleErrorBranchesAgreeOnUnits)
 
   ASSERT_GT(h_fallback, 0.0);
   // The two branches must agree: both are radians by the time they are used.
-  // Before #144 they disagreed by (pi/180)^2 == ~3283x.
+  // Before #144 they disagreed by (180/pi)^2 == ~3283x.
   EXPECT_NEAR(h_perbeam, h_fallback, 1e-6 * h_fallback);
 }
 

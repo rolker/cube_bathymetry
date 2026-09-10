@@ -284,9 +284,12 @@ public:
 
   /// True when a sonar-reported per-beam receive beamwidth (radians) is usable
   /// as a measurement: finite, strictly positive, and below the physical
-  /// ceiling above. Public so a caller can count and report rejections without
-  /// duplicating the predicate -- `DetectionsProjector` fills
-  /// `ProjectionDiagnostics::default_beamwidth_beams` with it.
+  /// ceiling above. Public so a caller can count and report the beams that
+  /// fall back to the generic device beamwidth without duplicating the
+  /// predicate -- `DetectionsProjector` fills
+  /// `ProjectionDiagnostics::default_beamwidth_beams` with it. A refused value
+  /// is one way into that count; a value the ping never reported at all is the
+  /// commoner one, and the caller adds it.
     static bool per_beam_beamwidth_usable(float beamwidth_rad);
 
 private:
