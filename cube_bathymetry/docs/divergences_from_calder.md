@@ -146,7 +146,7 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
   sidescan does no across-track beamforming, so its receive fan genuinely is that
   wide. Any clamp tight enough to be a plausibility check would discard it.
   - The corollary, stated plainly so it is not mistaken for a solved problem: **this
-    ceiling does not catch a misplaced transmit fan.** `ros2sonic` stamps
+    ceiling does not catch a misplaced transmit fan.** The R2Sonic driver stamps
     `TxBeamwidthHoriz` — the whole transmit sector, ~2.27 rad (130°), identical on
     every beam — into `rx_beamwidths`
     (`r2sonic/src/conversions.cpp:17-18`). That is a real, correctly-scaled
@@ -155,8 +155,10 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
     correctly gone, the value now arrives intact and would size the angular
     uncertainty from the transmit sector rather than the beam. The fix belongs in
     the driver — report the receive beamwidth, or leave the array empty as
-    `PingInfo.msg` provides for — and is tracked at
-    [`#149`](https://github.com/rolker/cube_bathymetry/issues/149).
+    `PingInfo.msg` provides for — and is tracked in the driver's own repo, at
+    [`rolker/ros2sonic#1`](https://github.com/rolker/ros2sonic/issues/1). It is an
+    **upstream** bug, present on the USF-COMIT parent and on four SeawardScience
+    branches, not a local divergence.
   - **Rejections are not silent.** `DetectionsProjector` counts them into
     `ProjectionDiagnostics::rejected_beamwidths` using the model's own predicate
     (`ErrorModel::per_beam_beamwidth_usable`, public so the two cannot drift). The
@@ -328,6 +330,8 @@ nominates a hypothesis (a manual disambiguation override).
 - [#148](https://github.com/rolker/cube_bathymetry/issues/148) — where Calder's
   `1/cos(angle)` beamwidth widening belongs, given that he gates it by device
   family. Still un-ported; see §2b.
-- [#149](https://github.com/rolker/cube_bathymetry/issues/149) — `ros2sonic`
-  stamps the transmit horizontal fan into `rx_beamwidths`; a driver fault the
-  §2b physical ceiling deliberately does not paper over.
+- [`rolker/ros2sonic#1`](https://github.com/rolker/ros2sonic/issues/1) — the
+  R2Sonic driver stamps the transmit horizontal fan into `rx_beamwidths`; an
+  upstream driver fault (present on the USF-COMIT parent and four
+  SeawardScience branches) that the §2b physical ceiling deliberately does not
+  paper over.

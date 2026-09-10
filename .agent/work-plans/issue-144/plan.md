@@ -130,7 +130,9 @@ does not apply. The PR closes #147 alongside #144.
 2026-09-10). The round-1 review proposed a plausibility ceiling on `rx_beamwidths[i]` because
 two in-workspace producers report large values. Only one of them is wrong: `ros2sonic` puts
 the *transmit* horizontal fan (2.27 rad) into the receive field, a driver fault filed as
-[`cube_bathymetry#149`](https://github.com/rolker/cube_bathymetry/issues/149);
+[`rolker/ros2sonic#1`](https://github.com/rolker/ros2sonic/issues/1) — an
+upstream driver bug, present on the USF-COMIT parent and four SeawardScience
+branches, filed in the driver's own repo;
 `garmin_sidescan`'s 55° across-track is **correct data in the right field**, because a
 sidescan does no across-track beamforming. A clamp tight enough to catch R2Sonic would reject
 Garmin's legitimate value. So the model rejects only what is physically impossible — a
@@ -153,7 +155,7 @@ divergences doc, that this catches nonsense and does **not** catch a misplaced t
   `divergences_from_calder.md`.
 - **A plausibility clamp on `rx_beamwidths[i]`** is deliberately not added — see point 5. Only
   the hard physical ceiling (≥ π rad) is. `ros2sonic`'s misplaced transmit fan is
-  `cube_bathymetry#149`, a driver fix, not a consumer-side clamp.
+  `rolker/ros2sonic#1`, a driver fix, not a consumer-side clamp.
 - **`marine_tools#82`** itself is not touched by this plan. This fix is written to be correct
   regardless of that issue's landing order (see point 1 above); `marine_tools#82` should be
   re-checked against this normalization once it lands, but that re-check is out of scope here.
@@ -330,4 +332,4 @@ Single PR closing both `#144` and `#147`. Atomic commits: the beamwidth unit fix
 validation, the attitude unit fix, and the round-1 review's doc corrections, with each
 commit's doc changes landing alongside its code. No store re-measurement, no widening
 (`#148`), no cross-repo changes (the `marine_tools` and `ros2sonic` consequences are flagged
-only, as `marine_tools#82` and `#149`).
+only, as `marine_tools#82` and `rolker/ros2sonic#1`).

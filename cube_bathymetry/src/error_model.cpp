@@ -280,13 +280,14 @@ double ErrorModel::swath_angle_error(
     //
     // The pi-radian ceiling catches NONSENSE -- a unit mix-up, a sentinel, a
     // corrupt field. It deliberately does NOT catch a real measurement of the
-    // wrong quantity: ros2sonic stamps the ~2.27 rad TRANSMIT horizontal fan
-    // into rx_beamwidths, and that passes this bound. That is a driver fault,
-    // tracked at https://github.com/rolker/cube_bathymetry/issues/149, not
-    // something a consumer-side clamp should paper over -- a clamp tight
-    // enough to reject 2.27 rad would also reject garmin_sidescan's entirely
-    // legitimate 55 degrees across-track (0.96 rad), which is correct data in
-    // the right field because a sidescan does no across-track beamforming.
+    // wrong quantity: an R2Sonic driver stamps the ~2.27 rad TRANSMIT
+    // horizontal fan into rx_beamwidths, and that passes this bound. That is a
+    // driver fault, fixed in the driver, not something a consumer-side clamp
+    // should paper over -- a clamp tight enough to reject 2.27 rad would also
+    // reject garmin_sidescan's entirely legitimate 55 degrees across-track
+    // (0.96 rad), which is correct data in the right field because a sidescan
+    // does no across-track beamforming. (Tracking reference in the divergences
+    // doc; it lives in another repo and would rot here.)
     //
     // Rejections are not silent: DetectionsProjector counts them into
     // ProjectionDiagnostics::rejected_beamwidths, which the live node reports

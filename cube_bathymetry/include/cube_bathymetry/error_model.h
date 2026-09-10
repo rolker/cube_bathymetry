@@ -257,11 +257,11 @@ public:
   /// check would throw that legitimate data away.
   ///
   /// The corollary is that this ceiling does NOT catch a misplaced transmit
-  /// fan: `ros2sonic` stamps `TxBeamwidthHoriz` (~2.27 rad, 130 degrees) into
-  /// `rx_beamwidths`, which is a real, correctly-scaled measurement of the
-  /// wrong quantity, and it passes this bound. That is a driver fault and is
-  /// fixed there, not laundered here -- see
-  /// https://github.com/rolker/cube_bathymetry/issues/149.
+  /// fan: an R2Sonic driver stamps the transmit horizontal fan (~2.27 rad,
+  /// 130 degrees) into `rx_beamwidths`, which is a real, correctly-scaled
+  /// measurement of the wrong quantity, and it passes this bound. That is a
+  /// driver fault and is fixed there, not laundered here. See the divergences
+  /// doc for the current tracking reference.
     static constexpr float kMaxPerBeamBeamwidthRad = 3.14159265358979323846f;
 
   /// True when a sonar-reported per-beam receive beamwidth (radians) is usable

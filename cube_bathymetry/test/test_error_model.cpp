@@ -775,8 +775,8 @@ TEST_F(ErrorModelTest, AngleErrorFallsBackOnPhysicallyImpossibleBeamwidth)
 // garmin_sidescan reports 55 degrees across-track for SideVu (46 for ClearVu),
 // which is correct data in the right field -- a sidescan does no across-track
 // beamforming, so its receive fan genuinely is that wide. A clamp tight enough
-// to reject ros2sonic's misplaced 2.27 rad transmit fan (#149) would throw this
-// away, which is exactly why no such clamp exists.
+// to reject an R2Sonic driver's misplaced 2.27 rad transmit fan would throw
+// this away, which is exactly why no such clamp exists.
 TEST_F(ErrorModelTest, AngleErrorAcceptsWideButLegitimateSidescanBeamwidth)
 {
   auto platform = makePlatform();
@@ -799,7 +799,7 @@ TEST_F(ErrorModelTest, AngleErrorAcceptsWideButLegitimateSidescanBeamwidth)
 TEST_F(ErrorModelTest, PerBeamBeamwidthUsablePredicateMatchesTheCeiling)
 {
   EXPECT_TRUE(ErrorModel::per_beam_beamwidth_usable(0.96f));
-  EXPECT_TRUE(ErrorModel::per_beam_beamwidth_usable(2.27f));  // ros2sonic's tx fan (#149)
+  EXPECT_TRUE(ErrorModel::per_beam_beamwidth_usable(2.27f));  // an R2Sonic driver's tx fan
   EXPECT_TRUE(
     ErrorModel::per_beam_beamwidth_usable(
       std::nextafter(ErrorModel::kMaxPerBeamBeamwidthRad, 0.0f)));
