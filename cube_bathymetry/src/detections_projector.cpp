@@ -174,12 +174,22 @@ ProjectionResult DetectionsProjector::project(
   // legitimate fixed-beamwidth encoding) reads the same way, and an over-long
   // array would over-report. The projector never logs; the caller reports
   // this (#144).
+  //
+  // The same loop counts beams with no usable RECEIVE ANGLE. Those soundings
+  // come out NaN (sounding.h / ErrorModel::beam_angle bounds-guard the array)
+  // and are then dropped by the range gate below, which would otherwise report
+  // them as range-filtered -- telling an operator whose driver omits
+  // `rx_angles` that their frame overrides are wrong when they are not (#144).
   const auto & reported_beamwidths = detections.ping_info.rx_beamwidths;
+  const auto & reported_rx_angles = detections.rx_angles;
   for (size_t i = 0; i < detections.two_way_travel_times.size(); ++i) {
     if (i >= reported_beamwidths.size() ||
       !cube::ErrorModel::per_beam_beamwidth_usable(reported_beamwidths[i]))
     {
       ++result.diagnostics.default_beamwidth_beams;
+    }
+    if (i >= reported_rx_angles.size() || !std::isfinite(reported_rx_angles[i])) {
+      ++result.diagnostics.missing_rx_angle_beams;
     }
   }
 

@@ -53,9 +53,15 @@ namespace cube
     }
     // rx_angles is bounds-guarded like every other per-beam array here (#144).
     // A driver that reports fewer receive angles than travel times used to
-    // send the two reads below off the end of the vector. Absent -> NaN, which
-    // propagates into the position and the TPU, rather than being read as 0
-    // (a nadir beam that was never measured) or as whatever follows in memory.
+    // send the two reads below off the end of the vector. Absent -> NaN,
+    // rather than being read as 0 (a nadir beam that was never measured) or as
+    // whatever follows in memory.
+    //
+    // The NaN does not reach the product: it makes the position and the TPU
+    // NaN within this sounding, and DetectionsProjector's range gate then
+    // drops it (NaN fails both comparisons), counting the beam into
+    // ProjectionDiagnostics::missing_rx_angle_beams so the drop is reported as
+    // what it is.
     const float rx_angle = (i < detections.rx_angles.size()) ?
         detections.rx_angles[i] : std::nan("");
     sonar_relative_position.x = range * -sin(tx_angle);

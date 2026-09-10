@@ -344,6 +344,56 @@ TEST_F(DetectionsProjectorTest, DefaultBeamwidthBeamsAreCounted)
   EXPECT_EQ(gated_result.diagnostics.default_beamwidth_beams, 3u);
 }
 
+// #144: a beam with no usable receive angle is reported as such, not as a
+// range-filtered sounding. The bounds guard makes the sounding NaN, the range
+// gate then drops it, and without this counter the operator is told "0
+// soundings (all range-filtered)" and pointed at their frame overrides -- the
+// one thing that is fine when the driver simply omits rx_angles.
+TEST_F(DetectionsProjectorTest, MissingReceiveAngleBeamsAreCounted)
+{
+  DetectionsProjector projector(params_);
+  tf2::BufferCore buffer;
+  fillAttitudeBuffer(buffer, params_);
+
+  // Fully populated: nothing missing.
+  auto full = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  auto full_result = projector.project(full, buffer, 0.0f);
+  EXPECT_EQ(full_result.diagnostics.missing_rx_angle_beams, 0u);
+  EXPECT_EQ(full_result.soundings.size(), 3u);
+
+  // Truncated array: the two unreported beams are NaN, dropped by the range
+  // gate, and counted here as well as in filtered_range.
+  auto truncated = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  truncated.rx_angles.resize(1);
+  auto truncated_result = projector.project(truncated, buffer, 0.0f);
+  EXPECT_EQ(truncated_result.diagnostics.total, 3u);
+  EXPECT_EQ(truncated_result.diagnostics.missing_rx_angle_beams, 2u);
+  EXPECT_EQ(truncated_result.diagnostics.filtered_range, 2u);
+  EXPECT_EQ(truncated_result.soundings.size(), 1u);
+
+  // Absent entirely -- the case that produces "0 soundings, all
+  // range-filtered" with no other signal.
+  auto absent = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  absent.rx_angles.clear();
+  auto absent_result = projector.project(absent, buffer, 0.0f);
+  EXPECT_TRUE(absent_result.soundings.empty());
+  EXPECT_EQ(absent_result.diagnostics.total, 3u);
+  EXPECT_EQ(absent_result.diagnostics.missing_rx_angle_beams, 3u);
+
+  // A reported-but-non-finite angle is the same failure with a value in it.
+  auto nan_angle = makeDetections({-0.2f, std::nanf(""), 0.2f}, 0.02f);
+  auto nan_result = projector.project(nan_angle, buffer, 0.0f);
+  EXPECT_EQ(nan_result.diagnostics.missing_rx_angle_beams, 1u);
+  EXPECT_EQ(nan_result.soundings.size(), 2u);
+
+  // An over-long array cannot push the count past the beam count.
+  auto over_long = makeDetections({0.0f}, 0.02f);
+  over_long.rx_angles = {0.0f, 0.0f, 0.0f};
+  auto over_long_result = projector.project(over_long, buffer, 0.0f);
+  EXPECT_EQ(over_long_result.diagnostics.total, 1u);
+  EXPECT_EQ(over_long_result.diagnostics.missing_rx_angle_beams, 0u);
+}
+
 // #144: cube::Platform keeps CALDER's sign conventions (pitch +ve bow up,
 // heave +ve down); the projector converts at the boundary, exactly as it does
 // for units. tf2::getEulerYPR returns the opposite pitch sense for an FLU

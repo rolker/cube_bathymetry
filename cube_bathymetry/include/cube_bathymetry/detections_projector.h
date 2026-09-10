@@ -101,6 +101,20 @@ namespace cube
   /// The denominator is `total` (one sounding per beam, before range
   /// filtering); the tools report "N of M beams".
     size_t default_beamwidth_beams = 0;
+
+  /// Beams in this ping for which the sonar reported no usable receive angle
+  /// -- an `rx_angles` array that is empty, shorter than the beam count, or
+  /// carrying a non-finite value for that beam.
+  ///
+  /// Such a beam's angle reads NaN (#144, deliberately, rather than 0 -- a
+  /// nadir beam that was never measured), so its position and TPU are NaN and
+  /// the range gate drops it. Without this counter the drop lands in
+  /// `filtered_range` and the operator is told the soundings were
+  /// range-filtered -- which, for a driver that omits `rx_angles` entirely, is
+  /// a confident pointer at the frame configuration, the one thing that is
+  /// fine. Sibling of `default_beamwidth_beams`: same domain
+  /// (`two_way_travel_times`), same `total` denominator.
+    size_t missing_rx_angle_beams = 0;
   };
 
 /// Result of projecting one SonarDetections message: the (range-filtered)

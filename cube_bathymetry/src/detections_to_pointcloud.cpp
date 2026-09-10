@@ -218,6 +218,14 @@ private:
           " non-positive, or >= pi rad), so their angular uncertainty is a"
           " default, not a measurement");
     }
+    if(projection.diagnostics.missing_rx_angle_beams > 0) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        projection.diagnostics.missing_rx_angle_beams << " of " <<
+          projection.diagnostics.total <<
+          " beams reported no usable receive angle (rx_angles absent, too"
+          " short, or non-finite); their position and uncertainty are NaN and"
+          " the range gate drops them");
+    }
     if(projection.diagnostics.filtered_range > 0) {
       RCLCPP_DEBUG_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
         projection.diagnostics.filtered_range << " of " <<

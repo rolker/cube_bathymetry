@@ -1212,6 +1212,7 @@ int main(int argc, char * argv[])
       proj_totals.missing_attitude += projection.diagnostics.missing_attitude;
       proj_totals.missing_heave += projection.diagnostics.missing_heave;
       proj_totals.default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
+      proj_totals.missing_rx_angle_beams += projection.diagnostics.missing_rx_angle_beams;
 
       try {
         auto transform = tfBuffer.lookupTransform(

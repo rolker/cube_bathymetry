@@ -60,6 +60,12 @@ namespace cube
   /// `ProjectionDiagnostics::default_beamwidth_beams`.
     size_t default_beamwidth_beams = 0;
 
+  /// Beams whose receive angle was absent or non-finite, so the sounding came
+  /// out NaN and the range gate dropped it. See
+  /// `ProjectionDiagnostics::missing_rx_angle_beams`; these drops are also
+  /// inside `filtered_range`.
+    size_t missing_rx_angle_beams = 0;
+
   /// False for tools that do not georeference (bag_to_geotiff): the
   /// georeferenced/dropped clause and its warning are then omitted.
     bool reports_georeferencing = true;
@@ -86,7 +92,9 @@ namespace cube
         << totals.missing_attitude << " missing attitude, "
         << totals.missing_heave << " missing heave, "
         << totals.default_beamwidth_beams << " of " << totals.beams
-        << " beams on the default beamwidth)" << std::endl;
+        << " beams on the default beamwidth, "
+        << totals.missing_rx_angle_beams << " of " << totals.beams
+        << " beams with no receive angle)" << std::endl;
 
     if (totals.default_beamwidth_beams > 0) {
       err << "WARNING: " << totals.default_beamwidth_beams << " of " << totals.beams
@@ -96,11 +104,30 @@ namespace cube
         "uncertainty is a default rather than a measurement."
           << std::endl;
     }
-    if (totals.pings > 0 && totals.soundings == 0) {
-      err << "WARNING: projected 0 soundings from " << totals.pings
-          << " pings -- check the --*-frame overrides match the bag's "
-          << "namespaced frames (see README 'Configuring frames per platform')."
+    if (totals.missing_rx_angle_beams > 0) {
+      err << "WARNING: " << totals.missing_rx_angle_beams << " of " << totals.beams
+          << " beams reported no usable receive angle (rx_angles absent, too "
+        "short, or non-finite), so their position and uncertainty are NaN and "
+        "the range gate dropped them -- those drops are inside the "
+        "range-filtered count above, and are a driver/message problem, not a "
+        "range-gate one."
           << std::endl;
+    }
+    if (totals.pings > 0 && totals.soundings == 0) {
+      // Don't point the operator at their frame overrides when the soundings
+      // were NaN before any frame was consulted (#144).
+      if (totals.beams > 0 && totals.missing_rx_angle_beams == totals.beams) {
+        err << "WARNING: projected 0 soundings from " << totals.pings
+            << " pings -- EVERY beam lacked a usable receive angle, so no "
+            << "sounding could be placed. Check the sonar driver's rx_angles, "
+            << "not the frame configuration."
+            << std::endl;
+      } else {
+        err << "WARNING: projected 0 soundings from " << totals.pings
+            << " pings -- check the --*-frame overrides match the bag's "
+            << "namespaced frames (see README 'Configuring frames per platform')."
+            << std::endl;
+      }
     }
     if (totals.reports_georeferencing &&
       totals.georeferenced_pings == 0 && totals.dropped_georef > 0)
