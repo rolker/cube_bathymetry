@@ -26,7 +26,6 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
-#include "lifecycle_msgs/msg/state.hpp"
 
 #include "cube_bathymetry/detections_projector.h"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -149,6 +148,17 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_cleanup(const rclcpp_lifecycle::State & state)
   {
+    // Undo what on_configure built. This override used to forward to the base
+    // and free nothing, so a cleaned-up node kept its subscriptions and went
+    // on deserializing every ping for a projector nobody was reading (#144).
+    // on_configure re-creates all of it (its declare_parameter calls are
+    // has_parameter-guarded), so configure -> cleanup -> configure works.
+    detections_subscriber_.reset();
+    odom_subscriber_.reset();
+    pointcloud_publisher_.reset();
+    tf_listener_.reset();
+    tf_buffer_.reset();
+    projector_.reset();
     return LifecycleNode::on_cleanup(state);
   }
 
@@ -177,7 +187,22 @@ private:
     // visible effect is log noise. That noise got much louder in #144: a
     // driver that reports no per-beam beamwidths (every M3 ping) now trips a
     // throttled warning on each ping. Do nothing unless we are active.
-    if(get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+    //
+    // The gate reads the PUBLISHER's activation flag rather than the node's
+    // lifecycle state: `get_current_state()` returns a reference into the
+    // state machine that transitions mutate, with no thread-safety guarantee
+    // from rclcpp -- correct here only because main() spins a
+    // SingleThreadedExecutor, an unstated invariant one executor swap away
+    // from being wrong. `LifecyclePublisher::is_activated()` is backed by
+    // std::atomic<bool> and is exactly the condition that matters: when it is
+    // false everything below this point is discarded by the publisher. The
+    // null check covers `unconfigured`, where the publisher does not exist.
+    if(!pointcloud_publisher_ || !pointcloud_publisher_->is_activated()) {
+      // Skipping the work also skips LifecyclePublisher's own one-shot
+      // "publisher is not activated" warning, which would leave
+      // inactive-with-data entirely silent. Say it here instead, throttled.
+      RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        "Detections arriving while not active; not projecting");
       return;
     }
 
