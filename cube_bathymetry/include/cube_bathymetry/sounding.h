@@ -47,6 +47,14 @@ namespace cube
     // sonar_relative_position) so the tier-2 backscatter TL correction can read it
     // downstream (cube_bathymetry#87). Same value used for the geometry below.
     slant_range = static_cast < float > (range);
+    // tx_angle deliberately keeps its 0 default where rx_angle below takes
+    // NaN, and the asymmetry is a behaviour decision, not an oversight: an
+    // unsteered across-track fan has no transmit steering to report, so an
+    // absent tx_angles is a normal encoding of "no tilt" for those sonars,
+    // while an absent rx_angles means the across-track geometry -- the thing
+    // that places the sounding -- was never measured. Treating tx the same way
+    // would turn every sounding from such a driver into a NaN the range gate
+    // drops. Revisiting it needs a field decision; see #144's review notes.
     float tx_angle = 0.0;
     if(i < detections.tx_angles.size()) {
         tx_angle = detections.tx_angles[i];
