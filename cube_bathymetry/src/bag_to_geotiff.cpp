@@ -347,13 +347,11 @@ int main(int argc, char *argv[])
   // Accumulated offline-projection diagnostics, surfaced at the end so a
   // misconfigured-frames or over-tight-range run is diagnosable rather than a
   // silently sparse/empty GeoTIFF (the failure mode #43 exists to kill).
-  size_t proj_pings = 0;
-  size_t proj_soundings = 0;
-  size_t proj_filtered_range = 0;
-  size_t proj_missing_attitude = 0;
-  size_t proj_missing_heave = 0;
-  size_t proj_beams = 0;
-  size_t proj_default_beamwidth_beams = 0;
+  // Whole-run projection totals; cube::report_projection_summary prints them.
+  // This tool does not georeference in the projection pass, so its summary
+  // line omits the georeferenced/dropped clause.
+  cube::ProjectionRunTotals proj_totals;
+  proj_totals.reports_georeferencing = false;
 
   BagReaders bag_readers(bagfile_names);
 
@@ -505,13 +503,13 @@ int main(int argc, char *argv[])
         rclcpp::Serialization<marine_acoustic_msgs::msg::SonarDetections>().deserialize_message(
           &serialized_message, &detections);
         auto projection = projector.project(detections, tfBuffer, std::nanf(""));
-        ++proj_pings;
-        proj_soundings += projection.soundings.size();
-        proj_filtered_range += projection.diagnostics.filtered_range;
-        proj_missing_attitude += projection.diagnostics.missing_attitude;
-        proj_missing_heave += projection.diagnostics.missing_heave;
-        proj_beams += projection.diagnostics.total;
-        proj_default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
+        ++proj_totals.pings;
+        proj_totals.soundings += projection.soundings.size();
+        proj_totals.filtered_range += projection.diagnostics.filtered_range;
+        proj_totals.missing_attitude += projection.diagnostics.missing_attitude;
+        proj_totals.missing_heave += projection.diagnostics.missing_heave;
+        proj_totals.beams += projection.diagnostics.total;
+        proj_totals.default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
         auto pc_message = soundingsToPointCloud2(projection.soundings, detections.header);
         soundings_buffer.push_back(std::make_pair(pc_message, last_nav));
         check_buffer = true;
@@ -601,15 +599,6 @@ int main(int argc, char *argv[])
   std::cout << "\ndone." << std::endl;
 
   if (!detections_topic.empty()) {
-    cube::ProjectionRunTotals proj_totals;
-    proj_totals.reports_georeferencing = false;  // this pass does not georeference
-    proj_totals.pings = proj_pings;
-    proj_totals.soundings = proj_soundings;
-    proj_totals.beams = proj_beams;
-    proj_totals.filtered_range = proj_filtered_range;
-    proj_totals.missing_attitude = proj_missing_attitude;
-    proj_totals.missing_heave = proj_missing_heave;
-    proj_totals.default_beamwidth_beams = proj_default_beamwidth_beams;
     cube::report_projection_summary(proj_totals);
   }
 

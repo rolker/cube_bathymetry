@@ -232,7 +232,12 @@ double ErrorModel::beam_angle(
   const marine_acoustic_msgs::msg::SonarDetections & detections,
   size_t i) const
 {
-  return -detections.rx_angles[i] + (M_PI / 180.0) * vessel_.static_roll;
+  // Bounds-guarded like Sounding's read of the same array (#144): a driver
+  // reporting fewer receive angles than travel times yields NaN here, which
+  // propagates into the uncertainty, instead of an out-of-bounds read.
+  const double rx_angle = (i < detections.rx_angles.size()) ?
+    static_cast<double>(detections.rx_angles[i]) : std::nan("");
+  return -rx_angle + (M_PI / 180.0) * vessel_.static_roll;
 }
 
 double ErrorModel::swath_angle_error(

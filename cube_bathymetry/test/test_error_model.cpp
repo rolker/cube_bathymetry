@@ -1021,4 +1021,35 @@ TEST_F(ErrorModelTest, DepthPitchTermUsesSwathAngleNotPitchCosine)
   EXPECT_GT(slipped, 3.0 * expected);
 }
 
+// #144: a driver may report fewer receive angles than travel times. Both the
+// Sounding geometry and beam_angle() used to index rx_angles unguarded, which
+// is an out-of-bounds read; the surrounding per-beam arrays (tx_angles,
+// intensities) were already guarded. The short beam now yields NaN -- honest,
+// and NaN-safe downstream -- rather than undefined behaviour or a silent 0
+// (which would read as a nadir beam that was never measured).
+TEST_F(ErrorModelTest, ShortRxAnglesYieldNaNRatherThanReadingOffTheEnd)
+{
+  ErrorModel em(vessel, device);
+  auto platform = makePlatform();
+
+  auto det = makeDetections({0.2f, -0.2f}, 0.02f);
+  det.rx_angles.resize(1);  // two beams, one reported angle
+
+  const auto soundings = em.compute(det, platform);
+  ASSERT_EQ(soundings.size(), 2u);
+
+  // Beam 0 is fully reported and unaffected.
+  EXPECT_TRUE(std::isfinite(soundings[0].depth));
+  EXPECT_TRUE(std::isfinite(soundings[0].vertical_error));
+  EXPECT_FLOAT_EQ(soundings[0].beam_angle, 0.2f);
+
+  // Beam 1 has no angle: position, depth, TPU and beam_angle are all NaN.
+  EXPECT_TRUE(std::isnan(soundings[1].beam_angle));
+  EXPECT_TRUE(std::isnan(soundings[1].depth));
+  EXPECT_TRUE(std::isnan(soundings[1].vertical_error));
+  EXPECT_TRUE(std::isnan(soundings[1].horizontal_error));
+  EXPECT_TRUE(std::isnan(soundings[1].sonar_relative_position.y));
+  EXPECT_TRUE(std::isnan(soundings[1].sonar_relative_position.z));
+}
+
 }  // namespace cube

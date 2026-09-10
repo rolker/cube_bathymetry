@@ -23,6 +23,8 @@
 #ifndef CUBE_BATHYMETRY__SOUNDING_H_
 #define CUBE_BATHYMETRY__SOUNDING_H_
 
+#include <cmath>
+
 #include "cube_bathymetry/common.h"
 #include "geometry_msgs/msg/point.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -49,9 +51,16 @@ namespace cube
     if(i < detections.tx_angles.size()) {
         tx_angle = detections.tx_angles[i];
     }
+    // rx_angles is bounds-guarded like every other per-beam array here (#144).
+    // A driver that reports fewer receive angles than travel times used to
+    // send the two reads below off the end of the vector. Absent -> NaN, which
+    // propagates into the position and the TPU, rather than being read as 0
+    // (a nadir beam that was never measured) or as whatever follows in memory.
+    const float rx_angle = (i < detections.rx_angles.size()) ?
+        detections.rx_angles[i] : std::nan("");
     sonar_relative_position.x = range * -sin(tx_angle);
-    sonar_relative_position.y = range * sin(detections.rx_angles[i]);
-    sonar_relative_position.z = range * cos(tx_angle) * cos(detections.rx_angles[i]);
+    sonar_relative_position.y = range * sin(rx_angle);
+    sonar_relative_position.z = range * cos(tx_angle) * cos(rx_angle);
 
     // Per-beam acoustic intensity (backscatter). Sonar-reported and usually
     // uncalibrated; for the Kongsberg M3 (via kongsberg_em_bridge) it is
@@ -68,9 +77,7 @@ namespace cube
     // deferred to cube_bathymetry#15); it is the per-beam geometry the deferred
     // node-output GeoCoder correction reconstructs the grazing angle from. Left
     // NaN when the source omits rx_angles for this beam.
-    if(i < detections.rx_angles.size()) {
-        beam_angle = detections.rx_angles[i];
-    }
+    beam_angle = rx_angle;
     }
 
   /// Depth relative to the sea surface. Positive is up above sea surface

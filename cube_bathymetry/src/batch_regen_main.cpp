@@ -693,14 +693,8 @@ int main(int argc, char * argv[])
   // Accumulated offline-projection diagnostics, surfaced at the end so a
   // misconfigured-frames or over-tight-range run is diagnosable rather than a
   // silently sparse/empty import (the failure mode #43 exists to kill).
-  size_t proj_pings = 0;
-  size_t proj_soundings = 0;
-  size_t proj_filtered_range = 0;
-  size_t proj_missing_attitude = 0;
-  size_t proj_missing_heave = 0;
-  size_t proj_beams = 0;
-  size_t proj_default_beamwidth_beams = 0;
-  size_t proj_dropped_georef = 0;  // pings with no earth transform at their stamp
+  // Whole-run projection totals; cube::report_projection_summary prints them.
+  cube::ProjectionRunTotals proj_totals;
 
   BagReaders bag_readers(bagfile_names);
 
@@ -883,13 +877,13 @@ int main(int argc, char * argv[])
       const float vessel_speed = speedAt(speed_by_ns, ping_ns);
 
       auto projection = projector.project(detections, tfBuffer, vessel_speed);
-      ++proj_pings;
-      proj_soundings += projection.soundings.size();
-      proj_filtered_range += projection.diagnostics.filtered_range;
-      proj_missing_attitude += projection.diagnostics.missing_attitude;
-      proj_missing_heave += projection.diagnostics.missing_heave;
-      proj_beams += projection.diagnostics.total;
-      proj_default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
+      ++proj_totals.pings;
+      proj_totals.soundings += projection.soundings.size();
+      proj_totals.filtered_range += projection.diagnostics.filtered_range;
+      proj_totals.missing_attitude += projection.diagnostics.missing_attitude;
+      proj_totals.missing_heave += projection.diagnostics.missing_heave;
+      proj_totals.beams += projection.diagnostics.total;
+      proj_totals.default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
 
       try {
         auto transform = tfBuffer.lookupTransform(
@@ -968,8 +962,8 @@ int main(int argc, char * argv[])
         // e.g. before the first earth fix, or a TF gap wider than the cache
         // window. Counted (not just logged) so an empty or sparse import is
         // diagnosable rather than silently dropped.
-        ++proj_dropped_georef;
-        if (proj_dropped_georef <= 5) {
+        ++proj_totals.dropped_georef;
+        if (proj_totals.dropped_georef <= 5) {
           std::cerr << "Transform Exception: " << e.what() << std::endl;
         }
       }
@@ -1058,7 +1052,7 @@ int main(int argc, char * argv[])
     {
       double progress = (tf_frontier_ns - begin_ns) / static_cast<double>(total_ns);
       std::cout << "\r  " << static_cast<int>(100 * progress) << "%  " << ping_count
-                << " pings (" << proj_dropped_georef << " dropped, " << pending.size()
+                << " pings (" << proj_totals.dropped_georef << " dropped, " << pending.size()
                 << " pending)      " << std::flush;
       last_report_time = now;
     }
@@ -1073,16 +1067,7 @@ int main(int argc, char * argv[])
   std::cout << "; projected " << ping_count << " pings in " << phase_secs() << "s." << std::endl;
 
   std::cout << "\ndone." << std::endl;
-  cube::ProjectionRunTotals proj_totals;
-  proj_totals.pings = proj_pings;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
-  proj_totals.dropped_georef = proj_dropped_georef;
-  proj_totals.soundings = proj_soundings;
-  proj_totals.beams = proj_beams;
-  proj_totals.filtered_range = proj_filtered_range;
-  proj_totals.missing_attitude = proj_missing_attitude;
-  proj_totals.missing_heave = proj_missing_heave;
-  proj_totals.default_beamwidth_beams = proj_default_beamwidth_beams;
   cube::report_projection_summary(proj_totals);
 
   std::cout << "Gathering per-tile buckets (exact rebuild)..." << std::endl;

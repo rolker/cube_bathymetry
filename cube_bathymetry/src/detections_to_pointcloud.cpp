@@ -171,6 +171,16 @@ private:
 
   void detectionsCallback(const marine_acoustic_msgs::msg::SonarDetections::UniquePtr & msg)
   {
+    // The subscription is created in on_configure and lives on through
+    // `inactive`, where the LifecyclePublisher silently drops anything we
+    // publish -- so every ping projected there is wasted work whose only
+    // visible effect is log noise. That noise got much louder in #144: a
+    // driver that reports no per-beam beamwidths (every M3 ping) now trips a
+    // throttled warning on each ping. Do nothing unless we are active.
+    if(get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+      return;
+    }
+
     const rclcpp::Time stamp(msg->header.stamp);
 
     // Speed over ground from odometry (latest cached value). The staleness gate
