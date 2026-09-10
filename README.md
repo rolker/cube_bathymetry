@@ -234,8 +234,8 @@ consumes, and where each input now comes from:
 
 | Error-model input | Source |
 |---|---|
-| `roll`, `pitch` (dominant per-beam term) | TF: `level_frame ← base_link_frame` at the ping stamp (interpolated to the exact time, not "latest within 1 s") |
-| `heave` | TF: `z(base_link_frame) − z(tide_frame)` at the ping stamp; enters the budget only squared, so it defaults to `0` if the transform is absent |
+| `roll`, `pitch` (dominant per-beam term) | TF: `level_frame ← base_link_frame` at the ping stamp (interpolated to the exact time, not "latest within 1 s"). **Pitch is negated at the producer** (#144): `tf2::getEulerYPR` returns bow-down-positive pitch in FLU, while `cube::Platform` keeps Calder's bow-up-positive convention. Roll needs no flip — a right-handed rotation about +x already lifts port, which is Calder's sense |
+| `heave` | TF: `tide_frame ← base_link_frame` at the ping stamp, **negated** (#144): the transform's `z` is the boat above the tide-corrected surface (REP-103, +up), while `cube::Platform::heave` is Calder's +down. Enters the budget only squared, so the sign is numerically inert and it defaults to `0` if the transform is absent |
 | `vessel_speed` (SOG) | `/odom` twist (`hypot(linear.x, linear.y)`), cached |
 | `surf_sspeed`, `mean_speed` | `SonarDetections.ping_info.sound_speed` |
 | ~~`latitude`, `longitude`, `heading`~~ | **removed** (#32) — Calder used them for *georeferencing*, a job that moved to TF in the ROS port, so they were orphaned: written by the node, read by no consumer |
