@@ -460,8 +460,25 @@ TEST_F(DetectionsProjectorTest, BowUpPitchFollowsCalderSignConvention)
 
   // ...and the two signs are genuinely distinguishable at this lever arm, so
   // the assertions above fail if the negation is dropped.
-  EXPECT_NE(expected[0].vertical_error, unflipped[0].vertical_error);
-  EXPECT_NE(expected[0].horizontal_error, unflipped[0].horizontal_error);
+  //
+  // The guard has to be the same SHAPE as the assertion it guards: EXPECT_NE
+  // is exact, while EXPECT_FLOAT_EQ tolerates 4 ULP (~5e-7 relative), so a
+  // future change that shrank the separation into that gap would leave the
+  // guard passing while the assertion above compared equal against the WRONG
+  // sign. Require a separation comfortably outside EXPECT_FLOAT_EQ's window:
+  // ~20x it, against measured separations of 2.9e-4 relative (vertical) and
+  // 3.3e-5 relative (horizontal) at these lever arms.
+  const float kMinRelativeSeparation = 1e-5f;
+  EXPECT_GT(
+    std::abs(expected[0].vertical_error - unflipped[0].vertical_error),
+    kMinRelativeSeparation * std::abs(expected[0].vertical_error))
+    << "vertical_error: " << expected[0].vertical_error << " vs "
+    << unflipped[0].vertical_error;
+  EXPECT_GT(
+    std::abs(expected[0].horizontal_error - unflipped[0].horizontal_error),
+    kMinRelativeSeparation * std::abs(expected[0].horizontal_error))
+    << "horizontal_error: " << expected[0].horizontal_error << " vs "
+    << unflipped[0].horizontal_error;
 }
 
 }  // namespace cube
