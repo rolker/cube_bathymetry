@@ -75,11 +75,12 @@ parameters with reasonable defaults:
   usable one and from the static `Device::across_track_beamwidth` otherwise
   (`error_model.cpp`, `swath_angle_error`). This is a generic stand-in for
   Calder's per-device `device_compute_angerr`, and can use live per-beam data
-  Calder did not have. See the **Angle error: units, validation and angle
-  widening (#144)** section below for the unit normalization and the
-  `1/cos(angle)` widening — those *are* behavioural changes, made after #47.
+  Calder did not have. See the **Angle error: units and validation (#144)**
+  section below for the unit normalization — that *is* a behavioural change,
+  made after #47 — and for the `1/cos(angle)` widening Calder applies to some
+  devices and this port still does not.
 
-## 2b. Angle error: units, validation and angle widening (#144)
+## 2b. Angle error: units and validation (#144)
 
 **Calder** (`original_cube/libsrc/ccom_core/device.c:808-820`, and again at `:895`
 and `:938`) forms the angular σ as
@@ -127,6 +128,23 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
 - **`/12`, not `/√12`, is confirmed.** The previously-open question is closed
   against Calder's source above: he divides by `12.0`. The divisor is unchanged and
   is now confirmed rather than assumed.
+- **The `1/cos(angle)` widening is still NOT ported — deliberately, and this is
+  the record of that gap.** It was restored during #144's implementation and then
+  backed out before the PR, because it is not the error model's decision to make.
+  Calder applies the widening at only **three of his nine** device families —
+  EM120, EM3000/D and SB8125, each annotated *"flat plate and FFT beamformer"* —
+  and the other five do not widen. The term is therefore a property of the array
+  and its beamformer, not a universal geometric truth: applying it unconditionally
+  would assert that every sonar we use is a flat-plate FFT beamformer, and applying
+  it on top of a driver-reported per-beam width risks double-counting a width the
+  driver may already have broadened. The error model should not have to know
+  whether an array is flat; that geometry belongs with the driver, which knows what
+  hardware it is talking to. Where the widening belongs, and what contract
+  `PingInfo::rx_beamwidths` carries (nominal-nadir width vs. width at that beam's
+  angle), is tracked in
+  [`#148`](https://github.com/rolker/cube_bathymetry/issues/148). Until that
+  lands, the port's angular σ is Calder's un-widened `beamwidth/12` at every
+  angle, which for an oblique beam on a flat array is an under-estimate.
 
 Pinned by `ErrorModelTest.AngleErrorBranchesAgreeOnUnits`,
 `AngleErrorFallbackPinnedAtNadir`, `AngleErrorFallsBackOnEmptyBeamwidths`,
