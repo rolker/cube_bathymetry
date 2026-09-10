@@ -110,7 +110,7 @@ thing.
 
 **3. The `1/cos(angle)` widening does not belong in this PR** (operator, 2026-09-10, after
 the round-1 review). It was implemented and then backed out before the PR. Calder applies it
-at only **three of his nine** device families — EM120, EM3000/D and SB8125, each annotated
+at only **three of his eight** device families — EM120, EM3000/D and SB8125, each annotated
 "flat plate and FFT beamformer" — and the other five do not widen, so applying it
 unconditionally is a modelling claim about our hardware, not a restoration of Calder's
 behaviour. It would also risk double-counting against a driver-reported per-beam width that
