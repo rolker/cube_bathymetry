@@ -302,20 +302,181 @@ Specialists: Static Analysis (clean), Governance, Plan Drift (clean), Claude Adv
 **Verified, not a finding:** the deletion of `VerticalErrorIncreasesWithBeamAngle` is justified. Two independent numerical checks (lead reviewer by hand from the source; Lens A against the built library) both confirm `EXPECT_LT(nadir, 30deg)` genuinely fails under the corrected model, and fails at constant depth too — the old assertion was unsound, not merely inconvenient. The two replacement tests cover what it was reaching for. Note that `EXPECT_LT(nadir, 60deg)` still passes unchanged at the original fixed travel time, so a minimal edit was available; the constant-depth rewrite is a deliberate improvement worth saying so in the PR body.
 
 ### Findings
-- [ ] (must-fix) per-beam beamwidth validation has no upper bound — `ros2sonic` stamps `rx_beamwidths` with the transmit fan (2.27 rad) and `garmin_sidescan` with 0.48 rad; the removed `pi/180` was laundering both. Add a plausibility ceiling — `cube_bathymetry/src/error_model.cpp:255-257`
-- [ ] (must-fix) the `1/cos` widening may be double-applied on the per-beam branch — Calder's widening exists because his table value is a nominal nadir width; a per-beam array plausibly reports the already-broadened width. Decide: widen the fallback branch only, or pin the nominal-nadir contract on `rx_beamwidths` and flag it on marine_tools#82. Untested (the only per-beam test is at nadir) — `cube_bathymetry/src/error_model.cpp:250-270`
-- [ ] (must-fix) Calder applies the widening to only 3 of 9 device families (EM120, EM3000/D, SB8125 — all annotated "flat plate and FFT beamformer"); the other five do not widen. Applying it unconditionally is a modelling decision about our sonars, not a pure restoration — say so and name the non-widening families — `cube_bathymetry/docs/divergences_from_calder.md:83-93,133-140`
-- [ ] (must-fix) "documented (and configured) in degrees" is false — `across_track_beamwidth` is exposed by no ROS parameter, YAML or launch file and is permanently the hardcoded 2.0. Post-fix it is the sole driver of the angular term for every M3 sounding. Strike "configured" and cross-reference cube_bathymetry#145 — `cube_bathymetry/docs/divergences_from_calder.md:104-106`
-- [ ] (must-fix) a third instance of the same false 95% claim survives in the same header, already self-disclosed as a follow-up: `horizontal_latency`'s "Compute approximate 95% error bound"; the implementation applies no scaling either. One-line edit in a file already open — `cube_bathymetry/include/cube_bathymetry/error_model.h:253`
-- [ ] (suggestion) `Platform::roll`/`pitch` are documented degrees and converted by the model, but `DetectionsProjector` feeds radians from `tf2::getEulerYPR` — the identical bug class, one function away, and this change makes it the leading residual. Every `makePlatform()` sets roll=pitch=0 so no test can see it. File its own issue before merging — `cube_bathymetry/src/detections_projector.cpp:112-113`
-- [ ] (suggestion) `rx_beamwidths`' doc comment says "transmit beamwidths" (copy-paste from the line above) — the field this whole issue is about — `cube_bathymetry/include/cube_bathymetry/error_model.h:213`
-- [ ] (suggestion) no guard on `|meas_angle|` beyond 90 degrees: `cos < 0` gives a negative widened beamwidth that squares back to a small, plausible-looking variance — garbage laundered into over-confidence, which is worse than the documented singularity at exactly 90 — `cube_bathymetry/src/error_model.cpp:271`
-- [ ] (suggestion) validation asymmetry: a per-beam 0.0 is rejected, a `Device::across_track_beamwidth` of 0.0/negative/NaN is accepted. Note the tension — five existing tests deliberately set it to 0.0 to isolate other terms, so a constructor that refuses to build would break them; a NaN/negative guard is the safe subset — `cube_bathymetry/src/error_model.cpp:61-67`
-- [ ] (suggestion) `AngleErrorFallbackPinnedAtNadir` and `AngleErrorFallsBackOnEmptyBeamwidths` are the same test with different comments — merge, or give the first a non-default beamwidth — `cube_bathymetry/test/test_error_model.cpp:661-700`
-- [ ] (suggestion) `AngleErrorFallsBackOnNonFiniteBeamwidth` includes `-0.01f`, which is finite, and there is no case for a finite-but-absurd value — the predicate's real weakness is untested — `cube_bathymetry/test/test_error_model.cpp:704-726`
-- [ ] (suggestion) the per-beam rejection is silent per-sounding in a hot loop; `DetectionsProjector::Result` already carries a diagnostics struct (`missing_attitude`, `missing_heave`, `filtered_range`) that a `rejected_beamwidths` counter would fit at zero cost — `cube_bathymetry/src/error_model.cpp:251-259`
-- [ ] (suggestion) nothing invalidates pre-#144 store tiles, so `depths/processed` becomes a mixed store with two uncertainty scales ~800x apart. The operator dropped re-measurement, which is not the same as dropping invalidation; ADR-0003's `build_fingerprint.json` is unimplemented and `package.xml` is pinned 0.0.0. Add an operator-visible note and file the follow-up — `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md`
-- [ ] (suggestion) record that CUBE's tuned constants (`bayes_factor_threshold`, `variance_scale`, `blunder_scalar`, ...) were calibrated against the inflated budget, so outlier rate and swath weighting shift with this change — documentation only, not the dropped re-measurement — `cube_bathymetry/src/hypothesis.cpp:54-88`
-- [ ] (suggestion) `Vessel::gps_drms = 2.0` is a Calder-era ship default that now dominates `horizontal_error` on RTK boats (drms ~0.02 m), adding ~3.9 m of spurious propagation distance at `node.cpp:163`. A consequential default, worth raising even though out of scope — `cube_bathymetry/include/cube_bathymetry/error_model.h:75`
-- [ ] (suggestion) README documents the published `vertical_uncertainty`/`horizontal_uncertainty` fields with no units — a name that says sigma carrying a value that is sigma^2, the same trap one layer out — and says "six float32 fields" where the code publishes seven (`beam_angle` trails) — `README.md:15-16`
-- [ ] (suggestion) `#144` introduced a whole new section 2b but is absent from the doc's "Related issues" list, and its in-text `#144` references are bare where the file's convention is full markdown links — `cube_bathymetry/docs/divergences_from_calder.md:200`
+- [x] (must-fix) per-beam beamwidth validation has no upper bound — `ros2sonic` stamps `rx_beamwidths` with the transmit fan (2.27 rad) and `garmin_sidescan` with 0.48 rad; the removed `pi/180` was laundering both. Add a plausibility ceiling — **premise corrected by the operator**: only `ros2sonic`'s value is wrong (an upstream driver fault, `rolker/ros2sonic#1`); `garmin_sidescan`'s 55 deg is correct data. A hard physical ceiling (>= pi rad) was added instead of a plausibility clamp — `cube_bathymetry/src/error_model.cpp:255-257`
+- [x] (must-fix) the `1/cos` widening may be double-applied on the per-beam branch — Calder's widening exists because his table value is a nominal nadir width; a per-beam array plausibly reports the already-broadened width. Decide: widen the fallback branch only, or pin the nominal-nadir contract on `rx_beamwidths` and flag it on marine_tools#82. Untested (the only per-beam test is at nadir) — resolved by DROPPING the widening from this PR entirely (operator decision); the commit was rebased out — `cube_bathymetry/src/error_model.cpp:250-270`
+- [x] (must-fix) Calder applies the widening to only 3 of 9 device families (EM120, EM3000/D, SB8125 — all annotated "flat plate and FFT beamformer"); the other five do not widen. Applying it unconditionally is a modelling decision about our sonars, not a pure restoration — say so and name the non-widening families — resolved by DROPPING the widening; the divergences doc now records it as an un-ported divergence with Calder's device-family gating as the reason, tracked at cube_bathymetry#148 — `cube_bathymetry/docs/divergences_from_calder.md:83-93,133-140`
+- [x] (must-fix) "documented (and configured) in degrees" is false — `across_track_beamwidth` is exposed by no ROS parameter, YAML or launch file and is permanently the hardcoded 2.0. Post-fix it is the sole driver of the angular term for every M3 sounding. Strike "configured" and cross-reference cube_bathymetry#145 — corrected in both the constructor comment and the divergences doc — `cube_bathymetry/docs/divergences_from_calder.md:104-106`
+- [x] (must-fix) a third instance of the same false 95% claim survives in the same header, already self-disclosed as a follow-up: `horizontal_latency`'s "Compute approximate 95% error bound"; the implementation applies no scaling either. One-line edit in a file already open — deleted — `cube_bathymetry/include/cube_bathymetry/error_model.h:253`
+- [x] (suggestion) `Platform::roll`/`pitch` are documented degrees and converted by the model, but `DetectionsProjector` feeds radians from `tf2::getEulerYPR` — the identical bug class, one function away, and this change makes it the leading residual. Every `makePlatform()` sets roll=pitch=0 so no test can see it. File its own issue before merging — **fixed in this PR**, not deferred to the follow-up: cube_bathymetry#147, which this PR closes — `cube_bathymetry/src/detections_projector.cpp:112-113`
+- [x] (suggestion) `rx_beamwidths`' doc comment says "transmit beamwidths" (copy-paste from the line above) — the field this whole issue is about — corrected to RECEIVE — `cube_bathymetry/include/cube_bathymetry/error_model.h:213`
+- [x] (suggestion) no guard on `|meas_angle|` beyond 90 degrees: `cos < 0` gives a negative widened beamwidth that squares back to a small, plausible-looking variance — garbage laundered into over-confidence, which is worse than the documented singularity at exactly 90 (deferred: the concern was specific to the widening's `1/cos`, which is no longer in this PR; the pre-existing `tan(angle)` singularity in `ang_svp` is unchanged and matches Calder) — `cube_bathymetry/src/error_model.cpp:271`
+- [x] (suggestion) validation asymmetry: a per-beam 0.0 is rejected, a `Device::across_track_beamwidth` of 0.0/negative/NaN is accepted. Note the tension — five existing tests deliberately set it to 0.0 to isolate other terms, so a constructor that refuses to build would break them; a NaN/negative guard is the safe subset — the tension is now stated in the constructor comment and the divergences doc, with `#145` named as what would first make the field human-settable; no guard added, for the reason the finding gives — `cube_bathymetry/src/error_model.cpp:61-67`
+- [x] (suggestion) `AngleErrorFallbackPinnedAtNadir` and `AngleErrorFallsBackOnEmptyBeamwidths` are the same test with different comments — merge, or give the first a non-default beamwidth — `AngleErrorFallbackPinnedAtNadir` now uses a non-default 7.5 deg width — `cube_bathymetry/test/test_error_model.cpp:661-700`
+- [x] (suggestion) `AngleErrorFallsBackOnNonFiniteBeamwidth` includes `-0.01f`, which is finite, and there is no case for a finite-but-absurd value — the predicate's real weakness is untested — split into `AngleErrorFallsBackOnNonPositiveBeamwidth`, and the finite-but-absurd case is now covered by the ceiling tests — `cube_bathymetry/test/test_error_model.cpp:704-726`
+- [x] (suggestion) the per-beam rejection is silent per-sounding in a hot loop; `DetectionsProjector::Result` already carries a diagnostics struct (`missing_attitude`, `missing_heave`, `filtered_range`) that a `rejected_beamwidths` counter would fit at zero cost — `ProjectionDiagnostics::rejected_beamwidths`, filled via the model's own public predicate; throttled warning in the live node, run-summary line plus a warning in all three offline tools — `cube_bathymetry/src/error_model.cpp:251-259`
+- [x] (suggestion) nothing invalidates pre-#144 store tiles, so `depths/processed` becomes a mixed store with two uncertainty scales ~800x apart. The operator dropped re-measurement, which is not the same as dropping invalidation; ADR-0003's `build_fingerprint.json` is unimplemented and `package.xml` is pinned 0.0.0. Add an operator-visible note and file the follow-up (deferred: per the operator, a real consequence but not a code change — carried into the PR body instead) — `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md`
+- [x] (suggestion) record that CUBE's tuned constants (`bayes_factor_threshold`, `variance_scale`, `blunder_scalar`, ...) were calibrated against the inflated budget, so outlier rate and swath weighting shift with this change — documentation only, not the dropped re-measurement — recorded in `divergences_from_calder.md` as a named consequence, explicitly distinguished from the dropped store re-measurement — `cube_bathymetry/src/hypothesis.cpp:54-88`
+- [x] (suggestion) `Vessel::gps_drms = 2.0` is a Calder-era ship default that now dominates `horizontal_error` on RTK boats (drms ~0.02 m), adding ~3.9 m of spurious propagation distance at `node.cpp:163`. A consequential default, worth raising even though out of scope (deferred: out of scope for this PR as the finding itself says — carried into the PR body so it is raised, not dropped) — `cube_bathymetry/include/cube_bathymetry/error_model.h:75`
+- [x] (suggestion) README documents the published `vertical_uncertainty`/`horizontal_uncertainty` fields with no units — a name that says sigma carrying a value that is sigma^2, the same trap one layer out — and says "six float32 fields" where the code publishes seven (`beam_angle` trails) — both corrected: seven fields, and the variance-in-m^2-at-one-sigma meaning spelled out — `README.md:15-16`
+- [x] (suggestion) `#144` introduced a whole new section 2b but is absent from the doc's "Related issues" list, and its in-text `#144` references are bare where the file's convention is full markdown links — `#144`, `#145`, `#147`, `#148` and `rolker/ros2sonic#1` all added to Related issues, as full markdown links — `cube_bathymetry/docs/divergences_from_calder.md:200`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-10 11:45 -04:00
+**By**: Claude Code Agent (Claude Opus 5 (1M context))
+
+**Branch**: `feature/issue-144` at `f579876` (nothing pushed; no PR yet)
+**Addressed**: the `## Local Review (Pre-Push)` of 2026-09-10 10:30 -04:00 (round 1, verdict
+changes-requested, at `aca27ef`) — all 5 must-fix and all 12 suggestions, **as triaged by the
+operator on 2026-09-10**. Where the operator's triage overrides the review, the triage won and
+the finding's checkbox records why.
+**Commits**: `cb2e347`, `b50bf87`, `0154e22`, `0987234`, `16af250`, `f579876`
+
+### Scope changes the operator made to this PR
+
+Three, and they reshape the PR rather than just correcting it:
+
+1. **The `1/cos(angle)` widening is OUT.** Commit `952c1da` (which restored it) was dropped by
+   rebasing the branch onto its parent — nothing was pushed, so no revert commit exists and
+   that SHA is no longer reachable. Its code, its test and its divergences-doc entry went with
+   it. Calder gates the term by device family (three of nine, all "flat plate and FFT
+   beamformer"), the geometry is device-specific, and the error model should not have to know
+   whether an array is flat — that contract belongs with the drivers. Tracked at
+   [cube_bathymetry#148](https://github.com/rolker/cube_bathymetry/issues/148).
+2. **The attitude bug is IN.** [cube_bathymetry#147](https://github.com/rolker/cube_bathymetry/issues/147)
+   is fixed here and **the PR body must close it alongside #144**.
+3. **Must-fix 1's premise was wrong.** No plausibility clamp. Only a hard physical ceiling.
+
+### What changed, finding by finding
+
+**Must-fix 2 and 3 — the widening (`cb2e347`).** Rebased out; the divergences doc now carries
+the omission as a live, reasoned divergence citing #148, so the gap is deliberate and
+traceable rather than silent. `plan.md` no longer claims the widening is in scope and records
+the two scope changes that replaced it.
+
+**Must-fix 1 — the validation ceiling (`b50bf87`).** `ErrorModel::kMaxPerBeamBeamwidthRad` =
+π rad, alongside the existing finite and strictly-positive checks; a rejected value falls back
+to the device beamwidth. Deliberately no tighter: `garmin_sidescan`'s 55° across-track is
+correct data in the correct field (a sidescan does no across-track beamforming), and any clamp
+tight enough to catch the R2Sonic transmit fan would discard it. The code comment, the header
+and the divergences doc all state that the ceiling catches nonsense and does **not** catch a
+misplaced transmit fan.
+
+Rejections are reported, not silent. The predicate is public
+(`ErrorModel::per_beam_beamwidth_usable`) so `DetectionsProjector` counts rejections into
+`ProjectionDiagnostics::rejected_beamwidths` without duplicating it;
+`detections_to_pointcloud` emits a throttled warning (`RCLCPP_WARN_STREAM_THROTTLE`, 10 s,
+matching the existing `missing_attitude` pattern), and `bag_to_geotiff`, `import_bag` and
+`batch_regen_bag` add the count to their run summary plus a warning when it is non-zero.
+`import_bag`'s summary moved into `report_projection_summary()` — the extra counter pushed
+`main()` past cpplint's 500-line limit, and the summary was the part that wanted to move.
+
+Tests: `AngleErrorFallsBackOnPhysicallyImpossibleBeamwidth` (π, 4, 100, 2π),
+`AngleErrorAcceptsWideButLegitimateSidescanBeamwidth` (garmin's 55° used, not swapped for the
+default), `PerBeamBeamwidthUsablePredicateMatchesTheCeiling` (boundary: `nextafter(π,0)` in,
+π out), and `DetectionsProjectorTest.RejectedBeamwidthsAreCounted` (two rejections in a
+three-beam ping whose third beam is legitimately wide; an empty array is not a rejection).
+
+**The attitude bug — #147 (`0154e22`).** `Platform::roll`/`pitch` are now **radians** and the
+four `* M_PI / 180.0` conversions in `swath_depth` and `compute` are deleted — the
+hold-radians-internally route, not conversion at the projector, exactly as #144 handled the
+beamwidth. `Device`/`Vessel` stay in degrees: they are human-entered configuration read off
+datasheets, whereas `Platform` is a measurement from TF with no degrees-facing surface. Sign
+convention **confirmed, not assumed**: roll is a right-handed rotation about REP-103's +x
+(forward), which lifts +y (port), so "+ve is port side up" as documented; `beam_angle()`
+negates the starboard-positive `rx_angles`, so `meas_angle` is port-positive too and the two
+add coherently.
+
+Three tests with **non-zero** roll and pitch, each of which fails against the old code:
+`PlatformRollIsRadiansAndSteersTheBeam` (reported depth tracks `-range·cos(roll + beam
+angle)`), `PlatformAttitudeEntersTheVerticalBudgetInRadians` (the closed form the isolating
+config leaves, `(bw/12)²·range²·sin²(roll+angle)·cos²(pitch)`; the degrees reading differs by
+>10×), and `PositiveRollIsPortSideUp` (a port beam reads shallower than a starboard one at
+equal and opposite angles).
+
+**Must-fix 4 and 5, and the doc suggestions (`0987234`).** `horizontal_latency`'s "approximate
+95% error bound" deleted — the third copy of a claim no implementation matches. The false
+"(and configured) in degrees" replaced: `across_track_beamwidth` is exposed by no parameter,
+YAML or launch file, is permanently the hardcoded 2.0, and after this change is the sole driver
+of the angular term for every M3 sounding — recorded in both the code and the doc, cross-linked
+to [#145](https://github.com/rolker/cube_bathymetry/issues/145). `rx_beamwidths`' doc comment
+said "transmit"; corrected. The validation asymmetry (device value unguarded while the per-beam
+one is) is now stated rather than left to be noticed. README: seven `float32` fields, not six,
+and the two uncertainty fields documented for the first time as variances in m² at one sigma —
+the same trap one layer out. The tuned-constants consequence is recorded in the divergences doc
+as a named consequence, explicitly distinguished from the dropped store re-measurement.
+
+**`rolker/ros2sonic#1` (`16af250`).** Mid-task correction from the operator: cube_bathymetry#149
+is closed as misfiled and the bug now lives in the driver's own repo as
+[`rolker/ros2sonic#1`](https://github.com/rolker/ros2sonic/issues/1), verified upstream (the
+USF-COMIT parent and four SeawardScience branches). Cited by full `owner/repo#number` form in
+the divergences doc; dropped from the code comments entirely, where the *explanation* earns its
+place and a cross-repo number would rot. The earlier commit's message was reworded in place
+(nothing pushed) so no dead reference survives in the history.
+
+**The three-angle test (`f579876`) — and what it found.** The suggestion was to extend
+`VerticalErrorIsWorseAtObliqueAngleAtConstantDepth` from two angles to three so the monotone
+claim is pinned by more than a pair. Done, and the added point falsified the monotone claim: at
+constant depth the total vertical budget **dips at 30° before rising**, because the
+measured-range term projects into depth as `cos²(angle)` and shrinks faster than the angular
+term's `tan²(angle)` grows until somewhere past 30°. A three-point monotone assertion was
+written first and failed on exactly this — the model was right, the assertion was not. The test
+now pins the *shape*, dip included, and says where monotonicity really does hold (the isolated
+angular term, `AngularContributionToVerticalErrorRisesWithBeamAngle`). This is the same class
+of finding as the earlier pass's `VerticalErrorIncreasesWithBeamAngle` rewrite: a two-point
+comparison could not tell "rises" from "dips and recovers".
+
+### Build and test results
+
+From the worktree root, `source setup.bash`, then:
+
+- `./sensors_ws/build.sh cube_bathymetry` — **passed**. Remaining stderr is pre-existing
+  `-Wunused-result` / `tmpnam` / `-Wunused-parameter` warnings in `bag_to_geotiff.cpp`,
+  `error_model.cpp` (unused `platform`/`per_ping_sources` parameters, untouched by this branch)
+  and two other test files.
+- `./sensors_ws/test.sh cube_bathymetry` — **617 tests, 0 errors, 0 failures, 70 skipped**
+  (609 before this pass; +8: five error-model tests for the ceiling and validation split, three
+  attitude tests, one projector diagnostics test, less the widening test that went out with the
+  rebase). `cpplint` and `uncrustify` are green, including the `import_bag_main.cpp` function-size
+  limit.
+
+No test was skipped, disabled or loosened. Two tests failed during the pass and both were
+diagnosed to cause rather than relaxed: `cpplint`'s function-size limit (fixed by extracting
+`report_projection_summary()`, not by raising the limit) and the three-point monotone assertion
+described above (the assertion was wrong about the model, and was replaced by one that is
+right).
+
+This repo has no `.pre-commit-config.yaml` and no installed git hooks, so no pre-commit run
+applies; `cpplint`/`uncrustify` run inside the colcon test suite above.
+
+### Deliberately not done — carry these into the PR body
+
+- **Store invalidation.** Nothing invalidates pre-#144 store tiles, so `depths/processed`
+  becomes a mixed store with two uncertainty scales ~800× apart. The operator dropped
+  *re-measurement*, which is not the same as dropping *invalidation*. Per the operator this is a
+  real consequence but not a code change: it belongs in the PR body, and a follow-up issue is
+  still owed.
+- **`Vessel::gps_drms = 2.0`** is a Calder-era ship default that now dominates
+  `horizontal_error` on RTK boats (drms ~0.02 m), adding ~3.9 m of spurious propagation
+  distance. Out of scope, but raise it in the PR body rather than let it drop.
+- **The past-90° guard** disappeared with the widening. The pre-existing `tan(angle)`
+  singularity in `ang_svp` is unchanged and matches Calder.
+- **The device-value validation asymmetry** is documented, not guarded — several tests set
+  `across_track_beamwidth` to 0.0 deliberately to isolate other terms. Worth revisiting with
+  #145, which is what would first make the field human-settable.
+
+### New finding, not acted on — worth its own issue
+
+`StaticErrorSources::min_angle`/`max_angle` are set from `-vessel.static_roll`, which is
+**degrees** (`error_model.cpp`, constructor), and then compared against `meas_angle`, which is
+**radians** (`swath_angle_error`). The same unit-mismatch class as #144 and #147, in the same
+function. It is latent today only because `Vessel::static_roll` defaults to 0.0, where both
+readings coincide — a non-zero mounting angle would gate the surface-sound-speed term at the
+wrong beam angles. Found while fixing #147; deliberately **not** fixed here, because the
+operator's triage set this PR's scope and a third unit fix would blur it. Should be filed.
+
+### Next step
+
+Pre-push re-review (`/review-code`) against the six-commit diff, then open the PR. The PR body
+must close **both** `#144` and `#147`, and must carry the store-invalidation and `gps_drms`
+notes above. Nothing is pushed — the host performs pushes.

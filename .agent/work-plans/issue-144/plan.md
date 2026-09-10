@@ -72,15 +72,19 @@ Three unit questions were raised and answered during review, against Calder's ve
 source in `original_cube/`. Recording them here so they are not relitigated.
 
 **1. `Device::across_track_beamwidth` stays in DEGREES; convert once at the boundary.**
-Not switched to radians. Rationale: every angular field in the neighbouring `Vessel` and
-`Platform` structs is degrees (roughly a dozen of them, each converted in the constructor),
-so a lone radian field in `Device` would create a fresh trap of exactly the kind this issue
-closes; sonar datasheets quote beamwidths in degrees, which is what a person configuring a
-new device will type; and REP-103's radians rule binds ROS interfaces, not internal C++
-config structs. The bug was never that the field is degrees — it was that the conversion
-sat at the use site instead of the boundary, applied to one sibling field and not the
-other. Moving all three structs to radians would be a legitimate separate change; doing it
-to this one field alone would not.
+Not switched to radians. Rationale: every angular field in the neighbouring `Vessel`
+struct is degrees (roughly a dozen of them, each converted in the constructor), so a lone
+radian field in `Device` would create a fresh trap of exactly the kind this issue closes;
+sonar datasheets quote beamwidths in degrees, which is what a person configuring a new
+device will type; and REP-103's radians rule binds ROS interfaces, not internal C++ config
+structs. The bug was never that the field is degrees — it was that the conversion sat at
+the use site instead of the boundary, applied to one sibling field and not the other.
+
+**Amended 2026-09-10 (round-1 review):** this decision originally covered `Platform`
+alongside `Device` and `Vessel`, and `Platform` has since gone the other way — see settled
+decision 4. The distinction is configuration versus measurement, not struct adjacency:
+`Device` and `Vessel` are typed by a human off a datasheet or a survey report and stay in
+degrees; `Platform` is filled by our own projector from TF and holds radians outright.
 
 **2. `Sounding::vertical_error` and `Sounding::horizontal_error` are VARIANCES in m^2, at
 one sigma, with NO confidence scaling applied.** Evidence, all from Calder:
