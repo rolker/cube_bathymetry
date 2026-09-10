@@ -317,8 +317,12 @@ std::pair<double, double> ErrorModel::swath_depth(
 ) const
 {
   double meas_angle = beam_angle(detections, i);
-  double cosT = cos((platform.roll * M_PI / 180.0) + meas_angle);
-  double sinT = sin((platform.roll * M_PI / 180.0) + meas_angle);
+  // platform.roll is RADIANS (#147), as is meas_angle -- no conversion. The
+  // pre-#147 `* M_PI / 180.0` here treated the projector's radians as degrees
+  // and shrank the vessel's roll by 57.3x before combining it with the beam
+  // angle, which is worst at the swath edge where the angular term dominates.
+  double cosT = cos(platform.roll + meas_angle);
+  double sinT = sin(platform.roll + meas_angle);
 
   double range = detections.two_way_travel_times[i] * detections.ping_info.sound_speed / 2.0;
 
@@ -408,10 +412,13 @@ std::vector<Sounding> ErrorModel::compute(
   const marine_acoustic_msgs::msg::SonarDetections & detections, const Platform & platform) const
 {
   PerPingErrorSources per_ping_sources;
-  per_ping_sources.cos_pitch = cos(platform.pitch * M_PI / 180.0);
-  per_ping_sources.sin_pitch = sin(platform.pitch * M_PI / 180.0);
-  per_ping_sources.cos_roll = cos(platform.roll * M_PI / 180.0);
-  per_ping_sources.sin_roll = sin(platform.roll * M_PI / 180.0);
+  // Platform attitude is RADIANS (#147). Vessel's angular fields are still
+  // degrees and still converted -- those are human-entered survey/config
+  // values, this is a measurement from TF.
+  per_ping_sources.cos_pitch = cos(platform.pitch);
+  per_ping_sources.sin_pitch = sin(platform.pitch);
+  per_ping_sources.cos_roll = cos(platform.roll);
+  per_ping_sources.sin_roll = sin(platform.roll);
 
   per_ping_sources.total_heave_variance = swath_heave(platform, per_ping_sources);
 

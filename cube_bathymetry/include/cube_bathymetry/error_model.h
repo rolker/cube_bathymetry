@@ -55,8 +55,21 @@ namespace cube
     /* No latitude/longitude/heading: the error model never uses them. They were
      * inherited from Calder's Platform (where they fed georeferencing); in this
      * ROS port georeferencing is done by TF, so they were dead fields. */
-    float roll;  /* Roll in degrees, +ve is port side up */
-    float pitch;  /* Pitch in degrees, +ve is bow up */
+    /* RADIANS, not degrees (#147). Platform is filled by our own
+     * DetectionsProjector straight from tf2::getEulerYPR, which returns
+     * radians -- there is no human-typed, datasheet-facing configuration
+     * surface here of the kind that keeps Device/Vessel angles in degrees, so
+     * the units are normalized at the type instead of at the use site. Before
+     * #147 these were documented as degrees, converted as degrees by
+     * ErrorModel, and filled with radians by the one and only producer, which
+     * understated attitude by 57.3x and effectively switched it off.
+     *
+     * Sign convention, confirmed rather than assumed: roll is a right-handed
+     * rotation about the REP-103 +x (forward) axis, which lifts +y (port), so
+     * +ve is port side up as documented; pitch is about +y (port), so +ve is
+     * bow up. */
+    float roll;  /* Roll in radians, +ve is port side up */
+    float pitch;  /* Pitch in radians, +ve is bow up */
     float heave;  /* Heave in meters, +ve down */
     float surf_sspeed;  /* Surface sound speed, m/s */
     float mean_speed;  /* Geometric mean equivalent sound speed, m/s */
@@ -356,9 +369,11 @@ private:
 
   /// `Device::across_track_beamwidth` converted from degrees to radians once,
   /// in the constructor. `Device` itself stays degrees-valued (sonar datasheets
-  /// and every sibling angular config field are in degrees); this is the single
-  /// boundary conversion, so use sites consume radians without converting
-  /// again. See #144 and docs/divergences_from_calder.md.
+  /// and every other angular field on `Device` and `Vessel` are in degrees);
+  /// this is the single boundary conversion, so use sites consume radians
+  /// without converting again. `Platform` is the deliberate exception -- it
+  /// holds radians outright (#147), being a measurement rather than
+  /// human-entered configuration. See #144 and docs/divergences_from_calder.md.
     double device_across_track_beamwidth_rad_ = 0.0;
   };
 

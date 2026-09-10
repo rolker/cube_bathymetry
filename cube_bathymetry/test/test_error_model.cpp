@@ -572,7 +572,7 @@ TEST_F(ErrorModelTest, IntensityIsNaNWhenAbsent)
 //     horizontal_error == ang_meas * range^2
 // and at beam angle A (roll = pitch = 0):
 //     vertical_error   == ang_meas * range^2 * sin^2(A)
-// where ang_meas = (beamwidth_rad / 12)^2 (times the 1/cos(A) widening).
+// where ang_meas = (beamwidth_rad / 12)^2.
 static Vessel angleIsolatingVessel()
 {
   Vessel v{};
@@ -853,6 +853,106 @@ TEST_F(ErrorModelTest, AngularContributionToVerticalErrorRisesWithBeamAngle)
   EXPECT_NEAR(v_nadir, 0.0, 1e-12);  // sin^2(0) == 0
   EXPECT_LT(v_nadir, v_30);
   EXPECT_LT(v_30, v_60);
+}
+
+// --- #147: Platform::roll / Platform::pitch are RADIANS -------------------
+//
+// Every other test in this file zeroes attitude, which is exactly why nothing
+// caught the mismatch: DetectionsProjector fed tf2::getEulerYPR's radians into
+// fields ErrorModel converted as degrees, understating attitude by 57.3x. These
+// tests exercise NON-ZERO roll and pitch, and each one fails against the
+// pre-#147 code.
+
+// Roll steers the beam: the reported depth is -range * cos(roll + beam angle).
+// With the isolating config every other contributor is switched off, so this
+// pins the geometry directly.
+TEST_F(ErrorModelTest, PlatformRollIsRadiansAndSteersTheBeam)
+{
+  auto platform = makePlatform();
+  const double roll_rad = 0.25;      // ~14.3 degrees, a real sea state
+  platform.roll = static_cast<float>(roll_rad);
+
+  const float rx_angle = 0.2f;       // rad, starboard +  ->  meas_angle = -0.2
+  const double meas_angle = -static_cast<double>(rx_angle);
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  auto det = makeDetections({rx_angle}, 0.02f);
+  const double depth = em.compute(det, platform).at(0).depth;
+
+  const double expected = -kIsolatedRange * std::cos(roll_rad + meas_angle);
+  EXPECT_NEAR(depth, expected, 1e-4);
+
+  // And specifically NOT the pre-#147 reading, which took the radians for
+  // degrees and shrank the roll by 57.3x.
+  const double old_wrong =
+    -kIsolatedRange * std::cos(roll_rad * M_PI / 180.0 + meas_angle);
+  EXPECT_GT(std::abs(depth - old_wrong), 0.05);
+}
+
+// Roll and pitch together, against the closed form the isolating config leaves:
+//   vertical_error = (beamwidth_rad/12)^2 * range^2
+//                    * sin^2(roll + beam angle) * cos^2(pitch)
+// Both attitude angles therefore have to be radians for this to hold.
+TEST_F(ErrorModelTest, PlatformAttitudeEntersTheVerticalBudgetInRadians)
+{
+  auto platform = makePlatform();
+  const double roll_rad = 0.25;
+  const double pitch_rad = 0.35;
+  platform.roll = static_cast<float>(roll_rad);
+  platform.pitch = static_cast<float>(pitch_rad);
+
+  const float rx_angle = 0.2f;
+  const double meas_angle = -static_cast<double>(rx_angle);
+  const double bw_rad = 2.0 * M_PI / 180.0;
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  auto det = makeDetections({rx_angle}, 0.02f);
+  const double v = em.compute(det, platform).at(0).vertical_error;
+
+  const double sinT = std::sin(roll_rad + meas_angle);
+  const double cos_pitch = std::cos(pitch_rad);
+  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange * sinT * sinT * cos_pitch * cos_pitch;
+
+  EXPECT_NEAR(v, expected, 1e-5 * expected);
+
+  // The pre-#147 model read both angles as degrees. Distinguish the two: the
+  // sin^2 factor alone differs by more than a factor of ten here.
+  const double old_sinT = std::sin(roll_rad * M_PI / 180.0 + meas_angle);
+  const double old_cos_pitch = std::cos(pitch_rad * M_PI / 180.0);
+  const double old_wrong = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange * old_sinT * old_sinT *
+    old_cos_pitch * old_cos_pitch;
+  EXPECT_GT(old_wrong, 10.0 * v);
+}
+
+// Sign convention, confirmed rather than assumed. Platform documents "+ve is
+// port side up", and beam_angle() makes meas_angle +ve to PORT (it negates the
+// starboard-positive rx angle). Rolling the boat port-side-up therefore steers
+// a port-side beam further from vertical and a starboard-side beam towards it,
+// which the depths must show: at equal and opposite beam angles, the port beam
+// reads shallower (its |cos| is smaller) than the starboard one.
+TEST_F(ErrorModelTest, PositiveRollIsPortSideUp)
+{
+  auto platform = makePlatform();
+  platform.roll = 0.25f;  // rad, port side up
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  // rx_angle +0.3 is starboard, -0.3 is port (rx_angles are starboard-positive).
+  auto det = makeDetections({0.3f, -0.3f}, 0.02f);
+  const auto soundings = em.compute(det, platform);
+  ASSERT_EQ(soundings.size(), 2u);
+
+  const double starboard_depth = soundings.at(0).depth;
+  const double port_depth = soundings.at(1).depth;
+
+  // Depths are negative; the port beam is swung further off vertical, so its
+  // magnitude is the smaller of the two.
+  EXPECT_LT(std::abs(port_depth), std::abs(starboard_depth));
+
+  // Pin both against the closed form so the direction is not just a ratio.
+  EXPECT_NEAR(starboard_depth, -kIsolatedRange * std::cos(0.25 - 0.3), 1e-4);
+  EXPECT_NEAR(port_depth, -kIsolatedRange * std::cos(0.25 + 0.3), 1e-4);
 }
 
 }  // namespace cube

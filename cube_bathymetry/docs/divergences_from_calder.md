@@ -105,9 +105,11 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
 - **Boundary normalization.** `Device::across_track_beamwidth` is converted from
   degrees to radians exactly once, in the `ErrorModel` constructor, alongside the
   identical conversion already done for `along_track_beamwidth`. `Device` itself
-  stays degrees-valued — every sibling angular field on `Device`, `Vessel` and
-  `Platform` is degrees, and sonar datasheets quote beamwidths in degrees, so a
-  lone radian field would be a fresh trap of exactly the kind this fixes.
+  stays degrees-valued — every other angular field on `Device` and `Vessel` is
+  degrees, and sonar datasheets quote beamwidths in degrees, so a lone radian
+  field among them would be a fresh trap of exactly the kind this fixes.
+  (`Platform` went the other way, to radians, in §2c: it is a measurement filled
+  by our own projector, not human-entered configuration.)
   `rx_beamwidths[i]` is consumed as radians with **no** conversion. Both branches
   are therefore correct whether or not
   [`marine_tools#82`](https://github.com/rolker/marine_tools/issues/82) (populating
@@ -184,6 +186,43 @@ Pinned by `ErrorModelTest.AngleErrorBranchesAgreeOnUnits`,
 `PerBeamBeamwidthUsablePredicateMatchesTheCeiling`, and
 `AngleErrorUsesReportedBeamwidthAsRadians`.
 
+## 2c. Platform attitude is held in radians, not degrees (#147)
+
+**Calder** keeps `Platform`'s roll and pitch in **degrees** and converts them at
+each use site (`errmod_full.c`), consistent with the rest of his human-entered
+vessel configuration.
+
+**Port, before #147**: the port kept the degrees labelling
+(`error_model.h`, `/* Roll in degrees, +ve is port side up */`) and the
+degree conversions (`error_model.cpp`, in `swath_depth` and in `compute`'s
+per-ping trig), but the fields' one and only producer is our own
+`DetectionsProjector`, which assigns `tf2::getEulerYPR`'s **radians** straight
+in. One producer, one consumer, and nothing to reconcile them: a 10° roll was
+stored as 0.1745 and then read as 0.1745 **degrees**, so attitude entered the
+model 57.3× understated — effectively switched off. It was invisible while the
+beamwidth fallback inflated the angular term by ~3,283× in variance; fixing that
+(§2b) made this the leading residual.
+
+**Port, after #147**: `Platform::roll` and `Platform::pitch` are **radians**, and
+the four `* M_PI / 180.0` factors are gone. This is the same
+boundary-normalization choice §2b made for the beamwidth, resolved the other way
+for a good reason: `Device` and `Vessel` are human-entered configuration read off
+datasheets and survey reports, so they stay in degrees and convert once at
+construction; `Platform` is a *measurement*, filled by our own projector from TF,
+with no degrees-facing configuration surface to preserve. Normalizing the type is
+cheaper than converting at the boundary and cannot drift.
+
+Sign convention, confirmed rather than assumed: roll is a right-handed rotation
+about REP-103's +x (forward) axis, which lifts +y (port), so `+ve is port side
+up` as documented; `beam_angle()` negates the starboard-positive `rx_angles`, so
+its `meas_angle` is port-positive too and the two add coherently — rolling port
+side up swings a port-side beam further from vertical.
+
+Pinned by `ErrorModelTest.PlatformRollIsRadiansAndSteersTheBeam`,
+`PlatformAttitudeEntersTheVerticalBudgetInRadians` and `PositiveRollIsPortSideUp`
+— the first tests in the suite to use a non-zero attitude at all, which is why
+the defect survived so long.
+
 ## 3. IHO f(z) error model is not ported
 
 **Calder** ships two TPU models: the detailed **FULL** MBES model
@@ -249,3 +288,16 @@ nominates a hypothesis (a manual disambiguation override).
   data-driven CUBE. Tracked separately, not a permanent divergence.
 - [#49](https://github.com/rolker/cube_bathymetry/issues/49) — node extraction
   quality (hypothesis-strength ratio, deterministic tie-break).
+- [#144](https://github.com/rolker/cube_bathymetry/issues/144) — the beamwidth
+  unit mismatch and the per-beam validation of §2b.
+- [#145](https://github.com/rolker/cube_bathymetry/issues/145) — offline
+  processing has no device or vessel configuration, so
+  `Device::across_track_beamwidth` cannot be set for the sonar in hand.
+- [#147](https://github.com/rolker/cube_bathymetry/issues/147) — the `Platform`
+  attitude unit mismatch of §2c, fixed in the same pull request as #144.
+- [#148](https://github.com/rolker/cube_bathymetry/issues/148) — where Calder's
+  `1/cos(angle)` beamwidth widening belongs, given that he gates it by device
+  family. Still un-ported; see §2b.
+- [#149](https://github.com/rolker/cube_bathymetry/issues/149) — `ros2sonic`
+  stamps the transmit horizontal fan into `rx_beamwidths`; a driver fault the
+  §2b physical ceiling deliberately does not paper over.

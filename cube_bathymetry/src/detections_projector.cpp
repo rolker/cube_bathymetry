@@ -105,6 +105,12 @@ ProjectionResult DetectionsProjector::project(
   // Attitude (roll/pitch) from TF at the ping stamp -- the SAME pose used
   // downstream to place the soundings, so the error budget is coherent.
   // Position and heading are not needed by the error model.
+  //
+  // getEulerYPR returns RADIANS and cube::Platform::roll/pitch are radians
+  // (#147), so these assignments are unit-clean. They were not before #147:
+  // Platform documented degrees and ErrorModel converted as degrees, so the
+  // one producer and the one consumer disagreed by 57.3x and attitude was
+  // effectively switched off.
   geometry_msgs::msg::TransformStamped level;
   if (lookupAtOrLatest(tf, params_.level_frame, params_.base_link_frame, stamp, level)) {
     double y, p, r;
