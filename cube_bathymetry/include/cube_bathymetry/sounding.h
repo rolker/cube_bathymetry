@@ -76,7 +76,19 @@ namespace cube
   /// Depth relative to the sea surface. Positive is up above sea surface
   /// and negative is down below sea surface
     float depth = std::nan("");
+
+  /// Vertical total propagated uncertainty as a VARIANCE in m^2, at one sigma.
+  /// No confidence-interval scaling is applied: CUBE consumes this directly as
+  /// the measurement variance in its depth update, and any 95%/99% figure is
+  /// produced downstream at reporting time by scaling the square root
+  /// (CONF_95PC / CONF_99PC). A one-dimensional error about `depth`.
     float vertical_error = 0.0;
+
+  /// Horizontal total propagated uncertainty as a VARIANCE in m^2, at one
+  /// sigma, likewise with no confidence-interval scaling.
+  /// Not the same shape of quantity as `vertical_error`: this one is radial,
+  /// derived from the drms convention, so its square root is a radius in the
+  /// horizontal plane rather than an error along a single axis. See #144.
     float horizontal_error = 0.0;
 
   /// Per-beam acoustic intensity / backscatter (NaN when not reported).

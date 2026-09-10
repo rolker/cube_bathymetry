@@ -70,26 +70,69 @@ parameters with reasonable defaults:
     old 5 % reached ~1.0 m at 20 m, larger than the entire allowance. Pinned by
     `ErrorModelTest.DefaultsInsideIHOOrder1aBudget`.
 
-- **Angle error** — kept as the generic `beamwidth/12` σ approximation using the
-  **live per-ping** `rx_beamwidths[i]` from the `SonarDetections` message, with the
-  static `Device::across_track_beamwidth` as fallback (`error_model.cpp`,
-  `swath_angle_error`). This is a generic stand-in for Calder's per-device
-  `device_compute_angerr`, and uses live per-beam data Calder did not have. No
-  behavioural change in #47 — documented here only.
+- **Angle error** — kept as the generic `beamwidth/12` σ approximation, taking the
+  beamwidth from the live per-ping `rx_beamwidths[i]` when the message reports a
+  usable one and from the static `Device::across_track_beamwidth` otherwise
+  (`error_model.cpp`, `swath_angle_error`). This is a generic stand-in for
+  Calder's per-device `device_compute_angerr`, and can use live per-beam data
+  Calder did not have. See the **Angle error: units, validation and angle
+  widening (#144)** section below for the unit normalization and the
+  `1/cos(angle)` widening — those *are* behavioural changes, made after #47.
 
-  > **Modeling note (not changed in #47):** the code uses `beamwidth / 12` as the
-  > angular σ, *not* the textbook uniform-distribution σ of `beamwidth / √12`.
-  > Whether `/12` is intended or should be `/√12` is an open question; it is left
-  > as-is here (no behavioural change) and tracked as a follow-up alongside the
-  > deg/rad fallback inconsistency below.
+## 2b. Angle error: units, validation and angle widening (#144)
 
-  > **Known pre-existing inconsistency (not fixed in #47):** the static fallback
-  > `across_track_beamwidth / 12` consumes `across_track_beamwidth` in **degrees**,
-  > whereas the live `rx_beamwidths[i]` path converts to **radians** before the
-  > `/12`. The two paths therefore disagree by a factor of `(π/180)` when the
-  > fallback is taken. The live path is the normal one (real pings carry
-  > `rx_beamwidths`); the fallback only fires when the message omits them. Tracked
-  > as a follow-up, not addressed here to keep #47 scoped.
+**Calder** (`original_cube/libsrc/ccom_core/device.c:808-820`, and again at `:895`
+and `:938`) forms the angular σ as
+
+```c
+bw = DEG2RAD(devices[device->type].across_width) / cos(angle);
+rtn = bw / 12.0;
+rtn *= rtn;    /* Dealing with variances */
+```
+
+— i.e. degrees converted to radians at the point of use, widened by `1/cos(angle)`
+for the beam's obliquity, divided by 12, and then squared into a variance.
+
+**Port, before #144**: the fallback consumed `Device::across_track_beamwidth` raw,
+in **degrees** (~57× too large, ~3,283× once squared into a variance), while the
+per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
+`marine_acoustic_msgs/msg/PingInfo` documents that field as **already radians**
+(~57× too small). The `1/cos(angle)` widening was dropped entirely.
+
+**Port, after #144**:
+
+- **Boundary normalization.** `Device::across_track_beamwidth` is converted from
+  degrees to radians exactly once, in the `ErrorModel` constructor, alongside the
+  identical conversion already done for `along_track_beamwidth`. `Device` itself
+  stays degrees-valued — every sibling angular field on `Device`, `Vessel` and
+  `Platform` is degrees, and sonar datasheets quote beamwidths in degrees, so a
+  lone radian field would be a fresh trap of exactly the kind this fixes.
+  `rx_beamwidths[i]` is consumed as radians with **no** conversion. Both branches
+  are therefore correct whether or not
+  [`marine_tools#82`](https://github.com/rolker/marine_tools/issues/82) (populating
+  `rx_beamwidths` for the Kongsberg bridge) has landed.
+- **Validation, not just a length check.** A per-beam value is used only when it is
+  finite and strictly positive; otherwise the device value is used. This matters:
+  `norbit_driver`'s `conversions.cpp` resizes `rx_beamwidths` to a **zero-filled**
+  vector for a beamwidth it does not report, so the old length-only check took the
+  per-beam branch and silently zeroed the angular term.
+- **The fallback was the live path, not the rare one.** The pre-#144 note in this
+  document had this backwards. `kongsberg_em_bridge/node.py:547-550` (repo
+  `marine_tools`) deliberately leaves `rx_beamwidths` **empty** to dodge this very
+  mismatch, so every M3 sounding took the too-large fallback; norbit data took the
+  per-beam branch with a zero. No sonar in service was on the "normal" path this
+  document described. The `kongsberg_em_bridge` "leave empty" comment becomes stale
+  once this normalization ships — flagged on `marine_tools#82`, not fixed here
+  (different repo; see also `cube_bathymetry#30`).
+- **`/12`, not `/√12`, is confirmed.** The previously-open question is closed
+  against Calder's source above: he divides by `12.0`. The divisor is unchanged and
+  is now confirmed rather than assumed.
+
+Pinned by `ErrorModelTest.AngleErrorBranchesAgreeOnUnits`,
+`AngleErrorFallbackPinnedAtNadir`, `AngleErrorFallsBackOnEmptyBeamwidths`,
+`AngleErrorFallsBackOnZeroFilledBeamwidths`,
+`AngleErrorFallsBackOnNonFiniteBeamwidth`, and
+`AngleErrorUsesReportedBeamwidthAsRadians`.
 
 ## 3. IHO f(z) error model is not ported
 

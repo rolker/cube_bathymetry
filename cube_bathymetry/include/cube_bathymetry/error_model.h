@@ -238,13 +238,14 @@ private:
       const PerPingErrorSources & per_ping_sources) const;
 
   /// Compute variance of horizontal positioning error caused by
-  /// GPS antennae not being at the transducer head
-  /// Returns approximate 95% confidence interval for error
+  /// GPS antennae not being at the transducer head.
+  /// Returns a variance in m^2 at one sigma: no confidence-interval scaling is
+  /// applied here (see #144). Calder's own header claims a doubling to reach a
+  /// 95% interval, but neither his implementation nor this one applies it --
+  /// the confidence scaling lives at reporting time (CONF_95PC), not in the
+  /// error budget.
   /// This computes eqn. 3.90, summarizing the component of horizontal
   /// error due to misalignment of the GPS antennae and the tx head.
-  /// Note that in keeping with the report and spreadsheet, we return
-  /// twice the nominal variance in order to approximate the 95% conf.
-  /// interval assuming a Gaussian distribution.
     double horizontal_positioning_error(
       const Platform & platform,
       const PerPingErrorSources & per_ping_sources) const;
@@ -309,10 +310,10 @@ private:
 
   /// Compute component of horizontal positioning error associated with
   /// ship attitude and offsets.
-  /// Returns approximate 95% confidence interval.
-  /// This assumes, per the spreadsheet and report, that we have to work
-  /// at the 95% confidence level due to the drms approximation. We
-  /// multiply the standard deviation estimate by 2.0 to approximate this.
+  /// Returns a variance in m^2 at one sigma: no confidence-interval scaling is
+  /// applied here (see #144). The stale claim that the estimate is multiplied
+  /// by 2.0 to reach a 95% interval never matched the implementation, here or
+  /// in Calder's.
   /// We are computing eqns. 3.77-3.82. Note that the spreadsheet
   /// does not include any component for the along-track beam angle,
   /// unlike the report, and we ignore it here also.
@@ -326,6 +327,13 @@ private:
     Vessel vessel_;
     StaticErrorSources static_error_sources_;
     Device device_;
+
+  /// `Device::across_track_beamwidth` converted from degrees to radians once,
+  /// in the constructor. `Device` itself stays degrees-valued (sonar datasheets
+  /// and every sibling angular config field are in degrees); this is the single
+  /// boundary conversion, so use sites consume radians without converting
+  /// again. See #144 and docs/divergences_from_calder.md.
+    double device_across_track_beamwidth_rad_ = 0.0;
   };
 
 

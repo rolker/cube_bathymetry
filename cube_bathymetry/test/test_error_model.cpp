@@ -178,21 +178,35 @@ TEST_F(ErrorModelTest, HorizontalErrorFloorsNonFiniteVesselSpeed)
   EXPECT_FLOAT_EQ(s_inf[0].horizontal_error, s_zero[0].horizontal_error);
 }
 
-TEST_F(ErrorModelTest, VerticalErrorIncreasesWithBeamAngle)
+// Rewritten for #144. This test previously held the two-way travel time fixed
+// (so the DEPTH shrank as the beam swung out) and asserted the total vertical
+// error rose monotonically nadir -> 30 deg -> 60 deg. That only held because
+// the angular term was inflated ~3283x by the degrees-as-radians bug: it
+// swamped every other term, so the budget tracked sin^2(angle) alone.
+//
+// With the angular term at its correct magnitude the picture is the real one:
+// the measured-range error projects into depth as cos^2(angle) and so SHRINKS
+// off nadir, while the angular term grows as sin^2(angle) * range^2. At shallow
+// depths with a narrow beam the shrinking range projection wins at moderate
+// angles, so the total dips at 30 deg before the angular term takes over. The
+// genuine, model-correct property is that an oblique beam is worse than nadir
+// once the angular term dominates -- asserted here at constant depth, which is
+// the comparison that isolates beam obliquity from a shortening water column.
+TEST_F(ErrorModelTest, VerticalErrorIsWorseAtObliqueAngleAtConstantDepth)
 {
   ErrorModel em(vessel, device);
   auto platform = makePlatform();
 
+  // Hold the DEPTH at 15 m rather than the slant range: travel time scales as
+  // 1/cos(angle) so depth = range*cos(angle) stays put.
   auto det_nadir = makeDetections({0.0f}, 0.02f);
-  auto det_30deg = makeDetections({0.5236f}, 0.02f);  // ~30 degrees
-  auto det_60deg = makeDetections({1.0472f}, 0.02f);  // ~60 degrees
+  auto det_60deg = makeDetections({1.0472f}, 0.04f);  // ~60 deg, same 15 m depth
 
   auto s_nadir = em.compute(det_nadir, platform);
-  auto s_30 = em.compute(det_30deg, platform);
   auto s_60 = em.compute(det_60deg, platform);
 
-  EXPECT_LT(s_nadir[0].vertical_error, s_30[0].vertical_error);
-  EXPECT_LT(s_30[0].vertical_error, s_60[0].vertical_error);
+  ASSERT_NEAR(s_nadir[0].depth, s_60[0].depth, 1e-3);  // same depth, by construction
+  EXPECT_LT(s_nadir[0].vertical_error, s_60[0].vertical_error);
 }
 
 TEST_F(ErrorModelTest, HorizontalErrorVariesWithBeamAngle)
@@ -548,6 +562,212 @@ TEST_F(ErrorModelTest, IntensityIsNaNWhenAbsent)
   auto soundings = em.compute(det, platform);
   ASSERT_EQ(soundings.size(), 1u);
   EXPECT_TRUE(std::isnan(soundings[0].intensity));
+}
+
+// --- #144: angular-measurement term units, validation ------------------------
+
+// Isolate swath_angle_error's beamwidth term (ang_meas). Everything else that
+// could reach vertical_error or horizontal_error is zeroed, so at nadir with
+// zero attitude:
+//     horizontal_error == ang_meas * range^2
+// and at beam angle A (roll = pitch = 0):
+//     vertical_error   == ang_meas * range^2 * sin^2(A)
+// where ang_meas = (beamwidth_rad / 12)^2 (times the 1/cos(A) widening).
+static Vessel angleIsolatingVessel()
+{
+  Vessel v{};
+  v.draft_sdev = 0.0;
+  v.ddraft_sdev = 0.0;
+  v.loading_sdev = 0.0;
+  v.tide_measured_sdev = 0.0;
+  v.tide_predicted_sdev = 0.0;
+  v.heave_fixed_sdev = 0.0;
+  v.heave_var_percent = 0.0;
+  v.gps_off_sdev = 0.0;
+  v.imu_off_sdev = 0.0;
+  v.gps_drms = 0.0;
+  v.gps_latency = 0.0;
+  v.gps_latency_sdev = 0.0;
+  v.imu_latency_sdev = 0.0;
+  v.tx_latency_sdev = 0.0;
+  v.sog_sdev = 0.0;
+  v.imu_rp_align_sdev = 0.0;
+  v.imu_g_align_sdev = 0.0;
+  v.roll_sdev = 0.0;         // kills base_roll_variance
+  v.pitch_sdev = 0.0;
+  v.pitch_stab_sdev = 0.0;
+  v.gyro_sdev = 0.0;
+  v.svp_sdev = 0.0;          // kills ang_svp and profile_err
+  v.surf_ss_sdev = 0.0;      // kills ang_surf_speed
+  v.static_roll = 0.0;
+  return v;
+}
+
+// Companion device: only the across-track beamwidth is left alive.
+static Device angleIsolatingDevice(double across_track_beamwidth_deg)
+{
+  Device d{};
+  d.across_track_beamwidth = across_track_beamwidth_deg;
+  d.along_track_beamwidth = 0.0;   // kills beamwidth_err
+  d.range_error_percent = 0.0;     // kills the range term
+  d.range_error_floor_m = 0.0;
+  return d;
+}
+
+// 0.02 s two-way at 1500 m/s -> 15 m range.
+static constexpr double kIsolatedRange = 15.0;
+
+TEST_F(ErrorModelTest, AngleErrorBranchesAgreeOnUnits)
+{
+  auto platform = makePlatform();
+  const double bw_deg = 3.0;
+  const double bw_rad = bw_deg * M_PI / 180.0;
+  Vessel v = angleIsolatingVessel();
+
+  // Fallback branch: no rx_beamwidths at all, device configured in degrees.
+  auto det_fallback = makeDetections({0.0f}, 0.02f);
+  ASSERT_TRUE(det_fallback.ping_info.rx_beamwidths.empty());
+  ErrorModel em_fallback(v, angleIsolatingDevice(bw_deg));
+  const double h_fallback =
+    em_fallback.compute(det_fallback, platform).at(0).horizontal_error;
+
+  // Per-beam branch: the same physical beamwidth, reported in radians as
+  // marine_acoustic_msgs/PingInfo specifies. The device value is deliberately
+  // different so a silent fallback would show up as a mismatch.
+  auto det_perbeam = makeDetections({0.0f}, 0.02f);
+  det_perbeam.ping_info.rx_beamwidths.push_back(static_cast<float>(bw_rad));
+  ErrorModel em_perbeam(v, angleIsolatingDevice(bw_deg * 10.0));
+  const double h_perbeam =
+    em_perbeam.compute(det_perbeam, platform).at(0).horizontal_error;
+
+  ASSERT_GT(h_fallback, 0.0);
+  // The two branches must agree: both are radians by the time they are used.
+  // Before #144 they disagreed by (pi/180)^2 == ~3283x.
+  EXPECT_NEAR(h_perbeam, h_fallback, 1e-6 * h_fallback);
+}
+
+TEST_F(ErrorModelTest, AngleErrorFallbackPinnedAtNadir)
+{
+  auto platform = makePlatform();
+  // The stock Device default: 2 degrees across-track.
+  Vessel v = angleIsolatingVessel();
+  Device d = angleIsolatingDevice(2.0);
+  auto det = makeDetections({0.0f}, 0.02f);
+
+  ErrorModel em(v, d);
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  // Nadir, so the 1/cos(angle) widening factor is exactly 1.0 and this pin is
+  // unaffected by it.
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  const double ang_meas = (bw_rad / 12.0) * (bw_rad / 12.0);
+  const double expected = ang_meas * kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+}
+
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnEmptyBeamwidths)
+{
+  auto platform = makePlatform();
+  // Today's real Kongsberg M3 behaviour: kongsberg_em_bridge leaves
+  // rx_beamwidths empty on purpose.
+  auto det = makeDetections({0.0f}, 0.02f);
+  ASSERT_TRUE(det.ping_info.rx_beamwidths.empty());
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+}
+
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnZeroFilledBeamwidths)
+{
+  auto platform = makePlatform();
+  // Today's real norbit behaviour: conversions.cpp resizes rx_beamwidths to a
+  // zero-filled vector for a value it does not report. A length-only check
+  // takes that 0.0 as a measurement and silently deletes the angular term.
+  auto det = makeDetections({0.0f}, 0.02f);
+  det.ping_info.rx_beamwidths.assign(1, 0.0f);
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_GT(h, 0.0);  // not silently zeroed
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+}
+
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnNonFiniteBeamwidth)
+{
+  auto platform = makePlatform();
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+
+  for (float bad : {std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
+      -0.01f})
+  {
+    auto det = makeDetections({0.0f}, 0.02f);
+    det.ping_info.rx_beamwidths.assign(1, bad);
+
+    ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+    const double h = em.compute(det, platform).at(0).horizontal_error;
+
+    ASSERT_TRUE(std::isfinite(h));
+    EXPECT_NEAR(h, expected, 1e-6 * expected);
+  }
+}
+
+TEST_F(ErrorModelTest, AngleErrorUsesReportedBeamwidthAsRadians)
+{
+  auto platform = makePlatform();
+  // A real, usable per-beam value: 4 degrees expressed in radians, twice the
+  // device's 2-degree fallback.
+  const double reported_rad = 4.0 * M_PI / 180.0;
+  auto det = makeDetections({0.0f}, 0.02f);
+  det.ping_info.rx_beamwidths.assign(1, static_cast<float>(reported_rad));
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double expected = (reported_rad / 12.0) * (reported_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-6 * expected);
+
+  // And specifically NOT the pre-#144 double conversion, which would have
+  // scaled the reported radians by another pi/180.
+  const double double_converted = reported_rad * (M_PI / 180.0);
+  const double old_wrong = (double_converted / 12.0) * (double_converted / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_GT(h, 100.0 * old_wrong);
+}
+
+// The monotone property the old test was reaching for, stated over the term it
+// actually applies to: the angular-measurement contribution to the vertical
+// budget rises with beam angle. Isolated so no other term can mask it.
+TEST_F(ErrorModelTest, AngularContributionToVerticalErrorRisesWithBeamAngle)
+{
+  auto platform = makePlatform();
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+
+  auto vertical = [&](float rx_angle) {
+      auto det = makeDetections({rx_angle}, 0.02f);
+      return static_cast<double>(em.compute(det, platform).at(0).vertical_error);
+    };
+
+  const double v_nadir = vertical(0.0f);
+  const double v_30 = vertical(0.5236f);
+  const double v_60 = vertical(1.0472f);
+
+  EXPECT_NEAR(v_nadir, 0.0, 1e-12);  // sin^2(0) == 0
+  EXPECT_LT(v_nadir, v_30);
+  EXPECT_LT(v_30, v_60);
 }
 
 }  // namespace cube

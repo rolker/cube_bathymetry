@@ -177,7 +177,23 @@ must describe it as restoring a term the port omitted, not as adding a term Cald
      `marine_tools` follow-up (kongsberg_em_bridge's now-stale "leave empty" comment).
 5. Tests (`test/test_error_model.cpp`), added alongside the existing tests that zero
    `across_track_beamwidth` (those remain valid — they isolate other terms and don't need to
-   change):
+   change).
+
+   **Implementation note (found during implementation, 2026-09-10):** one existing test that
+   does *not* zero `across_track_beamwidth` — `VerticalErrorIncreasesWithBeamAngle` — turned
+   out to encode the bug. It held the two-way travel time fixed (so the depth shrank as the
+   beam swung out) and asserted the total vertical error rose monotonically nadir → 30° →
+   60°. That only held because the ~3283× inflated angular term swamped every other term, so
+   the budget tracked `sin^2(angle)` alone. With the term at its correct magnitude the
+   measured-range error's `cos^2(angle)` projection dominates at moderate angles and the
+   total *dips* at 30° before rising. The test was replaced, not loosened, by two tests that
+   pin properties that are actually true of the corrected model:
+   `VerticalErrorIsWorseAtObliqueAngleAtConstantDepth` (nadir vs 60° at constant *depth*, the
+   comparison that isolates beam obliquity from a shortening water column) and
+   `AngularContributionToVerticalErrorRisesWithBeamAngle` (the monotone property stated over
+   the isolated angular term it actually applies to). The rewrite's comment records why.
+
+   New tests:
    - **Unit agreement**: drive the fallback and per-beam branches with equivalent inputs (a
      device beamwidth of `D` degrees vs. a single-beam `rx_beamwidths[0] = D * M_PI / 180.0`
      radians) at the same beam angle, and assert equal `ang_meas`/resulting horizontal or

@@ -58,6 +58,14 @@ ErrorModel::ErrorModel(const Vessel & vessel, const Device & device)
 
   static_error_sources_.sound_speed_profile_variance = vessel.svp_sdev * vessel.svp_sdev;
 
+  // Boundary normalization (#144): Device::across_track_beamwidth is documented
+  // (and configured) in degrees, like every other angular field on Device,
+  // Vessel and Platform. Convert it to radians exactly once, here, the same way
+  // along_track_beamwidth is converted just below -- the bug this closes was a
+  // conversion that sat at the use site for one sibling field and nowhere at
+  // all for the other.
+  device_across_track_beamwidth_rad_ = device.across_track_beamwidth * M_PI / 180.0;
+
   static_error_sources_.along_track_beamwidth_coefficient = (1.0 -
     cos((device.along_track_beamwidth * M_PI / 180.0) / 2.0)) *
     (1.0 - cos((device.along_track_beamwidth * M_PI / 180.0) / 2.0));
@@ -233,10 +241,25 @@ double ErrorModel::swath_angle_error(
     static_error_sources_.sound_speed_profile_variance /
     (4.0 * platform.mean_speed * platform.mean_speed);
 
-  double ang_meas = device_.across_track_beamwidth / 12.0;
+  // Beamwidth for the angular-measurement term, in RADIANS from either source
+  // (#144). The device fallback was converted once in the constructor;
+  // marine_acoustic_msgs/PingInfo documents rx_beamwidths as radians already,
+  // so it is consumed unconverted. Previously the fallback was used raw in
+  // degrees (~57x too large) and the per-beam value was converted a second time
+  // (~57x too small) -- the two branches disagreed by (pi/180).
+  double beamwidth = device_across_track_beamwidth_rad_;
   if(i < detections.ping_info.rx_beamwidths.size()) {
-    ang_meas = detections.ping_info.rx_beamwidths[i] * (M_PI / 180.0) / 12.0;
+    const float reported = detections.ping_info.rx_beamwidths[i];
+    // A per-beam value is only a measurement when it is finite and strictly
+    // positive. norbit_driver resizes rx_beamwidths to a zero-filled vector for
+    // beamwidths it does not report; trusting those zeros silently deletes the
+    // angular term instead of falling back to the device value.
+    if(std::isfinite(reported) && reported > 0.0f) {
+      beamwidth = reported;
+    }
   }
+
+  double ang_meas = beamwidth / 12.0;
   ang_meas *= ang_meas;
 
   return ang_meas + ang_svp + ang_surf_speed + static_error_sources_.base_roll_variance;
