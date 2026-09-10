@@ -12,8 +12,19 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
-`soundings` carries six `float32` fields per point, in order: `x`, `y`, `z`,
-`intensity`, `vertical_uncertainty`, `horizontal_uncertainty`. `intensity` is the
+`soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
+`intensity`, `vertical_uncertainty`, `horizontal_uncertainty`, `beam_angle`.
+
+**Read the two uncertainty fields carefully: despite the names, they are
+VARIANCES in m², at one sigma, with no confidence-interval scaling applied** —
+`cube::Sounding::vertical_error` / `horizontal_error` verbatim (see
+`include/cube_bathymetry/sounding.h`). A consumer that treats
+`vertical_uncertainty` as a σ in metres will understate the error band by its own
+square root. Any 95%/99% figure is produced downstream by scaling the square
+root. `vertical_uncertainty` is a one-dimensional error about depth;
+`horizontal_uncertainty` is radial (drms-derived), so its square root is a radius
+in the horizontal plane rather than an error along a single axis. `beam_angle` is
+the beam's incidence angle relative to nadir, in radians. `intensity` is the
 per-beam acoustic backscatter copied from `SonarDetections.intensities` — usually
 uncalibrated, but reflectivity in dB for the Kongsberg M3 (via `kongsberg_em_bridge`);
 it is `NaN` when the source omits intensities. The positions are in the detections'

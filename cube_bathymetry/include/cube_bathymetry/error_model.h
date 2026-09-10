@@ -222,7 +222,10 @@ namespace cube
     float sound_speed = 0.0;
   /// Sonar reported -3db transmit beamwidths in radians
     const std::vector < float > * tx_beamwidths = nullptr;
-  /// Sonar reported -3db transmit beamwidths in radians
+  /// Sonar reported -3db RECEIVE beamwidths in radians. (This said "transmit"
+  /// until #144 -- a copy-paste from the line above, on the very field whose
+  /// units that issue was about.) May be empty when the driver reports none;
+  /// values are validated before use, see ErrorModel::per_beam_beamwidth_usable.
     const std::vector < float > * rx_beamwidths = nullptr;
   /// Detection flags. 0 means good.
     const std::vector < uint8_t > * detection_flags = nullptr;
@@ -289,7 +292,12 @@ private:
       const Platform & platform,
       const PerPingErrorSources & per_ping_sources) const;
 
-  /// Compute approximate 95% error bound due to latency errors
+  /// Compute the horizontal error component due to latency errors.
+  /// Returns a variance in m^2 at one sigma: no confidence-interval scaling is
+  /// applied here (see #144). This header used to claim an "approximate 95%
+  /// error bound" -- the third copy of a claim the implementation has never
+  /// matched, alongside the two on horizontal_positioning_error. The 95%
+  /// scaling lives at reporting time (CONF_95PC), not in the error budget.
   /// We assume that the coefficients for eqn 3.100 have been pre-computed
   /// and stored in the workspace, and that the trig. functions for the
   /// current swath orientation have been computed.

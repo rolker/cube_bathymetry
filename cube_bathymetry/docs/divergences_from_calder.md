@@ -114,6 +114,24 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
   are therefore correct whether or not
   [`marine_tools#82`](https://github.com/rolker/marine_tools/issues/82) (populating
   `rx_beamwidths` for the Kongsberg bridge) has landed.
+- **"Documented in degrees" is the whole of it — it is not *configured* at all.**
+  `Device::across_track_beamwidth` is exposed by no ROS parameter, no YAML and no
+  launch file, so in practice it is permanently the hardcoded `2.0` that belongs
+  to no particular sonar. Since `kongsberg_em_bridge` leaves `rx_beamwidths`
+  empty on every M3 ping, that single constant is — after this fix — the **sole
+  driver of the angular term for every M3 sounding**. Correcting its units
+  without being able to set it right is only half the job; giving the offline
+  tools a device/vessel configuration is
+  [`#145`](https://github.com/rolker/cube_bathymetry/issues/145), for which this
+  issue is the stated prerequisite.
+- **The device value itself is not validated, unlike the per-beam one.** A
+  `Device::across_track_beamwidth` of `0.0`, negative, or NaN is accepted as
+  given, while a per-beam `0.0` is rejected. Deliberate for now — several tests
+  set it to `0.0` precisely to isolate other terms, so a constructor that
+  refused to build would break them — but the asymmetry means a misconfigured
+  device silently deletes the very term the per-beam path is guarded against
+  deleting. Worth revisiting with `#145`, which is what would first make the
+  field settable by a human.
 - **Validation, not just a length check.** A per-beam value is used only when it is
   finite, strictly positive, and **below π radians**; otherwise the device value is
   used. This matters: `norbit_driver`'s `conversions.cpp` resizes `rx_beamwidths` to
@@ -185,6 +203,18 @@ Pinned by `ErrorModelTest.AngleErrorBranchesAgreeOnUnits`,
 `AngleErrorAcceptsWideButLegitimateSidescanBeamwidth`,
 `PerBeamBeamwidthUsablePredicateMatchesTheCeiling`, and
 `AngleErrorUsesReportedBeamwidthAsRadians`.
+
+### Consequence: CUBE's tuned constants were calibrated against the old budget
+
+Recorded, not acted on. `hypothesis.cpp`'s decision constants —
+`bayes_factor_threshold`, `variance_scale`, `blunder_scalar` and friends — were
+tuned while the angular term was ~3,283× too large in variance, i.e. against a
+budget that made almost every sounding look uncertain. With the term at its
+correct magnitude the same constants sit against a much tighter budget, so
+outlier rejection rate and the relative weighting of nadir versus swath-edge
+soundings both shift. This is documentation of a known consequence, not the
+store re-measurement the operator explicitly dropped for #144; it is what a
+future re-tuning effort should start from.
 
 ## 2c. Platform attitude is held in radians, not degrees (#147)
 

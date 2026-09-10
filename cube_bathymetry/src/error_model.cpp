@@ -59,11 +59,25 @@ ErrorModel::ErrorModel(const Vessel & vessel, const Device & device)
   static_error_sources_.sound_speed_profile_variance = vessel.svp_sdev * vessel.svp_sdev;
 
   // Boundary normalization (#144): Device::across_track_beamwidth is documented
-  // (and configured) in degrees, like every other angular field on Device,
-  // Vessel and Platform. Convert it to radians exactly once, here, the same way
-  // along_track_beamwidth is converted just below -- the bug this closes was a
-  // conversion that sat at the use site for one sibling field and nowhere at
-  // all for the other.
+  // in degrees, like every other angular field on Device and Vessel. Convert it
+  // to radians exactly once, here, the same way along_track_beamwidth is
+  // converted just below -- the bug this closes was a conversion that sat at
+  // the use site for one sibling field and nowhere at all for the other.
+  //
+  // "Documented in degrees" is the whole of it: the field is exposed by NO ROS
+  // parameter, no YAML and no launch file, so in practice it is permanently the
+  // hardcoded 2.0 that belongs to no particular sonar. Since every M3 ping
+  // leaves rx_beamwidths empty, that one constant is now the sole driver of the
+  // angular term for every M3 sounding, which is why giving the offline tools a
+  // device/vessel configuration matters --
+  // https://github.com/rolker/cube_bathymetry/issues/145.
+  //
+  // Note the asymmetry with the per-beam validation below: a reported 0.0 is
+  // rejected, but a Device::across_track_beamwidth of 0.0 (or negative, or NaN)
+  // is accepted as given. That is deliberate for now -- several tests set it to
+  // 0.0 precisely to isolate other terms, so a constructor that refused to
+  // build would break them -- but it does mean a misconfigured device silently
+  // deletes the term the per-beam path is guarded against deleting.
   device_across_track_beamwidth_rad_ = device.across_track_beamwidth * M_PI / 180.0;
 
   static_error_sources_.along_track_beamwidth_coefficient = (1.0 -
