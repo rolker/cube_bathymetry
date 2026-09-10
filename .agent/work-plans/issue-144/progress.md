@@ -149,3 +149,15 @@ against whichever normalization boundary this issue lands.
       `cube_bathymetry#30` cross-reference.
 - [ ] Re-measure `depths/processed` uncertainty over the same Lake Massabesic 10 m box cited
       in the issue and record before/after numbers, per the issue's Acceptance section.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-09-10 09:34 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-144/plan.md` at `112b9ba`
+**Branch**: feature/issue-144 at `112b9ba`
+**Phases**: single (two atomic commits within it: unit-mismatch fix + Calder angle-widening enhancement)
+
+### Open questions
+- [ ] No open questions — plan is review-plan-ready.
