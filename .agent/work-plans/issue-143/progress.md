@@ -118,3 +118,67 @@ reprocess* of existing level-10 stores, which this issue explicitly excludes.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Sonnet`
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-09-10 14:59 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `6e45b3c`
+**Branch**: feature/issue-143 at `6e45b3c`
+**Phases**: single (a stacked-PR split point is named, but not preferred)
+
+### Summary
+
+The unit-of-decision question the Issue Review left open is **settled in the plan**
+per the operator's instruction (no separate ADR, no design issue): the unit is a
+**GGGS quadtree cut** — the emitted tile itself, resolved top-down from
+`coarsest_level` (8), descending wherever a grid's shallowest depth implies a finer
+level, terminating at `finest_level` (14). `depthAdaptiveLevel(double)` keeps its
+**current scalar signature** — the unit is answered by the caller's descent, and the
+scalar it is fed is the shallowest depth in the candidate tile, which is already the
+signature's documented contract. Per-region-at-a-fixed-decision-level was rejected
+because exact nesting forces the decision grid to level 8 (3.48 km), where one 2 m
+shoal would drag 3.48 km of ground to level 14 (256x the level-10 storage).
+
+Both consequences the review found are planned **in this PR**, not deferred:
+
+- **ADR-0003 fingerprint**: `schema_version` 1 -> 2, scalar `cell_size_m` replaced by
+  a `tiling` object carrying mode, policy and `level_plan_sha256`. Cheaper than the
+  review assumed — `build_fingerprint.h/cpp` **does not exist yet** (verified by grep;
+  `batch_regen_main.cpp` has no `--incremental` path), so this is an amendment before
+  first implementation, with no on-disk migration.
+- **ADR-0002 / batch_regen**: `BatchRegen::SheetFactory` becomes level-parameterised,
+  scatter/gather route through the plan, and `dirtyL10Tiles` gains a plan-aware
+  `dirtyTiles` overload that rolls up to plan leaves. The one-L14-tile margin survives
+  and is re-argued: `finest_level` (14) equals the survey index's footprint level, so
+  no leaf is ever finer than the index.
+
+Two consequences the review did **not** name were found and folded in: `SheetFactory`'s
+single-level signature, and a halo/persist-filter rule (route each batch to every level
+whose leaves its influence-expanded bounds touch; never persist a non-leaf grid) without
+which level seams would lose the neighbouring region's soundings.
+
+Mixed-level verification is a **hard requirement** of the PR, as the review asked: a
+single-level equivalence test (policy pinned to one level must produce a byte-identical
+store to today's path) is the load-bearing guard, plus a pyramid-composition test over
+`build_depth_overviews`.
+
+The storage estimate is grounded in the real Shoals `processed` layer
+(`~/data/world/depths/processed`: 69 native level-10 tiles, 167 MB, 2.42 MB/tile
+observed vs 14.7 MB dense) and expressed in uma#376's terms rather than a second
+accounting. The recon phase's report also surfaces the area that lands **coarser** than
+today's level 10 (the pinned ladder returns level 9 between ~36 m and ~72 m) so that
+resolution loss is visible to the operator before an import runs.
+
+### Open questions
+- [ ] Recon phase: flat sounding spill (~4.4 GB scratch for a 10 h M3 run) to avoid a
+      second projection pass, vs re-reading the bags. Plan defaults to the spill with a
+      `--recon-reproject` escape hatch.
+- [ ] Whether `--depth-adaptive` reaches
+      `unh_echoboats_project11/scripts/build_bathy_store.sh` here or in a follow-up
+      (plan assumes follow-up — other repo, and that script is already known-stale).
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
