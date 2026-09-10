@@ -81,6 +81,17 @@ namespace cube
   /// 1 when the heave TF (tide_frame <- base_link_frame) was missing; heave
   /// defaults to 0 (it enters the budget only squared, so this is non-critical).
     size_t missing_heave = 0;
+
+  /// Sonar-reported per-beam receive beamwidths in this ping that the error
+  /// model refused as unusable -- non-finite, non-positive, or at/above the
+  /// physical ceiling (`ErrorModel::kMaxPerBeamBeamwidthRad`). Each rejected
+  /// beam silently falls back to `Device::across_track_beamwidth`, which is a
+  /// generic value that belongs to no particular sonar, so a non-zero count
+  /// means the angular part of the uncertainty budget is being carried by a
+  /// default rather than by the instrument. Counted over the ping's
+  /// `rx_beamwidths` array, so it is zero for the (common) case of a driver
+  /// that reports nothing at all. See #144.
+    size_t rejected_beamwidths = 0;
   };
 
 /// Result of projecting one SonarDetections message: the (range-filtered)

@@ -272,4 +272,31 @@ TEST_F(DetectionsProjectorTest, NodeRegressionGeometryAndStaleSog)
   }
 }
 
+// #144: per-beam beamwidths the error model refuses are counted, not silent.
+// A rejected beam falls back to the generic Device::across_track_beamwidth, so
+// the operator has to be able to see that the angular budget is a default.
+TEST_F(DetectionsProjectorTest, RejectedBeamwidthsAreCounted)
+{
+  DetectionsProjector projector(params_);
+  tf2::BufferCore buffer;
+  fillAttitudeBuffer(buffer, params_);
+
+  auto det = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  // Beam 0: zero-filled, as norbit_driver reports an unknown width.
+  // Beam 1: at the physical ceiling (pi rad) -- nonsense, rejected.
+  // Beam 2: garmin_sidescan's legitimate 55 degrees across-track -- accepted.
+  det.ping_info.rx_beamwidths = {
+    0.0f,
+    ErrorModel::kMaxPerBeamBeamwidthRad,
+    static_cast<float>(55.0 * M_PI / 180.0)};
+
+  auto result = projector.project(det, buffer, 0.0f);
+  EXPECT_EQ(result.diagnostics.rejected_beamwidths, 2u);
+
+  // Nothing reported at all is not a rejection -- it is the common case.
+  auto clean = makeDetections({0.0f}, 0.02f);
+  ASSERT_TRUE(clean.ping_info.rx_beamwidths.empty());
+  EXPECT_EQ(projector.project(clean, buffer, 0.0f).diagnostics.rejected_beamwidths, 0u);
+}
+
 }  // namespace cube

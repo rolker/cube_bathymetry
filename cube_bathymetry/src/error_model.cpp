@@ -207,6 +207,13 @@ double ErrorModel::horizontal_latency(
   return sog_error + jitter_error + head_error + pitch_error;
 }
 
+bool ErrorModel::per_beam_beamwidth_usable(float beamwidth_rad)
+{
+  return std::isfinite(beamwidth_rad) &&
+         beamwidth_rad > 0.0f &&
+         beamwidth_rad < kMaxPerBeamBeamwidthRad;
+}
+
 double ErrorModel::beam_angle(
   const marine_acoustic_msgs::msg::SonarDetections & detections,
   size_t i) const
@@ -250,11 +257,27 @@ double ErrorModel::swath_angle_error(
   double beamwidth = device_across_track_beamwidth_rad_;
   if(i < detections.ping_info.rx_beamwidths.size()) {
     const float reported = detections.ping_info.rx_beamwidths[i];
-    // A per-beam value is only a measurement when it is finite and strictly
-    // positive. norbit_driver resizes rx_beamwidths to a zero-filled vector for
-    // beamwidths it does not report; trusting those zeros silently deletes the
-    // angular term instead of falling back to the device value.
-    if(std::isfinite(reported) && reported > 0.0f) {
+    // A per-beam value is only a measurement when it is finite, strictly
+    // positive, and physically possible (see per_beam_beamwidth_usable and
+    // kMaxPerBeamBeamwidthRad). norbit_driver resizes rx_beamwidths to a
+    // zero-filled vector for beamwidths it does not report; trusting those
+    // zeros silently deletes the angular term instead of falling back to the
+    // device value.
+    //
+    // The pi-radian ceiling catches NONSENSE -- a unit mix-up, a sentinel, a
+    // corrupt field. It deliberately does NOT catch a real measurement of the
+    // wrong quantity: ros2sonic stamps the ~2.27 rad TRANSMIT horizontal fan
+    // into rx_beamwidths, and that passes this bound. That is a driver fault,
+    // tracked at https://github.com/rolker/cube_bathymetry/issues/149, not
+    // something a consumer-side clamp should paper over -- a clamp tight
+    // enough to reject 2.27 rad would also reject garmin_sidescan's entirely
+    // legitimate 55 degrees across-track (0.96 rad), which is correct data in
+    // the right field because a sidescan does no across-track beamforming.
+    //
+    // Rejections are not silent: DetectionsProjector counts them into
+    // ProjectionDiagnostics::rejected_beamwidths, which the live node reports
+    // as a throttled warning and the offline tools fold into their run summary.
+    if(per_beam_beamwidth_usable(reported)) {
       beamwidth = reported;
     }
   }

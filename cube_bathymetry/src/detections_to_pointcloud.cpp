@@ -199,6 +199,14 @@ private:
         "No attitude TF (" << level_frame_ << " <- " << base_link_frame_ <<
         "); roll/pitch = NaN");
     }
+    if(projection.diagnostics.rejected_beamwidths > 0) {
+      RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
+        projection.diagnostics.rejected_beamwidths <<
+          " per-beam rx_beamwidths rejected as unusable (non-finite, non-positive,"
+          " or >= pi rad); the generic device across-track beamwidth was used for"
+          " those beams, so their angular uncertainty is a default, not a"
+          " measurement");
+    }
     if(projection.diagnostics.filtered_range > 0) {
       RCLCPP_DEBUG_STREAM_THROTTLE(get_logger(), *get_clock(), 10000,
         projection.diagnostics.filtered_range << " of " <<

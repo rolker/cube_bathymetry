@@ -646,20 +646,23 @@ TEST_F(ErrorModelTest, AngleErrorBranchesAgreeOnUnits)
   EXPECT_NEAR(h_perbeam, h_fallback, 1e-6 * h_fallback);
 }
 
+// Pins the absolute magnitude of the fallback term against an independently
+// computed value. Deliberately NOT the stock 2-degree Device default: with the
+// default this would be the same arithmetic as
+// AngleErrorFallsBackOnEmptyBeamwidths and pin nothing that test does not, so
+// it uses a distinct width and shows the pin tracks the configured value.
 TEST_F(ErrorModelTest, AngleErrorFallbackPinnedAtNadir)
 {
   auto platform = makePlatform();
-  // The stock Device default: 2 degrees across-track.
+  const double bw_deg = 7.5;
   Vessel v = angleIsolatingVessel();
-  Device d = angleIsolatingDevice(2.0);
+  Device d = angleIsolatingDevice(bw_deg);
   auto det = makeDetections({0.0f}, 0.02f);
 
   ErrorModel em(v, d);
   const double h = em.compute(det, platform).at(0).horizontal_error;
 
-  // Nadir, so the 1/cos(angle) widening factor is exactly 1.0 and this pin is
-  // unaffected by it.
-  const double bw_rad = 2.0 * M_PI / 180.0;
+  const double bw_rad = bw_deg * M_PI / 180.0;
   const double ang_meas = (bw_rad / 12.0) * (bw_rad / 12.0);
   const double expected = ang_meas * kIsolatedRange * kIsolatedRange;
   EXPECT_NEAR(h, expected, 1e-6 * expected);
@@ -701,17 +704,23 @@ TEST_F(ErrorModelTest, AngleErrorFallsBackOnZeroFilledBeamwidths)
   EXPECT_NEAR(h, expected, 1e-6 * expected);
 }
 
+// The 2-degree device fallback, as it reaches horizontal_error at nadir with
+// every other term isolated away. Shared by the rejection tests below, all of
+// which assert that a bad per-beam value lands exactly here.
+static double nadirFallbackHorizontalError()
+{
+  const double bw_rad = 2.0 * M_PI / 180.0;
+  return (bw_rad / 12.0) * (bw_rad / 12.0) * kIsolatedRange * kIsolatedRange;
+}
+
 TEST_F(ErrorModelTest, AngleErrorFallsBackOnNonFiniteBeamwidth)
 {
   auto platform = makePlatform();
-  const double bw_rad = 2.0 * M_PI / 180.0;
-  const double expected = (bw_rad / 12.0) * (bw_rad / 12.0) *
-    kIsolatedRange * kIsolatedRange;
+  const double expected = nadirFallbackHorizontalError();
 
   for (float bad : {std::numeric_limits<float>::quiet_NaN(),
       std::numeric_limits<float>::infinity(),
-      -std::numeric_limits<float>::infinity(),
-      -0.01f})
+      -std::numeric_limits<float>::infinity()})
   {
     auto det = makeDetections({0.0f}, 0.02f);
     det.ping_info.rx_beamwidths.assign(1, bad);
@@ -722,6 +731,82 @@ TEST_F(ErrorModelTest, AngleErrorFallsBackOnNonFiniteBeamwidth)
     ASSERT_TRUE(std::isfinite(h));
     EXPECT_NEAR(h, expected, 1e-6 * expected);
   }
+}
+
+// Finite but not a measurement. Kept separate from the non-finite cases: -0.01
+// used to sit in that test's list, where it was mislabelled -- it is perfectly
+// finite, and it is the positivity check, not isfinite(), that rejects it.
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnNonPositiveBeamwidth)
+{
+  auto platform = makePlatform();
+  const double expected = nadirFallbackHorizontalError();
+
+  for (float bad : {-0.01f, -1.0f, -0.0f}) {
+    auto det = makeDetections({0.0f}, 0.02f);
+    det.ping_info.rx_beamwidths.assign(1, bad);
+
+    ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+    const double h = em.compute(det, platform).at(0).horizontal_error;
+
+    EXPECT_NEAR(h, expected, 1e-6 * expected);
+  }
+}
+
+// The hard physical ceiling: a beam cannot subtend half a turn or more, so a
+// reported width at or above pi rad is nonsense (unit mix-up, sentinel, corrupt
+// field) and the device value is used instead.
+TEST_F(ErrorModelTest, AngleErrorFallsBackOnPhysicallyImpossibleBeamwidth)
+{
+  auto platform = makePlatform();
+  const double expected = nadirFallbackHorizontalError();
+
+  for (float bad : {static_cast<float>(M_PI), 4.0f, 100.0f, 6.2831853f}) {
+    auto det = makeDetections({0.0f}, 0.02f);
+    det.ping_info.rx_beamwidths.assign(1, bad);
+
+    ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+    const double h = em.compute(det, platform).at(0).horizontal_error;
+
+    EXPECT_NEAR(h, expected, 1e-6 * expected) << "rejected value: " << bad;
+  }
+}
+
+// ...and the ceiling is a PHYSICAL bound, not a plausibility clamp.
+// garmin_sidescan reports 55 degrees across-track for SideVu (46 for ClearVu),
+// which is correct data in the right field -- a sidescan does no across-track
+// beamforming, so its receive fan genuinely is that wide. A clamp tight enough
+// to reject ros2sonic's misplaced 2.27 rad transmit fan (#149) would throw this
+// away, which is exactly why no such clamp exists.
+TEST_F(ErrorModelTest, AngleErrorAcceptsWideButLegitimateSidescanBeamwidth)
+{
+  auto platform = makePlatform();
+  const double garmin_sidevu_rad = 55.0 * M_PI / 180.0;
+  auto det = makeDetections({0.0f}, 0.02f);
+  det.ping_info.rx_beamwidths.assign(1, static_cast<float>(garmin_sidevu_rad));
+
+  ErrorModel em(angleIsolatingVessel(), angleIsolatingDevice(2.0));
+  const double h = em.compute(det, platform).at(0).horizontal_error;
+
+  const double expected = (garmin_sidevu_rad / 12.0) * (garmin_sidevu_rad / 12.0) *
+    kIsolatedRange * kIsolatedRange;
+  EXPECT_NEAR(h, expected, 1e-5 * expected);
+  // Used, not silently swapped for the 2-degree device default.
+  EXPECT_GT(h, 10.0 * nadirFallbackHorizontalError());
+}
+
+// The predicate the projector reuses to count rejections must agree with what
+// the model actually does, boundary included: pi is out, just below pi is in.
+TEST_F(ErrorModelTest, PerBeamBeamwidthUsablePredicateMatchesTheCeiling)
+{
+  EXPECT_TRUE(ErrorModel::per_beam_beamwidth_usable(0.96f));
+  EXPECT_TRUE(ErrorModel::per_beam_beamwidth_usable(2.27f));  // ros2sonic's tx fan (#149)
+  EXPECT_TRUE(
+    ErrorModel::per_beam_beamwidth_usable(
+      std::nextafter(ErrorModel::kMaxPerBeamBeamwidthRad, 0.0f)));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(ErrorModel::kMaxPerBeamBeamwidthRad));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(0.0f));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(-1.0f));
+  EXPECT_FALSE(ErrorModel::per_beam_beamwidth_usable(std::numeric_limits<float>::quiet_NaN()));
 }
 
 TEST_F(ErrorModelTest, AngleErrorUsesReportedBeamwidthAsRadians)

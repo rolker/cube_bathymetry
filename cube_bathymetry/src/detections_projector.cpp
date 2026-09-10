@@ -134,6 +134,15 @@ ProjectionResult DetectionsProjector::project(
   platform.mean_speed = detections.ping_info.sound_speed;
   platform.surf_sspeed = detections.ping_info.sound_speed;
 
+  // Count per-beam beamwidths the error model will refuse, using the model's
+  // own predicate so the two can never drift apart. The projector never logs;
+  // the caller reports this (#144).
+  for (const float reported : detections.ping_info.rx_beamwidths) {
+    if (!cube::ErrorModel::per_beam_beamwidth_usable(reported)) {
+      ++result.diagnostics.rejected_beamwidths;
+    }
+  }
+
   auto soundings = error_model_->compute(detections, platform);
   result.diagnostics.total = soundings.size();
 

@@ -113,10 +113,38 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
   [`marine_tools#82`](https://github.com/rolker/marine_tools/issues/82) (populating
   `rx_beamwidths` for the Kongsberg bridge) has landed.
 - **Validation, not just a length check.** A per-beam value is used only when it is
-  finite and strictly positive; otherwise the device value is used. This matters:
-  `norbit_driver`'s `conversions.cpp` resizes `rx_beamwidths` to a **zero-filled**
-  vector for a beamwidth it does not report, so the old length-only check took the
-  per-beam branch and silently zeroed the angular term.
+  finite, strictly positive, and **below π radians**; otherwise the device value is
+  used. This matters: `norbit_driver`'s `conversions.cpp` resizes `rx_beamwidths` to
+  a **zero-filled** vector for a beamwidth it does not report, so the old
+  length-only check took the per-beam branch and silently zeroed the angular term.
+- **The π-radian bound is a HARD PHYSICAL ceiling, not a plausibility clamp — and
+  the difference matters.** A beam cannot subtend half a turn or more, so a value at
+  or above π rad is nonsense: a unit mix-up, a sentinel, or a corrupt field. The
+  bound is deliberately no tighter than that, because a wide reported beamwidth is
+  not automatically a wrong one. `garmin_sidescan` reports **55° across-track** for
+  SideVu (46° for ClearVu), and that is correct data in the correct field — a
+  sidescan does no across-track beamforming, so its receive fan genuinely is that
+  wide. Any clamp tight enough to be a plausibility check would discard it.
+  - The corollary, stated plainly so it is not mistaken for a solved problem: **this
+    ceiling does not catch a misplaced transmit fan.** `ros2sonic` stamps
+    `TxBeamwidthHoriz` — the whole transmit sector, ~2.27 rad (130°), identical on
+    every beam — into `rx_beamwidths`
+    (`r2sonic/src/conversions.cpp:17-18`). That is a real, correctly-scaled
+    measurement of the wrong quantity, and it passes the bound. Before #144 the
+    spurious `π/180` laundered it into a small-looking number; with the conversion
+    correctly gone, the value now arrives intact and would size the angular
+    uncertainty from the transmit sector rather than the beam. The fix belongs in
+    the driver — report the receive beamwidth, or leave the array empty as
+    `PingInfo.msg` provides for — and is tracked at
+    [`#149`](https://github.com/rolker/cube_bathymetry/issues/149).
+  - **Rejections are not silent.** `DetectionsProjector` counts them into
+    `ProjectionDiagnostics::rejected_beamwidths` using the model's own predicate
+    (`ErrorModel::per_beam_beamwidth_usable`, public so the two cannot drift). The
+    live node emits a throttled warning; `bag_to_geotiff`, `import_bag` and
+    `batch_regen_bag` fold the count into their run summary and warn when it is
+    non-zero. A rejected beam falls back to the generic
+    `Device::across_track_beamwidth`, so the operator needs to know the angular
+    budget is being carried by a default.
 - **The fallback was the live path, not the rare one.** The pre-#144 note in this
   document had this backwards. `kongsberg_em_bridge/node.py:547-550` (repo
   `marine_tools`) deliberately leaves `rx_beamwidths` **empty** to dodge this very
@@ -149,7 +177,11 @@ per-beam path multiplied `rx_beamwidths[i]` by `π/180` even though
 Pinned by `ErrorModelTest.AngleErrorBranchesAgreeOnUnits`,
 `AngleErrorFallbackPinnedAtNadir`, `AngleErrorFallsBackOnEmptyBeamwidths`,
 `AngleErrorFallsBackOnZeroFilledBeamwidths`,
-`AngleErrorFallsBackOnNonFiniteBeamwidth`, and
+`AngleErrorFallsBackOnNonFiniteBeamwidth`,
+`AngleErrorFallsBackOnNonPositiveBeamwidth`,
+`AngleErrorFallsBackOnPhysicallyImpossibleBeamwidth`,
+`AngleErrorAcceptsWideButLegitimateSidescanBeamwidth`,
+`PerBeamBeamwidthUsablePredicateMatchesTheCeiling`, and
 `AngleErrorUsesReportedBeamwidthAsRadians`.
 
 ## 3. IHO f(z) error model is not ported

@@ -762,6 +762,47 @@ bool finishTileReport(
   return true;
 }
 
+// Print the offline-projection run summary and the warnings that only make
+// sense once the whole pass is finished. Lifted out of main() so the summary
+// can grow (it gained a rejected-beamwidth count in #144) without pushing
+// main() past cpplint's function-size limit.
+void report_projection_summary(
+  size_t proj_pings,
+  size_t georeferenced_pings,
+  size_t proj_dropped_georef,
+  size_t proj_soundings,
+  size_t proj_filtered_range,
+  size_t proj_missing_attitude,
+  size_t proj_missing_heave,
+  size_t proj_rejected_beamwidths)
+{
+  std::cout << "Offline projection: " << proj_pings << " pings projected, "
+            << georeferenced_pings << " georeferenced into the grid, " << proj_dropped_georef
+            << " dropped (no earth TF); " << proj_soundings << " soundings ("
+            << proj_filtered_range << " range-filtered, " << proj_missing_attitude
+            << " missing attitude, " << proj_missing_heave << " missing heave, "
+            << proj_rejected_beamwidths << " rejected per-beam beamwidths)" << std::endl;
+  if (proj_rejected_beamwidths > 0) {
+    std::cerr << "WARNING: " << proj_rejected_beamwidths
+              << " per-beam rx_beamwidths rejected as unusable (non-finite, "
+      "non-positive, or >= pi rad); those beams fell back to the "
+      "generic device across-track beamwidth, so their angular "
+      "uncertainty is a default rather than a measurement."
+              << std::endl;
+  }
+  if (proj_pings > 0 && proj_soundings == 0) {
+    std::cerr << "WARNING: projected 0 soundings from " << proj_pings
+              << " pings -- check the --*-frame overrides match the bag's "
+              << "namespaced frames (see README 'Configuring frames per platform')."
+              << std::endl;
+  }
+  if (georeferenced_pings == 0 && proj_dropped_georef > 0) {
+    std::cerr << "WARNING: every ping was dropped for lack of an earth transform -- "
+              << "check that the bag has a localization chain to the 'earth' frame."
+              << std::endl;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char * argv[])
@@ -980,6 +1021,7 @@ int main(int argc, char * argv[])
   size_t proj_filtered_range = 0;
   size_t proj_missing_attitude = 0;
   size_t proj_missing_heave = 0;
+  size_t proj_rejected_beamwidths = 0;
   size_t proj_dropped_georef = 0;  // pings with no earth transform at their stamp
 
   // Main-pass read filter (cube#107): restrict each reader to the topics the
@@ -1213,6 +1255,7 @@ int main(int argc, char * argv[])
       proj_filtered_range += projection.diagnostics.filtered_range;
       proj_missing_attitude += projection.diagnostics.missing_attitude;
       proj_missing_heave += projection.diagnostics.missing_heave;
+      proj_rejected_beamwidths += projection.diagnostics.rejected_beamwidths;
 
       try {
         auto transform = tfBuffer.lookupTransform(
@@ -1419,22 +1462,10 @@ int main(int argc, char * argv[])
   std::cout << "; projected " << ping_count << " pings in " << phase_secs() << "s." << std::endl;
 
   std::cout << "\ndone." << std::endl;
-  std::cout << "Offline projection: " << proj_pings << " pings projected, "
-            << ping_count << " georeferenced into the grid, " << proj_dropped_georef
-            << " dropped (no earth TF); " << proj_soundings << " soundings ("
-            << proj_filtered_range << " range-filtered, " << proj_missing_attitude
-            << " missing attitude, " << proj_missing_heave << " missing heave)" << std::endl;
-  if (proj_pings > 0 && proj_soundings == 0) {
-    std::cerr << "WARNING: projected 0 soundings from " << proj_pings
-              << " pings -- check the --*-frame overrides match the bag's "
-              << "namespaced frames (see README 'Configuring frames per platform')."
-              << std::endl;
-  }
-  if (ping_count == 0 && proj_dropped_georef > 0) {
-    std::cerr << "WARNING: every ping was dropped for lack of an earth transform -- "
-              << "check that the bag has a localization chain to the 'earth' frame."
-              << std::endl;
-  }
+  report_projection_summary(
+    proj_pings, static_cast<size_t>(ping_count), proj_dropped_georef, proj_soundings,
+    proj_filtered_range, proj_missing_attitude, proj_missing_heave,
+    proj_rejected_beamwidths);
 
   std::cout << "Building store tiles..." << std::endl;
 

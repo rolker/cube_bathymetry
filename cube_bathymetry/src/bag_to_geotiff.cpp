@@ -344,6 +344,7 @@ int main(int argc, char *argv[])
   size_t proj_filtered_range = 0;
   size_t proj_missing_attitude = 0;
   size_t proj_missing_heave = 0;
+  size_t proj_rejected_beamwidths = 0;
 
   BagReaders bag_readers(bagfile_names);
 
@@ -500,6 +501,7 @@ int main(int argc, char *argv[])
         proj_filtered_range += projection.diagnostics.filtered_range;
         proj_missing_attitude += projection.diagnostics.missing_attitude;
         proj_missing_heave += projection.diagnostics.missing_heave;
+        proj_rejected_beamwidths += projection.diagnostics.rejected_beamwidths;
         auto pc_message = soundingsToPointCloud2(projection.soundings, detections.header);
         soundings_buffer.push_back(std::make_pair(pc_message, last_nav));
         check_buffer = true;
@@ -592,7 +594,16 @@ int main(int argc, char *argv[])
     std::cout << "Offline projection: " << proj_pings << " pings, " << proj_soundings
               << " soundings (" << proj_filtered_range << " range-filtered, "
               << proj_missing_attitude << " missing attitude, "
-              << proj_missing_heave << " missing heave)" << std::endl;
+              << proj_missing_heave << " missing heave, "
+              << proj_rejected_beamwidths << " rejected per-beam beamwidths)" << std::endl;
+    if (proj_rejected_beamwidths > 0) {
+      std::cerr << "WARNING: " << proj_rejected_beamwidths
+                << " per-beam rx_beamwidths rejected as unusable (non-finite, "
+        "non-positive, or >= pi rad); those beams fell back to the "
+        "generic device across-track beamwidth, so their angular "
+        "uncertainty is a default rather than a measurement."
+                << std::endl;
+    }
     if (proj_pings > 0 && proj_soundings == 0) {
       std::cerr << "WARNING: projected 0 soundings from " << proj_pings
                 << " pings -- check the --*-frame overrides match the bag's namespaced "

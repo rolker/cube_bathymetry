@@ -229,6 +229,32 @@ public:
     std::vector < Sounding > compute(const marine_acoustic_msgs::msg::SonarDetections & detections,
       const Platform & platform) const;
 
+  /// Largest per-beam receive beamwidth the model will accept, in radians.
+  /// This is a HARD PHYSICAL bound, not a plausibility clamp: a beam cannot
+  /// subtend half a turn or more, so anything at or above pi rad is nonsense
+  /// (a unit mix-up, a sentinel, or a corrupt field) rather than a wide beam.
+  ///
+  /// It is deliberately not tighter. `garmin_sidescan` reports 55 degrees
+  /// (0.96 rad) across-track for SideVu and 46 for ClearVu, and those are
+  /// CORRECT -- a sidescan does no across-track beamforming, so its receive
+  /// fan genuinely is that wide. Any clamp tight enough to be a "plausibility"
+  /// check would throw that legitimate data away.
+  ///
+  /// The corollary is that this ceiling does NOT catch a misplaced transmit
+  /// fan: `ros2sonic` stamps `TxBeamwidthHoriz` (~2.27 rad, 130 degrees) into
+  /// `rx_beamwidths`, which is a real, correctly-scaled measurement of the
+  /// wrong quantity, and it passes this bound. That is a driver fault and is
+  /// fixed there, not laundered here -- see
+  /// https://github.com/rolker/cube_bathymetry/issues/149.
+    static constexpr float kMaxPerBeamBeamwidthRad = 3.14159265358979323846f;
+
+  /// True when a sonar-reported per-beam receive beamwidth (radians) is usable
+  /// as a measurement: finite, strictly positive, and below the physical
+  /// ceiling above. Public so a caller can count and report rejections without
+  /// duplicating the predicate -- `DetectionsProjector` fills
+  /// `ProjectionDiagnostics::rejected_beamwidths` with it.
+    static bool per_beam_beamwidth_usable(float beamwidth_rad);
+
 private:
   /// Compute induced and measured heave components.
   /// Returns variance of total heave component of vertical error.
