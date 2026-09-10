@@ -9,7 +9,7 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | Node | Subscribes | Publishes | Purpose |
 |---|---|---|---|
 | `detections_to_pointcloud` | `detections` (`marine_acoustic_msgs/SonarDetections`), `odom` (`nav_msgs/Odometry`) | `soundings` (`sensor_msgs/PointCloud2`) | Turns each beam detection into a sounding in the **sonar frame** (x/y/z from travel-time + beam angles) and attaches **per-sounding TPU** (`vertical_uncertainty`, `horizontal_uncertainty`) computed by `cube::ErrorModel`. Lifecycle node. |
-| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
+| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; note the OPPOSITE convention to `soundings` below — that layer is a confidence-scaled standard deviation in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
 `soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
@@ -19,9 +19,14 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 VARIANCES in m², at one sigma, with no confidence-interval scaling applied** —
 `cube::Sounding::vertical_error` / `horizontal_error` verbatim (see
 `include/cube_bathymetry/sounding.h`). A consumer that treats
-`vertical_uncertainty` as a σ in metres will understate the error band by its own
-square root. Any 95%/99% figure is produced downstream by scaling the square
-root. `vertical_uncertainty` is a one-dimensional error about depth;
+`vertical_uncertainty` as a σ in metres reads the wrong number, and in either
+direction: a variance and its own square root agree only at 1 m². Below that
+the raw value is the smaller of the two and the band is understated (0.25 m²
+read as 0.25 m against a true σ of 0.5 m); above it the raw value is larger
+and the band is overstated (4 m² — what the default `Vessel::gps_drms` of 2 m
+contributes to `horizontal_error` on its own — read as 4 m against a true σ of
+2 m). Take the square root. Any 95%/99% figure is produced downstream by
+scaling that square root. `vertical_uncertainty` is a one-dimensional error about depth;
 `horizontal_uncertainty` is radial (drms-derived), so its square root is a radius
 in the horizontal plane rather than an error along a single axis. `beam_angle` is
 the beam's incidence angle relative to nadir, in radians. `intensity` is the

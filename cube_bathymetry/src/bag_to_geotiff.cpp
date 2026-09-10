@@ -81,10 +81,17 @@ bool bag_filter(const std::string & type)
   return false;
 }
 
-// Pack projected soundings into the same 6-field (x,y,z,intensity,
-// vertical_uncertainty,horizontal_uncertainty) PointCloud2 layout that
-// detections_to_pointcloud publishes, so the detections offline path feeds the
-// identical downstream soundings_buffer/grid machinery as a pre-projected bag.
+// Pack projected soundings into a 6-field (x,y,z,intensity,
+// vertical_uncertainty,horizontal_uncertainty) PointCloud2, so the detections
+// offline path feeds the identical downstream soundings_buffer/grid machinery
+// as a pre-projected bag.
+//
+// This is the first SIX of the seven fields detections_to_pointcloud
+// publishes: the seventh, `beam_angle`, is not emitted here. Consumers read
+// PointCloud2 fields by name and cube_bathymetry_node treats `beam_angle` as
+// optional (NaN-filling when it is absent), so the omission is safe -- but it
+// does mean the offline `-d` path carries no beam angle, and anything that
+// comes to depend on one has to add it here too.
 sensor_msgs::msg::PointCloud2::SharedPtr soundingsToPointCloud2(
   const std::vector<cube::Sounding> & soundings,
   const std_msgs::msg::Header & header)
