@@ -50,9 +50,9 @@ per the review's recommendation. The corrected scope:
    the device value instead of trusting a `0.0`.
 3. **Calder's `1/cos(angle)` widening term is NOT ported** (see "Out of scope"). Reading
    `original_cube/libsrc/ccom_core/device.c:808-820` for the widening does still settle the
-   `/12` vs `/sqrt(12)` open question in `divergences_from_calder.md` — Calder divides by
+   `/12` vs `/sqrt(12)` open question in `cube_bathymetry/docs/divergences_from_calder.md` — Calder divides by
    `12.0` — so that half of the reading survives as a doc-only correction.
-4. **`docs/divergences_from_calder.md:73-91` correction** — currently claims the fallback is
+4. **`cube_bathymetry/docs/divergences_from_calder.md` ("Angle error") correction** — currently claims the fallback is
    the rare path and the per-beam path the "normal" one; backwards for every sonar in service.
 5. **Delete the false "twice the nominal variance" doc comment from *both*
    `horizontal_positioning_error` overloads** — `error_model.h:242-247` (2-arg) and
@@ -117,7 +117,7 @@ behaviour. It would also risk double-counting against a driver-reported per-beam
 may already be broadened. The error model should not have to know whether an array is flat;
 that geometry belongs with the driver. Tracked as
 [`cube_bathymetry#148`](https://github.com/rolker/cube_bathymetry/issues/148), and recorded
-as a live divergence in `divergences_from_calder.md` so the gap is deliberate, not silent.
+as a live divergence in `cube_bathymetry/docs/divergences_from_calder.md` so the gap is deliberate, not silent.
 
 **4. `Platform::roll`/`pitch` move to RADIANS in this PR** (operator, 2026-09-10). The
 round-1 review found the identical unit-mismatch bug one function away:
@@ -156,7 +156,7 @@ divergences doc, that this catches nonsense and does **not** catch a misplaced t
   follow-up note on `marine_tools#82` once this PR merges.
 - **Calder's `1/cos(angle)` widening is not ported** — see "Settled unit decisions" point 3.
   Tracked as `cube_bathymetry#148`; recorded as a live divergence in
-  `divergences_from_calder.md`.
+  `cube_bathymetry/docs/divergences_from_calder.md`.
 - **A plausibility clamp on `rx_beamwidths[i]`** is deliberately not added — see point 5. Only
   the hard physical ceiling (≥ π rad) is. `ros2sonic`'s misplaced transmit fan is
   `rolker/ros2sonic#1`, a driver fix, not a consumer-side clamp.
@@ -200,8 +200,8 @@ divergences doc, that this catches nonsense and does **not** catch a misplaced t
    confidence scaling, and note that the horizontal one is a radial (drms-derived) quantity
    whose square root is a horizontal-plane radius rather than a single-axis error. Evidence
    in "Settled unit decisions" above.
-4. Correct `docs/divergences_from_calder.md:73-91` ("Angle error" subsection under "## 2.
-   Device error budget is parameterized, not a per-device table"):
+4. Correct `cube_bathymetry/docs/divergences_from_calder.md` (the "Angle error" material under
+   "## 2. Device error budget is parameterized, not a per-device table"):
    - Remove the "no behavioural change" framing for the angle term — commit 1 **is** a
      behavioral change, not documentation-only, so this needs its own entry rather than a
      note inside the #47 section it currently lives in.
@@ -226,8 +226,10 @@ divergences doc, that this catches nonsense and does **not** catch a misplaced t
    measured-range error's `cos^2(angle)` projection dominates at moderate angles and the
    total *dips* at 30° before rising. The test was replaced, not loosened, by two tests that
    pin properties that are actually true of the corrected model:
-   `VerticalErrorIsWorseAtObliqueAngleAtConstantDepth` (nadir vs 60° at constant *depth*, the
-   comparison that isolates beam obliquity from a shortening water column) and
+   `VerticalErrorIsWorseAtObliqueAngleAtConstantDepth` (nadir vs 30° vs 60° at constant
+   *depth*, the comparison that isolates beam obliquity from a shortening water column —
+   round-1 review made it a THREE-point comparison that pins the dip's shape, since a
+   two-point endpoint check cannot tell "rises monotonically" from "dips and recovers") and
    `AngularContributionToVerticalErrorRisesWithBeamAngle` (the monotone property stated over
    the isolated angular term it actually applies to). The rewrite's comment records why.
 
@@ -259,14 +261,69 @@ divergences doc, that this catches nonsense and does **not** catch a misplaced t
    `Platform::roll`/`pitch` (`src/detections_projector.cpp:111-113`), which `error_model.h:58-59`
    documents as degrees and `error_model.cpp:306-307` and `:397-400` convert as degrees —
    attitude enters the model 57.3x understated. Redocument the two fields as **radians** and
-   delete the four `* M_PI / 180.0` factors, so the one producer and the one consumer agree.
-   Confirm (not assume) the sign convention: `Platform` documents "+ve is port side up", and
-   REP-103's roll about +x-forward gives port up for a positive rotation.
+   delete the six `* M_PI / 180.0` factors that converted them (two in `swath_depth`, four in
+   `compute`'s per-ping trig), so the one producer and the one consumer agree.
+   Check (do not assume) the sign convention, BOTH halves of it. Round 2 found the first pass
+   had checked only roll: `Platform` documents "+ve is port side up", and REP-103's roll about
+   +x-forward gives port up for a positive rotation — correct; but `Platform` also documents
+   pitch "+ve is bow up", while `tf2::getEulerYPR` returns `-asin(R[2][0])` for an FLU
+   rotation, which is bow-DOWN positive. Operator decision: keep Calder's conventions on
+   `Platform` (every ported equation was derived under them) and negate at the producer, the
+   same boundary where units are converted. Heave (`+ve down` vs the TF translation's REP-103
+   `+up`) is negated there too — numerically inert, it enters only squared, but the struct is
+   held to one convention.
 7. Tests: every existing test zeroes roll and pitch, which is exactly why nothing caught this,
    so the new tests must exercise **non-zero** roll and pitch — a radian-valued roll must move
    the budget by the amount a radian-valued roll should, and the depth/`cosT` geometry must
    track the roll rather than a 57x-shrunken version of it.
-8. `docs/divergences_from_calder.md`: record the attitude unit fix alongside the beamwidth one.
+8. `cube_bathymetry/docs/divergences_from_calder.md`: record the attitude unit fix alongside the beamwidth one.
+
+**Commit 2b — the rejection/fallback diagnostic surface (added during implementation):**
+
+Normalizing the units settles what the number *means*; it does not tell an operator when the
+angular budget is a generic default rather than an instrument measurement — which, for every
+M3 ping (`rx_beamwidths` empty) and every norbit ping (zero-filled), is all of them. So the
+projector counts it and every caller reports it:
+
+- `ErrorModel` gains two public members so the predicate and its bound have one definition:
+  `static bool per_beam_beamwidth_usable(float beamwidth_rad)` and
+  `static constexpr float kMaxPerBeamBeamwidthRad` (π rad, a hard physical bound — see
+  settled decision 5, not a plausibility clamp).
+- `ProjectionDiagnostics` gains `default_beamwidth_beams`: beams whose angular term came from
+  `Device::across_track_beamwidth` because the ping reported no usable per-beam value for
+  them. Round 2 corrected this: it began life as `rejected_beamwidths`, counted over
+  `rx_beamwidths`, which was **silent in the field's commonest case** — an EMPTY array
+  rejects nothing, so 100% of M3 beams ran on the default while every tool printed "0
+  rejected". It now counts the FALLBACK over the beams (`two_way_travel_times`), the same
+  domain `swath_angle_error` indexes, and is reported as "N of M beams".
+- `cube::report_projection_summary()` over a `ProjectionRunTotals` struct, in the new
+  header-only `include/cube_bathymetry/projection_summary.h`: the run-summary paragraph was
+  three verbatim copies across the offline tools, which is how wording drifts. One copy now.
+- `detections_to_pointcloud` reports the count as a throttled warning, and — round 2 — returns
+  early unless the node is `active`, since the subscription outlives `on_activate`/`deactivate`
+  and the LifecyclePublisher silently drops what an inactive callback produces.
+- Per-beam array shape is hardened in the same spirit: `rx_angles` is bounds-guarded in
+  `Sounding`'s geometry and in `beam_angle()` (a short array was an out-of-bounds read;
+  absent is now NaN, like the neighbouring `tx_angles`/`intensities` reads).
+
+**Commit 2c — round-2 review: the pitch sign and Eqn. 3.49 (operator decisions):**
+
+- **Pitch sign.** See commit 2's item 6: negate at the producer, keep Calder's convention on
+  `Platform`. Pinned by `DetectionsProjectorTest.BowUpPitchFollowsCalderSignConvention`, which
+  needs a NON-ZERO IMU/GPS lever arm — the only terms odd in `sin(pitch)` are multiplied by
+  those offsets and vanish at the zero defaults, which is why the wrong sign was latent.
+- **Eqn. 3.49's pitch term.** `swath_depth` scaled it by `cos(pitch)²` where Calder
+  (`errmod_full.c:376-377`) uses `cosT²` = `cos(roll + beam angle)²`, the factor its two
+  faithful siblings in the same function already use. A transcription slip, not a decision;
+  over-estimates by `1/cos²T` (~4× at 60°, biased to the swath edge). Fixed to match Calder,
+  pinned by `ErrorModelTest.DepthPitchTermUsesSwathAngleNotPitchCosine`, and recorded in the
+  divergences doc as a **fixed porting error** (§2d), explicitly not a divergence. It is
+  pre-existing but invisible until #147 turned the pitch term on.
+- **The unconditional `/12`.** Calder's `bw/12.0` is inside an amplitude-detection branch
+  (`SOUNDING_ISAMPDET`); a phase detection takes `0.2*bw/√np`, and EM300 neither. This port
+  has no detection flag or window size in `SonarDetections`, so it applies `/12` to every
+  beam. Recorded as a real divergence (the earlier "/12 is confirmed" note over-claimed the
+  scope and paraphrased the C); the quoted block is now verbatim.
 
 **Commit 3 — the remaining round-1 review corrections:** the third false 95%-confidence claim
 on `horizontal_latency` (`error_model.h:253`), the false "documented (and configured) in
@@ -278,22 +335,28 @@ that says "transmit", and the README's missing units and stale field count.
 
 | File | Change |
 |------|--------|
-| `cube_bathymetry/include/cube_bathymetry/error_model.h` | Add a private member for the boundary-normalized (radians) device beamwidth; delete/replace the false "twice the nominal variance" doc comment on **both** `horizontal_positioning_error` overloads (2-arg at :242-247, 5-arg at :310-317) |
-| `cube_bathymetry/include/cube_bathymetry/sounding.h` | Document `vertical_error` / `horizontal_error` as variances in m^2 at one sigma, no confidence scaling; note the horizontal field is radial |
-| `cube_bathymetry/src/error_model.cpp` | Constructor: convert `device.across_track_beamwidth` to radians once. `swath_angle_error`: validate + select beamwidth without a second conversion, including the ≥ π rad physical ceiling (commit 1). Drop the four `* M_PI / 180.0` attitude conversions (commit 2) |
+| `cube_bathymetry/include/cube_bathymetry/error_model.h` | Add a private member for the boundary-normalized (radians) device beamwidth; add the public `per_beam_beamwidth_usable()` predicate and `kMaxPerBeamBeamwidthRad` so the projector's diagnostic cannot drift from the model's own rule (commit 2b); state the sign conventions and which producer converts (commit 2c); delete/replace the false "twice the nominal variance" doc comment on **both** `horizontal_positioning_error` overloads (2-arg at :242-247, 5-arg at :310-317) |
+| `cube_bathymetry/include/cube_bathymetry/sounding.h` | Document `vertical_error` / `horizontal_error` as variances in m^2 at one sigma, no confidence scaling; note the horizontal field is radial; bounds-guard the `rx_angles` reads (commit 2b) |
+| `cube_bathymetry/src/error_model.cpp` | Constructor: convert `device.across_track_beamwidth` to radians once. `swath_angle_error`: validate + select beamwidth without a second conversion, including the ≥ π rad physical ceiling (commit 1). Drop the six `* M_PI / 180.0` attitude conversions (commit 2). `swath_depth`: restore Calder's `cosT^2` in the Eqn. 3.49 pitch term; `beam_angle()`: bounds-guard `rx_angles` (commits 2b, 2c) |
 | `cube_bathymetry/src/detections_projector.cpp` | Document that `getEulerYPR`'s radians now go into radian-valued `Platform` fields (commit 2) |
 | `cube_bathymetry/test/test_error_model.cpp` | Add unit-agreement, regression-pin, and the validation-case tests (commit 1); add non-zero roll/pitch attitude tests (commit 2) |
-| `docs/divergences_from_calder.md` | Correct the "Angle error" subsection: fallback-is-normal claim reversed, normalization + validation documented, `/12` divisor confirmed, the un-ported widening recorded against `#148`, the attitude unit fix recorded |
+| `cube_bathymetry/docs/divergences_from_calder.md` | Correct the "Angle error" subsection: fallback-is-normal claim reversed, normalization + validation documented, `/12` divisor confirmed, the un-ported widening recorded against `#148`, the attitude unit fix recorded |
 | `README.md` | Units and confidence level on the published uncertainty fields; correct the field count (commit 3) |
+| `cube_bathymetry/include/cube_bathymetry/detections_projector.h` | `ProjectionDiagnostics::default_beamwidth_beams` (commit 2b) |
+| `cube_bathymetry/include/cube_bathymetry/projection_summary.h` | **New.** Header-only `cube::report_projection_summary()` + `ProjectionRunTotals`, replacing three verbatim copies of the run summary (commit 2b) |
+| `cube_bathymetry/src/detections_projector.cpp` | Count the beams that take the device-default beamwidth; negate pitch and heave at the boundary (commits 2b, 2c) |
+| `cube_bathymetry/src/detections_to_pointcloud.cpp` | Throttled warning for the default-beamwidth count; skip the callback unless active (commit 2b) |
+| `cube_bathymetry/src/import_bag_main.cpp`, `src/batch_regen_main.cpp`, `src/bag_to_geotiff.cpp` | Accumulate into `ProjectionRunTotals` and call the shared summary; `bag_to_geotiff`'s stale "6-field" comment corrected (commits 2b, 3) |
+| `cube_bathymetry/test/test_detections_projector.cpp` | Default-beamwidth counting (empty / short / over-long / range-gated) and the bow-up pitch-sign test (commits 2b, 2c) |
 
 ## Principles Self-Check
 
 | Principle | Consideration |
 |---|---|
-| A change includes its consequences | `docs/divergences_from_calder.md` correction lands in this PR, alongside the code it describes, not deferred; the `marine_tools` consequence is flagged, not silently dropped, via the existing `cube_bathymetry#30` cross-reference |
+| A change includes its consequences | `cube_bathymetry/docs/divergences_from_calder.md` correction lands in this PR, alongside the code it describes, not deferred; the `marine_tools` consequence is flagged, not silently dropped, via the existing `cube_bathymetry#30` cross-reference |
 | Test what breaks | Every existing test that zeroed `across_track_beamwidth` to avoid this term is left intact; new tests target exactly the branches and validation cases this fix changes (unit agreement, regression pin, empty/zero/non-finite/over-ceiling/real per-beam values) plus the attitude path, which no test exercised at all |
 | Only what's needed / Improve incrementally | The angle-widening term is not required to fix the unit bug and its correct home is a device-specific decision, so it is out of this PR entirely and tracked as `#148`. The attitude fix (`#147`) *is* in, because it is the same bug class in the same call chain and this PR is what makes it the leading residual |
-| Capture decisions, not just implementations | `divergences_from_calder.md` update closes the `/12` vs `/sqrt(12)` open question and corrects the backwards "normal path" claim, so the record matches the code going forward |
+| Capture decisions, not just implementations | `cube_bathymetry/docs/divergences_from_calder.md` update closes the `/12` vs `/sqrt(12)` open question and corrects the backwards "normal path" claim, so the record matches the code going forward |
 | Human control and transparency | No hidden behavior change — this is a correction toward documented intent (`rx_beamwidths` "in radians", `Device` "degrees"); the store re-measurement acceptance criterion the issue asked for is explicitly dropped by operator decision (see Out of scope), not silently omitted |
 
 ## ADR Compliance
@@ -301,39 +364,51 @@ that says "transmit", and the README's missing units and stale field count.
 | ADR | Triggered | How addressed |
 |---|---|---|
 | ADR-0008 (ROS 2 conventions) | No | Pure C++ math/logic fix and doc correction in an existing translation unit; no new packages, launch files, topics, or interfaces |
-| Others | No | No ADR governs numerical/error-model conventions; `docs/divergences_from_calder.md` is the informal record for this class of decision, and is exactly what this plan updates |
+| Others | No | No ADR governs numerical/error-model conventions; `cube_bathymetry/docs/divergences_from_calder.md` is the informal record for this class of decision, and is exactly what this plan updates |
 
 ## Consequences
 
 | If we change... | Also update... | Included in plan? |
 |---|---|---|
-| `swath_angle_error`'s beamwidth handling | `docs/divergences_from_calder.md` "Angle error" subsection | Yes |
+| `swath_angle_error`'s beamwidth handling | `cube_bathymetry/docs/divergences_from_calder.md` "Angle error" material | Yes |
 | `error_model.h`'s doc comments | Nothing else references the false "twice the nominal variance" claim (grepped; no other file quotes it) | Yes |
 | The angular term's magnitude for every M3/norbit sounding | `depths/processed` store uncertainty (the issue's original motivation) | **No — dropped by operator decision** (see Out of scope); unit tests are the only proof for this PR |
 | This repo's normalization boundary | `marine_tools#82` (populating `rx_beamwidths` for Kongsberg drivers) and `kongsberg_em_bridge/node.py:547-550`'s stale comment | Flagged only, not fixed here — both live in `marine_tools`, a different repo; cross-referenced via the existing `cube_bathymetry#30` issue |
 
 ## Documentation & Instruction Impact
 
-- **Stale docs** (must land in this PR): `docs/divergences_from_calder.md:73-91` (the "Angle
-  error" subsection) — currently states the fallback is the rare path and claims "no
+- **Stale docs** (must land in this PR): `cube_bathymetry/docs/divergences_from_calder.md` (the "Angle error" material) — currently states the fallback is the rare path and claims "no
   behavioural change," both now false. Corrected above, alongside the code.
+- **README** (must land in this PR): the `soundings` field list and the bold variance
+  warning are user-facing statements of exactly what this PR changes the meaning of. Round 2
+  found two of its own new claims wrong and both are corrected here — the "understate by its
+  own square root" wording (true only below 1 m²; at the defaults `horizontal_error` carries
+  `gps_drms²` = 4 m², where the same mistake overstates), and the `grid` output's
+  `uncertainty` layer advertised two lines above under the OPPOSITE convention (a
+  confidence-scaled standard deviation in metres, `node.cpp:266`) with nothing saying so.
 - **Agent-instruction candidates**: None — this is a self-contained numerical bug fix with no
   new workflow, convention, or pitfall that generalizes beyond this file's own divergences
   doc (which already exists as the right place to record it).
 
 ## Open Questions
 
-- None. Five decisions that would otherwise be open are settled: store re-measurement
+- None. Six decisions that would otherwise be open are settled: store re-measurement
   dropped, and the fix must be correct independent of `marine_tools#82`'s landing order (see
   "Out of scope"); `Device::across_track_beamwidth` stays in degrees, the error fields are
   one-sigma variances in m^2, the widening term is out of scope and tracked as `#148`, the
   attitude fix (`#147`) is in scope, and the per-beam validation gets a hard physical ceiling
   rather than a plausibility clamp (see "Settled unit decisions").
+- Two more were settled by the operator at round 2, and are recorded in commit 2c: the pitch
+  SIGN is corrected at the producer rather than by restating `Platform`'s convention, and
+  Eqn. 3.49's pitch term is fixed to match Calder rather than recorded as a divergence.
 
 ## Estimated Scope
 
-Single PR closing both `#144` and `#147`. Atomic commits: the beamwidth unit fix and
-validation, the attitude unit fix, and the round-1 review's doc corrections, with each
-commit's doc changes landing alongside its code. No store re-measurement, no widening
+Single PR closing both `#144` and `#147`. Atomic commits, one logical change each, with every
+commit's doc changes landing alongside its code. As implemented and reviewed, that came to
+nine rather than the three this plan first sketched: the beamwidth unit fix and validation,
+the attitude unit fix, the round-1 doc corrections, the constant-depth test rewrite, the
+diagnostic surface and its round-2 correction, the pitch-sign fix, the Eqn. 3.49 fix, the
+divergences-doc rewrite, and the round-2 wording and robustness fixes. No store re-measurement, no widening
 (`#148`), no cross-repo changes (the `marine_tools` and `ros2sonic` consequences are flagged
 only, as `marine_tools#82` and `rolker/ros2sonic#1`).
