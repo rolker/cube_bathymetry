@@ -59,6 +59,22 @@ geometry_msgs::msg::TransformStamped identityTransform(
   return tfs;
 }
 
+// A (parent <- child) transform whose rotation is a right-handed rotation of
+// `angle_rad` about the +y (port) axis. Used to build a pitched attitude.
+geometry_msgs::msg::TransformStamped rotatedAboutY(
+  const std::string & parent, const std::string & child, double angle_rad)
+{
+  geometry_msgs::msg::TransformStamped tfs;
+  tfs.header.stamp = pingStamp();
+  tfs.header.frame_id = parent;
+  tfs.child_frame_id = child;
+  tfs.transform.rotation.x = 0.0;
+  tfs.transform.rotation.y = std::sin(angle_rad / 2.0);
+  tfs.transform.rotation.z = 0.0;
+  tfs.transform.rotation.w = std::cos(angle_rad / 2.0);
+  return tfs;
+}
+
 // Build a SonarDetections ping. rx_angles is one entry per beam; tx_angle is a
 // single transmit steering angle applied to all beams (matching the typical
 // across-track fan). travel_time is two-way, seconds.
@@ -297,6 +313,76 @@ TEST_F(DetectionsProjectorTest, RejectedBeamwidthsAreCounted)
   auto clean = makeDetections({0.0f}, 0.02f);
   ASSERT_TRUE(clean.ping_info.rx_beamwidths.empty());
   EXPECT_EQ(projector.project(clean, buffer, 0.0f).diagnostics.rejected_beamwidths, 0u);
+}
+
+// #144: cube::Platform keeps CALDER's sign conventions (pitch +ve bow up,
+// heave +ve down); the projector converts at the boundary, exactly as it does
+// for units. tf2::getEulerYPR returns the opposite pitch sense for an FLU
+// rotation, so the projector must negate it.
+//
+// This test needs NON-ZERO IMU/GPS lever arms: the only terms odd in
+// sin(pitch) -- swath_heave's IMU lever-arm term and the heading/pitch
+// cross-terms of the static horizontal positioning error -- are multiplied by
+// those offsets and vanish at the (zero) defaults. That is why the wrong sign
+// was latent, and why a zero-lever-arm test could never catch it.
+TEST_F(DetectionsProjectorTest, BowUpPitchFollowsCalderSignConvention)
+{
+  ProjectorParams params = params_;
+  params.vessel.gps_x = 3.0;   // m forward of the transducer
+  params.vessel.gps_z = 1.5;   // m above it
+  params.vessel.imu_x = 2.0;
+  params.vessel.imu_z = 1.0;
+  DetectionsProjector projector(params);
+
+  // Bow-up attitude. In the level frame, base_link's forward axis tilts UP, so
+  // the (level <- base_link) rotation has R[2][0] > 0 and getEulerYPR returns
+  // pitch = -asin(R[2][0]) < 0 -- bow-DOWN-positive. Calder's Platform wants
+  // bow-UP-positive, so the projector must hand the error model +kBowUpRad.
+  const double kBowUpRad = 0.20;
+  tf2::BufferCore buffer;
+  // Parent = level, child = base_link, so the stored rotation IS the
+  // (level <- base_link) one the projector looks up -- no inversion to reason
+  // about. base_link stays the parent of the tide frame, so the tree
+  // (level -> base_link -> tide) is still singly connected.
+  buffer.setTransform(
+    rotatedAboutY(params.level_frame, params.base_link_frame, -kBowUpRad), "test", true);
+  buffer.setTransform(
+    identityTransform(params.base_link_frame, params.tide_frame), "test", true);
+
+  auto det = makeDetections({0.35f}, 0.02f);
+  const float sog = 2.0f;
+  auto result = projector.project(det, buffer, sog);
+  ASSERT_EQ(result.soundings.size(), 1u);
+  ASSERT_EQ(result.diagnostics.missing_attitude, 0u);
+
+  // Reference: the same ping through the error model with Calder's convention.
+  cube::ErrorModel model(params.vessel, params.device);
+  cube::Platform bow_up;
+  bow_up.timestamp = static_cast<double>(kPingSec) +
+    static_cast<double>(kPingNanosec) * 1e-9;
+  bow_up.roll = 0.0f;
+  bow_up.pitch = static_cast<float>(kBowUpRad);
+  bow_up.heave = 0.0f;
+  bow_up.surf_sspeed = det.ping_info.sound_speed;
+  bow_up.mean_speed = det.ping_info.sound_speed;
+  bow_up.vessel_speed = sog;
+
+  cube::Platform wrong_sign = bow_up;
+  wrong_sign.pitch = -bow_up.pitch;
+
+  const auto expected = model.compute(det, bow_up);
+  const auto unflipped = model.compute(det, wrong_sign);
+  ASSERT_EQ(expected.size(), 1u);
+  ASSERT_EQ(unflipped.size(), 1u);
+
+  // The projector agrees with the Calder-convention reference...
+  EXPECT_FLOAT_EQ(result.soundings[0].vertical_error, expected[0].vertical_error);
+  EXPECT_FLOAT_EQ(result.soundings[0].horizontal_error, expected[0].horizontal_error);
+
+  // ...and the two signs are genuinely distinguishable at this lever arm, so
+  // the assertions above fail if the negation is dropped.
+  EXPECT_NE(expected[0].vertical_error, unflipped[0].vertical_error);
+  EXPECT_NE(expected[0].horizontal_error, unflipped[0].horizontal_error);
 }
 
 }  // namespace cube

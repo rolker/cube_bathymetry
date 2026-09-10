@@ -64,13 +64,31 @@ namespace cube
      * ErrorModel, and filled with radians by the one and only producer, which
      * understated attitude by 57.3x and effectively switched it off.
      *
-     * Sign convention, confirmed rather than assumed: roll is a right-handed
-     * rotation about the REP-103 +x (forward) axis, which lifts +y (port), so
-     * +ve is port side up as documented; pitch is about +y (port), so +ve is
-     * bow up. */
+     * Sign conventions are CALDER'S, unchanged (#144). Every equation ported
+     * into ErrorModel was derived under them, so they are held here and the
+     * producer converts, exactly as it does for units.
+     *
+     * - roll: +ve port side up. This coincides with REP-103: a right-handed
+     *   rotation about +x (forward) lifts +y (port). No conversion needed --
+     *   verified twice.
+     * - pitch: +ve BOW UP. This is the OPPOSITE of what tf2::getEulerYPR
+     *   returns for an FLU rotation (pitch = -asin(R[2][0]), a right-handed
+     *   rotation about +y/port, i.e. bow-down positive), so DetectionsProjector
+     *   negates it at the boundary. An earlier revision of this comment
+     *   asserted the two senses agreed; that was only half checked -- the roll
+     *   half was right, the pitch half was not.
+     * - heave: +ve DOWN, likewise opposite to the REP-103 +up TF translation
+     *   the projector reads, and likewise negated there. Inert numerically
+     *   (heave enters only squared) but kept consistent on purpose.
+     *
+     * Three ported terms are ODD in sin(pitch) and so are sensitive to the
+     * pitch sign: swath_heave's IMU lever-arm term and the heading and pitch
+     * cross-terms of the static horizontal_positioning_error. All three vanish
+     * when the IMU/GPS offsets are zero, which is why a wrong sign stayed
+     * latent at the defaults. */
     float roll;  /* Roll in radians, +ve is port side up */
-    float pitch;  /* Pitch in radians, +ve is bow up */
-    float heave;  /* Heave in meters, +ve down */
+    float pitch;  /* Pitch in radians, +ve is bow up (negated by the producer) */
+    float heave;  /* Heave in meters, +ve down (negated by the producer) */
     float surf_sspeed;  /* Surface sound speed, m/s */
     float mean_speed;  /* Geometric mean equivalent sound speed, m/s */
     float vessel_speed;  /* Vessel's speed-over-ground, m/s */

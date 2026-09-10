@@ -111,12 +111,27 @@ ProjectionResult DetectionsProjector::project(
   // Platform documented degrees and ErrorModel converted as degrees, so the
   // one producer and the one consumer disagreed by 57.3x and attitude was
   // effectively switched off.
+  //
+  // SIGN (#144): cube::Platform keeps Calder's conventions -- roll +ve is port
+  // side up, pitch +ve is BOW UP -- because every ported equation in
+  // ErrorModel was derived under them. tf2::getEulerYPR on an FLU (REP-103)
+  // rotation returns pitch = -asin(R[2][0]), a right-handed rotation about +y
+  // (port), which is bow *down* positive: the opposite sense. So pitch is
+  // negated HERE, at the boundary, exactly as the degrees->radians conversion
+  // is done at the boundary -- the internals then stay faithful to the
+  // equations they came from. Roll needs no flip: a right-handed rotation
+  // about +x (forward) lifts +y (port), which is already Calder's sense.
+  //
+  // Three terms are ODD in sin(pitch) and so change value under the flip:
+  // swath_heave's IMU lever-arm term (error_model.cpp), and the heading and
+  // pitch cross-terms of the static horizontal_positioning_error. They all
+  // vanish when the IMU/GPS offsets are zero, which is why this was latent.
   geometry_msgs::msg::TransformStamped level;
   if (lookupAtOrLatest(tf, params_.level_frame, params_.base_link_frame, stamp, level)) {
     double y, p, r;
     tf2::getEulerYPR(level.transform.rotation, y, p, r);
     platform.roll = static_cast<float>(r);
-    platform.pitch = static_cast<float>(p);
+    platform.pitch = static_cast<float>(-p);
     (void)y;  // yaw/heading unused by the error model
   } else {
     platform.roll = std::nan("");
@@ -126,9 +141,15 @@ ProjectionResult DetectionsProjector::project(
 
   // Heave = boat vertical offset from the tide-corrected surface. It enters the
   // budget only squared, so it is non-critical; default to 0 if absent.
+  //
+  // SIGN (#144): like pitch, cube::Platform::heave keeps Calder's convention
+  // (+ve DOWN) while the TF translation is REP-103 +up, so it is negated at
+  // this boundary too. Numerically this is inert -- swath_heave uses heave
+  // only squared -- but leaving the two conventions crossed here is what made
+  // the pitch sign wrong, so the struct is held to one convention throughout.
   geometry_msgs::msg::TransformStamped tide;
   if (lookupAtOrLatest(tf, params_.tide_frame, params_.base_link_frame, stamp, tide)) {
-    platform.heave = static_cast<float>(tide.transform.translation.z);
+    platform.heave = static_cast<float>(-tide.transform.translation.z);
   } else {
     platform.heave = 0.0f;
     result.diagnostics.missing_heave = 1;
