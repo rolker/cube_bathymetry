@@ -50,14 +50,66 @@ per the review's recommendation. The corrected scope:
    the device value instead of trusting a `0.0`.
 3. **Calder's `1/cos(angle)` widening term** (`original_cube/libsrc/ccom_core/device.c:808-820`),
    ported alongside the unit fix since it is the same expression, but **as its own atomic
-   commit** — it is a modeling enhancement, not a bug fix (AGENTS.md atomic-commit rule; also
+   commit** — it is a term the port dropped rather than part of the unit bug, so it stays
+   independently reviewable and revertable (AGENTS.md atomic-commit rule; also
    settles the `/12` vs `/sqrt(12)` open question in `divergences_from_calder.md` — Calder
    uses `/12.0`, confirmed by the same source snippet).
 4. **`docs/divergences_from_calder.md:73-91` correction** — currently claims the fallback is
    the rare path and the per-beam path the "normal" one; backwards for every sonar in service.
-5. **Delete the false "twice the nominal variance" doc comment** at
-   `error_model.h:242-247` (the 2-arg `horizontal_positioning_error` overload) — unrelated
-   function, bundled per the owner's second comment since the file is already open.
+5. **Delete the false "twice the nominal variance" doc comment from *both*
+   `horizontal_positioning_error` overloads** — `error_model.h:242-247` (2-arg) and
+   `error_model.h:310-317` (5-arg). Both carry the identical false claim and neither
+   implementation applies a factor of 2. Bundled per the owner's second comment since the
+   file is already open; the second instance was found by `## Plan Review` and confirmed
+   against the implementation.
+6. **Document the units and statistical meaning of `Sounding::vertical_error` and
+   `Sounding::horizontal_error`** (`include/cube_bathymetry/sounding.h:79-80`), today bare
+   `float` fields with no units, no confidence level, and no comment. See "Settled unit
+   decisions" below for the answer and its evidence. This is the field the whole
+   confidence-interval confusion actually escapes through.
+
+### Settled unit decisions (operator, 2026-09-10)
+
+Three unit questions were raised and answered during review, against Calder's vendored
+source in `original_cube/`. Recording them here so they are not relitigated.
+
+**1. `Device::across_track_beamwidth` stays in DEGREES; convert once at the boundary.**
+Not switched to radians. Rationale: every angular field in the neighbouring `Vessel` and
+`Platform` structs is degrees (roughly a dozen of them, each converted in the constructor),
+so a lone radian field in `Device` would create a fresh trap of exactly the kind this issue
+closes; sonar datasheets quote beamwidths in degrees, which is what a person configuring a
+new device will type; and REP-103's radians rule binds ROS interfaces, not internal C++
+config structs. The bug was never that the field is degrees — it was that the conversion
+sat at the use site instead of the boundary, applied to one sibling field and not the
+other. Moving all three structs to radians would be a legitimate separate change; doing it
+to this one field alone would not.
+
+**2. `Sounding::vertical_error` and `Sounding::horizontal_error` are VARIANCES in m^2, at
+one sigma, with NO confidence scaling applied.** Evidence, all from Calder:
+
+- `original_cube/libsrc/errmod/errmod_iho.c:165-167` converts *into* this contract in the
+  open and comments each step: it takes the IHO 95% figure, divides by 1.96 (`/* Convert 95%
+  CI to standard deviation */`), then squares it (`/* And convert to variances */`). That is
+  the contract stated by the code that has to convert into it.
+- The full model (`errmod_full.c:792-793`) needs no such conversion because it builds
+  variances from the ground up and stores the sum unscaled.
+- CUBE consumes them as variances: `cube_node.c:1853` uses `snd->dz` directly as the
+  measurement variance in the depth update. The confidence interval is produced only at
+  reporting, as `sd2conf_scale * sqrt(variance)`, defaulting to 1.96 (`cube.c:109-113`).
+- Our port already behaves this way throughout (`parameters.cpp:69,88,95`;
+  `node.cpp:163,257,266`). Only the two doc comments say otherwise, which is why deleting
+  them — rather than implementing the factor of 2 — is the correct fix.
+
+Document the two fields accordingly, and note the asymmetry: the vertical figure is a
+one-dimensional error about depth, while the horizontal one is a two-dimensional radial
+quantity derived from the drms convention, so its square root is a radius in the horizontal
+plane rather than an error along a single axis. Both are m^2; they are not the same shape of
+thing.
+
+**3. The `1/cos(angle)` widening is a RESTORATION, not a new enhancement.** Calder applies
+it at `device.c:808`, `:895` and `:938`; the port dropped it. It still lands as its own
+atomic commit for independent reviewability, but the commit message and the divergences doc
+must describe it as restoring a term the port omitted, not as adding a term Calder lacked.
 
 ### Out of scope
 
@@ -97,12 +149,19 @@ per the review's recommendation. The corrected scope:
    - No behavioral difference for `tx_beamwidths` — it is unused by `swath_angle_error`
      (confirmed: only `rx_beamwidths` is read there); out of scope to add a use that doesn't
      exist today.
-3. Delete the false doc comment at `error_model.h:242-247` ("Returns approximate 95%
-   confidence interval..." / "we return twice the nominal variance...") on the 2-arg
-   `horizontal_positioning_error` declaration — the implementation
-   (`error_model.cpp:114-163`) returns a plain variance sum with no factor of 2, confirmed
-   against `swath_horizontal` and Calder's `errmod_full.c`. Replace with a comment that
-   matches the code (plain variance, no confidence-interval scaling).
+3. Delete the false doc comment from **both** `horizontal_positioning_error` overloads —
+   `error_model.h:242-247` (2-arg) and `error_model.h:310-317` (5-arg) — each claiming
+   "Returns approximate 95% confidence interval" and a doubling of the estimate. Neither
+   implementation applies a factor of 2 (`error_model.cpp:114-163` and `:319-356`), and
+   neither does Calder's (`errmod_full.c`, whose own headers carry the same stale claim;
+   his 95% scaling is applied at reporting, with 1.96, not inside these functions).
+   Replace both with wording that matches the code: returns a variance in m^2 at one sigma,
+   no confidence-interval scaling applied.
+3b. Document `Sounding::vertical_error` and `Sounding::horizontal_error`
+   (`include/cube_bathymetry/sounding.h:79-80`) as variances in m^2 at one sigma, with no
+   confidence scaling, and note that the horizontal one is a radial (drms-derived) quantity
+   whose square root is a horizontal-plane radius rather than a single-axis error. Evidence
+   in "Settled unit decisions" above.
 4. Correct `docs/divergences_from_calder.md:73-91` ("Angle error" subsection under "## 2.
    Device error budget is parameterized, not a per-device table"):
    - Remove the "no behavioural change" framing for the angle term — commit 1 (and commit 2,
@@ -136,7 +195,7 @@ per the review's recommendation. The corrected scope:
      directly as radians (no conversion), distinguishing this from the old
      double-conversion bug.
 
-**Commit 2 — Calder `1/cos(angle)` widening term (separate, modeling enhancement):**
+**Commit 2 — restore Calder's `1/cos(angle)` widening term (separate commit):**
 
 6. In `swath_angle_error`, after selecting the beamwidth (radians, from either source per
    commit 1), widen it by `1.0 / cos(meas_angle)` before forming `ang_meas` — `meas_angle` is
@@ -156,7 +215,8 @@ per the review's recommendation. The corrected scope:
 
 | File | Change |
 |------|--------|
-| `cube_bathymetry/include/cube_bathymetry/error_model.h` | Add a private member for the boundary-normalized (radians) device beamwidth; delete/replace the false "twice the nominal variance" doc comment on the 2-arg `horizontal_positioning_error` |
+| `cube_bathymetry/include/cube_bathymetry/error_model.h` | Add a private member for the boundary-normalized (radians) device beamwidth; delete/replace the false "twice the nominal variance" doc comment on **both** `horizontal_positioning_error` overloads (2-arg at :242-247, 5-arg at :310-317) |
+| `cube_bathymetry/include/cube_bathymetry/sounding.h` | Document `vertical_error` / `horizontal_error` as variances in m^2 at one sigma, no confidence scaling; note the horizontal field is radial |
 | `cube_bathymetry/src/error_model.cpp` | Constructor: convert `device.across_track_beamwidth` to radians once. `swath_angle_error`: validate + select beamwidth without a second conversion (commit 1); apply `1/cos(angle)` widening (commit 2) |
 | `cube_bathymetry/test/test_error_model.cpp` | Add unit-agreement, regression-pin, and three validation-case tests (commit 1); add widening-term test (commit 2) |
 | `docs/divergences_from_calder.md` | Correct the "Angle error" subsection: fallback-is-normal claim reversed, normalization + validation documented, `/12` divisor confirmed, widening term documented (split across commits 1 and 2 to match the code changes) |
@@ -167,7 +227,7 @@ per the review's recommendation. The corrected scope:
 |---|---|
 | A change includes its consequences | `docs/divergences_from_calder.md` correction lands in this PR (commits 1 and 2), not deferred; the `marine_tools` consequence is flagged, not silently dropped, via the existing `cube_bathymetry#30` cross-reference |
 | Test what breaks | Every existing test that zeroed `across_track_beamwidth` to avoid this term is left intact; new tests target exactly the branches and validation cases this fix changes (unit agreement, regression pin, empty/zero/non-finite/real per-beam values, widening) |
-| Only what's needed / Improve incrementally | The angle-widening term is a genuine modeling enhancement, not required to fix the unit bug — split into its own commit(s) so it is independently reviewable and revertable without touching the safety fix |
+| Only what's needed / Improve incrementally | The angle-widening term is a restoration of something Calder had and the port dropped, not required to fix the unit bug — split into its own commit(s) so it is independently reviewable and revertable without touching the safety fix |
 | Capture decisions, not just implementations | `divergences_from_calder.md` update closes the `/12` vs `/sqrt(12)` open question and corrects the backwards "normal path" claim, so the record matches the code going forward |
 | Human control and transparency | No hidden behavior change — this is a correction toward documented intent (`rx_beamwidths` "in radians", `Device` "degrees"); the store re-measurement acceptance criterion the issue asked for is explicitly dropped by operator decision (see Out of scope), not silently omitted |
 
@@ -198,10 +258,11 @@ per the review's recommendation. The corrected scope:
 
 ## Open Questions
 
-- None. The operator has already settled the two decisions that would otherwise be open
-  (store re-measurement dropped; fix must be correct independent of `marine_tools#82`'s
-  landing order) — see "Operator decisions already made" in the dispatch instructions and
-  "Out of scope" above.
+- None. Five decisions that would otherwise be open are settled: store re-measurement
+  dropped, and the fix must be correct independent of `marine_tools#82`'s landing order (see
+  "Out of scope"); `Device::across_track_beamwidth` stays in degrees, the error fields are
+  one-sigma variances in m^2, and the widening term is a restoration (see "Settled unit
+  decisions").
 
 ## Estimated Scope
 
