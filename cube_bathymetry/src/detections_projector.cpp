@@ -161,12 +161,25 @@ ProjectionResult DetectionsProjector::project(
   platform.mean_speed = detections.ping_info.sound_speed;
   platform.surf_sspeed = detections.ping_info.sound_speed;
 
-  // Count per-beam beamwidths the error model will refuse, using the model's
-  // own predicate so the two can never drift apart. The projector never logs;
-  // the caller reports this (#144).
-  for (const float reported : detections.ping_info.rx_beamwidths) {
-    if (!cube::ErrorModel::per_beam_beamwidth_usable(reported)) {
-      ++result.diagnostics.rejected_beamwidths;
+  // Count the beams whose angular term will fall back to the generic device
+  // beamwidth -- either because the ping reports no per-beam value for that
+  // beam, or because the error model refuses the one it reports. The predicate
+  // is the model's own, so the two cannot drift apart, and the domain is the
+  // BEAMS (two_way_travel_times), matching swath_angle_error's own indexing.
+  //
+  // Counting rejections over rx_beamwidths instead would be silent in the
+  // commonest field case there is: kongsberg_em_bridge leaves rx_beamwidths
+  // empty on every M3 ping, so every beam runs on the hardcoded generic
+  // beamwidth while nothing at all is "rejected". A single-element array (a
+  // legitimate fixed-beamwidth encoding) reads the same way, and an over-long
+  // array would over-report. The projector never logs; the caller reports
+  // this (#144).
+  const auto & reported_beamwidths = detections.ping_info.rx_beamwidths;
+  for (size_t i = 0; i < detections.two_way_travel_times.size(); ++i) {
+    if (i >= reported_beamwidths.size() ||
+      !cube::ErrorModel::per_beam_beamwidth_usable(reported_beamwidths[i]))
+    {
+      ++result.diagnostics.default_beamwidth_beams;
     }
   }
 

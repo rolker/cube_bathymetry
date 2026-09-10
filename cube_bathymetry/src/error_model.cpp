@@ -289,9 +289,11 @@ double ErrorModel::swath_angle_error(
     // does no across-track beamforming. (Tracking reference in the divergences
     // doc; it lives in another repo and would rot here.)
     //
-    // Rejections are not silent: DetectionsProjector counts them into
-    // ProjectionDiagnostics::rejected_beamwidths, which the live node reports
-    // as a throttled warning and the offline tools fold into their run summary.
+    // Falling back is not silent: DetectionsProjector counts every beam that
+    // lands on the device default -- refused value OR no value reported at all
+    // -- into ProjectionDiagnostics::default_beamwidth_beams, which the live
+    // node reports as a throttled warning and the offline tools fold into
+    // their run summary.
     if(per_beam_beamwidth_usable(reported)) {
       beamwidth = reported;
     }

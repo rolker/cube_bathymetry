@@ -82,16 +82,25 @@ namespace cube
   /// defaults to 0 (it enters the budget only squared, so this is non-critical).
     size_t missing_heave = 0;
 
-  /// Sonar-reported per-beam receive beamwidths in this ping that the error
-  /// model refused as unusable -- non-finite, non-positive, or at/above the
-  /// physical ceiling (`ErrorModel::kMaxPerBeamBeamwidthRad`). Each rejected
-  /// beam silently falls back to `Device::across_track_beamwidth`, which is a
-  /// generic value that belongs to no particular sonar, so a non-zero count
-  /// means the angular part of the uncertainty budget is being carried by a
-  /// default rather than by the instrument. Counted over the ping's
-  /// `rx_beamwidths` array, so it is zero for the (common) case of a driver
-  /// that reports nothing at all. See #144.
-    size_t rejected_beamwidths = 0;
+  /// Beams in this ping whose angular uncertainty came from the generic
+  /// `Device::across_track_beamwidth` instead of from the ping, because the
+  /// sonar reported no usable per-beam receive beamwidth for them. That covers
+  /// both a value the error model refused (non-finite, non-positive, or
+  /// at/above `ErrorModel::kMaxPerBeamBeamwidthRad`) and the absence of a value
+  /// at all -- an EMPTY `rx_beamwidths`, or one shorter than the beam count.
+  ///
+  /// Counting the FALLBACK rather than the rejection is deliberate (#144). The
+  /// count exists to tell an operator that the angular part of the budget is a
+  /// default belonging to no particular sonar, and the commonest way for that
+  /// to happen is the one a rejection count cannot see: `kongsberg_em_bridge`
+  /// leaves `rx_beamwidths` empty on every M3 ping, so 100% of beams run on
+  /// the default while nothing is rejected. Counting over the beams
+  /// (`two_way_travel_times`) rather than over `rx_beamwidths` also stops an
+  /// over-long array inflating the figure past the beam count.
+  ///
+  /// The denominator is `total` (one sounding per beam, before range
+  /// filtering); the tools report "N of M beams".
+    size_t default_beamwidth_beams = 0;
   };
 
 /// Result of projecting one SonarDetections message: the (range-filtered)

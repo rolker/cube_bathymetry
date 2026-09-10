@@ -286,7 +286,7 @@ public:
   /// as a measurement: finite, strictly positive, and below the physical
   /// ceiling above. Public so a caller can count and report rejections without
   /// duplicating the predicate -- `DetectionsProjector` fills
-  /// `ProjectionDiagnostics::rejected_beamwidths` with it.
+  /// `ProjectionDiagnostics::default_beamwidth_beams` with it.
     static bool per_beam_beamwidth_usable(float beamwidth_rad);
 
 private:

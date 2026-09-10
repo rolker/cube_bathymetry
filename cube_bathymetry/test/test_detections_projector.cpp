@@ -288,10 +288,13 @@ TEST_F(DetectionsProjectorTest, NodeRegressionGeometryAndStaleSog)
   }
 }
 
-// #144: per-beam beamwidths the error model refuses are counted, not silent.
-// A rejected beam falls back to the generic Device::across_track_beamwidth, so
-// the operator has to be able to see that the angular budget is a default.
-TEST_F(DetectionsProjectorTest, RejectedBeamwidthsAreCounted)
+// #144: every beam whose angular budget falls back to the generic
+// Device::across_track_beamwidth is counted -- a refused value AND a missing
+// one. The count exists so an operator can see that the angular budget is a
+// default belonging to no particular sonar; counting only REJECTIONS would be
+// silent in the commonest real case (kongsberg_em_bridge leaves rx_beamwidths
+// empty on every M3 ping, so 100% of beams run on the default).
+TEST_F(DetectionsProjectorTest, DefaultBeamwidthBeamsAreCounted)
 {
   DetectionsProjector projector(params_);
   tf2::BufferCore buffer;
@@ -307,12 +310,38 @@ TEST_F(DetectionsProjectorTest, RejectedBeamwidthsAreCounted)
     static_cast<float>(55.0 * M_PI / 180.0)};
 
   auto result = projector.project(det, buffer, 0.0f);
-  EXPECT_EQ(result.diagnostics.rejected_beamwidths, 2u);
+  EXPECT_EQ(result.diagnostics.default_beamwidth_beams, 2u);
+  EXPECT_EQ(result.diagnostics.total, 3u);  // the denominator the tools print
 
-  // Nothing reported at all is not a rejection -- it is the common case.
-  auto clean = makeDetections({0.0f}, 0.02f);
-  ASSERT_TRUE(clean.ping_info.rx_beamwidths.empty());
-  EXPECT_EQ(projector.project(clean, buffer, 0.0f).diagnostics.rejected_beamwidths, 0u);
+  // The M3 case: NOTHING reported at all. Every beam takes the default, and
+  // the diagnostic has to say so -- this is the case a rejection count missed.
+  auto empty = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  ASSERT_TRUE(empty.ping_info.rx_beamwidths.empty());
+  auto empty_result = projector.project(empty, buffer, 0.0f);
+  EXPECT_EQ(empty_result.diagnostics.default_beamwidth_beams, 3u);
+  EXPECT_EQ(empty_result.diagnostics.total, 3u);
+
+  // A single-element array (a legitimate fixed-beamwidth encoding) covers only
+  // beam 0; the other two fall back.
+  auto one = makeDetections({-0.2f, 0.0f, 0.2f}, 0.02f);
+  one.ping_info.rx_beamwidths = {static_cast<float>(2.0 * M_PI / 180.0)};
+  EXPECT_EQ(projector.project(one, buffer, 0.0f).diagnostics.default_beamwidth_beams, 2u);
+
+  // An over-long array cannot inflate the count past the beam count.
+  auto over_long = makeDetections({0.0f}, 0.02f);
+  over_long.ping_info.rx_beamwidths = {0.0f, 0.0f, 0.0f, 0.0f};
+  auto over_long_result = projector.project(over_long, buffer, 0.0f);
+  EXPECT_EQ(over_long_result.diagnostics.default_beamwidth_beams, 1u);
+  EXPECT_EQ(over_long_result.diagnostics.total, 1u);
+
+  // Range-filtered beams are still beams: the count is over the ping's beams,
+  // not over the soundings that survive the gate.
+  ProjectorParams gated = params_;
+  gated.minimum_range = 100.0;  // 15 m soundings are all filtered out
+  DetectionsProjector gating_projector(gated);
+  auto gated_result = gating_projector.project(empty, buffer, 0.0f);
+  ASSERT_TRUE(gated_result.soundings.empty());
+  EXPECT_EQ(gated_result.diagnostics.default_beamwidth_beams, 3u);
 }
 
 // #144: cube::Platform keeps CALDER's sign conventions (pitch +ve bow up,

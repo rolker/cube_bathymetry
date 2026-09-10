@@ -56,6 +56,7 @@
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/batch_regen.h"
 #include "cube_bathymetry/detections_projector.h"
+#include "cube_bathymetry/projection_summary.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/store_import.h"
@@ -697,7 +698,8 @@ int main(int argc, char * argv[])
   size_t proj_filtered_range = 0;
   size_t proj_missing_attitude = 0;
   size_t proj_missing_heave = 0;
-  size_t proj_rejected_beamwidths = 0;
+  size_t proj_beams = 0;
+  size_t proj_default_beamwidth_beams = 0;
   size_t proj_dropped_georef = 0;  // pings with no earth transform at their stamp
 
   BagReaders bag_readers(bagfile_names);
@@ -886,7 +888,8 @@ int main(int argc, char * argv[])
       proj_filtered_range += projection.diagnostics.filtered_range;
       proj_missing_attitude += projection.diagnostics.missing_attitude;
       proj_missing_heave += projection.diagnostics.missing_heave;
-      proj_rejected_beamwidths += projection.diagnostics.rejected_beamwidths;
+      proj_beams += projection.diagnostics.total;
+      proj_default_beamwidth_beams += projection.diagnostics.default_beamwidth_beams;
 
       try {
         auto transform = tfBuffer.lookupTransform(
@@ -1070,31 +1073,17 @@ int main(int argc, char * argv[])
   std::cout << "; projected " << ping_count << " pings in " << phase_secs() << "s." << std::endl;
 
   std::cout << "\ndone." << std::endl;
-  std::cout << "Offline projection: " << proj_pings << " pings projected, "
-            << ping_count << " georeferenced into the grid, " << proj_dropped_georef
-            << " dropped (no earth TF); " << proj_soundings << " soundings ("
-            << proj_filtered_range << " range-filtered, " << proj_missing_attitude
-            << " missing attitude, " << proj_missing_heave << " missing heave, "
-            << proj_rejected_beamwidths << " rejected per-beam beamwidths)" << std::endl;
-  if (proj_rejected_beamwidths > 0) {
-    std::cerr << "WARNING: " << proj_rejected_beamwidths
-              << " per-beam rx_beamwidths rejected as unusable (non-finite, "
-      "non-positive, or >= pi rad); those beams fell back to the "
-      "generic device across-track beamwidth, so their angular "
-      "uncertainty is a default rather than a measurement."
-              << std::endl;
-  }
-  if (proj_pings > 0 && proj_soundings == 0) {
-    std::cerr << "WARNING: projected 0 soundings from " << proj_pings
-              << " pings -- check the --*-frame overrides match the bag's "
-              << "namespaced frames (see README 'Configuring frames per platform')."
-              << std::endl;
-  }
-  if (ping_count == 0 && proj_dropped_georef > 0) {
-    std::cerr << "WARNING: every ping was dropped for lack of an earth transform -- "
-              << "check that the bag has a localization chain to the 'earth' frame."
-              << std::endl;
-  }
+  cube::ProjectionRunTotals proj_totals;
+  proj_totals.pings = proj_pings;
+  proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
+  proj_totals.dropped_georef = proj_dropped_georef;
+  proj_totals.soundings = proj_soundings;
+  proj_totals.beams = proj_beams;
+  proj_totals.filtered_range = proj_filtered_range;
+  proj_totals.missing_attitude = proj_missing_attitude;
+  proj_totals.missing_heave = proj_missing_heave;
+  proj_totals.default_beamwidth_beams = proj_default_beamwidth_beams;
+  cube::report_projection_summary(proj_totals);
 
   std::cout << "Gathering per-tile buckets (exact rebuild)..." << std::endl;
 
