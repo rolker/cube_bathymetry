@@ -199,14 +199,40 @@ TEST_F(ErrorModelTest, VerticalErrorIsWorseAtObliqueAngleAtConstantDepth)
 
   // Hold the DEPTH at 15 m rather than the slant range: travel time scales as
   // 1/cos(angle) so depth = range*cos(angle) stays put.
+  //
+  // Three angles, not two -- and the third one says something the pair could
+  // not. The nadir-vs-60-degree comparison is a claim about ENDPOINTS, and a
+  // single pair cannot distinguish "rises monotonically" from "dips and then
+  // recovers". Measured at 30 degrees, the corrected model does the latter:
+  // holding depth fixed, the measured-range term projects into depth as
+  // cos^2(angle) and shrinks faster than the angular term's tan^2(angle) grows,
+  // until the angular term takes over somewhere past 30 degrees.
+  //
+  // So this test pins the SHAPE, dip included, rather than asserting a
+  // monotonicity that is not true of the total budget. (It is true of the
+  // angular contribution in isolation -- see
+  // AngularContributionToVerticalErrorRisesWithBeamAngle -- which is the claim
+  // the deleted VerticalErrorIncreasesWithBeamAngle was really reaching for.)
   auto det_nadir = makeDetections({0.0f}, 0.02f);
-  auto det_60deg = makeDetections({1.0472f}, 0.04f);  // ~60 deg, same 15 m depth
+  auto det_30deg = makeDetections({0.5236f}, 0.0230940f);  // ~30 deg, same 15 m depth
+  auto det_60deg = makeDetections({1.0472f}, 0.04f);       // ~60 deg, same 15 m depth
 
   auto s_nadir = em.compute(det_nadir, platform);
+  auto s_30 = em.compute(det_30deg, platform);
   auto s_60 = em.compute(det_60deg, platform);
 
-  ASSERT_NEAR(s_nadir[0].depth, s_60[0].depth, 1e-3);  // same depth, by construction
+  // Same depth for all three, by construction.
+  ASSERT_NEAR(s_nadir[0].depth, s_30[0].depth, 1e-3);
+  ASSERT_NEAR(s_nadir[0].depth, s_60[0].depth, 1e-3);
+
+  // The property this test is named for: an oblique beam is worse than a nadir
+  // beam at the same depth.
   EXPECT_LT(s_nadir[0].vertical_error, s_60[0].vertical_error);
+
+  // ...but not by a monotone climb. Pinned so a future change that flattens or
+  // reverses the intermediate dip has to come here and say so deliberately.
+  EXPECT_LT(s_30[0].vertical_error, s_nadir[0].vertical_error);
+  EXPECT_LT(s_30[0].vertical_error, s_60[0].vertical_error);
 }
 
 TEST_F(ErrorModelTest, HorizontalErrorVariesWithBeamAngle)
