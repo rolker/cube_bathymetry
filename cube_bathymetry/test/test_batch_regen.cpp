@@ -88,6 +88,43 @@ std::vector<GeoSounding> surveyCell(
   return soundings;
 }
 
+// RAII stderr capture -- gtest's CaptureStderr/GetCapturedStderr is a SINGLE-capturer
+// facility, and a throw between the two leaves fd 2 redirected, aborting the binary
+// at the next capture. The destructor releases it.
+class StderrCapture
+{
+public:
+  StderrCapture() {testing::internal::CaptureStderr();}
+  ~StderrCapture()
+  {
+    if (!released_) {
+      testing::internal::GetCapturedStderr();
+    }
+  }
+  StderrCapture(const StderrCapture &) = delete;
+  StderrCapture & operator=(const StderrCapture &) = delete;
+  std::string str()
+  {
+    released_ = true;
+    return testing::internal::GetCapturedStderr();
+  }
+
+private:
+  bool released_ = false;
+};
+
+// Occurrences of @p needle in @p haystack -- for "emitted EXACTLY once" assertions.
+std::size_t countOccurrences(const std::string & haystack, const std::string & needle)
+{
+  std::size_t n = 0;
+  for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
+    pos = haystack.find(needle, pos + needle.size()))
+  {
+    ++n;
+  }
+  return n;
+}
+
 BatchRegen::SheetFactory sheetFactory()
 {
   return []() {return std::make_unique<GeoMapSheet>(kCellSize);};
@@ -389,6 +426,180 @@ TEST(BatchRegen, LegacySurveyStoreRefusedBeforeAnyWrite)
     marine_bathymetry_store::SourceLayer::Processed);
   EXPECT_FALSE(std::filesystem::exists(processed_dir))
     << "batch-regen must not create processed/ (or any output) when it refuses";
+
+  std::filesystem::remove_all(root);
+}
+
+// The silent-no-op prior guard must be reachable from the AUTHORITATIVE rebuild
+// (#137 review). BatchRegen::gather builds a fresh ImportAccumulator per tile and
+// calls persistResidentTile, never ImportAccumulator::finalize -- so the warning
+// finalize() emits could never fire here, even though batch_regen takes the same
+// --reference-store and prints the same "Reference-prior seeding from ..." banner.
+// A chart prior that gated nothing was therefore as silent from the tool the
+// workspace calls authoritative as it was before the fix.
+TEST(BatchRegen, PriorThatPrimesNothingWarnsFromGather)
+{
+  const std::string root = makeTempDir("prior_no_op_warning");
+  const std::string prior_dir = root + "/prior_store";
+
+  // A prior store whose only tile is FAR from the survey: the windowed load finds
+  // nothing usable and no tile ever primes.
+  {
+    const gggs::GridIndex far_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(10.0, 10.0);
+    marine_bathymetry_store::BathymetryTile tile(far_grid);
+    for (gggs::CellAreaIterator cit(far_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(far_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(43.0, -70.0, 20.0f, 40.0f));
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "");
+    cfg.reference_store_dir = prior_dir;
+    BatchRegen regen(sheetFactory(), cfg);
+    for (const auto & b : batches) {
+      regen.addBatch(b);
+    }
+    regen.finalize();
+    warned = capture.str();
+  }
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "batch_regen must emit the run-level prior warning exactly once from the "
+    "shared run-level tally; stderr was:\n" << warned;
+  EXPECT_NE(warned.find("batch_regen: WARNING"), std::string::npos)
+    << "the warning must name batch_regen, not import_bag; stderr was:\n" << warned;
+
+  // Companion no-false-positive check: a prior that DOES prime must stay quiet.
+  const std::string good_prior = root + "/good_prior";
+  {
+    const gggs::GridIndex survey_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+    marine_bathymetry_store::BathymetryTile tile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, good_prior);
+  }
+  std::string quiet;
+  {
+    StderrCapture capture;
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out2", "");
+    cfg.reference_store_dir = good_prior;
+    BatchRegen regen(sheetFactory(), cfg);
+    for (const auto & b : batches) {
+      regen.addBatch(b);
+    }
+    regen.finalize();
+    quiet = capture.str();
+  }
+  EXPECT_EQ(quiet.find("primed NOTHING"), std::string::npos)
+    << "an ordinary rebuild with a working prior must NOT warn; stderr was:\n"
+    << quiet;
+
+  std::filesystem::remove_all(root);
+}
+
+// The cross-level audit line must be de-duplicated ACROSS the whole rebuild, and
+// must name the tool that emitted it (#137 review). BatchRegen::finalize builds a
+// FRESH ImportAccumulator per gathered tile, so a tally merged after each tile
+// summed the counters correctly but left `audit_seen` de-duplicating nothing: the
+// line fired once per tile while its own text promised "reported once per prior
+// level", and it was hard-prefixed `import_bag:` on a rebuild the operator ran as
+// `batch_regen`. Two survey tiles inside ONE coarse chart tile therefore used to
+// produce two (or more) copies of a line claiming to be printed once.
+TEST(BatchRegen, CrossLevelAuditLineIsRunScopedAndNamesBatchRegen)
+{
+  constexpr float kCoarseCellSize = 8.0f;
+  const std::string root = makeTempDir("audit_dedup");
+  const std::string prior_dir = root + "/chart_store";
+
+  // Two survey positions well inside the SAME coarse chart tile (quarter and
+  // three-quarter points), so both survey tiles fall through to the same
+  // (layer, level) prior and would each emit the audit line without run-scoped
+  // dedup.
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::GridIndex coarse_grid = coarse_level.gridIndex(43.0, -70.0);
+  const double lat_a =
+    coarse_grid.southLatitude() + 0.25 * coarse_grid.latitudinalSpan();
+  const double lon_a =
+    coarse_grid.westLongitude() + 0.25 * coarse_grid.longitudinalSpan();
+  const double lat_b =
+    coarse_grid.southLatitude() + 0.75 * coarse_grid.latitudinalSpan();
+  const double lon_b =
+    coarse_grid.westLongitude() + 0.75 * coarse_grid.longitudinalSpan();
+  ASSERT_NE(survey_level.gridIndex(lat_a, lon_a), survey_level.gridIndex(lat_b, lon_b))
+    << "test setup: the two positions must land in DIFFERENT survey tiles";
+  ASSERT_EQ(coarse_level.gridIndex(lat_a, lon_a), coarse_grid);
+  ASSERT_EQ(coarse_level.gridIndex(lat_b, lon_b), coarse_grid);
+
+  // One coarse CHART tile with shallow data everywhere: no survey-level tile
+  // exists, so every gathered tile gates via the cross-level fallback.
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  std::string log;
+  {
+    StderrCapture capture;
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "");
+    cfg.reference_store_dir = prior_dir;
+    BatchRegen regen(sheetFactory(), cfg);
+    regen.addBatch(surveyCell(lat_a, lon_a, 150.0f, 40.0f));
+    regen.addBatch(surveyCell(lat_b, lon_b, 150.0f, 40.0f));
+    regen.finalize();
+    log = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(log, "seeded by cross-level resample"), 1u)
+    << "the audit line claims to be reported once per prior level, so it must be "
+    "de-duplicated across the WHOLE rebuild, not per gather accumulator; stderr "
+    "was:\n" << log;
+  EXPECT_NE(log.find("batch_regen: chart blunder gate"), std::string::npos)
+    << "a rebuild's gate diagnostics must name batch_regen; stderr was:\n" << log;
+  EXPECT_EQ(log.find("import_bag:"), std::string::npos)
+    << "no line of a batch_regen run may be attributed to import_bag; stderr "
+    "was:\n" << log;
+  EXPECT_TRUE(loadBathyCells(root + "/out").empty())
+    << "the coarse chart prior must gate the deep blunder on BOTH tiles (otherwise "
+    "the dedup assertion above is not exercising a real fallback); stderr was:\n"
+    << log;
 
   std::filesystem::remove_all(root);
 }

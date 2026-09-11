@@ -241,26 +241,63 @@ The startup-prime (#21) and revisit-reload (#70) paths generalize into a single
    depth as a CUBE hypothesis (round-trips through `values()`, refines under new
    soundings) **and** its per-cell backscatter Welford reconstructed from the
    `survey/` backscatter tile (`welfordFromCell`, ADR-0007 addendum). Measured data.
-2. **reference** — else a `reference/` prior tile is primed with
+2. **prior (`chart/` then `reference/`)** — else a prior tile is primed with
    `seed_settled=false`: predicted-surface only (turns the blunder-rejection gate
    on) but **never settled**, so it produces no `values()` output, seeds no
-   backscatter, and is **not counted as measured data**. A reference tile at the
-   survey level primes cell-for-cell; a **coarser** reference tile (a multi-level
+   backscatter, and is **not counted as measured data**. A prior tile at the
+   survey level primes cell-for-cell; a **coarser** prior tile (a multi-level
    prior — `loadWindow` returns tiles at any level, keyed by their own level, so the
-   same-level lookup misses them) is handled by a level-walk fallback (#115): the
-   finest coarser tile containing this survey tile is resampled (nearest-neighbour on
-   cell center) onto the fine survey cells, and the fallback level is logged for
-   auditability. Trade-off: the widened gate exposes tiles previously ungated
-   (reference data only at non-survey levels) to the coarse/shallow-biased-prior
-   false-reject mode — legitimate deeper-than-charted returns can be rejected;
-   the margin is tunable via the `blunder_*` params. Enforced by
-   `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData` (gate-only, not settled)
-   and `test_import_eviction.CoarseLevelReferenceSeedRejectsDeepBlunder` (the
-   cross-level fallback gates a deep blunder).
+   same-level lookup misses them) is handled by a level walk (#115): **every**
+   coarser tile *containing* this survey tile is resampled (nearest-neighbour on
+   cell center) onto the fine survey cells, **coarsest first**, then the exact-level
+   tile last — so each survey cell ends up gated by the FINEST prior that holds data
+   there, and a cell no finer prior covers is still gated by a coarser one. Each
+   contributing layer+level is logged for auditability. The walk stopped at the first
+   containing tile that seeded *any* cell until #137's review round: one sliver of
+   data in the finest containing tile then suppressed a coarser prior with full
+   coverage, leaving most of the survey tile ungated while the run tally recorded a
+   hit — so nothing warned either. **#137 extended
+   that fallback from `reference/` to `chart/` as well**, because an ENC chart
+   product is built on the chart scale ladder and essentially never has a tile at
+   the survey level — so the exact-level-only chart prime missed every time and the
+   gate stayed silently off for exactly the product the `Chart` layer holds.
+   Trade-off: the widened gate exposes tiles previously ungated to the
+   coarse/shallow-biased-prior false-reject mode — legitimate deeper-than-charted
+   returns can be rejected; the margin is tunable via the `blunder_*` params. **That
+   trade-off now applies to `chart/` too, and there it is the dominant gating path**
+   (an official chart is the usual prior in charted waters, and the chart ladder
+   means the resample gap can be large — an L2 chart tile is ~232 m/cell under an
+   L10 survey). Of the three options the #137 review put to the operator — bound how
+   coarse a prior may be, scale the blunder margin with the resample gap, or make the
+   chart fallback opt-in — **the operator chose to scale the margin** (2026-08-26).
+   A cross-level prime now inflates the seeded 1-sigma by
+   `prior_relief_slope * half-cell-span` (`--prior-relief-slope`, default 0.05).
+   This is what makes the variance limit bind at all: `Node::insert` takes the
+   `min()` of its three blunder limits, which selects the most *permissive*, so an
+   uncertainty-less chart cell seeding sigma = 1 cm made the variance term the most
+   restrictive and therefore always discarded — a 232 m/cell L2 prior gated exactly
+   as hard as an exact-level one, and one cell blending a shoal with a channel would
+   permanently reject the channel's real bottom (the offline import is single-pass).
+   The allowance scales with the gap, so a near-level prior is unaffected. Setting
+   the slope to 0 restores the previous unbounded-confidence behaviour. The audit
+   line still names the level used, so a large gap is visible in the import log, and
+   a run whose prior primed nothing at all warns explicitly rather than failing
+   silently (#137). Enforced by
+   `test_import_eviction.ResampleGapReliefAdmitsARealDeepUnderACoarsePrior` (a real
+   deeper-than-charted return survives a 232 m/cell prior at the default slope and is
+   rejected at slope 0),
+   `test_import_eviction.ReferenceSeedDoesNotAddMeasuredData` (gate-only, not settled),
+   `test_import_eviction.CoarseLevelReferenceSeedRejectsDeepBlunder` and
+   `.CoarseLevelChartSeedRejectsDeepBlunder` (the cross-level fallback gates a deep
+   blunder on each layer), `.MatchedButEmptyChartPriorStillWarns` /
+   `.EmptyExactLevelChartPriorFallsThroughToCoarsePrior` (a matched-but-no-data prior
+   is not a gate), and
+   `.SliverInTheFinestPriorDoesNotSuppressAFullCoverageCoarserPrior` (the gate covers
+   the per-cell union of the usable priors, not the first one to seed a cell).
 3. else **blank**.
 
 `seed_settled` is thus the contract boundary between *measured* (survey: settled +
-backscatter) and *prior-only* (reference: gate-only). This replaces the pre-#96
+backscatter) and *prior-only* (chart/reference: gate-only). This replaces the pre-#96
 upfront whole-store `loadIntoSheet` of a `--prior` chart, which loaded the entire
 prior into the sheet at once and defeated bounded-RAM eviction; the importer flag is
 now `--reference-store` and priming is lazy, per tile.

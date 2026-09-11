@@ -151,11 +151,16 @@ bool loadCurveFromBagSonarInfo(
     "needed). The off-boat CUBE re-run is authoritative, so it always writes the "
     "`survey` layer (uma#248 collapsed the draft/processed split into one)\n";
   std::cout << "  --reference-store <store_dir>: seed the CUBE predicted surface "
-    "lazily, per tile on first touch, from this store's `reference` (prior) layer "
-    "so blunder rejection drops false-deep detections (#89, #96). Tiles at the survey "
+    "lazily, per tile on first touch, from BOTH of this store's prior layers -- "
+    "`chart` (official chart/ENC products) and `reference` (prior/contour) -- so "
+    "blunder rejection drops false-deep detections (#89, #96, #119). `chart` primes "
+    "first and `reference` overwrites where both cover a cell. Tiles at the survey "
     "GGGS level gate cell-for-cell; a coarser (multi-level) prior gates via a "
-    "level-walk fallback that resamples the finest coarser tile (#115). Predicted-"
-    "only: the coarse prior is NEVER settled as "
+    "level-walk that gates on the per-cell UNION of EVERY containing coarser tile "
+    "(coarsest first, exact level last so it wins) -- since #137 for BOTH layers, "
+    "which matters because an ENC product is "
+    "built on the chart scale ladder and essentially never has a survey-level tile. "
+    "Predicted-only: the coarse prior is NEVER settled as "
     "measured data and seeds no backscatter. NOTE: a coarse/shallow-biased prior "
     "can also reject LEGITIMATE deeper-than-charted returns; the rejection margin "
     "is tunable via the blunder_* params. (A `survey` tile already in -o takes "
@@ -172,6 +177,12 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "  -r <meters>: Grid resolution (nominal; snapped to GGGS). "
     "Default 1.0\n";
   std::cout << "  --iho-order <order>: CUBE IHO order (default order1a)\n";
+  std::cout << "  --prior-relief-slope <s>: relief allowance for a CROSS-LEVEL "
+    "prior prime, as a seabed slope (default 0.05). A coarse prior cell speaks "
+    "for a whole cell span, so its seeded 1-sigma is inflated by s * half-span; "
+    "without this a 232 m/cell L2 chart band gates exactly as hard as an "
+    "exact-level prior and can permanently reject a real channel bottom under a "
+    "blended cell. Raise it over steep seabed, set 0 to disable (#137).\n";
   std::cout << "  --sonar-info-topic <topic>: SonarInfo topic scanned for the "
     "angular-response curve (auto mode, cube#102). Default: the detections "
     "topic's sibling 'sonar_info'. An explicit --backscatter-curve wins.\n";
@@ -781,6 +792,7 @@ int main(int argc, char * argv[])
   std::string odom_topic;  // optional: nav_msgs/Odometry for per-ping vessel speed
   double resolution = 1.0;
   std::string iho_order = "order1a";
+  double prior_relief_slope = cube::ImportAccumulatorConfig{}.prior_relief_slope;
   int ping_count_limit = 0;
   // Coverage-message size report (cube_bathymetry#112). Off unless a path is
   // given; measures what the live coverage stream would put on the operator
@@ -895,6 +907,12 @@ int main(int argc, char * argv[])
       odom_topic = next_value("--odom-topic");
     } else if (*arg == "-r") {
       resolution = parse_double("-r", next_value("-r"));
+    } else if (*arg == "--prior-relief-slope") {
+      prior_relief_slope = std::stod(next_value("--prior-relief-slope"));
+      if (!std::isfinite(prior_relief_slope) || prior_relief_slope < 0.0) {
+        throw std::runtime_error(
+                "--prior-relief-slope must be a finite, non-negative slope");
+      }
     } else if (*arg == "--iho-order") {
       iho_order = next_value("--iho-order");
     } else if (*arg == "--backscatter-correction") {
@@ -1124,6 +1142,7 @@ int main(int argc, char * argv[])
   cube::ImportAccumulatorConfig accumulator_config;
   accumulator_config.store_dir = store_dir;
   accumulator_config.reference_store_dir = reference_store_dir;
+  accumulator_config.prior_relief_slope = prior_relief_slope;
   // Match the store level to the sheet's actual (GGGS-snapped) cell size so the
   // reload/seed/merge scratch stores tile identically.
   accumulator_config.cell_size_m =
@@ -1133,8 +1152,11 @@ int main(int argc, char * argv[])
   cube::ImportAccumulator accumulator(geo_map_sheet, accumulator_config);
 
   if (!reference_store_dir.empty()) {
-    std::cout << "Reference-prior seeding from " << reference_store_dir
-              << " (lazy per-tile; predicted-only blunder gate, #96)." << std::endl;
+    std::cout << "Prior seeding (chart + reference layers) from "
+              << reference_store_dir
+              << " (lazy per-tile; predicted-only blunder gate, #96). A run that "
+      "primes nothing WARNS at the end (#137) -- this banner alone does not mean "
+      "the gate engaged." << std::endl;
   }
 
   if (max_resident_tiles > 0) {

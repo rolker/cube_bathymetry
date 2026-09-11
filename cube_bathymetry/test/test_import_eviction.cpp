@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <string>
 #include <utility>
@@ -87,6 +88,91 @@ std::vector<GeoSounding> surveyCell(
     soundings.push_back(s);
   }
   return soundings;
+}
+
+// RAII stderr capture. gtest's CaptureStderr/GetCapturedStderr is a SINGLE-capturer
+// facility: a throw between the two leaves fd 2 redirected, and the next
+// CaptureStderr then trips gtest's "already capturing" check and ABORTS the whole
+// binary -- hiding the original failure and taking every later test with it. The
+// destructor releases the capture so an exception in the code under test surfaces as
+// an ordinary test failure instead.
+class StderrCapture
+{
+public:
+  StderrCapture() {testing::internal::CaptureStderr();}
+  ~StderrCapture()
+  {
+    if (!released_) {
+      testing::internal::GetCapturedStderr();
+    }
+  }
+  StderrCapture(const StderrCapture &) = delete;
+  StderrCapture & operator=(const StderrCapture &) = delete;
+  /// Stop capturing and return what was written.
+  std::string str()
+  {
+    released_ = true;
+    return testing::internal::GetCapturedStderr();
+  }
+
+private:
+  bool released_ = false;
+};
+
+// Occurrences of @p needle in @p haystack -- for "emitted EXACTLY once" assertions,
+// which a plain find() cannot make (a duplicated warning would pass).
+std::size_t countOccurrences(const std::string & haystack, const std::string & needle)
+{
+  std::size_t n = 0;
+  for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
+    pos = haystack.find(needle, pos + needle.size()))
+  {
+    ++n;
+  }
+  return n;
+}
+
+// Write a CHART-layer prior tile at @p coarse_grid: shallow (-20 m) everywhere
+// EXCEPT the cells overlying survey tile @p hole, which are written as explicit
+// no-data. The tile therefore CONTAINS the survey tile (so the containment walk
+// selects it) and still primes NOT ONE survey cell -- the "matched but empty"
+// case that made a tile MATCH look like a prime before #137's review round.
+void writeChartPriorWithHole(
+  const std::string & prior_dir, float coarse_cell_size,
+  const gggs::GridIndex & coarse_grid, const gggs::GridIndex & hole)
+{
+  const double cell_lat =
+    coarse_grid.latitudinalSpan() / gggs::GridIndex::cellRowCount();
+  const double cell_lon =
+    coarse_grid.longitudinalSpan() / gggs::GridIndex::cellColumnCount();
+  // Pad the hole by one coarse cell: a survey cell's center always resolves into a
+  // coarse cell whose own center lies within half a coarse cell of the survey tile,
+  // so this guarantees every coarse cell the resample could read is no-data.
+  const double south = hole.southLatitude() - cell_lat;
+  const double north = hole.southLatitude() + hole.latitudinalSpan() + cell_lat;
+  const double west = hole.westLongitude() - cell_lon;
+  const double east = hole.westLongitude() + hole.longitudinalSpan() + cell_lon;
+  const double kNoData = std::numeric_limits<double>::quiet_NaN();
+
+  marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+  for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+    const auto sw = (*cit).position();
+    const double clat = sw.latitude + 0.5 * cell_lat;
+    const double clon = sw.longitude + 0.5 * cell_lon;
+    const bool in_hole = clat >= south && clat <= north &&
+      clon >= west && clon <= east;
+    ctile.set(
+      (*cit).row(), (*cit).column(),
+      marine_bathymetry_store::BathyCell{
+          in_hole ? kNoData : -20.0, in_hole ? kNoData : 0.5});
+  }
+  std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+  tiles.emplace(coarse_grid, std::move(ctile));
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(
+    coarse_cell_size, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+  store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+  marine_bathymetry_store::save(store, prior_dir);
 }
 
 ImportAccumulatorConfig makeConfig(
@@ -1177,6 +1263,971 @@ TEST(ImportEviction, SymlinkedSurveyStoreAbortsImport)
       << "the abort must be the loud message, got: " << e.what();
   }
   EXPECT_TRUE(threw) << "a symlinked survey/ store must abort the import";
+
+  std::filesystem::remove_all(root);
+}
+
+// Cross-level CHART blunder gate (#137). The sibling of
+// CoarseLevelReferenceSeedRejectsDeepBlunder above, for the Chart layer -- and the
+// case that matters most in the field, because an ENC chart product is built on the
+// chart scale ladder (usage bands) and so essentially NEVER has a tile at the survey
+// GGGS level. Before #137, Chart got only the exact-level `find`, the level-walk
+// fallback was Reference-only, and a real ENC prior therefore gated NOTHING: present
+// on disk, announced at startup, never consulted. Observed on the 2026-08-25 Isles of
+// Shoals import, where an L2/L3/L6/L7/L8 chart layer under an L10 survey produced
+// byte-identical output with and without --reference-store.
+TEST(ImportEviction, CoarseLevelChartSeedRejectsDeepBlunder)
+{
+  // A COARSER cell size -> a coarser GGGS level than the 1 m survey (L10). 8 m -> L7.
+  constexpr float kCoarseCellSize = 8.0f;
+  ASSERT_LT(gggs::Level::fromCellSize(kCoarseCellSize).level(),
+    gggs::Level::fromCellSize(kCellSize).level())
+    << "the chart prior must be at a coarser level to exercise the level-walk";
+
+  const std::string root = makeTempDir("xlevel_chartseed");
+  const std::string prior_dir = root + "/chart_store";
+
+  // Survey the INTERIOR of a single L10 tile (its center), not a shared tile corner:
+  // a corner sounding routes ambiguously to one of four tiles. GGGS nesting puts this
+  // L10 tile wholly inside one L7 tile.
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // Fill the ENTIRE containing L7 tile with a SHALLOW (-20 m) chart prior, written to
+  // the CHART layer (a staging-writable store, as import_geotiff's chart path uses).
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  const gggs::GridIndex coarse_grid = coarse_level.gridIndex(survey_lat, survey_lon);
+  ASSERT_LT(coarse_grid.level(), survey_grid.level())
+    << "the chart tile must be at a coarser level than the survey tile";
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  // A clearly-too-deep blunder (~ -150 m) where the coarse chart prior says ~ -20 m.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+
+  const std::string with_prior = root + "/with_prior";
+  std::string audit;
+  {
+    // Capture the import log so the test pins the MECHANISM (the cross-level
+    // fallback fired) and not merely the absence of a settled cell -- which an
+    // unrelated gate could also produce.
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(with_prior, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+    audit = capture.str();
+  }
+  EXPECT_NE(audit.find("chart blunder gate"), std::string::npos)
+    << "the chart cross-level fallback must announce itself; stderr was:\n" << audit;
+  EXPECT_NE(audit.find("seeded by cross-level resample"), std::string::npos)
+    << "the gate must come from the LEVEL-WALK, not an exact-level match; "
+    "stderr was:\n" << audit;
+  EXPECT_EQ(audit.find("primed NOTHING"), std::string::npos)
+    << "a chart prior that gates must not trip the silent-no-op warning; "
+    "stderr was:\n" << audit;
+
+  // Baseline: no prior at all.
+  const std::string no_prior = root + "/no_prior";
+  runImport(batches, no_prior, "", /*budget=*/0);
+
+  const auto with = loadBathyCells(with_prior);
+  const auto without = loadBathyCells(no_prior);
+
+  ASSERT_FALSE(without.empty())
+    << "without a prior the deep sounding must settle a cell";
+  bool baseline_is_deep = false;
+  for (const auto & [cell, du] : without) {
+    if (du.first < -100.0) {baseline_is_deep = true;}
+  }
+  EXPECT_TRUE(baseline_is_deep)
+    << "the baseline deep sounding should settle a deep (< -100 m) cell";
+
+  // With the COARSER chart prior, Chart's Phase B seeds the shallow predicted surface
+  // and the gate rejects the deep sounding -- so NO cell settles. Revert #137 (make
+  // Chart exact-level-only again) and `with` gains the deep cell -> this fails.
+  EXPECT_TRUE(with.empty())
+    << "the cross-level CHART prior must gate the deep blunder (#137 level-walk)";
+
+  std::filesystem::remove_all(root);
+}
+
+// Boundary-flush cross-level CHART gate (#137), mirroring
+// BoundaryFlushCrossLevelReferenceRejectsDeepBlunder for the Chart layer. Chart now
+// shares the SAME containment-checked walk, so it inherits the same hazard: a survey
+// tile flush against a coarse-tile boundary also pulls in the edge-adjacent coarse
+// NEIGHBOR through loadWindow's inclusive overlap test. Selecting on level alone
+// would pick the neighbor, primeFromTileResample's grid-mismatch guard would skip
+// every fine cell, and the gate would be silently OFF for boundary tiles again.
+TEST(ImportEviction, BoundaryFlushCrossLevelChartRejectsDeepBlunder)
+{
+  constexpr float kCoarseCellSize = 8.0f;
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  ASSERT_LT(coarse_level.level(), survey_level.level())
+    << "the chart prior must be at a coarser level to exercise the level-walk";
+
+  const std::string root = makeTempDir("flush_xlevel_chartseed");
+  const std::string prior_dir = root + "/chart_store";
+
+  // A survey position inside the WESTMOST L10 sub-tile of its containing L7 tile, so
+  // the survey tile's west edge is flush with the L7 west boundary. Latitude at the
+  // L7 tile's mid-height so only the WEST neighbor (not a corner) is adjacent.
+  const gggs::GridIndex container = coarse_level.gridIndex(43.0, -70.0);
+  const double lat = container.southLatitude() + container.latitudinalSpan() * 0.5;
+  const double lon = container.westLongitude() + container.longitudinalSpan() / 16.0;
+  const gggs::GridIndex survey_grid = survey_level.gridIndex(lat, lon);
+  ASSERT_EQ(survey_grid.level(), survey_level.level());
+  ASSERT_NEAR(survey_grid.westLongitude(), container.westLongitude(), 1e-9)
+    << "the survey tile must be flush against the coarse west boundary";
+
+  const gggs::GridIndex west_neighbor = coarse_level.gridIndex(
+    lat, container.westLongitude() - container.longitudinalSpan() * 0.5);
+  ASSERT_EQ(west_neighbor.level(), container.level());
+  ASSERT_NE(west_neighbor, container)
+    << "the west neighbor must be a distinct coarse tile";
+
+  // Fill BOTH coarse tiles shallow (-20 m) into the CHART layer.
+  {
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    for (const gggs::GridIndex & cg : {container, west_neighbor}) {
+      marine_bathymetry_store::BathymetryTile ctile(cg);
+      for (gggs::CellAreaIterator cit(cg); cit.valid(); cit.next()) {
+        ctile.set(
+          (*cit).row(), (*cit).column(),
+          marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+      }
+      tiles.emplace(cg, std::move(ctile));
+    }
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+
+  const std::string with_prior = root + "/with_prior";
+  {
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(with_prior, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  // Baseline: the SAME soundings with no prior at all must settle a deep cell --
+  // otherwise `with.empty()` below would pass for a reason unrelated to the gate
+  // (the Reference sibling test runs this same control).
+  const std::string no_prior = root + "/no_prior";
+  runImport(batches, no_prior, "", /*budget=*/0);
+  const auto without = loadBathyCells(no_prior);
+  ASSERT_FALSE(without.empty())
+    << "without a prior the deep sounding must settle a cell";
+  bool baseline_is_deep = false;
+  for (const auto & [cell, du] : without) {
+    if (du.first < -100.0) {baseline_is_deep = true;}
+  }
+  EXPECT_TRUE(baseline_is_deep)
+    << "the baseline deep sounding should settle a deep (< -100 m) cell";
+
+  const auto with = loadBathyCells(with_prior);
+  EXPECT_TRUE(with.empty())
+    << "the containment check must pick the CONTAINING chart tile, not the "
+       "edge-adjacent west neighbor, and gate the deep blunder";
+
+  std::filesystem::remove_all(root);
+}
+
+// Silent-no-op diagnostic (#137, second defect). A run given --reference-store that
+// primes NOT ONE tile must say so at finalize(). Before this, the operator saw the
+// "Reference-prior seeding from ..." startup banner, the gate was off for the entire
+// import, and nothing in the output distinguished that from a working gate -- which
+// is precisely how the ENC-chart miss above went unnoticed.
+TEST(ImportEviction, NoUsablePriorEmitsWarning)
+{
+  const std::string root = makeTempDir("no_usable_prior");
+  const std::string prior_dir = root + "/prior_store";
+
+  // A prior store whose only tile is FAR from the survey, so the windowed load
+  // returns nothing usable and no rung ever primes.
+  {
+    const gggs::GridIndex far_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(10.0, 10.0);
+    marine_bathymetry_store::BathymetryTile tile(far_grid);
+    for (gggs::CellAreaIterator cit(far_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(far_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(43.0, -70.0, 20.0f, 40.0f));
+
+  // NOTE: stderr capture is a standard gtest facility, but this is its first use in
+  // this file -- the surrounding tests all assert on store contents rather than on
+  // operator-facing output. The warning IS the behaviour under test here, so there is
+  // nothing in the store to assert against instead. StderrCapture wraps it so a throw
+  // in the code under test cannot leave fd 2 redirected and abort the binary.
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+    // A SECOND finalize() must not repeat the warning (the tally is never cleared,
+    // so only the once-guard stops a duplicate).
+    acc.finalize();
+    warned = capture.str();
+  }
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "a prior store that never primes must warn EXACTLY once at finalize (a "
+    "duplicated warning would pass a substring check); stderr was:\n" << warned;
+  EXPECT_NE(warned.find("blunder gate was INACTIVE"), std::string::npos)
+    << "the warning must say the gate was inactive; stderr was:\n" << warned;
+  EXPECT_NE(warned.find("prior-seed attempt(s)"), std::string::npos)
+    << "the warning must count ATTEMPTS, not tiles (a revisited tile re-primes and "
+    "counts again); stderr was:\n" << warned;
+  EXPECT_NE(warned.find("No chart or reference tiles overlap"), std::string::npos)
+    << "an out-of-area prior with no read failure is a COVERAGE gap and must be "
+    "reported as one; stderr was:\n" << warned;
+  EXPECT_EQ(warned.find("FAILED to read"), std::string::npos)
+    << "nothing failed to read here -- a coverage gap must not be reported as an "
+    "unreadable store; stderr was:\n" << warned;
+
+  // Companion no-false-positive check: a prior that DOES prime must NOT warn.
+  const std::string good_prior = root + "/good_prior";
+  {
+    const gggs::GridIndex survey_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+    marine_bathymetry_store::BathymetryTile tile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, good_prior);
+  }
+  std::string quiet;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out2", "", /*budget=*/0);
+    cfg.reference_store_dir = good_prior;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+    quiet = capture.str();
+  }
+  EXPECT_EQ(quiet.find("primed NOTHING"), std::string::npos)
+    << "an ordinary import with a working prior must NOT warn; stderr was:\n"
+    << quiet;
+
+  std::filesystem::remove_all(root);
+}
+
+// A MATCHED prior tile is not a PRIMED one (#137 review). The containment walk can
+// select a coarse chart tile that genuinely contains this survey tile and still prime
+// NOT ONE cell, because the coarse cells overlying the survey area are no-data -- an
+// ENC product with a hole exactly where the survey ran. Counting that match as a
+// "hit" suppressed the silent-no-op warning permanently: the operator saw the startup
+// banner, no warning, and an ungated import.
+TEST(ImportEviction, MatchedButEmptyChartPriorStillWarns)
+{
+  constexpr float kCoarseCellSize = 8.0f;
+  const std::string root = makeTempDir("empty_chart_prior");
+  const std::string prior_dir = root + "/chart_store";
+
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+  const gggs::GridIndex coarse_grid =
+    gggs::Level::fromCellSize(kCoarseCellSize).gridIndex(survey_lat, survey_lon);
+  ASSERT_LT(coarse_grid.level(), survey_grid.level());
+
+  // Shallow chart data everywhere in the coarse tile EXCEPT over the survey tile.
+  writeChartPriorWithHole(prior_dir, kCoarseCellSize, coarse_grid, survey_grid);
+
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+
+  const std::string out = root + "/out";
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+    warned = capture.str();
+  }
+
+  // The gate really was off -- the deep sounding settled.
+  const auto cells = loadBathyCells(out);
+  bool settled_deep = false;
+  for (const auto & [cell, du] : cells) {
+    if (du.first < -100.0) {settled_deep = true;}
+  }
+  ASSERT_TRUE(settled_deep)
+    << "the empty prior gates nothing, so the deep sounding must settle -- "
+    "otherwise this test is not exercising the ungated case";
+
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "a prior tile that MATCHED but primed no cell must still trip the "
+    "silent-no-op warning exactly once; stderr was:\n" << warned;
+  EXPECT_EQ(warned.find("seeded by cross-level resample"), std::string::npos)
+    << "nothing was primed, so no cross-level fallback line may claim otherwise; "
+    "stderr was:\n" << warned;
+  // The layers/levels ARE reported, so the operator can see it is a data hole in a
+  // present chart layer, not a missing prior store.
+  EXPECT_NE(warned.find("chart@L"), std::string::npos)
+    << "the warning must name the layer@level actually found; stderr was:\n"
+    << warned;
+
+  std::filesystem::remove_all(root);
+}
+
+// Phase A must not short-circuit Phase B (#137 review). An exact-survey-level chart
+// tile that is all no-data over this survey tile used to return "primed" and
+// suppress the cross-level fallback -- so a multi-level ENC prior whose COARSER band
+// has real data gated nothing, purely because a hollow same-level tile existed.
+TEST(ImportEviction, EmptyExactLevelChartPriorFallsThroughToCoarsePrior)
+{
+  constexpr float kCoarseCellSize = 8.0f;
+  const std::string root = makeTempDir("exact_empty_falls_through");
+  const std::string prior_dir = root + "/chart_store";
+
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+  const gggs::GridIndex coarse_grid =
+    gggs::Level::fromCellSize(kCoarseCellSize).gridIndex(survey_lat, survey_lon);
+  ASSERT_LT(coarse_grid.level(), survey_grid.level());
+
+  // (a) an exact-survey-level chart tile written entirely as no-data.
+  {
+    marine_bathymetry_store::BathymetryTile hollow(survey_grid);
+    const double kNoData = std::numeric_limits<double>::quiet_NaN();
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      hollow.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{kNoData, kNoData});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(hollow));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+  // (b) a COARSER containing chart tile in the SAME store dir with real shallow data
+  //     (the multi-level ENC ladder this issue is about).
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+
+  const std::string out = root + "/out";
+  std::string log;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+    log = capture.str();
+  }
+
+  EXPECT_TRUE(loadBathyCells(out).empty())
+    << "the hollow exact-level tile must fall through to the coarser chart prior, "
+    "which gates the deep blunder; import log was:\n" << log;
+  EXPECT_NE(log.find("seeded by cross-level resample"), std::string::npos)
+    << "the gate must come from the cross-level fallback; log was:\n" << log;
+  EXPECT_EQ(log.find("primed NOTHING"), std::string::npos)
+    << "the coarse prior DID prime, so no silent-no-op warning; log was:\n" << log;
+
+  std::filesystem::remove_all(root);
+}
+
+// A read failure must be REPORTED even when another tile primed (#137 review).
+// The run-level report used to return early whenever `hits > 0`, so the separately
+// tallied `read_failures` could only ever reach the operator in the zero-hit case:
+// a prior store that went unreadable for all but one tile emitted no run-level line
+// at all. That is the same silently-inactive gate this issue exists to close,
+// reached by a different route.
+TEST(ImportEviction, ReadFailureIsReportedEvenWhenAnotherTilePrimed)
+{
+  const std::string root = makeTempDir("prior_read_failure");
+  const std::string prior_dir = root + "/prior_store";
+
+  // Two survey areas, far enough apart that each one's prior window sees only its
+  // own prior tile: A gets a good reference tile, B's is corrupted on disk.
+  constexpr double kLatA = 43.0;
+  constexpr double kLonA = -70.0;
+  constexpr double kLatB = 44.0;
+  constexpr double kLonB = -71.0;
+  const gggs::Level level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::GridIndex grid_a = level.gridIndex(kLatA, kLonA);
+  const gggs::GridIndex grid_b = level.gridIndex(kLatB, kLonB);
+  ASSERT_NE(grid_a, grid_b);
+  {
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    for (const gggs::GridIndex & g : {grid_a, grid_b}) {
+      marine_bathymetry_store::BathymetryTile tile(g);
+      for (gggs::CellAreaIterator cit(g); cit.valid(); cit.next()) {
+        tile.set(
+          (*cit).row(), (*cit).column(),
+          marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+      }
+      tiles.emplace(g, std::move(tile));
+    }
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+  // Corrupt ONLY tile B's raster: the filename still parses (so the window still
+  // selects it) but the GDAL read throws -- an unreadable/corrupt store, not a
+  // coverage gap.
+  const std::string tile_b_path = prior_dir + "/" +
+    marine_bathymetry_store::layerDirName(
+    marine_bathymetry_store::SourceLayer::Reference) + "/" +
+    marine_bathymetry_store::tileFilename(grid_b);
+  ASSERT_TRUE(std::filesystem::is_regular_file(tile_b_path))
+    << "test setup: expected the reference tile at " << tile_b_path;
+  {
+    std::ofstream corrupt(tile_b_path, std::ios::binary | std::ios::trunc);
+    corrupt << "not a geotiff";
+  }
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(kLatA, kLonA, 20.0f, 40.0f));
+    acc.addBatch(surveyCell(kLatB, kLonB, 20.0f, 40.0f));
+    acc.finalize();
+    warned = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(warned, "FAILED to read the prior store"), 1u)
+    << "the read failure must be reported once at run level even though the OTHER "
+    "tile primed; stderr was:\n" << warned;
+  EXPECT_EQ(warned.find("primed NOTHING"), std::string::npos)
+    << "one tile DID prime, so the no-op warning must not claim otherwise; stderr "
+    "was:\n" << warned;
+  EXPECT_NE(warned.find("primed only "), std::string::npos)
+    << "partial coverage must be reported -- some attempts gated, some did not "
+    "(#137 review); stderr was:\n" << warned;
+
+  std::filesystem::remove_all(root);
+}
+
+// Positive coverage for the warm-start scoping clause (#137 review): the run-level
+// warning must SAY that some tiles never reached the prior rung, and must name the
+// layer they warm-started from correctly (`processed/` -- the layer rung 1 actually
+// reads -- not "survey"), and must not imply the two counts partition the run.
+TEST(ImportEviction, WarmStartedTilesAreScopedOutOfThePriorWarning)
+{
+  const std::string root = makeTempDir("warm_start_clause");
+  const std::string prior_dir = root + "/prior_store";
+  const std::string out = root + "/out";
+
+  // A prior store whose only tile is FAR from the survey: nothing it holds can prime.
+  {
+    const gggs::GridIndex far_grid =
+      gggs::Level::fromCellSize(kCellSize).gridIndex(10.0, 10.0);
+    marine_bathymetry_store::BathymetryTile tile(far_grid);
+    for (gggs::CellAreaIterator cit(far_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(far_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  // First pass with no prior: writes a `processed/` tile at A that the second pass
+  // will warm-start from (the incremental-import case).
+  constexpr double kLatA = 43.0;
+  constexpr double kLonA = -70.0;
+  constexpr double kLatB = 44.0;
+  constexpr double kLonB = -71.0;
+  {
+    std::vector<std::vector<GeoSounding>> first;
+    first.push_back(surveyCell(kLatA, kLonA, 20.0f, 40.0f));
+    runImport(first, out, "", /*budget=*/0);
+  }
+  ASSERT_FALSE(loadBathyCells(out).empty())
+    << "test setup: the first pass must leave a processed tile to warm-start from";
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(kLatA, kLonA, 20.0f, 40.0f));   // warm-starts (rung 1)
+    acc.addBatch(surveyCell(kLatB, kLonB, 20.0f, 40.0f));   // reaches the prior rung
+    acc.finalize();
+    warned = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "the tile that DID reach the prior rung primed nothing, so the warning must "
+    "fire exactly once; stderr was:\n" << warned;
+  EXPECT_NE(warned.find("tile touch(es) warm-started"), std::string::npos)
+    << "the warning must scope its claim by reporting the warm-started tile; "
+    "stderr was:\n" << warned;
+  EXPECT_NE(warned.find("'processed/' layer"), std::string::npos)
+    << "rung 1 reads the `processed/` layer -- naming a 'survey' layer sends the "
+    "operator to a directory that no longer exists (ADR-0010 D8); stderr was:\n"
+    << warned;
+
+  std::filesystem::remove_all(root);
+}
+
+// A prior tile that OVERLAPS the survey window but cannot gate it must not be
+// reported as a level MISMATCH (#137 review). loadWindow's overlap test is
+// inclusive, so a survey tile flush against a coarse-tile boundary also pulls in the
+// edge-adjacent coarse NEIGHBOUR -- a tile sharing no cell with it. Listing that
+// under "prior tiles found over the surveyed area ... vs survey level N" reads as
+// "your prior is at the wrong level" (regenerate it finer) when the real fault is a
+// coverage gap at the tile edge (extend the prior's coverage).
+TEST(ImportEviction, EdgeAdjacentCoarseNeighborIsNotReportedAsALevelMismatch)
+{
+  constexpr float kCoarseCellSize = 8.0f;
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  ASSERT_LT(coarse_level.level(), survey_level.level());
+
+  const std::string root = makeTempDir("edge_adjacent_only");
+  const std::string prior_dir = root + "/chart_store";
+
+  // Same boundary-flush geometry as BoundaryFlushCrossLevelChartRejectsDeepBlunder,
+  // but the chart data is written ONLY into the west NEIGHBOUR: nothing in the store
+  // contains the surveyed tile, so nothing can gate it.
+  const gggs::GridIndex container = coarse_level.gridIndex(43.0, -70.0);
+  const double lat = container.southLatitude() + container.latitudinalSpan() * 0.5;
+  const double lon = container.westLongitude() + container.longitudinalSpan() / 16.0;
+  const gggs::GridIndex survey_grid = survey_level.gridIndex(lat, lon);
+  ASSERT_NEAR(survey_grid.westLongitude(), container.westLongitude(), 1e-9)
+    << "test setup: the survey tile must be flush against the coarse west boundary";
+  const gggs::GridIndex west_neighbor = coarse_level.gridIndex(
+    lat, container.westLongitude() - container.longitudinalSpan() * 0.5);
+  ASSERT_NE(west_neighbor, container);
+
+  {
+    marine_bathymetry_store::BathymetryTile ctile(west_neighbor);
+    for (gggs::CellAreaIterator cit(west_neighbor); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(west_neighbor, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  std::string warned;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(root + "/out", "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+    acc.finalize();
+    warned = capture.str();
+  }
+
+  EXPECT_EQ(countOccurrences(warned, "primed NOTHING"), 1u)
+    << "nothing containing the survey tile exists, so the gate was off; stderr "
+    "was:\n" << warned;
+  EXPECT_NE(warned.find("a coverage gap, not a level mismatch"), std::string::npos)
+    << "an edge-adjacent neighbour gates nothing and must be reported as a COVERAGE "
+    "gap, not as a prior tile found over the surveyed area; stderr was:\n" << warned;
+  EXPECT_NE(warned.find("coarse tiles that do not contain them"), std::string::npos)
+    << "the unusable tiles must still be named, so the operator can tell 'the prior "
+    "stops at this edge' from 'there is no prior at all'; stderr was:\n" << warned;
+  EXPECT_EQ(warned.find("Prior tiles usable over the surveyed area"),
+    std::string::npos)
+    << "no tile here is usable for the surveyed tile(s); stderr was:\n" << warned;
+
+  std::filesystem::remove_all(root);
+}
+
+// A SLIVER of data in the finest containing prior must not suppress a coarser prior
+// that covers the whole tile (#137 review). The cross-level walk used to stop at the
+// first candidate that primed >= 1 cell, so one coarse cell of data in the finest
+// containing tile left the rest of the survey tile ungated -- and, because the tally
+// counted that as a hit, nothing warned either. Every usable prior is now primed,
+// coarsest first, so the gate covers their per-cell UNION with the finest prior
+// winning where it has data.
+TEST(ImportEviction, SliverInTheFinestPriorDoesNotSuppressAFullCoverageCoarserPrior)
+{
+  constexpr float kMidCellSize = 8.0f;
+  constexpr float kCoarseCellSize = 64.0f;
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::Level mid_level = gggs::Level::fromCellSize(kMidCellSize);
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kCoarseCellSize);
+  ASSERT_LT(mid_level.level(), survey_level.level());
+  ASSERT_LT(coarse_level.level(), mid_level.level());
+
+  const std::string root = makeTempDir("prior_sliver");
+  const std::string prior_dir = root + "/chart_store";
+
+  const gggs::GridIndex survey_grid = survey_level.gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+  const gggs::GridIndex mid_grid = mid_level.gridIndex(survey_lat, survey_lon);
+  const gggs::GridIndex coarse_grid = coarse_level.gridIndex(survey_lat, survey_lon);
+
+  // (a) the FINEST containing chart tile: no-data everywhere except the single cell
+  //     overlying the survey tile's south-west corner -- far from the sounding.
+  {
+    const double kNoData = std::numeric_limits<double>::quiet_NaN();
+    marine_bathymetry_store::BathymetryTile sliver(mid_grid);
+    for (gggs::CellAreaIterator cit(mid_grid); cit.valid(); cit.next()) {
+      sliver.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{kNoData, kNoData});
+    }
+    const gggs::CellIndex corner_cell = mid_level.cellIndex(
+      gggs::geoPoint(
+        survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.02,
+        survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.02));
+    ASSERT_EQ(corner_cell.grid(), mid_grid);
+    sliver.set(
+      corner_cell.row(), corner_cell.column(),
+      marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(mid_grid, std::move(sliver));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kMidCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+  // (b) a COARSER containing chart tile with shallow data everywhere.
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCoarseCellSize, /*reference_writable=*/false, /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  const std::string out = root + "/out";
+  std::string log;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+    acc.finalize();
+    log = capture.str();
+  }
+
+  // Control: the same deep sounding with no prior at all settles a deep cell, so an
+  // empty output really does mean the gate rejected it.
+  const std::string no_prior = root + "/no_prior";
+  {
+    std::vector<std::vector<GeoSounding>> batches;
+    batches.push_back(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+    runImport(batches, no_prior, "", /*budget=*/0);
+  }
+  ASSERT_FALSE(loadBathyCells(no_prior).empty())
+    << "control: without a prior the deep sounding must settle";
+
+  EXPECT_TRUE(loadBathyCells(out).empty())
+    << "the sliver in the finest containing prior covers one corner cell only; the "
+    "full-coverage coarser prior must still gate the rest of the tile; import log "
+    "was:\n" << log;
+  EXPECT_EQ(log.find("primed NOTHING"), std::string::npos)
+    << "the priors DID prime, so no silent-no-op warning; log was:\n" << log;
+
+  std::filesystem::remove_all(root);
+}
+
+// An EMPTY processed tile in the output store must not short-circuit the prior rung
+// (#137 review). Rung 1 returned on the mere existence of a `processed/` tile, so an
+// all-no-data tile (a tile written for an area that produced no accepted soundings)
+// left the survey tile ungated on a re-import -- and the run-level warning's scoping
+// clause then positively vouched for it as "warm-started".
+TEST(ImportEviction, EmptyProcessedTileFallsThroughToThePriorRung)
+{
+  const std::string root = makeTempDir("empty_processed_warm_start");
+  const std::string prior_dir = root + "/prior_store";
+  const std::string out = root + "/out";
+
+  const gggs::GridIndex survey_grid =
+    gggs::Level::fromCellSize(kCellSize).gridIndex(43.0, -70.0);
+  const double survey_lat =
+    survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double survey_lon =
+    survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // A shallow reference prior at the survey level: it WILL gate the deep blunder,
+  // but only if rung 1 lets the tile reach it.
+  {
+    marine_bathymetry_store::BathymetryTile tile(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      tile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/0.5});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(tile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kCellSize, /*reference_writable=*/true);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Reference, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+  // An existing OUTPUT store whose processed tile for this area is all no-data.
+  {
+    const double kNoData = std::numeric_limits<double>::quiet_NaN();
+    marine_bathymetry_store::BathymetryTile hollow(survey_grid);
+    for (gggs::CellAreaIterator cit(survey_grid); cit.valid(); cit.next()) {
+      hollow.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{kNoData, kNoData});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(survey_grid, std::move(hollow));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(kCellSize);
+    store.importTiles(
+      marine_bathymetry_store::SourceLayer::Processed, std::move(tiles));
+    marine_bathymetry_store::save(store, out);
+  }
+
+  std::string log;
+  {
+    StderrCapture capture;
+    GeoMapSheet sheet(kCellSize);
+    ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+    cfg.reference_store_dir = prior_dir;
+    ImportAccumulator acc(sheet, cfg);
+    acc.addBatch(surveyCell(survey_lat, survey_lon, 150.0f, 40.0f));
+    acc.finalize();
+    log = capture.str();
+  }
+
+  EXPECT_TRUE(loadBathyCells(out).empty())
+    << "the empty processed tile warm-starts nothing, so the tile must reach the "
+    "prior rung and be gated; import log was:\n" << log;
+  EXPECT_EQ(log.find("warm-started"), std::string::npos)
+    << "an empty processed tile must not be reported to the operator as a "
+    "warm-started tile; import log was:\n" << log;
+
+  std::filesystem::remove_all(root);
+}
+
+// Resample-gap relief allowance (#137, operator decision). A prior coarse enough to
+// blend a shoal and a channel into one cell must NOT gate the survey as hard as an
+// exact-level prior would. `Node::insert` takes the MINIMUM of its three blunder
+// limits and min() selects the most PERMISSIVE, so an uncertainty-less chart cell
+// seeding sigma = 1 cm makes the variance term the most restrictive and therefore
+// discarded — the gate collapses to the flat blunder_minimum at every resolution.
+// Inflating the seeded 1-sigma by (relief_slope * half-span) makes the variance term
+// bind exactly when the prior is too coarse to speak for the cell.
+//
+// A ~28 m sounding under a ~20 m L7 (8 m/cell) prior is the discriminating case: it
+// is deeper than blunder_minimum (10 m) allows... no it is not — so use a coarse L2
+// prior, whose 232 m half-span buys metres of allowance, and a sounding just past
+// what the flat limit permits. With the allowance the sounding survives; with the
+// allowance disabled (slope 0, the pre-#137 behaviour) it is rejected.
+TEST(ImportEviction, ResampleGapReliefAdmitsARealDeepUnderACoarsePrior)
+{
+  // L2 is the coarsest band an ENC export carries — ~232 m/cell.
+  constexpr float kVeryCoarseCellSize = 232.0f * 960.0f / 960.0f;
+  const gggs::Level survey_level = gggs::Level::fromCellSize(kCellSize);
+  const gggs::Level coarse_level = gggs::Level::fromCellSize(kVeryCoarseCellSize);
+  ASSERT_LT(coarse_level.level(), survey_level.level());
+  const double half_span = 0.5 * coarse_level.cellSize();
+  ASSERT_GT(half_span, 20.0) << "the coarse band must be coarse enough to matter";
+
+  const gggs::GridIndex survey_grid = survey_level.gridIndex(43.0, -70.0);
+  const double lat = survey_grid.southLatitude() + survey_grid.latitudinalSpan() * 0.5;
+  const double lon = survey_grid.westLongitude() + survey_grid.longitudinalSpan() * 0.5;
+
+  // A shallow (-20 m) coarse chart prior over the whole containing coarse tile.
+  const std::string root = makeTempDir("relief_slope");
+  const std::string prior_dir = root + "/chart_store";
+  const gggs::GridIndex coarse_grid = coarse_level.gridIndex(lat, lon);
+  {
+    marine_bathymetry_store::BathymetryTile ctile(coarse_grid);
+    for (gggs::CellAreaIterator cit(coarse_grid); cit.valid(); cit.next()) {
+      ctile.set(
+        (*cit).row(), (*cit).column(),
+        marine_bathymetry_store::BathyCell{/*depth=*/-20.0, /*uncertainty=*/NAN});
+    }
+    std::map<gggs::GridIndex, marine_bathymetry_store::BathymetryTile> tiles;
+    tiles.emplace(coarse_grid, std::move(ctile));
+    marine_bathymetry_store::BathymetryStore store =
+      marine_bathymetry_store::BathymetryStore::fromCellSize(
+      kVeryCoarseCellSize, /*reference_writable=*/false,
+      /*chart_staging_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Chart, std::move(tiles));
+    marine_bathymetry_store::save(store, prior_dir);
+  }
+
+  // A REAL deeper-than-charted return: 35 m where the blended coarse cell says 20 m.
+  // The flat blunder_minimum (10 m) rejects it; the relief allowance admits it.
+  std::vector<std::vector<GeoSounding>> batches;
+  batches.push_back(surveyCell(lat, lon, 35.0f, 40.0f));
+
+  const auto run = [&](double slope, const std::string & out) {
+      GeoMapSheet sheet(kCellSize);
+      ImportAccumulatorConfig cfg = makeConfig(out, "", /*budget=*/0);
+      cfg.reference_store_dir = prior_dir;
+      cfg.prior_relief_slope = slope;
+      ImportAccumulator acc(sheet, cfg);
+      for (const auto & b : batches) {
+        acc.addBatch(b);
+      }
+      acc.finalize();
+      return loadBathyCells(out);
+    };
+
+  // slope 0 == the pre-#137 behaviour: the coarse prior gates as hard as an
+  // exact-level one and the real deep is rejected.
+  const auto without = run(0.0, root + "/no_relief");
+  EXPECT_TRUE(without.empty())
+    << "with the allowance disabled the coarse prior should reject the real deep";
+
+  // The shipped default admits it: half_span is ~116 m, so 0.05 buys ~5.8 m of
+  // 1-sigma, and blunder_scalar * sigma exceeds the 10 m flat limit.
+  const auto with = run(ImportAccumulatorConfig{}.prior_relief_slope,
+      root + "/default_relief");
+  bool kept_real_deep = false;
+  for (const auto & [cell, du] : with) {
+    if (du.first < -30.0) {kept_real_deep = true;}
+  }
+  EXPECT_TRUE(kept_real_deep)
+    << "the resample-gap relief allowance must admit a real deeper-than-charted "
+       "return under a very coarse prior";
 
   std::filesystem::remove_all(root);
 }

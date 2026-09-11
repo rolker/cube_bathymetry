@@ -148,16 +148,43 @@ On the first touch of each tile, both tools seed it with a two-rung precedence:
    first, then `reference/` **overwrites** where the two overlap a cell:
    - **`chart/`** (charted-waters gate, #119) — official chart products live in the
      `Chart` layer, which the gate previously never consulted, so charted-waters
-     imports ran ungated. Only an **exact survey-level** chart tile is primed;
-     there is **no** cross-level fallback for chart (coarse-chart resampling is
-     deferred).
-   - **`reference/`** (prior/contour) — a reference tile at the exact survey GGGS
-     level gates cell-for-cell; a **coarser** reference tile (a multi-level prior,
-     e.g. ENC exports at L5/L7/L8 under an L10 survey) is picked up by a level-walk
-     fallback (#115) that resamples the finest available coarser tile's shallow
-     prior onto the fine survey cells — coarse ENC generalization is shoal-biased,
-     the conservative direction for a false-deep gate. The fallback logs the
-     reference level it used, so the import is auditable.
+     imports ran ungated.
+   - **`reference/`** (prior/contour).
+
+   **Both** layers use a **level walk** (#115 for `reference/`, extended to
+   `chart/` by #137): every **containing** coarser tile is resampled onto the fine
+   survey cells, coarsest first, then the exact survey-level tile last — so each
+   cell is gated by the **finest** prior that holds data there, and a cell no finer
+   prior covers is still gated by a coarser one. Chart needs this most — an ENC
+   product is built on the chart scale ladder (usage bands) and essentially never
+   has a tile at the survey GGGS level, so an exact-level-only chart prime missed
+   every time and the gate stayed silently off for exactly the product the `Chart`
+   layer exists to hold. A tile that *matches* but is **no-data** over the survey
+   tile primes nothing and is not treated as a gate; nor does a sliver of data in a
+   finer prior suppress a coarser one with fuller coverage (#137 review). The walk
+   logs each layer and level it used (once per layer/level), so the import is
+   auditable, and a run whose prior primed **nothing at all**, gated only **part**
+   of the run, or **failed to read** the store ends with an explicit warning naming
+   what the store did hold (`import_bag` at `finalize`, `batch_regen` after its
+   gather) rather than leaving the operator to infer a working gate from the startup
+   banner (#137).
+
+   **Trade-off, worth knowing before you point this at a chart.** Coarse ENC
+   generalization is shoal-biased, which is the conservative direction for a
+   false-deep gate — but the same bias **falsely rejects legitimate deeper-than-
+   charted returns**, and the widened gate exposes tiles that previously ran
+   ungated to that mode. How coarse a prior may gate is **not capped** — an L2
+   chart tile is ~232 m/cell under an L10 (1 m) survey — but the **blunder margin
+   scales with the resample gap**: a cross-level prime inflates the seeded 1-sigma
+   by `--prior-relief-slope * half-cell-span` (default 0.05, a gentle 5 % seabed
+   slope), so a coarse band no longer gates as hard as a survey-resolution prior.
+   Without it the variance limit could never bind at all — `Node::insert` takes the
+   `min()` of its three blunder limits, which picks the most *permissive*, and an
+   uncertainty-less chart cell seeds sigma = 1 cm — so one L2 cell blending a shoal
+   with a channel would permanently reject the channel's real bottom. Raise the
+   slope over steep seabed; set it to 0 to restore the previous behaviour. The audit
+   line names the level used, so a large gap stays visible in the import log, and the
+   margin is additionally tunable via the `blunder_*` parameters.
 
    (Replaces the pre-#96 `--prior` flag, which loaded the whole prior into RAM up
    front and defeated eviction.)
@@ -197,17 +224,23 @@ above, sharing the same `primeFromPriorLayers` semantics:
   turns that on afloat.
 - **`chart/` first, `reference/` overwrites** where both layers cover a cell — the
   store's `SourceLayer` priority order.
-- **Exact survey level only** — unlike the offline `reference/` path there is **no**
-  cross-level (#115) fallback here; a coarser multi-level prior tile is counted as
-  level-mismatched and skipped.
+- **Exact survey level only** — unlike the offline path (where **both** prior
+  layers walk levels since #137) there is **no** cross-level (#115) resample here; a
+  coarser multi-level prior tile is counted as level-mismatched and skipped. On the
+  usual ENC prior — built on the chart scale ladder, so essentially never at the
+  survey level — that leaves the live gate **off**; tracked as a known gap (#137).
+- **A match is not a gate** — a prior tile that exists at the survey level but holds
+  no data over it primes nothing, and is counted separately (`empty_tiles`) rather
+  than reported as a live gate (#137).
 - Runs **before** the `draft_dir` warm-start, so an already-surveyed cell keeps its
   finer draft-derived predicted depth (the draft prime overwrites the prior).
 - **Budget-bounded** like the draft prime (`max_resident_tiles`): the whole prior
   store is loaded into RAM at configure *before* `trimResidentToBudget` bounds it,
   so a very large prior spikes RAM transiently — prefer a **region-scoped**
-  `prior_store_dir`. Evicted prior-primed tiles are predicted-only and **not
-  reloadable on revisit**, so they silently lose their gate until evict/revisit
-  re-priming lands (deferred, #118).
+  `prior_store_dir`. Evicted prior-primed tiles are predicted-only and are
+  **re-primed from `prior_store_dir` on revisit** (#118), so eviction costs one
+  windowed disk read on return, never the gate; a prior read error there keeps the
+  tile evicted so the next revisit retries rather than running ungated.
 - **Fail-safe** — a missing / unreadable / empty / all-level-mismatched prior logs
   a warning and the node continues **ungated**; a misconfigured prior never takes
   down live perception.

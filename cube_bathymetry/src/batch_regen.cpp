@@ -295,6 +295,10 @@ void BatchRegen::finalize(
   ImportAccumulatorConfig gather_cfg = cfg_;
   gather_cfg.max_resident_tiles = 0;
   gather_cfg.skip_survey_seed = true;
+  // Name THIS tool in the per-tile prior-gate diagnostics (#137 review): the gather
+  // accumulators are ImportAccumulators, but an operator reading a rebuild log must
+  // not be told import_bag emitted them.
+  gather_cfg.tool = "batch_regen";
 
   // Gather one tile at a time, in deterministic (sorted GridIndex) order.
   for (const auto & idx : tiles_) {
@@ -340,10 +344,29 @@ void BatchRegen::finalize(
     // writes ONLY the target tile (not the neighbour grids a seam sounding created).
     std::unique_ptr<GeoMapSheet> sheet = factory_();
     ImportAccumulator acc(*sheet, gather_cfg);
+    // Every gather accumulator tallies into the ONE run-level tally (#137 review).
+    // Merging per-tile tallies afterwards summed the counters correctly but left
+    // `audit_seen` de-duplicating nothing -- the cross-level audit line fired once
+    // per TILE while its own text promised once per prior level.
+    acc.usePriorTally(&prior_tally_);
     acc.addBatch(bucket);
     acc.persistResidentTile(idx);
     bathy_persisted_ += acc.bathyTilesPersisted();
     bs_persisted_ += acc.backscatterTilesPersisted();
+  }
+  // The gather drives ONE accumulator per tile and calls persistResidentTile, never
+  // ImportAccumulator::finalize -- so the silent-no-op prior guard (#137) that
+  // finalize() emits is unreachable from here, and batch_regen is the AUTHORITATIVE
+  // off-boat rebuild path that also takes --reference-store and prints the same
+  // "Reference-prior seeding from ..." banner. Report once for the run from the
+  // shared tally every gather accumulator wrote into. Once only, mirroring
+  // ImportAccumulator::finalize's guard -- unlike that one this CANNOT run before
+  // the tile work (there is no tally until the gather has run), so a throw in the
+  // loop above still loses the line; see the note on BatchRegen::prior_tally_.
+  if (!prior_outcome_reported_) {
+    prior_outcome_reported_ = true;
+    reportPriorPrimeOutcome(
+      prior_tally_, cfg_.reference_store_dir, cfg_.cell_size_m, "batch_regen");
   }
 
   // Store-level provenance sidecars, written once (uma#248 StoreMetadata).

@@ -28,6 +28,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cube_bathymetry/geo_grid.h"
@@ -201,7 +202,15 @@ namespace cube
 ///   coarse prior depths would contaminate the survey layer (and its co-estimated
 ///   backscatter) with non-measured fill, so the prior only gates, it does not
 ///   fill; survey-falls-through-to-reference gap-filling stays a query-time concern.
-  void primeFromTile(
+///
+/// @return the number of cells actually primed. Only cells whose stored depth is
+///   FINITE are primed — a non-finite depth (NaN or ±inf) is no-data, and an
+///   infinite one could neither gate (the blunder limit is meaningless on it) nor be
+///   allowed to count as coverage. Zero is a real answer: an all-no-data tile
+///   matches its GridIndex and primes nothing, so a caller asking "is the blunder
+///   gate on for this tile?" must key on this count, never on the fact that a tile
+///   was found (#137).
+  std::size_t primeFromTile(
     const marine_bathymetry_store::BathymetryTile & tile, GeoMapSheet & map_sheet,
     bool seed_settled = true);
 
@@ -218,7 +227,9 @@ namespace cube
 /// walk. A null @p mask primes every finite-depth cell (equivalent to
 /// @ref primeFromTile). @p seed_settled forwards to the same warm-start vs.
 /// predicted-only semantics documented on @ref primeFromTile.
-  void primeFromTileSkippingMask(
+///
+/// @return the number of cells actually primed (see @ref primeFromTile).
+  std::size_t primeFromTileSkippingMask(
     const marine_bathymetry_store::BathymetryTile & tile,
     const marine_bathymetry_store::BathymetryTile * mask, GeoMapSheet & map_sheet,
     bool seed_settled = true);
@@ -268,11 +279,23 @@ namespace cube
   /// Tiles skipped because they are not at the sheet's survey level (a
   /// multi-level prior store); surfaced so the caller can log the coverage gap.
     std::size_t level_mismatched = 0;
+  /// Tiles that MATCHED the survey level and primed NOT ONE cell (all-NaN over this
+  /// area). They gate nothing, so they are not counted in @ref reference_tiles /
+  /// @ref chart_tiles — a caller that reported a matched tile as a live gate was
+  /// telling the operator the blunder gate was on when it was off (#137).
+    std::size_t empty_tiles = 0;
+  /// Tiles that primed at least one cell. Zero means the gate is OFF everywhere,
+  /// whatever `tiles()` held.
     std::size_t total() const {return reference_tiles + chart_tiles;}
   };
 
 /// @brief Prime @p map_sheet's predicted surface from BOTH prior layers of
 ///        @p store (predicted-only, seed_settled=false), exact-level tiles only.
+///
+/// A MATCH IS NOT A PRIME (#137): a tile that matches the survey level but holds no
+/// finite depth over this area primes nothing and gates nothing, so it is counted in
+/// @ref PriorLayerPrimeResult::empty_tiles, never in the per-layer prime counts a
+/// caller keys its "blunder gate active" message on.
 ///
 /// The live-node prior prime (#91) and the offline Chart-gate fix (#119) share
 /// the same semantics: `Chart` tiles are primed first (lowest-priority layer),
@@ -291,6 +314,86 @@ namespace cube
   PriorLayerPrimeResult primeFromPriorLayers(
     const marine_bathymetry_store::BathymetryStore & store,
     GeoMapSheet & map_sheet);
+
+/// @brief Run-level tally of the prior (`chart/` + `reference/`) predicted-surface
+///        prime, backing the silent-no-op guard (#137).
+///
+/// A prior store that is configured, announced at startup, and never actually
+/// consulted leaves the blunder gate OFF for the whole run with nothing in the
+/// output to say so — how a multi-level ENC chart prior behaved before Chart gained
+/// the cross-level fallback. The tally is what @ref reportPriorPrimeOutcome turns
+/// into that one loud line, and it is a plain struct (not private accumulator state)
+/// because the authoritative off-boat rebuild path, `batch_regen`, drives ONE
+/// @ref ImportAccumulator per tile and so has to hold the RUN-level tally itself and
+/// report once for the run. Each gather accumulator is pointed at that one tally via
+/// @ref ImportAccumulator::usePriorTally rather than accumulating its own and merging
+/// afterwards: `audit_seen` de-duplicates the cross-level audit line, and a dedup set
+/// that is merged only after the fact suppresses nothing at all (#137 review).
+  struct PriorPrimeTally
+  {
+  /// Per-tile prime CALLS: first touch plus every evicted-tile revisit, so a
+  /// revisited tile counts more than once. Not a distinct-tile count — the warning
+  /// says "attempt(s)" for exactly this reason.
+    std::size_t attempts = 0;
+  /// Attempts that primed at least one CELL. A matched-but-all-NaN prior tile is
+  /// NOT a hit: it gates nothing (#137).
+    std::size_t hits = 0;
+  /// Attempts whose windowed load THREW (unreadable/corrupt/permission-denied
+  /// store). Tracked apart from `hits` so "we could not read the prior" is never
+  /// reported as "the prior does not cover the survey".
+    std::size_t read_failures = 0;
+  /// Tiles that warm-started from the output store's own survey layer (rung 1) and
+  /// so returned before ever reaching the prior rung. They are NOT attempts, and
+  /// the warning must not claim the gate was off for them.
+    std::size_t survey_warm_starts = 0;
+  /// Every (layer, GGGS level) pair the prior windows held that is USABLE for the
+  /// tile it was loaded for — at the survey level, or a coarser tile that actually
+  /// CONTAINS it. Reported by the warning so a coverage hole in a present prior is
+  /// visible ("chart@L7 vs survey level 10") instead of left to be inferred.
+    std::set < std::pair < marine_bathymetry_store::SourceLayer, int >> layers_seen;
+  /// (layer, level) pairs the windows held that could NOT be used for the tile:
+  /// finer than the survey level (dropped — no aggregation rule), or coarse tiles
+  /// the inclusive window returned that do not contain the survey tile (the
+  /// edge-adjacent neighbours `findCrossLevelPriors` rejects). Kept apart from
+  /// @ref layers_seen because reporting them as a level MISMATCH sends the operator
+  /// after the wrong fault: a boundary tile with no containing prior is a coverage
+  /// gap, and the remedies differ (#137 review).
+    std::set < std::pair < marine_bathymetry_store::SourceLayer,
+    int >> unusable_seen;
+  /// (layer, level) pairs whose cross-level-fallback audit line has already been
+  /// logged this run; the line is emitted once per pair, not once per tile. This
+  /// only holds when every tile of the run shares ONE tally — see
+  /// @ref ImportAccumulator::usePriorTally.
+    std::set < std::pair < marine_bathymetry_store::SourceLayer, int >> audit_seen;
+  };
+
+/// @brief Emit the run-level prior-store WARNING(s) describing how much of the run
+///        a configured prior actually gated (#137).
+///
+/// Up to two lines, each independently gated:
+///  - **Read failures** — emitted whenever ANY attempt failed to read the store,
+///    *regardless of whether other tiles primed*. An unreadable/corrupt/permission-
+///    denied store is a different fault with a different remedy than a coverage gap,
+///    and tying it to the zero-hit case hid it completely on a run where a single
+///    tile primed (#137 review).
+///  - **Coverage** — "primed NOTHING on any of N attempt(s)" when nothing primed at
+///    all, or "primed only M of N attempt(s)" when the prior gated part of the run.
+///    Partial coverage is the likelier field failure than total non-coverage, so it
+///    is reported rather than left to be assumed away. Both name the layer@level
+///    pairs the prior windows held, so a level mismatch is visible.
+///
+/// Both coverage lines scope their claim to the tiles that actually consulted the
+/// prior, since a tile warm-started from the output store's `processed/` layer
+/// returns before the prior rung.
+///
+/// @param tally            Run-level tally (see @ref PriorPrimeTally).
+/// @param prior_store_dir  The `--reference-store` dir, named in the warning.
+/// @param cell_size_m      Survey cell size, reported as the survey GGGS level.
+/// @param tool             Prefix for the line (`import_bag` / `batch_regen`).
+/// @return true when at least one line was emitted.
+  bool reportPriorPrimeOutcome(
+    const PriorPrimeTally & tally, const std::string & prior_store_dir,
+    float cell_size_m, const char * tool);
 
 /// @brief True when a legacy `survey/` layer dir PERSISTS in @p store_dir — the
 ///        signature of a permanent, whole-store ADR-0010 D8 migration REFUSAL.
@@ -351,6 +454,35 @@ namespace cube
   /// prior contents. The live import path leaves this false (its warm-start is the
   /// intended incremental-import behavior).
     bool skip_survey_seed = false;
+  /// Tool name prefixing this accumulator's operator-facing prior-gate diagnostics
+  /// (the per-tile prior read error, the cross-level audit line, and the run-level
+  /// warning). @ref BatchRegen sets it to `batch_regen` for its gather so an
+  /// authoritative rebuild's diagnostics are not attributed to `import_bag` (#137).
+    std::string tool = "import_bag";
+  /// Relief allowance for a CROSS-LEVEL prior prime, as a seabed slope (rise over
+  /// run), exposed as `--prior-relief-slope` on both importers (#137).
+  ///
+  /// A coarse prior cell reports one depth for a span of `Level::cellSize()`
+  /// metres. This inflates the seeded 1-sigma by `slope * half-span`, so the
+  /// `blunder_scalar * sqrt(variance)` limit — the one `Node::insert`'s `min()`
+  /// otherwise always discards, because an uncertainty-less chart cell seeds
+  /// sigma = 1 cm — widens with the resample gap. Without it a 232 m/cell L2
+  /// prior gates exactly as hard as an exact-level one, and one coarse cell
+  /// spanning a shoal and a channel permanently rejects the channel's real
+  /// seafloor (the offline import is single-pass).
+  ///
+  /// **This default is a real decision, not a formality.** 0.05 (a 5 % slope, so
+  /// ±5.8 m of relief allowed under a 232 m L2 cell and ±0.02 m under a 1 m
+  /// exact-level one) is deliberately gentle: it is enough to stop a coarse
+  /// chart band from gating like a survey-resolution prior, while leaving a
+  /// near-level prior's behaviour unchanged. Raise it where the seabed is steep
+  /// (a rock ledge, a dredged channel wall) and false rejections matter more
+  /// than admitting a false deep; lower it toward 0 to restore the pre-#137
+  /// unbounded-confidence behaviour. Exactly 0 disables the allowance.
+  ///
+  /// Applies ONLY to the cross-level resample path: an exact-survey-level prior
+  /// primes through `primeFromTile`, which this does not touch.
+    double prior_relief_slope = 0.05;
   };
 
 /// @brief Bounded-RAM offline import accumulator (cube_bathymetry#92).
@@ -422,6 +554,15 @@ public:
   ///   with a single coarse `StoreMetadata` at the store root). Written only when
   ///   non-null and not `empty()`.
   /// @param bs_metadata    Optional store-level provenance for the backscatter store.
+  ///
+  /// ALSO emits the run-level prior-store WARNING (#137,
+  /// @ref reportPriorPrimeOutcome) when a configured `--reference-store` primed
+  /// nothing for any tile that reached the prior rung — the blunder gate was off
+  /// for the whole run despite the startup banner saying otherwise. Emitted
+  /// FIRST, before the tile persists, so a persist that throws cannot swallow it,
+  /// and once only, however many times this is called. `batch_regen` never calls
+  /// this (see @ref persistResidentTile) and reports the same warning itself from
+  /// the one run-level tally its gather accumulators share (@ref usePriorTally).
     void finalize(
       const marine_bathymetry_store::StoreMetadata * bathy_metadata = nullptr,
       const marine_mbes_backscatter_store::StoreMetadata * bs_metadata = nullptr);
@@ -447,11 +588,41 @@ public:
     std::size_t bathyTilesPersisted() const {return bathy_persisted_;}
   /// @brief Cumulative backscatter tile writes (eviction + finalize).
     std::size_t backscatterTilesPersisted() const {return bs_persisted_;}
+  /// @brief Tally prior primes into @p tally (caller-owned) instead of into this
+  ///        accumulator's own, for a driver that runs MANY accumulators over one run.
+  ///
+  /// `batch_regen` builds one accumulator per gathered tile and reports the
+  /// silent-no-op warning itself (@ref finalize cannot do it for that path — the
+  /// gather calls @ref persistResidentTile). Pointing every gather accumulator at
+  /// the ONE run-level tally is what makes the run-scoped state in
+  /// @ref PriorPrimeTally actually run-scoped: merging per-tile tallies afterwards
+  /// sums the counters correctly but leaves `audit_seen` de-duplicating nothing, so
+  /// the cross-level audit line fired once per TILE while claiming in its own text
+  /// to be reported once per prior level (#137 review).
+  ///
+  /// @p tally must outlive this accumulator. Passing `nullptr` restores the
+  /// accumulator's own tally. Call before the first @ref addBatch.
+    void usePriorTally(PriorPrimeTally * tally) {shared_tally_ = tally;}
+
+  /// @brief The prior-prime tally this accumulator is writing to (#137) — its own,
+  ///        or the shared one set by @ref usePriorTally.
+    const PriorPrimeTally & priorPrimeTally() const {return priorTally();}
   /// @brief The scratch spill directory (empty until the first eviction). Exposed
   ///        for tests that assert it is cleaned up after @ref finalize.
     const std::string & scratchDir() const {return scratch_dir_;}
 
 private:
+  /// The tally prior primes are recorded in: @ref prior_tally_ unless a driver
+  /// redirected it with @ref usePriorTally.
+    PriorPrimeTally & priorTally()
+    {
+      return shared_tally_ != nullptr ? *shared_tally_ : prior_tally_;
+    }
+    const PriorPrimeTally & priorTally() const
+    {
+      return shared_tally_ != nullptr ? *shared_tally_ : prior_tally_;
+    }
+
     void evictColdTiles();
     void persistBathyTile(const gggs::GridIndex & index);
     void persistBackscatterTile(const gggs::GridIndex & index);
@@ -473,9 +644,15 @@ private:
   ///           store, or a resurvey of an already-written tile): prime settled
   ///           (`seed_settled=true`) AND restore each cell's backscatter Welford
   ///           via @ref welfordFromCell from the `survey/` backscatter tile.
-  ///        2. reference — else a `reference/` tile in @ref reference_store_dir:
-  ///           prime predicted-only (`seed_settled=false`, blunder gate); NOT
-  ///           counted as measured data, NO backscatter seed.
+  ///        2. prior — else a `chart/` or `reference/` tile in
+  ///           @ref reference_store_dir: prime predicted-only
+  ///           (`seed_settled=false`, blunder gate); NOT counted as measured data,
+  ///           NO backscatter seed. `chart/` primes first and `reference/`
+  ///           overwrites where both cover a cell; since #137 BOTH layers walk
+  ///           the per-cell UNION of every CONTAINING coarser tile (coarsest
+  ///           first, the exact-survey-level tile last so it wins), rather than
+  ///           resampling a single tile (the #115 level-walk, which was
+  ///           Reference-only and single-tile before).
   ///        else blank (no prior). A no-op beyond marking @ref seeded_ when no
   ///        seed source is configured or found.
   /// @return false if the rung-1 survey seed threw (the on-disk survey tile exists
@@ -497,6 +674,18 @@ private:
     std::string scratch_dir_;  // lazily created on first eviction; "" = none
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
+  /// Run-level prior-prime tally (#137), for the @ref finalize silent-no-op
+  /// warning. Populated only when a `--reference-store` was configured. All
+  /// attempts and no hits means the blunder gate never engaged for any tile that
+  /// reached the prior rung — how a multi-level chart prior behaved before Chart
+  /// gained the cross-level fallback, and worth one loud line rather than silence.
+    PriorPrimeTally prior_tally_;
+  /// Non-null when a driver redirected the tally (@ref usePriorTally); not owned.
+    PriorPrimeTally * shared_tally_ = nullptr;
+  /// Guards @ref finalize's warning against a second emission: the tally is never
+  /// cleared (batch_regen's gather accumulators all share one run-level tally via
+  /// @ref usePriorTally), so a second @ref finalize call would otherwise repeat it.
+    bool prior_outcome_reported_ = false;
   };
 
 }  // namespace cube
