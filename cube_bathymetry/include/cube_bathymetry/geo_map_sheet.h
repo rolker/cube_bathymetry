@@ -92,6 +92,21 @@ public:
       bool tl_removed = false,
       float absorption_db_per_m = 0.0f);
 
+  /// @brief Set the spacing term of the node capture distance
+  ///        (`Parameters::capture_spacing_scale`, cube_bathymetry#143).
+  ///
+  /// Writes into the sheet's private @c parameters_ like
+  /// setBackscatterCorrection, so it reaches every owned grid. The offline
+  /// tools expose it as `--capture-spacing-scale`; tests that must reproduce
+  /// the pre-#143 fixed 0.5 m gate pin it to `0.5 / distance_scale`. Note the
+  /// sheet's `distance_scale` is the **requested** cell size passed to the
+  /// constructor, not the GGGS-snapped cell the grids are laid out on.
+  /// @throws std::invalid_argument if @p scale is not finite and positive.
+    void setCaptureSpacingScale(float scale);
+
+  /// The node spacing the sheet's Parameters use (`distance_scale`, metres).
+    double distanceScale() const {return parameters_.distance_scale;}
+
   /// Return the grids within the bounds, creating new ones if necessary
     std::vector < std::shared_ptr <
     GeoGrid >> getOrCreateGridsIn(const gz4d::BoundsDegrees & bounds);

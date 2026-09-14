@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <utility>
 #include "marine_autonomy/gz4d_geo.h"
 
@@ -89,6 +90,15 @@ void GeoMapSheet::setBackscatterCorrection(
   parameters_.angular_response_curve = std::move(curve);
   parameters_.backscatter_tl_removed = tl_removed;
   parameters_.backscatter_absorption_db_per_m = absorption_db_per_m;
+}
+
+void GeoMapSheet::setCaptureSpacingScale(float scale)
+{
+  if (!std::isfinite(scale) || scale <= 0.0f) {
+    throw std::invalid_argument(
+            "GeoMapSheet::setCaptureSpacingScale: scale must be finite and positive");
+  }
+  parameters_.capture_spacing_scale = scale;
 }
 
 void GeoMapSheet::addSoundings(

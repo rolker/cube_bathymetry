@@ -24,8 +24,10 @@
 #define CUBE_BATHYMETRY__MAP_SHEET_H_
 
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include "cube_bathymetry/grid.h"
@@ -64,6 +66,22 @@ public:
     GridIndex gridIndex(const MapPosition & position) const;
 
     std::chrono::steady_clock::time_point lastUpdateTime() const;
+
+  /// @brief Set the spacing term of the node capture distance
+  ///        (`Parameters::capture_spacing_scale`, cube_bathymetry#143); reaches
+  ///        every owned grid, which hold the parameters by const reference.
+  /// @throws std::invalid_argument if @p scale is not finite and positive.
+    void setCaptureSpacingScale(float scale)
+    {
+      if (!std::isfinite(scale) || scale <= 0.0f) {
+        throw std::invalid_argument(
+                "MapSheet::setCaptureSpacingScale: scale must be finite and positive");
+      }
+      parameters_.capture_spacing_scale = scale;
+    }
+
+  /// The node spacing the sheet's Parameters use (`distance_scale`, metres).
+    double distanceScale() const {return parameters_.distance_scale;}
 
 private:
   /// Grid cell counts

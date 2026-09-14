@@ -222,6 +222,12 @@ std::vector<GeoSounding> makeRegressionBatch()
 // boundary-cell reshuffle can perturb them.
 TEST_F(GeoGridTest, BulkInsertBitExactRegression)
 {
+  // The goldens were captured under the pre-#143 node capture gate, whose floor
+  // was a fixed 0.5 m. The gate is now max(0.05*|depth|, k*spacing); pin k so
+  // the spacing term is exactly 0.5 m on this 1.0 m sheet, which keeps the
+  // goldens a guard for the container/bounds refactor rather than for the gate
+  // (the gate has its own tests in test_node.cpp).
+  params.capture_spacing_scale = static_cast<float>(0.5 / params.distance_scale);
   auto grid_index = makeGridIndex(43.07, -70.76);
   GeoGrid g(grid_index, params);
   g.insert(makeRegressionBatch());

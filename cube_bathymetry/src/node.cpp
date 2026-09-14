@@ -151,7 +151,15 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
     target_depth = sounding.depth;
   }
 
-  if(distance > std::max<double>(parameters.capture_distance_scale * std::abs(target_depth), 0.5)) {
+  /* Capture distance: the node accepts the sounding only within the larger of
+   * the depth term (Calder's 5 % of depth) and the spacing term (a multiple of
+   * the node spacing). The original's hard-coded 0.5 m floor is gone -- see
+   * Parameters::capture_spacing_scale (cube_bathymetry#143).
+   */
+  const double capture_distance = std::max<double>(
+    parameters.capture_distance_scale * std::abs(target_depth),
+    parameters.capture_spacing_scale * parameters.distance_scale);
+  if(distance > capture_distance) {
     return false;
   }
 
