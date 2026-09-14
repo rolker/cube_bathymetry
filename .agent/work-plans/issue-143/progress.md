@@ -280,3 +280,54 @@ machinery.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 11:06 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `ee5af01` (revision 3)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-143`, plan not pushed)
+**Verdict**: changes-requested
+
+Round 3, after the operator-led design re-base. The six re-based points are
+treated as settled and are not re-litigated. The findings below are (a) two
+r2 items the revision does not actually resolve, and (b) new internal
+inconsistencies in the revision's own material — the count grid, the
+required-vs-achieved mapping, the quadtree prefix, and the equivalence test's
+pinned parameter.
+
+### r2 disposition (verified against the code, not re-litigated)
+
+| r2 finding | Disposition |
+|---|---|
+| 1 shared touch clock | **Resolved.** `touch_counter_` confirmed per-sheet (`geo_map_sheet.h:228-231`); the injected optional `shared_ptr<atomic<uint64_t>>`, the named `residentTiles()`/`persistAndDrop()` API on the `store_import.h` row, and the two preserved invariants (throwing persist leaves the tile resident; dropped tiles recorded in `evicted_`) all appear. |
+| 5 RAM budget | **Resolved.** One store-wide `max_resident_tiles` with `MultiLevelAccumulator`-owned global eviction; per-accumulator eviction disabled by `max_resident_tiles = 0`, which matches `store_import.cpp:1050`'s early return. `test_tile_eviction_rss` carries a mixed-level case. Recon RAM now quantified separately. |
+| 2 `persist_leaves` seam loss | **Not dissolved — inverted.** See finding 3. |
+| 3 `--replace-tiling` | Genuinely dissolved (the flag is gone). |
+| 4 store-wide plan hash | Dissolved (the hash is gone); one residual documentation gap, finding 13. |
+| 5 (sugg.) decision-depth rollup | **Not addressed.** See finding 4. |
+| 7, 9, 10 (sugg.) | Taken: `--scratch-dir` + free-space check, single sidecar owner, `dirtyTiles` throws. |
+| 8 (sugg.) recon RAM | Partly taken (count grid quantified; reservoir still unstated — finding 11). |
+
+uma#383 and uma#386 verified OPEN with the titles the plan cites.
+
+### Findings
+- [ ] (must-fix) The default `--count-level 13` violates the plan's own startup validation `count-level >= finest` (default `finest_level` 14). It is also a real cap, not just a validation clash: achieved spacing is `(2λ+1)·R` with `λ >= 0`, so with R = a level-13 cell (0.113 m) the data can never *achieve* level 14 and the fine end of the ladder is unreachable through the achieved path. Reconcile the default, the validation direction, and the ladder's fine clamp. — `plan.md:140,289`
+- [ ] (must-fix) `achieved = fromCellSize(p95 of achieved spacing over g).level()` rounds the wrong way. `gggs::Level::fromCellSize` returns "the coarsest Level whose cells are AT OR FINER than `cell_size`" (`marine_autonomy/gggs/level.h:59-74`, `ceil` of the log2), so an achieved spacing of 0.33 m maps to level 12 (0.227 m cells) — finer than the data supports, the unsafe direction, and the opposite of the plan's own rule ("the level whose cell is **no finer than** the 95th-percentile level of aggregation"). Take the coarser neighbour explicitly. The same level-ordering slip appears in the `LevelPlan` API: `coverageDeficit()` is described as "tiles where required < achieved level", but the decision section defines the deficit as required being *finer* than achieved, i.e. `required > achieved` in level numbers. — `plan.md:153,238`
+- [ ] (must-fix) Routing is per **level**, emission is per **tile**, and the plan states there is no filter at persist time ("every tile an accumulator builds is persisted"). A batch is one ping (`import_bag_main.cpp:1293-1296`), so any swath whose influence-expanded bounds clip an emitted level-14 tile is handed in full to the level-14 accumulator, which then builds and persists level-14 tiles over the neighbouring plain that the level plan never emitted. r2's must-fix 2 is therefore not dissolved — it is inverted from under-production (dropped seam tiles) into over-production (fine tiles outside the plan), which breaks the plan report's storage estimate, the coverage-deficit accounting, and `test_level_plan`'s guarantee about what the store contains. Specify a per-tile admission rule at persist time, and state explicitly how it still keeps the near-seam neighbour tiles that `gridIndicesForSoundings` deliberately includes (`store_import.cpp:1089-1090,1103`) so single-level equivalence survives. — `plan.md:33,260-265`
+- [ ] (must-fix) `decision_depth[g]` is defined only per **level-14** grid (recon step 1), but the descent evaluates `depthAdaptiveLevel(decision_depth[g])` at every level from the coarsest down (step 3). No rollup rule is given, so the algorithm is not implementable as written for any `g` coarser than level 14. This is r2 suggestion 5, unaddressed in r3; r3 makes it sharper by dropping the min-count guard that the old rollup text leaned on. Say whether coarse grids pool their descendants' soundings and recompute the percentile, or take the min over children's decision depths — and name the safety direction of the choice. — `plan.md:143,151-153`
+- [ ] (must-fix) The descent root and the prefix invariant are hard-coded at level 8 ("Descend from each touched **level-8** grid"; "every emitted tile's ancestors up to **level 8** are also emitted", repeated in the `test_level_plan` row) while `coarsest_level` is a tunable whose default is 8. The single-level equivalence test sets `coarsest_level == finest_level == 10`: under a literal level-8 root it would emit levels 8, 9 and 10 and could not be byte-identical to today's fixed-level store. Make the root `coarsest_level` throughout, and say separately that the per-level-8 spill partition is a scratch-file grouping independent of `coarsest_level`. — `plan.md:151,159,365`
+- [ ] (must-fix) The equivalence test's pinned parameter is numerically wrong. Level 10's nominal cell is **0.906 m** (uma `depth_adaptive_level.hpp:53` ladder; `gggs::Level::cellSize()`), so `capture_spacing_scale = 0.5 / 0.91` yields a gate of 0.4978 m, not today's 0.5 m — every tile would differ and the load-bearing test fails by construction. Pin `0.5 / gggs::Level(10).cellSize()`. Related: `capture_spacing_scale` is a `Parameters` field with no CLI flag and no ROS parameter in the plan (today's `capture_distance_scale` has neither — `parameters.h:205` is its only site), so also say how the test sets it. — `plan.md:366`
+- [ ] (suggestion) The spill size estimate is low by ~1.7x and the lossless-replay requirement is unstated. `GeoSounding` is `gz4d::PositionDegrees` plus `Sounding`, and `Sounding` carries seven floats **and** a `geometry_msgs::msg::Point sonar_relative_position` (`sounding.h`) — roughly 80 B, not 48 B, so a 10 h M3 day is ~7.4 GB, not 4.4 GB. The free-space check is sized from this number. A spilled subset would also have to keep `intensity`, `beam_angle`, `slant_range` and `sonar_relative_position` or the backscatter half of the byte-identical assertion cannot hold (the angular-response correction reads them). — `plan.md:250`
+- [ ] (suggestion) The compute consequence of parents-alive is not quantified anywhere. Storage is bounded and stated (the 4/3 geometric series), but over a shoal the full prefix is levels 8 through 14 — seven native levels — so that ground is CUBE-estimated up to seven times and every ping there routes into up to seven accumulators. "one extra estimate per level stacked over a point (two or three on a slope)" understates the shallow case, and the Consequences table has no import-runtime row. — `plan.md:169,399-411`
+- [ ] (suggestion) Fingerprint schema ambiguity for `mode: fixed`. The `tiling` object marks `cell_size_m` as "fixed only" but does not say whether `policy` — which now carries `capture_spacing_scale` — is written in fixed mode. The capture-gate change alters fixed-level output too, so a fixed-mode fingerprint that omits the capture policy would fail to mark existing fixed stores stale, which is exactly the job ADR-0003's `cell_size_m` row does today (`docs/decisions/0003-staleness-fingerprint.md:44,62-63`). — `plan.md:308-312`
+- [ ] (suggestion) The hole criterion contradicts the chosen `k`. The Context says a node at a cell coarser than `2 × 0.05·depth` has uncaptured corners — that is the mid-edge (`0.5·cell`) criterion, the one the plan elsewhere rejects as "node-centric". Under the adopted half-diagonal rule (`k = 0.71`) the threshold is `cell > capture / 0.71`, i.e. about 1.41x, not 2x. — `plan.md:81`
+- [ ] (suggestion) r2 suggestion 8 is only half carried: the count grid now has a per-km² figure, but the per-level-14-grid depth reservoir is still described only as "bounded" with no cap and no bytes/km², and it is the other structure that scales with surveyed area. — `plan.md:246`
+- [ ] (suggestion) The spill's claimed bound is close to vacuous. A level-8 grid spans 3478.7 m, so most single-day surveys fall inside one or two of them and "the replay is bounded by one coarse tile's soundings" bounds nothing useful. Either partition the spill finer or drop the claim and rest the residency argument on eviction alone. — `plan.md:251-253`
+- [ ] (suggestion) Removing the plan hash (r2 must-fix 4, correctly dissolved) leaves one case undocumented: a re-import over the **same** ground under a different count-level or policy leaves the earlier import's finer native tiles in place, and a fine-LOD reader prefers those stale partial tiles over the newer, coarser, complete estimate. Not asking to reinstate the guard — asking the README depth-adaptive section and the ADR-0002 amendment to state what a re-import over already-covered ground leaves behind. — `plan.md:33-36,402`
+- [ ] (suggestion) `--count-level` has a validated lower bound but no upper one (GGGS runs to level 20), and the Calder citation does not support the default as paired: "R of about a quarter of the finest spacing you expect" at level 13 (0.113 m) implies a finest expected spacing of ~0.45 m, i.e. level 11, not the `finest_level` 14 the plan also defaults to. Say which reading the default follows. — `plan.md:140,433-435`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
