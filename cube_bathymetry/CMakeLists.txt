@@ -505,6 +505,12 @@ if(BUILD_TESTING)
     marine_bathymetry_store::marine_bathymetry_store
     marine_mbes_backscatter_store::marine_mbes_backscatter_store
   )
+  # The CLI-contract cases run the built import_bag binary for its argument
+  # validation (a bad depth-adaptive policy must fail before any bag opens).
+  target_compile_definitions(test_mixed_level_import PRIVATE
+    IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
+  )
+  add_dependencies(test_mixed_level_import import_bag)
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers

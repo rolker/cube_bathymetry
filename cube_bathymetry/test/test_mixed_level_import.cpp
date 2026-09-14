@@ -35,7 +35,11 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/wait.h>
 #include <unistd.h>
+
+#include <array>
+#include <cstdio>
 
 #include <cmath>
 #include <filesystem>
@@ -369,5 +373,73 @@ TEST(MixedLevelImport, OneResidentBudgetAcrossLevels)
   std::filesystem::remove_all(bounded_dir);
   std::filesystem::remove_all(unbounded_dir);
 }
+
+#ifdef IMPORT_BAG_EXE
+namespace
+{
+// Run import_bag with @p args; merged stdout+stderr, exit status via @p status.
+std::string runImportBag(const std::string & args, int * status)
+{
+  const std::string command = std::string(IMPORT_BAG_EXE) + " " + args + " 2>&1";
+  std::string output;
+  FILE * pipe = popen(command.c_str(), "r");
+  if (pipe == nullptr) {
+    *status = -1;
+    return output;
+  }
+  std::array<char, 4096> buffer{};
+  while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+    output += buffer.data();
+  }
+  const int rc = pclose(pipe);
+  *status = (rc != -1 && WIFEXITED(rc)) ? WEXITSTATUS(rc) : -1;
+  return output;
+}
+}  // namespace
+
+// The depth-adaptive policy is validated before any bag is opened: a finest
+// level past 14 breaks ADR-0002's dirty-set guarantee and must be refused at
+// startup with the reason, not hours into a pass.
+TEST(ImportBagCli, RefusesAFinestLevelPastTheSurveyIndex)
+{
+  int status = -1;
+  const std::string out = runImportBag(
+    "--depth-adaptive --depth-adaptive-finest 15 -o /nonexistent/store -d /t /nonexistent.bag",
+    &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("finest_level 15 exceeds 14"), std::string::npos) << out;
+  EXPECT_EQ(out.find("cannot open"), std::string::npos)
+    << "validation must fail before any bag is opened\n" << out;
+}
+
+TEST(ImportBagCli, RefusesPlanFlagsWithoutDepthAdaptive)
+{
+  int status = -1;
+  const std::string out = runImportBag(
+    "--level-plan-out /tmp/x.json -o /nonexistent/store -d /t /nonexistent.bag", &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("need --depth-adaptive"), std::string::npos) << out;
+}
+
+TEST(ImportBagCli, RefusesAnInvalidCaptureSpacingScale)
+{
+  int status = -1;
+  const std::string out = runImportBag(
+    "--capture-spacing-scale 0 -o /nonexistent/store -d /t /nonexistent.bag", &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("--capture-spacing-scale must be a positive number"), std::string::npos)
+    << out;
+}
+
+TEST(ImportBagCli, UsageDocumentsTheDepthAdaptiveFlags)
+{
+  int status = -1;
+  const std::string out = runImportBag("-h", &status);
+  EXPECT_NE(out.find("--depth-adaptive"), std::string::npos);
+  EXPECT_NE(out.find("--level-plan-out"), std::string::npos);
+  EXPECT_NE(out.find("--capture-spacing-scale"), std::string::npos);
+  EXPECT_NE(out.find("--scratch-dir"), std::string::npos);
+}
+#endif  // IMPORT_BAG_EXE
 
 }  // namespace cube
