@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "cube_bathymetry/level_plan.h"
 #include "marine_autonomy/gggs.h"
 #include "marine_survey_index/query.hpp"
 
@@ -103,11 +104,28 @@ namespace cube
 /// @throws std::runtime_error if a footprint tile cannot be rolled up to a
 ///   valid store-level ancestor (e.g. a malformed index row). Catch alongside
 ///   the antimeridian case above and fall back to full regen.
-  std::vector < DirtyTile > dirtyL10Tiles(
-  sqlite3 * db,
-  const std::vector < std::string > &new_bag_paths,
-  const gggs::Level & store_level,
-  const std::string & sensor_filter = "");
+  std::vector < DirtyTile > dirtyTilesAtLevel(
+    sqlite3 * db,
+    const std::vector < std::string > &new_bag_paths,
+    const gggs::Level & store_level,
+    const std::string & sensor_filter = "");
+
+  /// @brief Dirty tiles of a DEPTH-ADAPTIVE store (cube_bathymetry#143): the
+  ///        same footprint + one-tile margin as `dirtyTilesAtLevel`, rolled up
+  ///        to the emitted tile at EVERY level the plan holds over it (parents
+  ///        are estimated in full under their children, so each is dirty).
+  ///
+  /// A conservative superset, as ADR-0002 requires. Throws std::invalid_argument
+  /// (from the roll-up) if an index footprint tile is COARSER than an emitted
+  /// tile over it: the index footprint level is read from the DB and may be
+  /// mixed, and a level plan's finest level is validated <= 14, so this cannot
+  /// happen for a level-14 index -- but it must never be silently mis-levelled.
+  /// The dry-run CLI's catch falls back to a full regen.
+  std::vector < DirtyTile > dirtyTiles(
+    sqlite3 * db,
+    const std::vector < std::string > &new_bag_paths,
+    const LevelPlan & plan,
+    const std::string & sensor_filter = "");
 
 }  // namespace cube
 

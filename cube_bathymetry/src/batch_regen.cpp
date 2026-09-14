@@ -93,9 +93,34 @@ GeoSounding fromRecord(const ScatterRecord & r)
 }
 }  // namespace
 
-BatchRegen::BatchRegen(SheetFactory factory, ImportAccumulatorConfig config)
-: factory_(std::move(factory)), cfg_(std::move(config)), index_sheet_(factory_())
+BatchRegen::BatchRegen(
+  SheetFactory factory, ImportAccumulatorConfig config, std::shared_ptr<const LevelPlan> plan)
+: factory_(std::move(factory)), cfg_(std::move(config)), plan_(std::move(plan))
 {
+  if (plan_) {
+    // Depth-adaptive (#143): one routing sheet per emitted level, admitting
+    // only the plan's emitted tiles at that level -- the same admission the
+    // import's MultiLevelAccumulator applies, so the scatter's tile set equals
+    // the import's.
+    for (const uint8_t level : plan_->levels()) {
+      auto sheet = factory_(level);
+      if (!sheet || sheet->gridLevel().level() != level) {
+        throw std::invalid_argument(
+                "batch_regen: the sheet factory did not produce a level-" +
+                std::to_string(level) + " sheet");
+      }
+      std::shared_ptr<const LevelPlan> plan_ref = plan_;
+      sheet->setAdmission(
+        [plan_ref](const gggs::GridIndex & grid) {return plan_ref->isEmitted(grid);});
+      index_sheets_.emplace(level, std::move(sheet));
+    }
+    if (index_sheets_.empty()) {
+      throw std::invalid_argument("batch_regen: the level plan emits no tiles");
+    }
+  } else {
+    const uint8_t level = gggs::Level::fromCellSize(cfg_.cell_size_m).level();
+    index_sheets_.emplace(level, factory_(level));
+  }
   // PREFLIGHT (cube#133): batch-regen is a WRITE-PATH tool and, unlike the live node
   // and store_import's load()/loadWindow() catches, it NEVER load()s the output store --
   // so the ADR-0010 D8 `survey/`->`processed/` auto-migration never fires here. If the
@@ -215,13 +240,18 @@ void BatchRegen::addBatch(const std::vector<GeoSounding> & soundings)
   // per-cell radius test, so a bucketed sounding that does not actually reach the tile
   // is harmlessly filtered (no false deposit) -- the bucket is a superset the radius
   // test trims back to the exact single-pass deposit set.
-  for (const auto & idx : index_sheet_->gridIndicesForSoundings(soundings)) {
-    std::ofstream & out = bucketStream(idx);
-    for (const auto & s : soundings) {
-      const ScatterRecord rec = toRecord(s);
-      out.write(reinterpret_cast<const char *>(&rec), sizeof(rec));
-      if (!out) {
-        throw std::runtime_error("batch_regen: failed writing scatter bucket");
+  // Per level (#143): each routing sheet enumerates the tiles it would create
+  // for this batch -- for a plan, only the emitted ones at its level -- and the
+  // whole batch goes into each such bucket (GridIndex carries the level).
+  for (const auto & [level, index_sheet] : index_sheets_) {
+    for (const auto & idx : index_sheet->gridIndicesForSoundings(soundings)) {
+      std::ofstream & out = bucketStream(idx);
+      for (const auto & s : soundings) {
+        const ScatterRecord rec = toRecord(s);
+        out.write(reinterpret_cast<const char *>(&rec), sizeof(rec));
+        if (!out) {
+          throw std::runtime_error("batch_regen: failed writing scatter bucket");
+        }
       }
     }
   }
@@ -338,8 +368,18 @@ void BatchRegen::finalize(
     // Fresh sheet + single-tile accumulator: replays the bucket in one pass (never
     // evicts), applies the survey/reference seed precedence via addBatch, then
     // writes ONLY the target tile (not the neighbour grids a seam sounding created).
-    std::unique_ptr<GeoMapSheet> sheet = factory_();
-    ImportAccumulator acc(*sheet, gather_cfg);
+    // The gather sheet is built at the bucket's OWN level (#143): a fixed
+    // rebuild has one level; a plan-driven one gathers each tile at the level
+    // it was emitted at, with the store level matched to that sheet.
+    std::unique_ptr<GeoMapSheet> sheet = factory_(idx.level());
+    if (!sheet || sheet->gridLevel().level() != idx.level()) {
+      throw std::runtime_error(
+              "batch_regen: the sheet factory did not produce a level-" +
+              std::to_string(idx.level()) + " sheet for the gather");
+    }
+    ImportAccumulatorConfig tile_cfg = gather_cfg;
+    tile_cfg.cell_size_m = static_cast<float>(sheet->nominalCellSizeMeters());
+    ImportAccumulator acc(*sheet, tile_cfg);
     acc.addBatch(bucket);
     acc.persistResidentTile(idx);
     bathy_persisted_ += acc.bathyTilesPersisted();

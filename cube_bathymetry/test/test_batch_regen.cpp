@@ -44,6 +44,8 @@
 #include "cube_bathymetry/batch_regen.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
+#include "cube_bathymetry/multi_level_accumulator.h"
+#include "cube_bathymetry/recon.h"
 #include "cube_bathymetry/store_import.h"
 #include "marine_autonomy/gggs.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
@@ -90,7 +92,7 @@ std::vector<GeoSounding> surveyCell(
 
 BatchRegen::SheetFactory sheetFactory()
 {
-  return []() {return std::make_unique<GeoMapSheet>(kCellSize);};
+  return [](uint8_t) {return std::make_unique<GeoMapSheet>(kCellSize);};
 }
 
 ImportAccumulatorConfig makeConfig(
@@ -390,6 +392,94 @@ TEST(BatchRegen, LegacySurveyStoreRefusedBeforeAnyWrite)
   EXPECT_FALSE(std::filesystem::exists(processed_dir))
     << "batch-regen must not create processed/ (or any output) when it refuses";
 
+  std::filesystem::remove_all(root);
+}
+
+// Depth-adaptive rebuild (#143): with a level plan, batch-regen scatters to every
+// emitted tile at every level and gathers each at its own level. The result must
+// be BYTE-IDENTICAL to the import's MultiLevelAccumulator over the same plan and
+// soundings -- the same file set under processed/, each file the same bytes.
+TEST(BatchRegen, MixedLevelPlanMatchesTheMultiLevelImportExactly)
+{
+  // A deep plain (40 m -> level 9) with a shoal (3 m -> finer) inside it, one
+  // batch per position, dense enough that the count grid achieves every level.
+  std::vector<std::vector<GeoSounding>> batches;
+  for (int i = 0; i < 6; ++i) {
+    for (int j = 0; j < 6; ++j) {
+      batches.push_back(surveyCell(43.07 + i * 3.0e-5, -70.76 + j * 3.0e-5, 40.0f, 30.0f));
+    }
+  }
+  for (int i = 0; i < 6; ++i) {
+    for (int j = 0; j < 6; ++j) {
+      batches.push_back(
+        surveyCell(43.07005 + i * 5.0e-6, -70.75995 + j * 5.0e-6, 3.0f, 25.0f));
+    }
+  }
+  LevelPlanPolicy policy;
+  Parameters params{CellSizes(1.0f), "order1a"};
+  ReconCollector recon(policy, "");
+  for (const auto & b : batches) {
+    recon.add(b, params);
+  }
+  auto plan = std::make_shared<LevelPlan>(recon.plan());
+  ASSERT_GE(plan->levels().size(), 2u);
+
+  const std::string root = makeTempDir("mixedlevel");
+  const std::string r_dir = root + "/regen";
+  const std::string i_dir = root + "/import";
+  const std::string r_bs = root + "/regen_bs";
+  const std::string i_bs = root + "/import_bs";
+
+  BatchRegen::SheetFactory factory = [](uint8_t level) {
+      return std::make_unique<GeoMapSheet>(requestedCellSizeFor(level));
+    };
+  {
+    ImportAccumulatorConfig cfg = makeConfig(r_dir, r_bs);
+    BatchRegen regen(factory, cfg, plan);
+    for (const auto & b : batches) {
+      regen.addBatch(b);
+    }
+    regen.finalize();
+  }
+  {
+    MultiLevelAccumulatorConfig cfg;
+    cfg.store_dir = i_dir;
+    cfg.bs_store_dir = i_bs;
+    cfg.max_resident_tiles = 0;
+    MultiLevelAccumulator acc(plan, cfg);
+    for (const auto & b : batches) {
+      acc.addBatch(b);
+    }
+    acc.finalize();
+  }
+
+  // Same processed tile files, byte for byte, at more than one level.
+  auto readTiles = [](const std::string & store_dir) {
+      std::map<std::string, std::string> out;
+      const auto layer = std::filesystem::path(store_dir) /
+        marine_bathymetry_store::layerDirName(marine_bathymetry_store::SourceLayer::Processed);
+      for (const auto & e : std::filesystem::directory_iterator(layer)) {
+        if (e.path().extension() != ".tif") {continue;}
+        std::ifstream in(e.path(), std::ios::binary);
+        out.emplace(e.path().filename().string(), std::string(
+            (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()));
+      }
+      return out;
+    };
+  const auto regen_tiles = readTiles(r_dir);
+  const auto import_tiles = readTiles(i_dir);
+  ASSERT_FALSE(import_tiles.empty());
+  std::set<std::string> levels_seen;
+  for (const auto & [name, bytes] : import_tiles) {
+    levels_seen.insert(name.substr(0, name.find('_')));
+  }
+  EXPECT_GE(levels_seen.size(), 2u);
+  ASSERT_EQ(regen_tiles.size(), import_tiles.size()) << "different tile sets";
+  for (const auto & [name, bytes] : import_tiles) {
+    auto it = regen_tiles.find(name);
+    ASSERT_NE(it, regen_tiles.end()) << "batch-regen is missing " << name;
+    EXPECT_TRUE(it->second == bytes) << "tile bytes differ: " << name;
+  }
   std::filesystem::remove_all(root);
 }
 

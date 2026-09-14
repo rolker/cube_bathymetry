@@ -44,6 +44,7 @@
 #include <tuple>
 #include <vector>
 
+#include "cube_bathymetry/level_plan.h"
 #include "cube_bathymetry/survey_index_query.h"
 #include "marine_autonomy/gggs.h"
 #include "marine_survey_index/schema.hpp"
@@ -150,7 +151,7 @@ TEST_F(DirtyTileQuery, RollsL14FootprintUpToItsL10Parent)
   insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
 
   const auto dirty =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
 
   ASSERT_EQ(dirty.size(), 1u) << "centre footprint should mark exactly one L10 tile";
   EXPECT_EQ(dirty[0].tile, p10);
@@ -175,7 +176,7 @@ TEST_F(DirtyTileQuery, OneTileMarginMarksAdjacentL10Tiles)
   insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
 
   const auto dirty =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
 
   const double mid_lat = 0.5 * (p10.southLatitude() + p10.northLatitude());
   const double mid_lon = 0.5 * (p10.westLongitude() + p10.eastLongitude());
@@ -209,7 +210,7 @@ TEST_F(DirtyTileQuery, ContributingPassesIncludeOldBags)
   insertPass(2, fp14, "mbes-bathy", "/mbes", 100, 200, 55);   // older, same tile
 
   const auto dirty =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
 
   const cube::DirtyTile * dt = find(dirty, p10);
   ASSERT_NE(dt, nullptr);
@@ -248,7 +249,7 @@ TEST_F(DirtyTileQuery, ContributingPassesIncludeOldBagInSeparateL14Subtile)
   insertPass(2, corner14, "mbes-bathy", "/mbes", 100, 200, 55);    // old, SW corner
 
   const auto dirty =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
 
   const cube::DirtyTile * dt = find(dirty, p10);
   ASSERT_NE(dt, nullptr);
@@ -287,13 +288,13 @@ TEST_F(DirtyTileQuery, SensorFilterExactScopesFootprintAndPasses)
   insertPass(1, fp14b, "sidescan_port", "/ss", 100, 200, 40);      // region B, sidescan
 
   // Unfiltered: both regions are dirty.
-  const auto all = cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+  const auto all = cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
   EXPECT_TRUE(contains(all, p10a));
   EXPECT_TRUE(contains(all, p10b));
 
   // Filtered to mbes: only region A is dirty, and its passes are mbes-only.
   const auto mbes =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "mbes-bathy");
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "mbes-bathy");
   EXPECT_TRUE(contains(mbes, p10a)) << "mbes footprint tile is dirty";
   EXPECT_FALSE(contains(mbes, p10b)) << "sidescan-only region must be excluded";
   const cube::DirtyTile * dt = find(mbes, p10a);
@@ -301,6 +302,85 @@ TEST_F(DirtyTileQuery, SensorFilterExactScopesFootprintAndPasses)
   for (const auto & p : dt->passes) {
     EXPECT_EQ(p.sensor_type, "mbes-bathy") << "contributing set must be mbes-only";
   }
+}
+
+// A hand-built level plan: JSON with the given tiles emitted (and touched).
+std::string planJson(const std::vector<gggs::GridIndex> & tiles)
+{
+  std::string touched, emitted;
+  for (const auto & t : tiles) {
+    const std::string l = std::to_string(t.level());
+    const std::string r = std::to_string(t.row());
+    const std::string c = std::to_string(t.column());
+    if (!touched.empty()) {touched += ","; emitted += ",";}
+    touched += "[" + l + "," + r + "," + c + "]";
+    emitted += "{\"l\":" + l + ",\"r\":" + r + ",\"c\":" + c +
+      ",\"req\":" + l + ",\"ach\":" + l + ",\"d\":-10,\"ref\":false}";
+  }
+  return "{\"schema\":1,\"policy\":{\"capture_distance_scale\":0.05,\"coarsest_level\":8,"
+         "\"finest_level\":14,\"count_level\":14,\"min_obs_per_node\":5,"
+         "\"blunder_allowance\":0.2,\"decision_depth_percentile\":0.02,"
+         "\"achieved_percentile\":0.95},\"touched\":[" + touched + "],\"tiles\":[" +
+         emitted + "]}";
+}
+
+// Depth-adaptive dirty set (#143): the same L14 footprint rolls up to the emitted
+// tile at EVERY plan level over it -- parents are estimated under children, so
+// each is dirty -- and stays a conservative superset of the fixed-level answer.
+TEST_F(DirtyTileQuery, PlanRollsUpToEveryEmittedLevel)
+{
+  const gggs::GridIndex p10 = gggs::Level(kStoreLevel).gridIndex(kLat, kLon);
+  const double center_lat = 0.5 * (p10.southLatitude() + p10.northLatitude());
+  const double center_lon = 0.5 * (p10.westLongitude() + p10.eastLongitude());
+  const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(center_lat, center_lon);
+  insertBag(1, "/data/bagNew");
+  insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
+
+  // The plan emits the footprint's ancestors at 8, 9, 10 and 12 (not 11).
+  std::vector<gggs::GridIndex> emitted;
+  gggs::GridIndex a = fp14;
+  while (a.level() > 8) {
+    a = gggs::parent(a);
+    if (a.level() != 11 && a.level() != 13) {emitted.push_back(a);}
+  }
+  const cube::LevelPlan plan = cube::LevelPlan::fromJson(planJson(emitted));
+
+  const auto dirty = cube::dirtyTiles(db_, {"/data/bagNew"}, plan);
+  std::set<std::uint8_t> levels;
+  for (const auto & dt : dirty) {
+    levels.insert(dt.tile.level());
+    EXPECT_TRUE(plan.isEmitted(dt.tile)) << "dirty tile must be an emitted plan tile";
+  }
+  EXPECT_EQ(levels, (std::set<std::uint8_t>{8, 9, 10, 12}));
+  // Every fixed-level (L10) dirty tile is among the plan's dirty tiles.
+  const auto fixed = cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+  for (const auto & dt : fixed) {
+    if (plan.isEmitted(dt.tile)) {
+      EXPECT_TRUE(contains(dirty, dt.tile));
+    }
+  }
+  // The pass is attached at every level it rolls up to.
+  for (const auto & dt : dirty) {
+    if (dt.tile == gggs::parent(gggs::parent(gggs::parent(gggs::parent(fp14))))) {
+      EXPECT_EQ(dt.passes.size(), 1u);
+    }
+  }
+}
+
+// A footprint COARSER than an emitted tile cannot be rolled up to it: the
+// query throws (the dry-run's catch falls back to full regen) rather than
+// silently mis-levelling the dirty set.
+TEST_F(DirtyTileQuery, PlanFinerThanTheFootprintThrows)
+{
+  const gggs::GridIndex fp12 = gggs::Level(12).gridIndex(kLat, kLon);
+  insertBag(1, "/data/bagNew");
+  insertPass(1, fp12, "mbes-bathy", "/mbes", 100, 200, 40);
+  std::vector<gggs::GridIndex> emitted;
+  gggs::GridIndex a = fp12;
+  emitted.push_back(gggs::Level(14).gridIndex(kLat, kLon));  // finer than the footprint
+  while (a.level() > 8) {a = gggs::parent(a); emitted.push_back(a);}
+  const cube::LevelPlan plan = cube::LevelPlan::fromJson(planJson(emitted));
+  EXPECT_THROW(cube::dirtyTiles(db_, {"/data/bagNew"}, plan), std::invalid_argument);
 }
 
 // The literal "sidescan" filter expands to the channel-split `LIKE 'sidescan%'`
@@ -318,15 +398,15 @@ TEST_F(DirtyTileQuery, SidescanFilterMatchesChannelSplitSensors)
   insertPass(1, fp14, "sidescan_port", "/ss", 100, 200, 40);
 
   const auto alias =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "sidescan");
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "sidescan");
   EXPECT_TRUE(contains(alias, p10)) << "\"sidescan\" alias must match sidescan_port";
 
   const auto exact =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "sidescan_port");
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "sidescan_port");
   EXPECT_TRUE(contains(exact, p10)) << "exact sensor_type must match";
 
   const auto miss =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "mbes-bathy");
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel), "mbes-bathy");
   EXPECT_TRUE(miss.empty()) << "non-matching filter yields no footprint";
 }
 
@@ -355,7 +435,7 @@ TEST_F(DirtyTileQuery, MixedLevelFootprintRollsEachLevelToStore)
   insertPass(1, fp13, "mbes-bathy", "/mbes", 100, 200, 40);   // L13 pass
 
   const auto dirty =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
 
   const cube::DirtyTile * dta = find(dirty, p10a);
   const cube::DirtyTile * dtb = find(dirty, p10b);
@@ -375,7 +455,7 @@ TEST_F(DirtyTileQuery, NoNewBagsYieldsNoDirtyTiles)
   insertBag(1, "/data/bagNew");
   insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
 
-  const auto dirty = cube::dirtyL10Tiles(db_, {}, gggs::Level(kStoreLevel));
+  const auto dirty = cube::dirtyTilesAtLevel(db_, {}, gggs::Level(kStoreLevel));
   EXPECT_TRUE(dirty.empty());
 }
 
@@ -391,7 +471,7 @@ TEST_F(DirtyTileQuery, BagNotInIndexYieldsNoDirtyTiles)
   insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
 
   const auto dirty =
-    cube::dirtyL10Tiles(db_, {"/data/bagNeverIndexed"}, gggs::Level(kStoreLevel));
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNeverIndexed"}, gggs::Level(kStoreLevel));
   EXPECT_TRUE(dirty.empty());
 }
 
@@ -414,7 +494,7 @@ TEST_F(DirtyTileQuery, TiedPassesComeBackInADeterministicOrder)
   insertPass(1, fp14, "mbes-bathy", "/alpha", 100, 200, 40);
 
   const auto dirty =
-    cube::dirtyL10Tiles(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
+    cube::dirtyTilesAtLevel(db_, {"/data/bagNew"}, gggs::Level(kStoreLevel));
 
   ASSERT_EQ(dirty.size(), 1u);
   const auto & passes = dirty[0].passes;

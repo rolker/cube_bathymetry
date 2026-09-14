@@ -152,6 +152,7 @@ target_include_directories(cube_bathymetry_survey_index_query PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(cube_bathymetry_survey_index_query
+  cube_bathymetry_level_plan         # LevelPlan-aware dirtyTiles (#143)
   marine_autonomy::marine_autonomy   # gggs (GridIndex, Level, parent, levels)
   marine_survey_index::marine_survey_index_core  # PassRow, queryPasses, tilesForBoundingBox
   SQLite::SQLite3
@@ -465,6 +466,7 @@ if(BUILD_TESTING)
   # bathy + backscatter store vs a single-pass unbounded ImportAccumulator.
   ament_add_gtest(test_batch_regen test/test_batch_regen.cpp)
   target_link_libraries(test_batch_regen
+    cube_bathymetry_level_plan   # LevelPlan/ReconCollector for the mixed-level case (#143)
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
     marine_mbes_backscatter_store::marine_mbes_backscatter_store
