@@ -387,3 +387,41 @@ uma#383 and uma#386 re-verified OPEN with the cited titles.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-14 14:03 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-143 at `2f93049`
+**Mode**: pre-push
+**Depth**: Deep (reason: ~6.9k lines, 39 implementation files, cross-module, two ADR amendments, on-disk format change)
+**Must-fix**: 6 | **Suggestions**: 10
+**Round**: 1 | **Ship**: continue — two headline guarantees (bit-exact rebuild, bounded RAM) are asserted in shipped docs but unsupported by the code, and the suite bypasses the path that breaks
+
+Specialists: Static Analysis (cpplint/uncrustify/lint_cmake clean; cppcheck rows are its C-vs-C++ header misdetection), Governance, Plan Drift, Claude Adversarial Lens A + Lens B. Copilot and Local off (default). Clean rebuild + full suite re-run independently: 752 tests, 0 errors, 0 failures, 87 skipped.
+
+All plan-review must-fixes from rounds 1-4 were traced to code and confirmed honored. The operator-settled design points were not re-litigated.
+
+### Findings
+- [ ] (must-fix) Phase-two replays the spill in spatial (level-10 grid) order, not chronological; CUBE's sliding-median pre-filter is order-dependent, so tiles coarser than the spill level — the default levels 8 and 9 — differ from a chronological import. Puts README:107 "bit-exact vs import_bag --depth-adaptive" and ADR-0002:198 "byte-identical" in doubt; both equivalence tests bypass the spill. SpilledSounding carries no sequence number, so this is a design decision — `src/import_bag_main.cpp:1157`, `src/recon.cpp:174`
+- [ ] (must-fix) The recon count grid is unbounded in RAM — no budget, no eviction, no reported peak — contrary to the plan's explicit commitment (plan.md:228-232) and README:106's bounded-RAM claim; ~630 MB/km² at the default --count-level 14. Undisclosed in Implementation sync — `src/recon.cpp:97`, `include/cube_bathymetry/count_grid.h:241`
+- [ ] (must-fix) The recon spill opens one ofstream per level-10 grid with no cap; BatchRegen solves the same problem in this PR at kMaxOpenStreams=128 with LRU + flush check. fd exhaustion aborts a large survey mid-recon — `src/recon.cpp:140`
+- [ ] (must-fix) The build fingerprint omits the inputs that decide the plan: --depth-adaptive-scale (LevelPlanPolicy::depth.capture_distance_scale), achieved_percentile, decision_depth_percentile, iho_order; the capture_distance_scale it does record has no CLI setter and can never change (false assurance) — `src/build_fingerprint.cpp:49`, `src/import_bag_main.cpp:1048`
+- [ ] (must-fix) Plan-aware dirtyTiles silently drops a footprint tile with no emitted ancestor at any plan level (ground the plan never covered), contradicting ADR-0002's "conservative superset"; the empty-set guard only fires on a total miss — `src/survey_index_query.cpp:395`
+- [ ] (must-fix) BuildFingerprint::write promises ADR-0003's fsync (and the comment says "flush it to disk") but calls only std::fflush — `src/build_fingerprint.cpp:186`
+- [ ] (suggestion) recon.cleanup() deletes the spill before accumulator.finalize() persists resident tiles; reorder to narrow the crash window — `src/import_bag_main.cpp:1183`
+- [ ] (suggestion) Spill files open ios::app with no empty-dir check; orphaned .recon_spill_<pid> dirs after a kill are never swept or warned about — `src/recon.cpp:142`
+- [ ] (suggestion) A failed fingerprint write only warns; the run still prints "done!" and exits 0 — `src/import_bag_main.cpp:1061`
+- [ ] (suggestion) The live node inherits the new capture gate with no ROS parameter, while both offline tools got --capture-spacing-scale (the floor removal itself is operator-settled) — `src/node.cpp:151`
+- [ ] (suggestion) ShallowReservoir kCapacity=64 is sized for decision_depth_percentile ~0.02; validate() accepts any value in [0,1] and a larger one silently returns a far-too-shallow depth — `include/cube_bathymetry/recon.h:88`
+- [ ] (suggestion) Plan bookkeeping: multi_level_accumulator.*, recon.*, map_sheet.h and three touched test files are in neither Files-to-Change nor Implementation sync — `.agent/work-plans/issue-143/plan.md:425`
+- [ ] (suggestion) Orphaned `/// @brief Tiles currently resident in RAM.` now heads persistAndDrop, giving it two @brief lines — `include/cube_bathymetry/store_import.h:441`
+- [ ] (suggestion) Six closing braces indented to ~column 56 in the new test files — `test/test_count_grid.cpp:178`
+- [ ] (suggestion) test_mixed_level_import got TIMEOUT 300; test_import_eviction (~44 s against the 60 s default) did not — `CMakeLists.txt:466`
+- [ ] (suggestion) batch_regen reads and writes no fingerprint at all though ADR-0003 names it the writer; nothing calls isStale() — `src/batch_regen_main.cpp`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
