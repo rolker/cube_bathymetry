@@ -141,12 +141,14 @@ add_library(cube_bathymetry_level_plan
   src/count_grid.cpp
   src/level_plan.cpp
   src/build_fingerprint.cpp   # ADR-0003 schema v2, tiling only (#143)
+  src/recon.cpp               # recon pass: counts + decision depths + sounding spill
 )
 target_include_directories(cube_bathymetry_level_plan PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(cube_bathymetry_level_plan
+  cube_bathymetry                    # GeoSounding + Parameters::maxSpreadRadius (recon)
   marine_autonomy::marine_autonomy   # gggs (Level, GridIndex, CellIndex, parent)
   marine_tiled_raster_store::marine_tiled_raster_store  # count-tile GeoTIFF io
   marine_bathymetry_store::marine_bathymetry_store  # depthAdaptiveLevel (uma#369)
@@ -489,6 +491,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_level_plan cube_bathymetry_level_plan)
   ament_add_gtest(test_build_fingerprint test/test_build_fingerprint.cpp)
   target_link_libraries(test_build_fingerprint cube_bathymetry_level_plan)
+  ament_add_gtest(test_recon test/test_recon.cpp)
+  target_link_libraries(test_recon cube_bathymetry_level_plan)
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers

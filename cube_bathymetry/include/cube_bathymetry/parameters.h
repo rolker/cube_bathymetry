@@ -118,6 +118,15 @@ namespace cube
   /// sentinel callers skip on.
     double influenceRadius(const Sounding & sounding) const;
 
+  /// The farthest any node can be from @p sounding and still be offered it,
+  /// at ANY node spacing: `CONF_99PC * sqrt(horizontal_error)`, the cap
+  /// `influenceRadius` applies before its spacing floor. Level-independent, so
+  /// a recon pass can record it once and a level plan can expand occupied
+  /// count cells by `max(this, that level's cell)` -- a conservative superset
+  /// of the reach at every level (cube_bathymetry#143). NaN for the same
+  /// degenerate soundings `influenceRadius` rejects.
+    double maxSpreadRadius(const Sounding & sounding) const;
+
   /// Value used to indicate 'no data' (typ. FLT_MAX)
     float no_data_value = std::numeric_limits < float > ::quiet_NaN();
 
