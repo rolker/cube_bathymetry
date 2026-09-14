@@ -262,6 +262,9 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "    --count-grid-out <dir>: also persist the recon count grid "
     "(UInt16 GeoTIFF tiles), mergeable into a later run's counts.\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
+  std::cout << "  Exit codes: 0 = done; 1 = failed, the store may be incomplete; "
+    "2 = the store is complete but build_fingerprint.json could not be written, "
+    "so a later incremental regen must do a FULL regen (ADR-0003).\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
     "to the survey/campaign id). Per-cell source interning was retired for the "
@@ -1081,9 +1084,13 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
   }
 }
 
-/// Write the ADR-0003 fingerprint for a finished import (cube#143). Best-effort:
-/// a failure is reported, never fatal -- the store is already written.
-void writeFingerprint(
+/// Write the ADR-0003 fingerprint for a finished import (cube#143). The store
+/// itself is already written, so a failure here is not fatal to the data -- but
+/// it is not nothing either: a store with no fingerprint cannot be told stale,
+/// so the next `batch_regen --incremental` must fall back to a full regen and
+/// the operator has to know. Returns false on failure; the callers exit 2
+/// ("the store is complete, the fingerprint is not") rather than print "done!".
+bool writeFingerprint(
   const std::string & store_dir, cube::BuildFingerprint::Mode mode, double cell_size_m,
   const cube::Parameters & parameters, const std::string & iho_order,
   const cube::LevelPlanPolicy * policy, const std::set<uint8_t> & levels_used)
@@ -1113,9 +1120,14 @@ void writeFingerprint(
     f.write(store_dir);
     std::cout << "Wrote " << cube::BuildFingerprint::kFilename << " (" << cube::toString(mode)
               << ")." << std::endl;
+    return true;
   } catch (const std::exception & e) {
-    std::cerr << "warning: could not write " << cube::BuildFingerprint::kFilename << ": "
-              << e.what() << std::endl;
+    std::cerr << "error: the store in " << store_dir << " is complete, but "
+              << cube::BuildFingerprint::kFilename << " could not be written (" << e.what()
+              << "). Without it the store cannot be told stale: a later "
+      "batch_regen --incremental must fall back to a FULL regen (ADR-0003)."
+              << std::endl;
+    return false;
   }
 }
 
@@ -1242,7 +1254,6 @@ int cube_depth_adaptive_finish(
     std::cout << " L" << static_cast<int>(level) << "=" << n;
   }
   std::cout << std::endl;
-  recon.cleanup();
 
   std::cout << "Building store tiles..." << std::endl;
   const std::size_t resident_before_final = accumulator.residentTileCount();
@@ -1253,10 +1264,17 @@ int cube_depth_adaptive_finish(
   reportPersisted(
     accumulator, store_dir, bs_store_dir, evicted_count, resident_before_final,
     std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count());
-  writeFingerprint(
+  // Only now is the spill expendable: until finalize() has persisted the
+  // resident tiles, it is the only copy of the projected soundings, and a
+  // crash in between would cost the whole (multi-hour) projection pass.
+  recon.cleanup();
+  const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::DepthAdaptive, 0.0,
     accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &policy,
     plan->levels());
+  if (!fingerprinted) {
+    return 2;
+  }
   std::cout << "done!" << std::endl;
   return 0;
 }
@@ -1921,7 +1939,7 @@ int main(int argc, char * argv[])
     resident_before_final, phase_secs());
   // Build fingerprint (ADR-0003 schema 2, tiling only -- cube#143): a fixed-level
   // store records its mode, the requested cell size and the capture policy.
-  writeFingerprint(
+  const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
     iho_order, nullptr, {geo_map_sheet.gridLevel().level()});
 
@@ -1930,6 +1948,9 @@ int main(int argc, char * argv[])
       tile_refresh_tiles_per_cycle))
   {
     return 1;
+  }
+  if (!fingerprinted) {
+    return 2;
   }
 
   std::cout << "done!" << std::endl;
