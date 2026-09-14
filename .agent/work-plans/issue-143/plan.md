@@ -78,7 +78,8 @@ Verified in this checkout:
   `Capture_Distance_Minimum`, a shallow-water node-starvation guard, and
   advises lowering it to half the grid spacing for sub-metre grids. Effective
   reach = min of the two gates, so a node at a cell coarser than
-  `2 × 0.05·depth` has corners no node captures (holes), and below 10 m depth
+  `0.05·depth / 0.71` (about 1.41× the capture radius; the half-diagonal
+  criterion this plan adopts) has corners no node captures (holes), and below 10 m depth
   the 0.5 m floor makes levels 12–14 add nodes without adding resolvable
   detail. Both are fixed by point 4.
 - `BatchRegen` already abstracts sheet construction behind a
@@ -137,28 +138,56 @@ tile:
 
 Algorithm (`levelPlanFor(count_grid, decision_depth_by_grid, policy)`):
 
-1. Recon fills a **count grid** at level `C` (parameter `--count-level`, default
-   13, cell 0.11 m — Calder's R of about a quarter of the finest spacing you
-   expect; see RAM below) with one `uint16` count per cell, and a
-   **decision-depth** per level-14 grid = the 2nd-percentile of that grid's
-   soundings (flier guard, kept from r2; with counts in hand the min-count
-   guard is no longer needed: a grid too sparse for the percentile is also too
-   sparse to *achieve* a fine level).
+1. Recon fills a **count grid** at level `C` (parameter `--count-level`,
+   **default = `finest_level`**, i.e. 14, cell 0.057 m; validated
+   `finest_level <= C <= 20`) with one `uint16` count per cell. R is
+   deliberately the finest ladder cell itself rather than Calder's "a quarter
+   of the finest expected spacing": his quarter smooths a *continuous* spacing
+   estimate, whereas ours is quantised to the dyadic ladder, so achieved
+   spacing needs only be resolved to the ladder step — and the achieved path can
+   only reach level `C` (achieved spacing is `(2λ+1)·R`, `λ >= 0`), which is why
+   the default equals the ladder's fine end. Lowering `C` caps the achieved
+   level and quarters the count-grid RAM per level (see RAM below).
+   Recon also keeps, per **level-14** grid, the **64 shallowest soundings** (a
+   bounded max-heap, 256 B per grid); its **decision depth** is the
+   `max(1, ceil(0.02·N))`-th shallowest, capped at the 64th — i.e. the 2nd
+   percentile exactly for N ≤ 3200 soundings and "at least 64 fliers deep"
+   beyond (flier guard, kept from r2). No min-count guard: a grid too sparse for
+   the percentile is also too sparse to *achieve* a fine level, and counts say so.
 2. **LoA** per count cell via a summed-area table over each count-grid tile
    (Calder §III.A): the smallest λ with `Σ counts in the (2λ+1)² box ≥ n_req`,
    `n_req` = `--min-obs-per-node` (default 5) inflated by
    `--blunder-allowance` (default 20 %). Achieved spacing = `(2λ+1)·R`.
-3. Descend from each touched level-8 grid. At grid `g` at level `L`:
-   `required = depthAdaptiveLevel(decision_depth[g]).level()`,
-   `achieved = fromCellSize(p95 of achieved spacing over g).level()`,
-   `target = min(required, achieved)` (the coarser). **Emit `g`** (it is
-   estimated and stored at level L regardless). If `target > L` and
-   `L < finest_level`, recurse into the children of `g` that hold data. A
-   child with no soundings is skipped.
-4. The result is a set of tiles at several levels where **every emitted tile's
-   ancestors up to level 8 are also emitted** — a full quadtree prefix, not a
-   cut. Downstream consumers need no disjointness: the store already holds
-   overlapping native levels, and the overview pyramid skips native parents.
+3. **Touched set.** A tile at any level is *touched* if the influence disc of
+   any sounding intersects it — recon records, per count cell, the maximum
+   `influenceRadius` of the soundings that landed there, and the plan expands
+   each occupied count cell by that radius before testing tile intersection.
+   This is the same window `GeoMapSheet::gridIndicesForSoundings` uses
+   (`store_import.cpp:1089-1090`), so the touched set at a single level equals
+   the set of grids today's fixed-level import creates, near-seam neighbours
+   included.
+4. **Decision-depth rollup**: `decision_depth[g]` for a grid coarser than 14 is
+   the **minimum over its children's decision depths** (the shoal-biased, safe
+   direction: a shoal anywhere in `g` makes `g` at least as shallow). The
+   percentile is computed once, at level 14, from the reservoir; coarse grids
+   never pool soundings.
+5. **Descent from each touched grid at `coarsest_level`** (a tunable; 8 by
+   default). At grid `g` at level `L`:
+   `required = depthAdaptiveLevel(decision_depth[g]).level()`;
+   `achieved = levelNoFinerThan(p95 of achieved spacing over g)`, where
+   `levelNoFinerThan(s)` is the **finest level whose cell is ≥ s** —
+   `gggs::Level::fromCellSize(s)` returns the coarsest level at-or-**finer**
+   (`gggs/level.h:59-74`, the unsafe direction), so the helper takes
+   `fromCellSize(s).level() - 1` unless that level's cell equals `s` exactly;
+   `target = min(required, achieved)` in level numbers (the coarser). **Emit
+   `g`** (it is estimated and stored at level L regardless). If `target > L`
+   and `L < finest_level`, recurse into the **touched** children of `g`.
+6. The result is a set of tiles at several levels where **every emitted tile's
+   ancestors up to `coarsest_level` are also emitted** — a full quadtree
+   prefix, not a cut. With `coarsest_level == finest_level` it is exactly
+   today's single-level touched set. Downstream consumers need no
+   disjointness: the store already holds overlapping native levels, and the
+   overview pyramid skips native parents.
 
 **Why this and not the alternatives:**
 
@@ -182,14 +211,24 @@ the area landing **coarser than level 10** (resolution lost against today's
 stores in >36 m water; inherent to the pinned ladder, surfaced because a default
 that reduces what the operator can see must be visible).
 
-**Recon RAM.** The count grid is the one structure that grows with area: a
-level-13 count tile is 960² × 2 B = 1.8 MB over ~109 m of ground, ~84 tiles/km²,
-so ~150 MB/km² if fully resident. Count tiles are plain rasters: the recon keeps
-them under the same resident-tile budget and eviction as CUBE tiles (persist to
-the scratch dir, reload on revisit), and the summed-area table is built per tile
-at LoA time. `--count-level 12` quarters that (38 MB/km²) at the cost of not
-being able to *achieve* levels finer than 12. The plan report states the
-resident count-tile peak.
+**Recon RAM.** Two structures grow with surveyed area. The count grid: a
+level-14 count tile is 960² × 2 B = 1.8 MB over ~54 m of ground, ~340 tiles/km²,
+so ~630 MB/km² if fully resident (level 13: ~160 MB/km²; level 12: ~40 MB/km²).
+Count tiles are plain rasters: the recon keeps them under the same resident-tile
+budget and eviction as CUBE tiles (persist to the scratch dir, reload on
+revisit), and the summed-area table is built per tile at LoA time. The depth
+reservoir: 64 × 4 B + a count per level-14 grid, ~90 KB/km² — negligible. The
+plan report states the resident count-tile peak.
+
+**Compute consequence of parents-alive.** Over a shoal the full prefix is every
+level from `coarsest_level` to the achieved level — up to seven native levels —
+so that ground is CUBE-estimated up to seven times and each ping there routes
+into up to seven accumulators; over a plain it is two or three. Import runtime
+therefore scales with the *sum over levels* of the area emitted at each, which
+the plan report prints as an estimate-count multiplier against the fixed-level
+baseline (the same quantity the storage series bounds at ≤ 4/3 of the finest
+level — for storage; compute has no such bound because coarse tiles cost the
+same per sounding as fine ones).
 
 ## Prerequisite (cross-repo)
 
@@ -234,8 +273,10 @@ a CUBE constant, once it lands.
    algorithm above. Query API: `std::set<gggs::GridIndex> tilesContaining(const
    gggs::CellIndex &) const` (one per emitted level), `std::set<uint8_t>
    levelsIntersecting(const gz4d::BoundsDegrees &) const`, `bool
-   isEmitted(const gggs::GridIndex &) const`, `tilesAtLevel(uint8_t)`,
-   `coverageDeficit()` (tiles where required < achieved level). JSON round-trip
+   isEmitted(const gggs::GridIndex &) const`, `isTouched(const gggs::GridIndex &)
+   const`, `tilesAtLevel(uint8_t)`, `coverageDeficit()` (tiles where the
+   *required* level is finer than the *achieved* one, i.e. `required > achieved`
+   in level numbers). JSON round-trip
    with a **defined canonical form** (tiles sorted by `(level,row,col)`, fixed
    key order, integers only, policy scale as its parsed decimal string, no
    whitespace) and `sha256()` over it, for `--level-plan` reuse and the
@@ -243,14 +284,22 @@ a CUBE constant, once it lands.
    level, coverage deficit, area coarser than level 10, count-tile peak).
 4. **Recon phase in `import_bag`** — a first pass that projects and
    georeferences exactly as today but, instead of accumulating CUBE, updates the
-   count grid and the per-level-14-grid depth reservoir (bounded, for the 2nd
-   percentile), and spills each projected `GeoSounding` to a **per-level-8-tile
-   spill file** under `--scratch-dir` (default: beside the output store, never
-   `temp_directory_path()`, which is often tmpfs — r2 suggestion). Free space is
-   checked against the projected spill size (~48 B/sounding; a 10 h M3 day at
-   2560 soundings/s is ~4.4 GB) before phase 1 starts. Phase 2 replays the spill
-   per level-8 tile, so the expensive projection/TF work runs once and the
-   replay is bounded by one coarse tile's soundings.
+   count grid, the per-count-cell max influence radius, and the
+   per-level-14-grid shallowest-64 reservoir, and spills each projected
+   `GeoSounding` **in full** (every `Sounding` field including `intensity`,
+   `beam_angle`, `slant_range` and `sonar_relative_position`, so the
+   backscatter half of the equivalence test holds — the angular-response
+   correction reads them) to a **per-level-10-grid spill file** under
+   `--scratch-dir` (default: beside the output store, never
+   `temp_directory_path()`, which is often tmpfs — r2 suggestion). A spilled
+   record is ~80 B (`gz4d::PositionDegrees` + `Sounding`, `sounding.h`); free
+   space is checked against the projected size (a 10 h M3 day at 2560
+   soundings/s is ~7.4 GB) before phase 1 starts. Phase 2 replays the spill
+   grid by grid, so the expensive projection/TF work runs once. The level-10
+   partition (~870 m grids) is a scratch-file grouping independent of
+   `coarsest_level`: a fine tile's replay reads one file; a coarse parent's
+   replay reads its descendants' files. Residency during replay rests on the
+   accumulator's eviction, not on the partition.
 5. **`--level-plan-out <f>` / `--level-plan <f>` / `--count-grid-out <d>`** —
    recon-only and reuse-a-plan modes, so the operator can inspect the estimate
    and the coverage deficit and approve before committing a multi-hour import.
@@ -261,8 +310,20 @@ a CUBE constant, once it lands.
    the batch's influence-expanded bounds intersect** (`levelsIntersecting`) —
    parents included, since they are estimated in full. Each accumulator's
    scratch/reload/seed stores still tile identically to *its own* sheet, which
-   is the invariant the `:1129-1130` comment protects. There is **no leaf
-   filter**: every tile an accumulator builds is persisted.
+   is the invariant the `:1129-1130` comment protects.
+   **Per-tile admission** (r3 must-fix 3): routing chooses the *levels*, but a
+   batch is one ping (`import_bag_main.cpp:1293-1296`), so without a tile-level
+   rule a swath clipping one emitted level-14 tile would build level-14 tiles
+   over the whole neighbouring plain. Each accumulator's `GeoMapSheet` is
+   therefore given the plan's **emitted set at its level** as an admission
+   predicate: `gridIndicesForSoundings` returns only grids in that set, so a
+   grid outside the plan is never created, never estimated, never persisted —
+   its ground has its native estimate at the parent level. Soundings near an
+   emitted tile's edge still reach it (they are in its influence-expanded
+   window), so seams inside the plan are exact. Because the emitted set at a
+   level is the *touched* set (algorithm step 3, the same window today's fixed
+   path uses), single-level runs admit exactly today's grids. There is no
+   *leaf* filter: every admitted tile is persisted, parents included.
    **One shared RAM budget**: `max_resident_tiles` keeps its operator-facing
    meaning as the store-wide total; `MultiLevelAccumulator` owns eviction and
    drops the globally coldest tiles across levels. Comparable coldness needs a
@@ -282,11 +343,16 @@ a CUBE constant, once it lands.
 7. **`import_bag` wiring** — `--depth-adaptive` (off by default; fixed-level
    stays the default and the only `draft`/live behaviour) selects recon + spill
    + `MultiLevelAccumulator`. Policy tunables `--depth-adaptive-scale/-coarsest/
-   -finest` (#369 defaults), `--count-level` (13), `--min-obs-per-node` (5),
-   `--blunder-allowance` (0.2), `--depth-adaptive-percentile` (2), `--scratch-dir`;
-   all validated once at startup — **including `finest <= 14`** (GGGS has levels
-   0–20; a leaf finer than the level-14 survey-index footprint breaks ADR-0002's
-   dirty-set guarantee) and `count-level >= finest`. A policy throw is fatal there.
+   -finest` (#369 defaults), `--count-level` (default = finest),
+   `--min-obs-per-node` (5), `--blunder-allowance` (0.2),
+   `--depth-adaptive-percentile` (2), `--scratch-dir`, and
+   `--capture-spacing-scale` (0.71; also on `batch_regen_bag`, whose bit-exact
+   regeneration needs the same gate); all validated once at startup —
+   **including `finest <= 14`** (GGGS has levels 0–20; a tile finer than the
+   level-14 survey-index footprint breaks ADR-0002's dirty-set guarantee) and
+   `finest <= count-level <= 20`. A policy throw is fatal there. The live node
+   gets no ROS parameter for the capture scale, matching `capture_distance_scale`
+   today (`parameters.h:205` is its only site); both stay `Parameters` fields.
 8. **`batch_regen` level-awareness (ADR-0002 amendment)** — `SheetFactory`
    becomes `std::function<std::unique_ptr<GeoMapSheet>(gggs::Level)>`; scatter
    routes to **every emitted tile containing the sounding** (parents included);
@@ -308,11 +374,21 @@ a CUBE constant, once it lands.
    `{"mode": "fixed"|"depth_adaptive", "cell_size_m": <float, fixed only>,
    "policy": {"capture_distance_scale", "capture_spacing_scale", "coarsest_level",
    "finest_level", "count_level", "min_obs_per_node", "blunder_allowance"},
-   "levels_used": [...]}`. Staleness: any change of `mode` or `policy` forces a
-   full regen. **No `level_plan_sha256` and no `--replace-tiling`** (r2
+   "levels_used": [...]}`. **`policy` is written in both modes** — the capture
+   gate changes fixed-level output too, so a fixed store's fingerprint must
+   carry `capture_distance_scale` and `capture_spacing_scale` or the staleness
+   job ADR-0003's `cell_size_m` row does today is lost; the depth-adaptive-only
+   keys are null in fixed mode. Staleness: any change of `mode` or `policy`
+   forces a full regen. **No `level_plan_sha256` and no `--replace-tiling`** (r2
    must-fixes 3/4): under point 1, tiles at several levels on the same ground
    are the normal state, so a later import at other levels is additive like any
-   other import and needs no refusal. `build_fingerprint.h/cpp` (new) implements
+   other import and needs no refusal. What that leaves behind is documented,
+   not guarded (README + ADR-0002 amendment): a re-import over already-covered
+   ground under a different policy or count level leaves the earlier import's
+   finer native tiles in place, and a fine-LOD reader prefers those over the
+   newer, coarser, complete estimate — the same additive-merge contract the
+   store has for same-level re-imports (`importTiles` merges, `save()` never
+   deletes). `build_fingerprint.h/cpp` (new) implements
    **only** `schema_version` + `tiling` read/write; `import_bag` writes it after
    every successful import (fixed-level writes `mode: fixed`). The other
    ADR-0003 keys and `batch_regen --incremental` stay unimplemented and are
@@ -331,12 +407,13 @@ a CUBE constant, once it lands.
 
 | File | Change |
 |------|--------|
-| `cube_bathymetry/include/cube_bathymetry/parameters.h` / `src/parameters.cpp` | `capture_spacing_scale` (default 0.71); doc the two gates. |
+| `cube_bathymetry/include/cube_bathymetry/parameters.h` / `src/parameters.cpp` | `capture_spacing_scale` (default 0.71; `--capture-spacing-scale` on both CLI tools); doc the two gates. |
+| `cube_bathymetry/include/cube_bathymetry/geo_map_sheet.h` / `src/geo_map_sheet.cpp` | Optional admission predicate on `gridIndicesForSoundings` (the plan's emitted set at this sheet's level). |
 | `cube_bathymetry/src/node.cpp` | Capture = `max(scale·depth, capture_spacing_scale·distance_scale)`; 0.5 literal removed. |
 | `cube_bathymetry/include/cube_bathymetry/count_grid.h` / `src/count_grid.cpp` | **New** — sparse count tiles, summed-area table, level of aggregation, percentile per coarse tile, persist/merge. |
 | `cube_bathymetry/include/cube_bathymetry/level_plan.h` / `src/level_plan.cpp` | **New** — quadtree prefix, required-vs-achieved, queries, canonical JSON + sha256, plan report. |
 | `cube_bathymetry/include/cube_bathymetry/build_fingerprint.h` / `src/build_fingerprint.cpp` | **New** — minimal ADR-0003 v2 read/write (`schema_version` + `tiling`). |
-| `cube_bathymetry/include/cube_bathymetry/geo_map_sheet.h` / `src/geo_map_sheet.cpp` | Optional shared touch clock. |
+| (same files) | Optional shared touch clock. |
 | `cube_bathymetry/include/cube_bathymetry/store_import.h` / `src/store_import.cpp` | `MultiLevelAccumulator` (routing, shared budget, global eviction, single sidecar write); `ImportAccumulator::residentTiles()` / `persistAndDrop()`. |
 | `cube_bathymetry/src/import_bag_main.cpp` | Recon (count grid + reservoir + per-L8 spill under `--scratch-dir` with free-space check); `--depth-adaptive*`, `--count-level`, `--min-obs-per-node`, `--blunder-allowance`, `--level-plan[-out]`, `--count-grid-out`; validation incl. `finest <= 14`; multi-level path; fingerprint write; drop the `:1128-1130` single-resolution comment. |
 | `cube_bathymetry/include/cube_bathymetry/batch_regen.h` / `src/batch_regen.cpp` | Level-parameterised `SheetFactory`; scatter to every emitted containing tile; per-tile gather. |
@@ -362,9 +439,9 @@ a CUBE constant, once it lands.
 |---|---|
 | `test_node` (capture) | A sounding at 0.7 cell from a node is accepted at every depth (no holes); at 1 m depth on a 0.11 m cell the gate is `0.71·0.11 m`, not 0.5 m; at 40 m depth on a 1.81 m cell the depth term (2 m) wins. |
 | `test_count_grid` | Counts accumulate per cell; summed-area sums equal brute force; LoA for a cell with `n_req` soundings inside is 0, for an empty region grows to the box that reaches them; persist/merge round-trip is additive. |
-| `test_level_plan` | Every emitted tile's ancestors up to level 8 are emitted (full prefix); required-vs-achieved takes the coarser; a shoal refines only the children that hold data; a sparse shoal (counts below `n_req` at fine spacing) stays coarse and is reported as coverage deficit; `finest > 14` rejected; canonical JSON round-trip is lossless and `sha256()` is identical across insertion orders and across two processes. |
-| **Single-level equivalence** (`test_mixed_level_import`) | With `coarsest_level == finest_level == 10` **and `capture_spacing_scale` pinned so the gate equals today's** (`0.5 / 0.91`), the depth-adaptive path writes a store **byte-identical** to the fixed-level path over the same synthetic bags. Defined as: every `.tif` under `processed/` (and the backscatter `survey/` dir) identical file-for-file; `registry.json` equal after parsing. If a GDAL-injected tag proves non-deterministic the fallback is band-data + geotransform equality, recorded in the test. The load-bearing regression guard. |
-| **Parents under children** | A deep-plain-plus-shoal survey emits level 8 everywhere touched, level 9/10 over the plain, and finer tiles over the shoal; the parent tiles over the shoal hold a complete estimate (no holes), and `buildDepthOverviewPyramid` **skips** those parent slots as native (ADR-0011) and writes derived tiles only where no native tile exists; a level-by-level composite has no coverage hole. |
+| `test_level_plan` | Every emitted tile's ancestors up to `coarsest_level` are emitted (full prefix); with `coarsest == finest` the emitted set equals the touched set; `levelNoFinerThan` rounds toward the coarser level (0.33 m → level 11, never 12); required-vs-achieved takes the coarser; a shoal refines only the touched children; a sparse shoal (counts below `n_req` at fine spacing) stays coarse and is reported as coverage deficit; the min-rollup makes a parent at least as shallow as any child; `finest > 14` and `count-level < finest` rejected; canonical JSON round-trip is lossless and `sha256()` is identical across insertion orders and across two processes. |
+| **Single-level equivalence** (`test_mixed_level_import`) | With `coarsest_level == finest_level == 10` **and `capture_spacing_scale` pinned so the gate equals today's 0.5 m exactly** — set on `Parameters` as `0.5 / gggs::Level(10).cellSize()` computed at runtime (level 10's nominal cell is 0.906 m, so a hand-typed `0.5/0.91` would give 0.4978 m and fail by construction) — the depth-adaptive path writes a store **byte-identical** to the fixed-level path over the same synthetic bags. Defined as: every `.tif` under `processed/` (and the backscatter `survey/` dir) identical file-for-file; `registry.json` equal after parsing. If a GDAL-injected tag proves non-deterministic the fallback is band-data + geotransform equality, recorded in the test. The load-bearing regression guard. |
+| **Parents under children** | A deep-plain-plus-shoal survey with `coarsest_level = 8` emits level 8 everywhere touched, level 9/10 over the plain, and finer tiles over the shoal; the parent tiles over the shoal hold a complete estimate (no holes), and `buildDepthOverviewPyramid` **skips** those parent slots as native (ADR-0011) and writes derived tiles only where no native tile exists; a level-by-level composite has no coverage hole. |
 | **Halo/seam** | A sounding within one influence radius of a tile boundary at level L contributes to both level-L tiles; each tile's cells equal a whole-survey fixed-level build at that level. |
 | **Bounded RAM** (`test_tile_eviction_rss`) | A mixed-level run with `max_resident_tiles = N` never holds more than N resident tiles summed across levels, evicts the globally coldest first (shared clock), and loses no data. |
 | **Fingerprint** (`test_build_fingerprint`) | v2 round-trip; fixed-level writes `mode: fixed`; a v1 file reads as stale. |
@@ -399,7 +476,8 @@ a CUBE constant, once it lands.
 | If we change... | Also update... | Included in plan? |
 |---|---|---|
 | Store holds tiles at several levels on the same ground | ADR-0003 fingerprint schema; ADR-0002 rollup; overview pyramid behaviour (native parents skipped) | Yes (steps 8–10); pyramid consumed as-is and tested. |
-| A later import at other levels | Nothing — additive, like any import; the pre-existing same-level merge contract (`importTiles` merges, `save()` never deletes; uma-side) is unchanged | Yes — stated in README; no guard, no `--replace-tiling`. |
+| A later import at other levels | Nothing — additive, like any import; the pre-existing same-level merge contract (`importTiles` merges, `save()` never deletes; uma-side) is unchanged; a re-import over covered ground under a different policy leaves the earlier finer tiles in place, preferred by fine-LOD readers | Yes — stated in README + ADR-0002 amendment (step 9); no guard, no `--replace-tiling`. |
+| Parents estimated in full under children | Import runtime: up to 7× the estimates over a shoal, 2–3× over a plain; plan report prints the multiplier | Yes — stated; no bound claimed for compute. |
 | Capture gate becomes spacing-aware, floor removed | Live CUBE node behaviour at its fixed level; README parameter table; `.agents/README.md` parameter table (**this repo has none** — see below) | Yes (step 1, README); the guide is a follow-up issue. |
 | `depthAdaptiveLevel` gains a horizontal-error floor | uma policy header + tests | uma#386, separate PR. |
 | N per-level accumulators | `max_resident_tiles` semantics, ADR-0001 claim, README table, `test_tile_eviction_rss`, `GeoMapSheet` clock | Yes (step 6). |
@@ -429,10 +507,11 @@ a CUBE constant, once it lands.
 
 ## Open Questions
 
-- [ ] `--count-level` default 13 vs 12: 13 lets the data *achieve* level 13
-      (0.11 m) in very shallow water at ~150 MB/km² resident-peak before
-      eviction; 12 quarters the RAM and caps achieved at 12. Defaulting to 13
-      with eviction unless the operator prefers the cheaper cap.
+- [ ] `--count-level` default = `finest_level` (14, ~630 MB/km² resident peak
+      before eviction) keeps the whole ladder reachable; an operator surveying
+      only deeper water can lower it (13: ~160 MB/km², caps achieved at 13).
+      Defaulting to the full ladder with eviction unless the operator prefers
+      the cheaper cap.
 - [ ] Live-node follow-up (not this PR): the boat keeps the count grid and the
       per-tile spill in its live cache, re-derives the plan periodically, and
       adds child tiles when counts justify them, replaying the parent's spill.
@@ -467,3 +546,15 @@ uma#386 (independent).
   `ImportAccumulator` API named; `--scratch-dir` + free-space check; recon RAM
   stated; single sidecar owner; `dirtyTiles` throws; `test_survey_index_query`
   added; min-count guard dropped (counts subsume it).
+- **r4** (2026-09-14) — after plan review r3 (`db95a50`): `--count-level`
+  default = `finest_level` with `finest <= C <= 20` and the R-reading stated;
+  `levelNoFinerThan` rounds toward the coarser level; `coverageDeficit` is
+  `required > achieved`; **touched set** defined from the influence-expanded
+  count cells and a **per-tile admission predicate** on `GeoMapSheet` (r3
+  must-fix 3 — routing is per level, admission per emitted tile); decision-depth
+  rollup = min over children, 64-shallowest reservoir with stated bytes/km²;
+  descent root = `coarsest_level` throughout; equivalence pin computed from
+  `gggs::Level(10).cellSize()` and `--capture-spacing-scale` named on both
+  tools; spill = full `GeoSounding` at ~80 B (7.4 GB/day) per level-10 grid;
+  compute multiplier row; `policy` written in both fingerprint modes;
+  re-import-over-covered-ground documented; hole criterion 1.41×.
