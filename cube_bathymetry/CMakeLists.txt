@@ -140,6 +140,7 @@ install(TARGETS cube_bathymetry_survey_index_query EXPORT export_${PROJECT_NAME}
 add_library(cube_bathymetry_level_plan
   src/count_grid.cpp
   src/level_plan.cpp
+  src/build_fingerprint.cpp   # ADR-0003 schema v2, tiling only (#143)
 )
 target_include_directories(cube_bathymetry_level_plan PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -486,6 +487,8 @@ if(BUILD_TESTING)
   target_link_libraries(test_count_grid cube_bathymetry_level_plan)
   ament_add_gtest(test_level_plan test/test_level_plan.cpp)
   target_link_libraries(test_level_plan cube_bathymetry_level_plan)
+  ament_add_gtest(test_build_fingerprint test/test_build_fingerprint.cpp)
+  target_link_libraries(test_build_fingerprint cube_bathymetry_level_plan)
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers
