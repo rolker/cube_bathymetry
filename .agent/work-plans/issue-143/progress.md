@@ -331,3 +331,59 @@ uma#383 and uma#386 verified OPEN with the titles the plan cites.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 11:16 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `9e7a8dd` (revision 4)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-143`, plan not pushed)
+**Verdict**: changes-requested
+
+Round 4. The six operator-confirmed design points are settled and not
+re-litigated. All six r3 must-fixes are addressed; the two findings below are
+the residue of r3 must-fix 3's fix — the *newly added* admission-predicate and
+touched-set material, checked against `geo_map_sheet.cpp` and
+`store_import.cpp`, does not yet do what the plan claims for it. Everything
+else verified resolved.
+
+### r3 disposition (verified against the code, not re-litigated)
+
+| r3 finding | Disposition |
+|---|---|
+| 1 `--count-level` default vs validation | **Resolved.** Default = `finest_level`; `finest <= C <= 20`; the achieved-path reachability argument (`(2λ+1)·R`) and the deliberate departure from Calder's "quarter of the finest expected spacing" are both stated. |
+| 2 `levelNoFinerThan` rounding + deficit direction | **Resolved.** Matches `gggs/level.h:59-74` (`fromCellSize` = coarsest at-or-**finer**, `ceil` of the log2); the helper takes `fromCellSize(s).level() - 1` unless exact, and the test row pins 0.33 m → 11. `coverageDeficit()` is now `required > achieved` in both places. |
+| 3 per-tile admission / touched set | **Addressed in intent, incomplete in mechanism** — findings 1 and 2. |
+| 4 decision-depth rollup | **Resolved.** Min over children, percentile computed once at level 14, safety direction (shoal-biased) named; coarse grids never pool. |
+| 5 `coarsest_level` root | **Resolved** in the algorithm, the prefix invariant and the test row; the spill partition is explicitly independent (now level 10). One stale mention — finding 6. |
+| 6 equivalence pin | **Resolved** as far as the arithmetic goes (`0.5 / gggs::Level(10).cellSize()`, and `--capture-spacing-scale` now exists on both tools so the test can set it). One unstated precondition — finding 4. |
+| 7-14 (suggestions) | All carried: 80 B/7.4 GB spill with the full `GeoSounding` field list; the compute-multiplier section and Consequences row; `policy` written in both fingerprint modes; the 1.41x hole criterion; the reservoir's 256 B/grid and ~90 KB/km²; the level-10 spill partition replacing the vacuous level-8 bound; the re-import-over-covered-ground paragraph; the count-level upper bound and the R-reading. |
+
+uma#383 and uma#386 re-verified OPEN with the cited titles.
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good (operator-settled) | Unchanged; the single-PR shape is the operator's decision and out of review scope. |
+| Issue alignment | Good | All four deliverables still covered; the unit of decision is settled in-plan with its rejected alternatives. |
+| File targeting | Needs work | The `geo_map_sheet` row scopes the admission predicate to `gridIndicesForSoundings` alone, which is not the creation site (finding 1). |
+| Consequences | Good | Compute multiplier, re-import-over-covered-ground, and the fixed-mode `policy` key are all now carried. |
+| Documentation & instruction impact | Good | Unchanged, non-silent, candidates framed as proposals. |
+| Principle alignment | Needs work | "Test what breaks" — the load-bearing equivalence test is falsifiable only if the emitted set really reproduces today's persisted set at a single level (findings 1, 2). Elsewhere good. |
+| ADR compliance | Good | 0002/0003 amendments carry the decision; `finest <= 14` invariant re-argued; ADR-0001 persist-then-drop invariants named. |
+| ROS conventions | N/A | Offline CLI tools and pure library code. |
+
+### Findings
+- [ ] (must-fix) The admission predicate is scoped to the wrong function, so it cannot deliver "never created, never estimated, never persisted". `gridIndicesForSoundings` only *enumerates* (`geo_map_sheet.cpp:115-130`); creation happens in `addSoundings` → `getOrCreateGridsIn(boundsForSoundings(...))` (`geo_map_sheet.cpp:102,147-168`), and `ImportAccumulator::finalize` persists **every** grid in `sheet_.grids()` (`store_import.cpp:1157-1165`). Filtering only the enumerator leaves the level-14 accumulator creating and persisting exactly the off-plan tiles r3 finding 3 described, while *also* skipping their reload/seed pass (`store_import.cpp:1103-1120`) — a worse state than no predicate. The predicate must gate the shared `boundsForSoundings` consumers together; the source comment at `geo_map_sheet.cpp:41-43` exists precisely because those two paths must never drift. Say so in the Approach step and in the `geo_map_sheet.h/cpp` Files-to-Change row. — `plan.md:314-320,411`
+- [ ] (must-fix) The touched set is computed with one influence radius per count cell, but the influence radius is **level-dependent**: `Parameters::influenceRadius` floors at `distance_scale` (`parameters.cpp:100-107`), which `setGridResolution` sets to the sheet's node spacing (`parameters.cpp:112-115`) — 3.62 m at level 8 versus 0.057 m at level 14 — and `boundsForSoundings` adds a further one-**cell** floor at the sheet's own level (`geo_map_sheet.cpp:62-72`). A single recon-time radius therefore under-expands the touched set at every level coarser than the one it was computed at, so coarse tiles that a fixed-level import at that level would populate can be excluded from the emitted set — the same seam loss as r2 must-fix 2, re-entering through admission, and it breaks single-level equivalence for any `coarsest == finest == L` where the floor binds. Expand per level: `max(recorded radius, gggs::Level(L).cellSize())` plus one cell at L, or record the radius per level. — `plan.md:161-167,314-320`
+- [ ] (suggestion) The equivalence claim is stated against the wrong set. Today's import *creates* every grid in the batch's expanded **bounding rectangle** (`GridAreaIterator` over `boundsForSoundings`, `geo_map_sheet.cpp:122-125`), which is strictly larger than a union of per-sounding influence discs — but an all-no-data tile is never written (`store_import.cpp:505-509`), so what the emitted set must reproduce is the **persisted** set, not the created set. Restate the invariant as "the emitted set at a level is a superset of the grids today's import persists, and admitted-but-empty tiles write nothing", which is both true and sufficient for the byte-identical test. — `plan.md:165-167`
+- [ ] (suggestion) The equivalence pin carries an unstated precondition. `GeoMapSheet` builds `parameters_` from the **requested** cell size, not the GGGS-snapped nominal (`geo_map_sheet.cpp:76`), so `distance_scale` equals `--resolution`, while the pin `0.5 / gggs::Level(10).cellSize()` assumes it equals 0.906 m. A fixed-level baseline run with `--resolution 1.0` would give a 0.552 m gate and the test fails by construction again. Either pin `capture_spacing_scale = 0.5 / <the sheet's distance_scale>`, or state that both sides construct the sheet with `gggs::Level(10).cellSize()`. — `plan.md:465`
+- [ ] (suggestion) Two undefined edges in the new LoA material: (a) `levelNoFinerThan(s)` is `fromCellSize(s).level() - 1`, which underflows at level 0 and has no stated clamp to `coarsest_level`; (b) the summed-area table is built **per count-grid tile**, so a box near a tile edge is truncated and a sparse cell may never reach `n_req` for any λ inside the tile — say what λ saturation yields (presumably `coarsest_level`, reported as coverage deficit, which is the safe direction) and test it. — `plan.md:170-180`
+- [ ] (suggestion) The `import_bag_main.cpp` Files-to-Change row still says "per-L8 spill" while Approach step 4 (correctly, per r3 finding 5) partitions the spill per level-10 grid. — `plan.md:418`
+- [ ] (suggestion) The decision-depth min-rollup should say it is a min over **touched** children only (an untouched child has no decision depth) and what an entirely undecided grid yields — otherwise the descent's `depthAdaptiveLevel(decision_depth[g])` is undefined on the sparse edge tiles the touched set deliberately includes. — `plan.md:168-172`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
