@@ -422,6 +422,26 @@ All plan-review must-fixes from rounds 1-4 were traced to code and confirmed hon
 - [ ] (suggestion) test_mixed_level_import got TIMEOUT 300; test_import_eviction (~44 s against the 60 s default) did not — `CMakeLists.txt:466`
 - [ ] (suggestion) batch_regen reads and writes no fingerprint at all though ADR-0003 names it the writer; nothing calls isStale() — `src/batch_regen_main.cpp`
 
+### Operator decisions for the fix pass (2026-09-14, host-recorded)
+
+- **Must-fix 1 (spill replay order)**: replace the per-level-10-grid spill files
+  with **one chronological spill file** replayed front to back — the order the
+  fixed path saw the pings — so byte-identity holds by construction. Extend the
+  single-level equivalence test to run through the recon spill (recon → plan →
+  replay), not only through direct `addBatch` calls. This also resolves must-fix
+  3 (one open file). Update `recon.h/cpp`, `import_bag_main.cpp`, the README and
+  the plan's Implementation-sync text (the level-10 partition is gone).
+- **Must-fix 2 (count-grid RAM)**: **directory-backed count tiles with an LRU**
+  in `CountGrid`: a resident budget (default a few hundred tiles), a cold tile
+  written to the scratch dir as a UInt16 GeoTIFF and reloaded on demand — during
+  recon and during plan computation, where the level of aggregation needs only a
+  3×3 neighbourhood at a time. The plan report prints the resident peak.
+- Must-fixes 4–6 as found: fingerprint records `capture_distance_scale`,
+  `achieved_percentile`, `decision_depth_percentile` and `iho_order`; the
+  plan-aware `dirtyTiles` must remain a conservative superset (off-plan ground is
+  never dropped — roll it up to the plan's coarsest level, or report it, never
+  silently omit); `BuildFingerprint::write` fsyncs.
+
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
