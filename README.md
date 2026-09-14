@@ -111,7 +111,10 @@ distance is `max(0.05 × |depth|, k × node spacing)`. CUBE's fixed 0.5 m floor
 (`Capture_Distance_Minimum`) is gone (#143) — the spacing term replaces it, so a
 fixed-level run at level 10 now gathers within 0.64 m instead of 0.5 m below
 ~13 m of water, and deeper the depth term dominates as before. The live node
-inherits the same gate at its fixed level.
+applies the same gate at its fixed level and takes the same multiplier as the
+ROS parameter `capture_spacing_scale` (default 0.71), so a deployment can pin
+it — to `0.5 / cell_size` to reproduce the pre-#143 gate exactly, say — without
+rebuilding.
 
 ### Depth-adaptive multi-level stores (`--depth-adaptive`, #143)
 

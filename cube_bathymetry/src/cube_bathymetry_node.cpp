@@ -32,6 +32,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -105,6 +106,25 @@ public:
 
     geo_map_sheet_ =
       std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
+
+    // Node capture gate (cube_bathymetry#143). Calder's hard-coded 0.5 m floor
+    // is gone; the spacing term replaces it, so the live node's gate moved just
+    // as the offline tools' did. Both offline tools expose the multiplier as
+    // --capture-spacing-scale, so the live node exposes it too rather than
+    // inheriting a changed gate with no way to set it back.
+    declare_parameter("capture_spacing_scale", 0.71);
+    const double capture_spacing_scale = get_parameter("capture_spacing_scale").as_double();
+    try {
+      geo_map_sheet_->setCaptureSpacingScale(static_cast<float>(capture_spacing_scale));
+    } catch (const std::invalid_argument & e) {
+      RCLCPP_ERROR(get_logger(), "capture_spacing_scale: %s", e.what());
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+    }
+    RCLCPP_INFO(
+      get_logger(), "Capture distance: max(%.3f x |depth|, %.3f x %.3f m node spacing)",
+      geo_map_sheet_->parameters().capture_distance_scale,
+      geo_map_sheet_->parameters().capture_spacing_scale,
+      geo_map_sheet_->distanceScale());
     // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
     // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
     evicted_indices_.clear();
