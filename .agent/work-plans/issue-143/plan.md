@@ -158,16 +158,21 @@ Algorithm (`levelPlanFor(count_grid, decision_depth_by_grid, policy)`):
    (Calder §III.A): the smallest λ with `Σ counts in the (2λ+1)² box ≥ n_req`,
    `n_req` = `--min-obs-per-node` (default 5) inflated by
    `--blunder-allowance` (default 20 %). Achieved spacing = `(2λ+1)·R`.
-3. **Touched set.** A tile at any level is *touched* if the influence disc of
-   any sounding intersects it — recon records, per count cell, the maximum
-   `influenceRadius` of the soundings that landed there, and the plan expands
-   each occupied count cell by that radius before testing tile intersection.
-   This is the same window `GeoMapSheet::gridIndicesForSoundings` uses
-   (`store_import.cpp:1089-1090`), so the touched set at a single level equals
-   the set of grids today's fixed-level import creates, near-seam neighbours
-   included.
+3. **Touched set, per level.** The influence radius is **level-dependent**:
+   `influenceRadius` floors at `distance_scale`, the sheet's node spacing
+   (`parameters.cpp:100-115`; 3.62 m at level 8, 0.057 m at level 14), and the
+   sheet's selection window adds a one-cell floor at its own level
+   (`geo_map_sheet.cpp:62-72`). So there is one touched set **per level L**:
+   recon records, per count cell, the maximum *unfloored* spread term of the
+   soundings that landed there (`distance_scale·(ratio−1)^(1/2) − max_radius`,
+   capped at `max_radius`, before the spacing floor); at plan time each occupied
+   count cell is expanded by `max(recorded term, cell_L)` (the level-L floor,
+   which also covers the one-cell selection floor) before testing intersection
+   with level-L tiles. At a single level this reproduces the window today's
+   fixed-level import selects, near-seam neighbours included; at coarser levels
+   the floor grows with the cell, so no seam tile is lost through admission.
 4. **Decision-depth rollup**: `decision_depth[g]` for a grid coarser than 14 is
-   the **minimum over its children's decision depths** (the shoal-biased, safe
+   the **minimum over its *touched* children's decision depths** (the shoal-biased, safe
    direction: a shoal anywhere in `g` makes `g` at least as shallow). The
    percentile is computed once, at level 14, from the reservoir; coarse grids
    never pool soundings.
@@ -178,7 +183,13 @@ Algorithm (`levelPlanFor(count_grid, decision_depth_by_grid, policy)`):
    `levelNoFinerThan(s)` is the **finest level whose cell is ≥ s** —
    `gggs::Level::fromCellSize(s)` returns the coarsest level at-or-**finer**
    (`gggs/level.h:59-74`, the unsafe direction), so the helper takes
-   `fromCellSize(s).level() - 1` unless that level's cell equals `s` exactly;
+   `fromCellSize(s).level() - 1` unless that level's cell equals `s` exactly,
+   clamped to `[coarsest_level, finest_level]` (so a spacing coarser than the
+   coarsest cell cannot underflow toward level 0). Where the LoA box for a
+   count cell would run past its count tile's edge, the summed-area query is
+   evaluated over the stitched 3×3 count-tile neighbourhood; a box that
+   saturates even there reads as the coarsest level (the safe direction) and
+   is reported;
    `target = min(required, achieved)` in level numbers (the coarser). **Emit
    `g`** (it is estimated and stored at level L regardless). If `target > L`
    and `L < finest_level`, recurse into the **touched** children of `g`.
@@ -316,14 +327,22 @@ a CUBE constant, once it lands.
    rule a swath clipping one emitted level-14 tile would build level-14 tiles
    over the whole neighbouring plain. Each accumulator's `GeoMapSheet` is
    therefore given the plan's **emitted set at its level** as an admission
-   predicate: `gridIndicesForSoundings` returns only grids in that set, so a
-   grid outside the plan is never created, never estimated, never persisted —
-   its ground has its native estimate at the parent level. Soundings near an
-   emitted tile's edge still reach it (they are in its influence-expanded
-   window), so seams inside the plan are exact. Because the emitted set at a
-   level is the *touched* set (algorithm step 3, the same window today's fixed
-   path uses), single-level runs admit exactly today's grids. There is no
-   *leaf* filter: every admitted tile is persisted, parents included.
+   predicate applied **where grids are created**: `getOrCreateGridsIn`
+   (`geo_map_sheet.cpp:147-168`, reached from `addSoundings` at `:102`) skips
+   any index outside the set, so an off-plan grid is never created, never
+   estimated, and never appears in `sheet_.grids()` for `finalize` to persist
+   (`store_import.cpp:1157-1165`). The enumerator `gridIndicesForSoundings`
+   (`geo_map_sheet.cpp:115-130`) is filtered by the same predicate so the
+   reload/seed pass and the creation pass see one set — filtering only the
+   enumerator would leave off-plan grids created and persisted while skipping
+   their reload, worse than no predicate. Soundings near an emitted tile's
+   edge still reach it (they are in its level-L expanded window), so seams
+   inside the plan are exact. Because the emitted set at a level is that
+   level's *touched* set (algorithm step 3, the window today's fixed path
+   selects), single-level runs admit exactly today's grids. There is no
+   *leaf* filter: every admitted tile that receives data is persisted, parents
+   included (an admitted grid that stays empty is not written, as today —
+   `store_import.cpp:505-509`).
    **One shared RAM budget**: `max_resident_tiles` keeps its operator-facing
    meaning as the store-wide total; `MultiLevelAccumulator` owns eviction and
    drops the globally coldest tiles across levels. Comparable coldness needs a
@@ -408,14 +427,14 @@ a CUBE constant, once it lands.
 | File | Change |
 |------|--------|
 | `cube_bathymetry/include/cube_bathymetry/parameters.h` / `src/parameters.cpp` | `capture_spacing_scale` (default 0.71; `--capture-spacing-scale` on both CLI tools); doc the two gates. |
-| `cube_bathymetry/include/cube_bathymetry/geo_map_sheet.h` / `src/geo_map_sheet.cpp` | Optional admission predicate on `gridIndicesForSoundings` (the plan's emitted set at this sheet's level). |
+| `cube_bathymetry/include/cube_bathymetry/geo_map_sheet.h` / `src/geo_map_sheet.cpp` | Optional admission predicate (the plan's emitted set at this sheet's level) applied in `getOrCreateGridsIn` and `gridIndicesForSoundings`. |
 | `cube_bathymetry/src/node.cpp` | Capture = `max(scale·depth, capture_spacing_scale·distance_scale)`; 0.5 literal removed. |
 | `cube_bathymetry/include/cube_bathymetry/count_grid.h` / `src/count_grid.cpp` | **New** — sparse count tiles, summed-area table, level of aggregation, percentile per coarse tile, persist/merge. |
 | `cube_bathymetry/include/cube_bathymetry/level_plan.h` / `src/level_plan.cpp` | **New** — quadtree prefix, required-vs-achieved, queries, canonical JSON + sha256, plan report. |
 | `cube_bathymetry/include/cube_bathymetry/build_fingerprint.h` / `src/build_fingerprint.cpp` | **New** — minimal ADR-0003 v2 read/write (`schema_version` + `tiling`). |
 | (same files) | Optional shared touch clock. |
 | `cube_bathymetry/include/cube_bathymetry/store_import.h` / `src/store_import.cpp` | `MultiLevelAccumulator` (routing, shared budget, global eviction, single sidecar write); `ImportAccumulator::residentTiles()` / `persistAndDrop()`. |
-| `cube_bathymetry/src/import_bag_main.cpp` | Recon (count grid + reservoir + per-L8 spill under `--scratch-dir` with free-space check); `--depth-adaptive*`, `--count-level`, `--min-obs-per-node`, `--blunder-allowance`, `--level-plan[-out]`, `--count-grid-out`; validation incl. `finest <= 14`; multi-level path; fingerprint write; drop the `:1128-1130` single-resolution comment. |
+| `cube_bathymetry/src/import_bag_main.cpp` | Recon (count grid + per-cell max spread term + reservoir + per-level-10 spill under `--scratch-dir` with free-space check); `--depth-adaptive*`, `--count-level`, `--min-obs-per-node`, `--blunder-allowance`, `--level-plan[-out]`, `--count-grid-out`; validation incl. `finest <= 14`; multi-level path; fingerprint write; drop the `:1128-1130` single-resolution comment. |
 | `cube_bathymetry/include/cube_bathymetry/batch_regen.h` / `src/batch_regen.cpp` | Level-parameterised `SheetFactory`; scatter to every emitted containing tile; per-tile gather. |
 | `cube_bathymetry/src/batch_regen_main.cpp` | Accept a level plan; drop the fixed `cell_size_m` pin when a plan is in use; drop the `:825-827` comment; `dirtyTilesAtLevel` call at `:394`. |
 | `cube_bathymetry/include/cube_bathymetry/survey_index_query.h` / `src/survey_index_query.cpp` | Rename `dirtyL10Tiles` → `dirtyTilesAtLevel`; add `dirtyTiles(..., const LevelPlan &, ...)` (throws on a coarser footprint). |
@@ -439,8 +458,8 @@ a CUBE constant, once it lands.
 |---|---|
 | `test_node` (capture) | A sounding at 0.7 cell from a node is accepted at every depth (no holes); at 1 m depth on a 0.11 m cell the gate is `0.71·0.11 m`, not 0.5 m; at 40 m depth on a 1.81 m cell the depth term (2 m) wins. |
 | `test_count_grid` | Counts accumulate per cell; summed-area sums equal brute force; LoA for a cell with `n_req` soundings inside is 0, for an empty region grows to the box that reaches them; persist/merge round-trip is additive. |
-| `test_level_plan` | Every emitted tile's ancestors up to `coarsest_level` are emitted (full prefix); with `coarsest == finest` the emitted set equals the touched set; `levelNoFinerThan` rounds toward the coarser level (0.33 m → level 11, never 12); required-vs-achieved takes the coarser; a shoal refines only the touched children; a sparse shoal (counts below `n_req` at fine spacing) stays coarse and is reported as coverage deficit; the min-rollup makes a parent at least as shallow as any child; `finest > 14` and `count-level < finest` rejected; canonical JSON round-trip is lossless and `sha256()` is identical across insertion orders and across two processes. |
-| **Single-level equivalence** (`test_mixed_level_import`) | With `coarsest_level == finest_level == 10` **and `capture_spacing_scale` pinned so the gate equals today's 0.5 m exactly** — set on `Parameters` as `0.5 / gggs::Level(10).cellSize()` computed at runtime (level 10's nominal cell is 0.906 m, so a hand-typed `0.5/0.91` would give 0.4978 m and fail by construction) — the depth-adaptive path writes a store **byte-identical** to the fixed-level path over the same synthetic bags. Defined as: every `.tif` under `processed/` (and the backscatter `survey/` dir) identical file-for-file; `registry.json` equal after parsing. If a GDAL-injected tag proves non-deterministic the fallback is band-data + geotransform equality, recorded in the test. The load-bearing regression guard. |
+| `test_level_plan` | Every emitted tile's ancestors up to `coarsest_level` are emitted (full prefix); with `coarsest == finest` the emitted set equals that level's touched set; the touched set at a coarser level is never narrower than the union of its touched children (per-level floor); `levelNoFinerThan` clamps at `coarsest_level`; an LoA box crossing a count-tile edge reads the neighbour's counts; `levelNoFinerThan` rounds toward the coarser level (0.33 m → level 11, never 12); required-vs-achieved takes the coarser; a shoal refines only the touched children; a sparse shoal (counts below `n_req` at fine spacing) stays coarse and is reported as coverage deficit; the min-rollup makes a parent at least as shallow as any child; `finest > 14` and `count-level < finest` rejected; canonical JSON round-trip is lossless and `sha256()` is identical across insertion orders and across two processes. |
+| **Single-level equivalence** (`test_mixed_level_import`) | With `coarsest_level == finest_level == 10` **and `capture_spacing_scale` pinned so the gate equals today's 0.5 m exactly** — set on `Parameters` as `0.5 / distance_scale` where `distance_scale` is the **requested** resolution both paths are built with (`GeoMapSheet` takes the requested, not the snapped, cell size — `geo_map_sheet.cpp:76` — so the test builds both paths from the same requested resolution and derives the pin from it; a hand-typed `0.5/0.91` against the 0.906 m nominal cell would give 0.4978 m and fail by construction) — the depth-adaptive path writes a store **byte-identical** to the fixed-level path over the same synthetic bags. Defined against the **persisted** set (the created set is the batch bounding rectangle and empty grids are never written, `store_import.cpp:505-509`): every `.tif` under `processed/` (and the backscatter `survey/` dir) identical file-for-file, the same file set on both sides; `registry.json` equal after parsing. If a GDAL-injected tag proves non-deterministic the fallback is band-data + geotransform equality, recorded in the test. The load-bearing regression guard. |
 | **Parents under children** | A deep-plain-plus-shoal survey with `coarsest_level = 8` emits level 8 everywhere touched, level 9/10 over the plain, and finer tiles over the shoal; the parent tiles over the shoal hold a complete estimate (no holes), and `buildDepthOverviewPyramid` **skips** those parent slots as native (ADR-0011) and writes derived tiles only where no native tile exists; a level-by-level composite has no coverage hole. |
 | **Halo/seam** | A sounding within one influence radius of a tile boundary at level L contributes to both level-L tiles; each tile's cells equal a whole-survey fixed-level build at that level. |
 | **Bounded RAM** (`test_tile_eviction_rss`) | A mixed-level run with `max_resident_tiles = N` never holds more than N resident tiles summed across levels, evicts the globally coldest first (shared clock), and loses no data. |
@@ -558,3 +577,11 @@ uma#386 (independent).
   tools; spill = full `GeoSounding` at ~80 B (7.4 GB/day) per level-10 grid;
   compute multiplier row; `policy` written in both fingerprint modes;
   re-import-over-covered-ground documented; hole criterion 1.41×.
+- **r5** (2026-09-14) — after plan review r4 (`e04fa0c`): admission predicate
+  moved to where grids are **created** (`getOrCreateGridsIn`) with the
+  enumerator filtered by the same set; touched set defined **per level** with
+  the level's spacing floor (`max(recorded spread term, cell_L)`); rollup over
+  *touched* children; `levelNoFinerThan` clamped to the policy range; LoA boxes
+  stitched across count-tile edges, saturation = coarsest; equivalence stated
+  against the persisted set and pinned from the requested resolution; Files
+  row spill partition corrected to level 10.
