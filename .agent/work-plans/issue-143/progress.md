@@ -223,3 +223,60 @@ resolution loss is visible to the operator before an import runs.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 08:46 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `52b25dd` (revision 2)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-143`, plan not pushed)
+**Verdict**: changes-requested
+
+Round 2. All five r1 must-fix findings and all eight r1 suggestions are
+resolved or deliberately declined by the operator (the PR split); the split
+is not re-raised. The findings below are new consequences the revision
+introduced — three of them (2, 3, 4) are data-loss or data-refusal paths in
+the newly added `persist_leaves` / `--replace-tiling` / fingerprint-guard
+machinery.
+
+### r1 disposition (verified, not re-litigated)
+
+| r1 finding | Disposition |
+|---|---|
+| 1 backscatter single-level | Resolved as prerequisite — uma#383 verified filed and OPEN, with the same `mbes_store.hpp:51` / `tile_io.hpp:93-96` evidence. |
+| 2 `finest_level > 14` | Resolved — startup validation + ADR-0002 invariant (see new finding 6 on how it is enforced downstream). |
+| 3 fingerprint inoperative | Resolved — minimal `build_fingerprint.h/cpp` in scope, `--replace-tiling` promoted to step 6b with tests (see new findings 3, 4). |
+| 4 raw-min decision depth | Resolved — percentile + min-count guards, tested (see new finding 5 on the rollup spec). |
+| 5 N× RAM budget | Resolved in intent — one shared store-wide budget (see new finding 1 on implementability). |
+| 6 split (suggestion) | Declined by the operator. Not re-raised. |
+| 7-13 suggestions | All taken: decision's shipped home named (ADR-0002 amendment), canonical JSON + sha determinism test, `--replace-tiling` promoted, "byte-identical" defined, `dirtyL10Tiles` → `dirtyTilesAtLevel`, README layer-name drift, `.level()` fixed and the unreachable descend branch dropped. |
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good (operator-settled) | Unchanged size; the single-PR shape is the operator's decision and is out of review scope this round. uma#383 is correctly externalised. |
+| Issue alignment | Good | All four issue deliverables still covered; the recon report still carries the storage estimate and the below-L10 resolution loss. |
+| File targeting | Needs work | `test_survey_index_query.cpp` (named in the Consequences table for the rename) is missing from Files to Change, as is the new public `ImportAccumulator` eviction API that step 4 depends on (finding 1). |
+| Consequences | Needs work | Three new ones from r2's own additions: the leaf filter's effect on seam-tile coverage (2), the store-wide clear on an accumulate-across-surveys layer (3), and the store-wide fingerprint comparison refusing disjoint-area imports (4). |
+| Documentation & instruction impact | Good | Unchanged and still non-silent. |
+| Principle alignment | Needs work | "A change includes its consequences" — findings 2-4. "Never work around a bug we own" is respected. "Human control and transparency" improved further (guard + report). |
+| ADR compliance | Needs work | ADR-0001's lossless persist-then-drop and `evicted_` bookkeeping must survive MultiLevelAccumulator ownership of eviction (finding 1); ADR-0002's margin argument is now enforced by a runtime check whose form matters (finding 6). |
+| ROS conventions | N/A | Offline CLI tools and pure library code. |
+
+### Findings
+- [ ] (must-fix) Global-coldest eviction across per-level accumulators is not implementable from the existing last-touch data. `GeoMapSheet::touch_counter_` is a **per-sheet** monotonic counter (`geo_map_sheet.h:228-231`, incremented at `geo_map_sheet.cpp:165,200`), so `lastTouchOf` values from two sheets are incomparable — a level with fewer touches always has the smaller numbers and its tiles always look coldest. Specify a shared touch clock (one counter injected into every sheet, or a MultiLevelAccumulator-side touch sequence recorded per (level, grid)). Also: step 4's `persistAndDrop(grid)` and the resident-set/last-touch accessors are **new public API** on `ImportAccumulator` that the Files-to-Change row for `store_import.h` does not mention, and the primitive must preserve the two invariants `evictColdTiles` holds today — a persist that throws leaves the tile **resident** (`store_import.cpp:1069-1077`), and a dropped tile is recorded in `evicted_` so `addBatch`'s reload-before-add reloads it (`store_import.cpp:1103-1106`). — `plan.md:176-190`
+- [ ] (must-fix) The `persist_leaves` filter drops tiles today's path writes, which also makes the load-bearing single-level equivalence test unpassable as written. A grid with no soundings is "skipped, not emitted" (algorithm step 4), so the leaf set is keyed on sounding **positions** — but `GeoMapSheet::gridIndicesForSoundings` deliberately includes near-seam neighbour tiles and a sounding "can also spread into neighbour tiles" (`store_import.cpp:1089-1090,1126-1127`), and today's fixed-level import persists those tiles with their real influence-derived cells. Under step 5 they are non-leaves: never persisted, freely dropped. With `coarsest == finest == 10` the adaptive store would therefore be **missing seam tiles** the fixed path writes — not byte-identical, and a genuine coverage regression. Define the leaf set over the influence-expanded sounding bounds (the same window `gridIndicesForSoundings` uses), or state and document the coverage change explicitly. — `plan.md:73-76,191-197`
+- [ ] (must-fix) `--replace-tiling` "clears the `processed/` layer directory" is a destructive operation on a layer that **accumulates across surveys**. The bathy store's `processed/` layer is a single geodata collection that successive imports add to (`importTiles` merges; `save()` never deletes) — clearing it to re-tile one survey area deletes every other survey's tiles in that store, and the same applies to the backscatter `survey/` dir. Scope the clear to tiles overlapping the new plan's footprint, print the exact list of tiles it will delete (dry-run / report before the import starts), and require an explicit confirmation rather than a bare flag. — `plan.md:207-217`
+- [ ] (must-fix) The fingerprint guard's granularity refuses legitimate additive imports. `level_plan_sha256` is a **store-wide** hash of the whole cut, so importing a *new, disjoint* survey area into an existing depth-adaptive store always yields a different sha and is refused — with the only offered remedy being the destructive `--replace-tiling` of finding 3. The orphan hazard exists only on ground covered by **both** plans. Compare per-overlap (refuse only when the new plan assigns a different level to ground the store already holds), or record the tiling per leaf/region in the fingerprint so a disjoint-area import proceeds additively. — `plan.md:207-217,250-258`
+- [ ] (suggestion) The decision-depth rollup is internally inconsistent. Step 1 says a grid below `--depth-adaptive-min-count` "inherits its parent's decision" and "contributes its soundings to the parent's reservoir", but reservoirs are described as existing only at level 14 and step 2's rollup is a **min over children's decision depths**, not a pooled reservoir. Say which: coarse grids keep pooled reservoirs (percentile recomputed at each level), or the min-rollup simply skips undecided children. Also name the safety direction of the min-count rule — a genuinely shoal level-14 grid with fewer than 25 soundings is stored coarse, which is the shoal-biased policy's *unsafe* direction. — `plan.md:56-72`
+- [ ] (suggestion) Say that `dirtyTiles(plan)` **throws** rather than `assert`s the "no footprint tile coarser than a leaf" invariant. The footprint level is read per row from the survey-index DB and is explicitly allowed to be mixed (`survey_index_query.cpp:192-193` "an index that stores per-sensor native levels"), so a static `finest <= 14` check at import startup does not establish it for `batch_regen` against an arbitrary index; and `assert` is compiled out under `NDEBUG`. `ancestorAtLevel` already throws `std::runtime_error` on exactly this case (`survey_index_query.cpp:73-88`) and the dry-run's catch falls back to full regen — reuse that path and say so. — `plan.md:232-245`
+- [ ] (suggestion) The recon spill needs a home and a space check. The existing scratch dir is created under `std::filesystem::temp_directory_path()` (`store_import.cpp:449-451`), which on many hosts is a tmpfs — a ~4.4 GB sounding spill would land in RAM, defeating the bounded-RAM property, or hit ENOSPC hours into an import. Add an explicit `--scratch-dir` (defaulting beside the output store, not `/tmp`), and check free space against the projected spill size before phase 1 starts. — `plan.md:161-167`
+- [ ] (suggestion) Recon's own RAM is the one unbounded structure in a tool whose headline property is bounded RAM: the reservoir is bounded *per grid*, but the number of touched level-14 grids scales with surveyed area (~54 m grid ⇒ ~340 grids/km²). State the per-grid reservoir cap and the resulting bytes per km², so the operator can size a multi-day survey. — `plan.md:56-62,161-167`
+- [ ] (suggestion) Per-level `finalize` writes the store-level provenance sidecars (`registry.json`, backscatter metadata) once per accumulator (`store_import.cpp:1166-1180`). Say which accumulator owns that write — or have `MultiLevelAccumulator` do it once after finalising all levels — so the surviving sidecar is chosen, not whichever level finished last. — `plan.md:176-190`
+- [ ] (suggestion) Files to Change omits `test_survey_index_query.cpp`, which the Consequences table itself names as a caller of the renamed `dirtyL10Tiles`. — `plan.md:262-283,342`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
