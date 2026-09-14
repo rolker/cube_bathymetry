@@ -49,9 +49,18 @@
 /// - keeps, per level-14 grid, the 64 shallowest soundings so the grid's
 ///   **decision depth** -- a low percentile of its shallowest, the flier
 ///   guard -- can be read off at the end, and
-/// - spills the projected `GeoSounding` in full to one scratch file per
-///   level-10 grid, so the expensive projection/TF work runs once and phase
-///   two replays the spill grid by grid into the per-level accumulators.
+/// - spills the projected `GeoSounding` in full to **one chronological scratch
+///   file**, so the expensive projection/TF work runs once and phase two
+///   replays the spill front to back into the per-level accumulators.
+///
+/// The spill is a single file replayed in write order on purpose. CUBE's
+/// sliding-median pre-filter is order-dependent, so any partition of the
+/// soundings (an earlier revision spilled one file per level-10 grid) would
+/// present a tile coarser than the partition with the pings interleaved
+/// differently than the fixed-level path saw them, and the depth-adaptive
+/// store would no longer be byte-identical to a fixed import of the same bags.
+/// Replaying one file front to back hands phase two exactly the order phase one
+/// saw, so the equivalence holds by construction rather than by argument.
 ///
 /// This is Calder's CHRT two-pass structure (Calder & Rice, Computers &
 /// Geosciences 2017) with the level of aggregation from his 2019 paper as the
@@ -103,15 +112,18 @@ namespace cube
   class ReconCollector
   {
 public:
-  /// GGGS level of the spill partition (~870 m grids).
-    static constexpr uint8_t kSpillLevel = 10;
+  /// Name of the single chronological spill file inside the scratch dir.
+    static constexpr const char * kSpillFilename = "soundings.spill";
 
   /// @brief Construct a collector.
   /// @param policy Validated on construction.
-  /// @param scratch_dir Directory for the spill files (created as needed);
-  ///        empty disables the spill (recon-only runs that never replay).
+  /// @param scratch_dir Directory for the spill file and the count-grid tile
+  ///        spill (created as needed); empty disables both (recon-only runs
+  ///        that never replay, and that hold every count tile in RAM).
   /// @throws std::invalid_argument on a bad policy; std::runtime_error if the
-  ///         scratch dir cannot be created.
+  ///         scratch dir cannot be created, or if it already exists and is not
+  ///         empty (an orphaned scratch dir from a killed run: appending to its
+  ///         spill would replay another run's soundings).
     ReconCollector(const LevelPlanPolicy & policy, std::string scratch_dir);
     ~ReconCollector();
 
@@ -131,16 +143,14 @@ public:
   /// The plan for what was collected: `levelPlanFor(counts, decisionDepths, policy)`.
     LevelPlan plan() const;
 
-  /// Spill files written so far, keyed by level-10 grid.
-    std::vector < gggs::GridIndex > spilledGrids() const;
-
-  /// @brief Replay the spill of one level-10 grid, in the order it was written.
+  /// @brief Replay the whole spill front to back -- the chronological order
+  ///        phase one saw the soundings in, which is what makes a
+  ///        single-level plan byte-identical to a fixed-level import.
   ///        Closes the file for writing first (a replay after `add` is the
-  ///        normal phase-one -> phase-two hand-off).
+  ///        normal phase-one -> phase-two hand-off); re-runnable.
+  ///        Does nothing when nothing was spilled.
   /// @throws std::runtime_error if the file cannot be read.
-    void forEachSpilled(
-      const gggs::GridIndex & spill_grid,
-      const std::function < void(const GeoSounding &) > &fn);
+    void forEachSpilled(const std::function < void(const GeoSounding &) > &fn);
 
   /// Bytes one spilled sounding occupies on disk.
     static constexpr std::size_t kBytesPerSpilledSounding = sizeof(SpilledSounding);
@@ -149,18 +159,20 @@ public:
   ///        the shortfall when @p dir has fewer than @p needed_bytes free.
     static void requireFreeSpace(const std::string & dir, uint64_t needed_bytes);
 
-  /// Delete the spill files and the scratch dir (also done by the destructor).
+  /// Delete the spill file, the count-tile spill and the scratch dir (also
+  /// done by the destructor).
     void cleanup();
+
+  /// Path of the spill file; empty when the spill is disabled.
+    std::string spillPath() const;
 
 private:
     LevelPlanPolicy policy_;
     std::string scratch_dir_;
     CountGrid counts_;
     std::map < gggs::GridIndex, ShallowReservoir > reservoirs_;
-    std::map < gggs::GridIndex, std::unique_ptr < std::ofstream >> spill_out_;
+    std::unique_ptr < std::ofstream > spill_out_;
     uint64_t spilled_ = 0;
-
-    std::string spillPath(const gggs::GridIndex & spill_grid) const;
   };
 
 }  // namespace cube

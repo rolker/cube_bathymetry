@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -134,31 +135,30 @@ TEST(ReconCollector, CountsReservoirsAndPlans)
   EXPECT_EQ(recon.soundingsSeen(), 40u);
 }
 
-TEST(ReconCollector, SpillRoundTripsEverySoundingFieldPerLevel10Grid)
+TEST(ReconCollector, SpillRoundTripsEverySoundingFieldInChronologicalOrder)
 {
   const std::string dir = scratch("spill");
   LevelPlanPolicy policy;
   Parameters params{CellSizes(1.0f), "order1a"};
   {
     ReconCollector recon(policy, dir);
-    // Two soundings in one level-10 grid, one far away in another.
+    // Three soundings that straddle two level-10 grids, interleaved: an earlier
+    // revision spilled one file per level-10 grid, which would replay these as
+    // (0, 2, 1). One chronological file replays them as written.
     std::vector<GeoSounding> batch{
       sounding(43.07, -70.76, -12.0f, 0.02f),
-      sounding(43.0701, -70.7601, -12.5f, 0.03f),
-      sounding(43.5, -70.2, -30.0f)};
+      sounding(43.5, -70.2, -30.0f),
+      sounding(43.0701, -70.7601, -12.5f, 0.03f)};
     recon.add(batch, params);
     EXPECT_EQ(recon.soundingsSpilled(), 3u);
-    ASSERT_EQ(recon.spilledGrids().size(), 2u);
-    EXPECT_EQ(std::filesystem::directory_iterator(dir) != std::filesystem::directory_iterator(),
-        true);
+    EXPECT_TRUE(std::filesystem::exists(recon.spillPath()));
 
-    const auto near = gggs::Level(ReconCollector::kSpillLevel).gridIndex(43.07, -70.76);
     std::vector<GeoSounding> replayed;
-    recon.forEachSpilled(near, [&](const GeoSounding & s) {replayed.push_back(s);});
-    ASSERT_EQ(replayed.size(), 2u);
-    for (std::size_t i = 0; i < 2; ++i) {
-      EXPECT_DOUBLE_EQ(replayed[i].latitude, batch[i].latitude);
-      EXPECT_DOUBLE_EQ(replayed[i].longitude, batch[i].longitude);
+    recon.forEachSpilled([&](const GeoSounding & s) {replayed.push_back(s);});
+    ASSERT_EQ(replayed.size(), batch.size());
+    for (std::size_t i = 0; i < batch.size(); ++i) {
+      EXPECT_DOUBLE_EQ(replayed[i].latitude, batch[i].latitude) << "order at " << i;
+      EXPECT_DOUBLE_EQ(replayed[i].longitude, batch[i].longitude) << "order at " << i;
       EXPECT_FLOAT_EQ(replayed[i].sounding.depth, batch[i].sounding.depth);
       EXPECT_FLOAT_EQ(replayed[i].sounding.vertical_error, batch[i].sounding.vertical_error);
       EXPECT_FLOAT_EQ(replayed[i].sounding.horizontal_error, batch[i].sounding.horizontal_error);
@@ -172,19 +172,30 @@ TEST(ReconCollector, SpillRoundTripsEverySoundingFieldPerLevel10Grid)
       EXPECT_DOUBLE_EQ(replayed[i].sounding.sonar_relative_position.z,
         batch[i].sounding.sonar_relative_position.z);
     }
-    // A grid nothing was spilled into replays nothing.
-    std::size_t none = 0;
-    recon.forEachSpilled(gggs::Level(10).gridIndex(44.0, -69.0), [&](const GeoSounding &) {
-        ++none;
-        });
-    EXPECT_EQ(none, 0u);
-    // The replay is re-runnable (the file was closed, not consumed).
+    // The replay is re-runnable (the file was closed, not consumed), and a
+    // later add appends behind it.
     std::size_t again = 0;
-    recon.forEachSpilled(near, [&](const GeoSounding &) {++again;});
-    EXPECT_EQ(again, 2u);
+    recon.forEachSpilled([&](const GeoSounding &) {++again;});
+    EXPECT_EQ(again, 3u);
+    recon.add({sounding(43.07, -70.76, -13.0f)}, params);
+    std::size_t after = 0;
+    recon.forEachSpilled([&](const GeoSounding &) {++after;});
+    EXPECT_EQ(after, 4u);
   }
-  // The destructor removed the spill files and the empty scratch dir.
+  // The destructor removed the spill file and the empty scratch dir.
   EXPECT_FALSE(std::filesystem::exists(dir));
+}
+
+TEST(ReconCollector, RefusesAnOrphanedScratchDir)
+{
+  const std::string dir = scratch("orphan");
+  std::filesystem::create_directories(dir);
+  std::ofstream(std::filesystem::path(dir) / "soundings.spill") << "stale";
+  LevelPlanPolicy policy;
+  // An orphaned dir from a killed run would be appended to, replaying another
+  // run's soundings: refuse it instead.
+  EXPECT_THROW(ReconCollector(policy, dir), std::runtime_error);
+  std::filesystem::remove_all(dir);
 }
 
 TEST(ReconCollector, FreeSpaceCheckNamesTheShortfall)

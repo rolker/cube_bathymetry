@@ -26,7 +26,11 @@
 //      multi-level path writes a store BYTE-IDENTICAL to today's fixed-level
 //      path over the same soundings: the same set of files under processed/,
 //      each with identical bytes. This is the load-bearing regression guard for
-//      the decoupling of the estimation grid from the store tiling.
+//      the decoupling of the estimation grid from the store tiling. It runs the
+//      WHOLE import path -- recon -> level plan -> spill replay -- because
+//      CUBE's sliding-median pre-filter is order-dependent, so a spill that did
+//      not replay chronologically would break the identity while an
+//      addBatch-only test still passed.
 //   2. PARENTS UNDER CHILDREN -- a deep plain with a shoal writes tiles at more
 //      than one level, and the coarse parent over the shoal holds a complete
 //      estimate (no holes where the fine children are).
@@ -198,13 +202,24 @@ TEST(MixedLevelImport, SingleLevelPolicyIsByteIdenticalToTheFixedPath)
     acc.finalize();
   }
 
-  // Adaptive path, pinned to one level.
+  // Adaptive path, pinned to one level, through the real two-pass import:
+  // recon (count + spill) -> level plan -> chronological spill replay.
+  const std::string spill_dir = makeTempDir("spill");
+  std::filesystem::remove(spill_dir);  // the collector creates it, and refuses a used one
   {
     LevelPlanPolicy policy;
     policy.depth.coarsest_level = 10;
     policy.depth.finest_level = 10;
     Parameters params{CellSizes(requested), "order1a"};
-    auto plan = std::make_shared<LevelPlan>(planFor(batches, policy, params));
+
+    ReconCollector recon(policy, spill_dir);
+    std::size_t soundings = 0;
+    for (const auto & b : batches) {
+      recon.add(b, params);
+      soundings += b.size();
+    }
+    ASSERT_EQ(recon.soundingsSpilled(), soundings) << "every sounding must reach the spill";
+    auto plan = std::make_shared<LevelPlan>(recon.plan());
     ASSERT_EQ(plan->levels(), std::set<uint8_t>{10});
 
     MultiLevelAccumulatorConfig cfg;
@@ -215,12 +230,27 @@ TEST(MixedLevelImport, SingleLevelPolicyIsByteIdenticalToTheFixedPath)
         return std::make_unique<GeoMapSheet>(requested);
       };
     MultiLevelAccumulator acc(plan, cfg);
-    for (const auto & b : batches) {
-      acc.addBatch(b);
+    // Same chunking as import_bag's phase two.
+    constexpr std::size_t kChunk = 256;
+    std::vector<GeoSounding> chunk;
+    std::size_t replayed = 0;
+    recon.forEachSpilled([&](const GeoSounding & s) {
+        chunk.push_back(s);
+        if (chunk.size() >= kChunk) {
+          acc.addBatch(chunk);
+          replayed += chunk.size();
+          chunk.clear();
+        }
+      });
+    if (!chunk.empty()) {
+      acc.addBatch(chunk);
+      replayed += chunk.size();
     }
+    EXPECT_EQ(replayed, soundings);
     acc.finalize();
-    EXPECT_EQ(acc.batchesPerLevel().at(10), batches.size());
+    recon.cleanup();
   }
+  EXPECT_FALSE(std::filesystem::exists(spill_dir)) << "the spill must be cleaned up";
 
   const auto fixed = readTiles(fixed_dir);
   const auto adaptive = readTiles(adaptive_dir);

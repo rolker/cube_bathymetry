@@ -1151,26 +1151,26 @@ int cube_depth_adaptive_finish(
 
   auto phase_tp = std::chrono::steady_clock::now();
   uint64_t replayed = 0;
-  // Replay per ping-sized chunk: the spill is ordered by arrival within each
-  // level-10 file, and a 256-sounding chunk is one swath's worth, so routing
+  // Replay the one spill file front to back, in ping-sized chunks: the file is
+  // in arrival order, so every accumulator sees the soundings in the order the
+  // fixed-level path saw them (CUBE's sliding-median pre-filter is
+  // order-dependent), and a 256-sounding chunk is one swath's worth, so routing
   // and eviction run at the same granularity as the fixed path.
   constexpr std::size_t kChunk = 256;
   std::vector<cube::GeoSounding> chunk;
   chunk.reserve(kChunk);
-  for (const auto & grid : recon.spilledGrids()) {
-    recon.forEachSpilled(grid, [&](const cube::GeoSounding & s) {
-        chunk.push_back(s);
-        if (chunk.size() >= kChunk) {
-          accumulator.addBatch(chunk);
-          replayed += chunk.size();
-          chunk.clear();
-        }
-      });
-    if (!chunk.empty()) {
-      accumulator.addBatch(chunk);
-      replayed += chunk.size();
-      chunk.clear();
-    }
+  recon.forEachSpilled([&](const cube::GeoSounding & s) {
+      chunk.push_back(s);
+      if (chunk.size() >= kChunk) {
+        accumulator.addBatch(chunk);
+        replayed += chunk.size();
+        chunk.clear();
+      }
+    });
+  if (!chunk.empty()) {
+    accumulator.addBatch(chunk);
+    replayed += chunk.size();
+    chunk.clear();
   }
   const double replay_secs =
     std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count();

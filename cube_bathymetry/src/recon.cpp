@@ -100,6 +100,15 @@ ReconCollector::ReconCollector(const LevelPlanPolicy & policy, std::string scrat
   policy_.validate();
   if (!scratch_dir_.empty()) {
     std::error_code ec;
+    // Refuse an orphaned scratch dir left by a killed run: the spill is opened
+    // for append, so reusing one would replay another run's soundings.
+    if (std::filesystem::exists(scratch_dir_, ec) &&
+      !std::filesystem::is_empty(scratch_dir_, ec) && !ec)
+    {
+      throw std::runtime_error(
+              "recon: scratch dir " + scratch_dir_ + " already exists and is not empty "
+              "(an orphaned spill from a killed run?); remove it or pass --scratch-dir");
+    }
     std::filesystem::create_directories(scratch_dir_, ec);
     if (ec) {
       throw std::runtime_error(
@@ -113,17 +122,17 @@ ReconCollector::~ReconCollector()
   cleanup();
 }
 
-std::string ReconCollector::spillPath(const gggs::GridIndex & spill_grid) const
+std::string ReconCollector::spillPath() const
 {
-  return (std::filesystem::path(scratch_dir_) /
-         (std::to_string(spill_grid.level()) + "_" + std::to_string(spill_grid.row()) + "_" +
-         std::to_string(spill_grid.column()) + ".spill")).string();
+  if (scratch_dir_.empty()) {
+    return {};
+  }
+  return (std::filesystem::path(scratch_dir_) / kSpillFilename).string();
 }
 
 void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Parameters & parameters)
 {
   const gggs::Level l14(14);
-  const gggs::Level spill_level(kSpillLevel);
   for (const auto & s : soundings) {
     if (!std::isfinite(s.latitude) || !std::isfinite(s.longitude) ||
       !std::isfinite(s.sounding.depth))
@@ -137,18 +146,19 @@ void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Param
     if (scratch_dir_.empty()) {
       continue;
     }
-    const gggs::GridIndex g = spill_level.gridIndex(s.latitude, s.longitude);
-    auto & out = spill_out_[g];
-    if (!out) {
-      out = std::make_unique<std::ofstream>(spillPath(g), std::ios::binary | std::ios::app);
-      if (!*out) {
-        throw std::runtime_error("recon: cannot open spill file " + spillPath(g));
+    // One chronological file: the replay order is the arrival order, which is
+    // what makes phase two byte-identical to a fixed-level import.
+    if (!spill_out_) {
+      spill_out_ = std::make_unique<std::ofstream>(
+        spillPath(), std::ios::binary | std::ios::app);
+      if (!*spill_out_) {
+        throw std::runtime_error("recon: cannot open spill file " + spillPath());
       }
     }
     const SpilledSounding record = SpilledSounding::from(s);
-    out->write(reinterpret_cast<const char *>(&record), sizeof(record));
-    if (!*out) {
-      throw std::runtime_error("recon: failed writing spill file " + spillPath(g));
+    spill_out_->write(reinterpret_cast<const char *>(&record), sizeof(record));
+    if (!*spill_out_) {
+      throw std::runtime_error("recon: failed writing spill file " + spillPath());
     }
     ++spilled_;
   }
@@ -171,38 +181,26 @@ LevelPlan ReconCollector::plan() const
   return levelPlanFor(counts_, decisionDepths(), policy_);
 }
 
-std::vector<gggs::GridIndex> ReconCollector::spilledGrids() const
+void ReconCollector::forEachSpilled(const std::function<void(const GeoSounding &)> & fn)
 {
-  std::vector<gggs::GridIndex> grids;
-  for (const auto & [grid, out] : spill_out_) {
-    grids.push_back(grid);
+  if (spilled_ == 0) {
+    return;  // nothing was spilled (no spill dir, or no finite soundings)
   }
-  return grids;
-}
-
-void ReconCollector::forEachSpilled(
-  const gggs::GridIndex & spill_grid,
-  const std::function<void(const GeoSounding &)> & fn)
-{
-  auto it = spill_out_.find(spill_grid);
-  if (it == spill_out_.end()) {
-    return;  // nothing was spilled there
+  if (spill_out_) {
+    spill_out_->flush();
+    spill_out_->close();
+    spill_out_.reset();
   }
-  if (it->second) {
-    it->second->flush();
-    it->second->close();
-    it->second.reset();  // keep the map entry: the grid was spilled
-  }
-  std::ifstream in(spillPath(spill_grid), std::ios::binary);
+  std::ifstream in(spillPath(), std::ios::binary);
   if (!in) {
-    throw std::runtime_error("recon: cannot read spill file " + spillPath(spill_grid));
+    throw std::runtime_error("recon: cannot read spill file " + spillPath());
   }
   SpilledSounding record;
   while (in.read(reinterpret_cast<char *>(&record), sizeof(record))) {
     fn(record.toGeoSounding());
   }
   if (in.bad()) {
-    throw std::runtime_error("recon: read error on spill file " + spillPath(spill_grid));
+    throw std::runtime_error("recon: read error on spill file " + spillPath());
   }
 }
 
@@ -224,14 +222,14 @@ void ReconCollector::requireFreeSpace(const std::string & dir, uint64_t needed_b
 
 void ReconCollector::cleanup()
 {
-  for (auto & [grid, out] : spill_out_) {
-    if (out) {
-      out->close();
-    }
-    std::error_code ec;
-    std::filesystem::remove(spillPath(grid), ec);
+  if (spill_out_) {
+    spill_out_->close();
+    spill_out_.reset();
   }
-  spill_out_.clear();
+  if (!scratch_dir_.empty()) {
+    std::error_code ec;
+    std::filesystem::remove(spillPath(), ec);
+  }
   if (!scratch_dir_.empty()) {
     std::error_code ec;
     if (std::filesystem::exists(scratch_dir_, ec) && std::filesystem::is_empty(scratch_dir_, ec)) {
