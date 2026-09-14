@@ -148,7 +148,7 @@ void CountGrid::invalidateSat(const gggs::GridIndex & grid) const
 void CountGrid::invalidateHistograms(const gggs::GridIndex & grid) const
 {
   // This tile and its eight neighbours: their boxes read this tile's counts.
-  for (auto it = histogram_cache_.begin(); it != histogram_cache_.end();) {
+  for (auto it = histogram_cache_.begin(); it != histogram_cache_.end(); ) {
     const gggs::GridIndex & g = it->first.first;
     const int dr = static_cast<int>(g.row()) - static_cast<int>(grid.row());
     const int dc = static_cast<int>(g.column()) - static_cast<int>(grid.column());
@@ -485,7 +485,8 @@ uint8_t CountGrid::levelOf(const std::string & dir)
   std::ifstream level_file(std::filesystem::path(dir) / kLevelFile);
   int level = -1;
   if (!(level_file >> level) || level < 0 || level >= static_cast<int>(gggs::levels.size())) {
-    throw std::runtime_error("CountGrid::levelOf: no valid " + std::string(kLevelFile) + " in " + dir);
+    throw std::runtime_error("CountGrid::levelOf: no valid " + std::string(kLevelFile) + " in " +
+        dir);
   }
   return static_cast<uint8_t>(level);
 }

@@ -337,7 +337,9 @@ TEST_F(LevelPlanTest, SingleLevelPolicyEmitsExactlyTheTouchedSet)
   EXPECT_EQ(plan.levels(), only);
   // Emitted == touched at that level.
   std::set<gggs::GridIndex> emitted;
-  for (const auto & grid : plan.tilesAtLevel(10)) {emitted.insert(grid);}
+  for (const auto & grid : plan.tilesAtLevel(10)) {
+    emitted.insert(grid);
+                                                                        }
   gggs::GridIndex a = g;
   while (a.level() > 10) {a = gggs::parent(a);}
   EXPECT_TRUE(emitted.count(a));
@@ -385,7 +387,9 @@ TEST_F(LevelPlanTest, CanonicalJsonRoundTripsAndIsOrderIndependent)
   for (const auto & g : grids) {
     for (uint16_t r = 0; r < CountGrid::kEdge; r += 4) {
       for (uint16_t c = 0; c < CountGrid::kEdge; c += 4) {
-        for (int i = 0; i < 6; ++i) {counts2.add(gggs::CellIndex(g, r, c), 1.5);}
+        for (int i = 0; i < 6; ++i) {
+          counts2.add(gggs::CellIndex(g, r, c), 1.5);
+        }
       }
     }
     depths2[g] = (g == shoal) ? -3.0f : -40.0f;

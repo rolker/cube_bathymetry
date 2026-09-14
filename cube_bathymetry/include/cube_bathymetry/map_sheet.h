@@ -75,7 +75,7 @@ public:
     {
       if (!std::isfinite(scale) || scale <= 0.0f) {
         throw std::invalid_argument(
-                "MapSheet::setCaptureSpacingScale: scale must be finite and positive");
+          "MapSheet::setCaptureSpacingScale: scale must be finite and positive");
       }
       parameters_.capture_spacing_scale = scale;
     }

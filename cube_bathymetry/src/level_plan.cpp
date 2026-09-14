@@ -78,7 +78,8 @@ uint64_t LevelPlanPolicy::requiredObservations() const
 void LevelPlanPolicy::validate() const
 {
   if (!std::isfinite(depth.capture_distance_scale) || depth.capture_distance_scale <= 0.0) {
-    throw std::invalid_argument("level plan policy: capture_distance_scale must be finite and positive");
+    throw std::invalid_argument(
+        "level plan policy: capture_distance_scale must be finite and positive");
   }
   if (depth.finest_level > kSurveyIndexFootprintLevel) {
     throw std::invalid_argument(
@@ -122,7 +123,8 @@ uint8_t levelNoFinerThan(double spacing_m, uint8_t coarsest, uint8_t finest)
   if (at_or_finer.cellSize() < spacing_m * (1.0 - 1e-9)) {
     level -= 1;
   }
-  return static_cast<uint8_t>(std::clamp(level, static_cast<int>(coarsest), static_cast<int>(finest)));
+  return static_cast<uint8_t>(std::clamp(level, static_cast<int>(coarsest),
+      static_cast<int>(finest)));
 }
 
 bool LevelPlan::isEmitted(const gggs::GridIndex & grid) const
@@ -220,7 +222,8 @@ std::string LevelPlan::toJson() const
     for (const auto & grid : grids) {
       if (!first) {out << ",";}
       first = false;
-      out << "[" << static_cast<int>(grid.level()) << "," << grid.row() << "," << grid.column() << "]";
+      out << "[" << static_cast<int>(grid.level()) << "," << grid.row() << "," << grid.column() <<
+        "]";
     }
   }
   out << "],\"tiles\":[";
@@ -360,7 +363,7 @@ std::string LevelPlan::report(double observed_bytes_per_tile) const
       << deficit_tiles << " tiles, " << std::setprecision(3) << deficit_area / 1e6 << " km2\n";
   out << "  ground stored coarser than level 10 (today's fixed level): "
       << std::setprecision(3) << coarse_area / 1e6 << " km2 -- resolution lost against "
-      "today's stores in >36 m water; inherent to the pinned uma#369 ladder\n";
+    "today's stores in >36 m water; inherent to the pinned uma#369 ladder\n";
   return out.str();
 }
 
@@ -491,7 +494,8 @@ LevelPlan levelPlanFor(
       PlannedTile tile;
       tile.index = grid;
       tile.decision_depth = depth;
-      tile.required_level = marine_bathymetry_store::depthAdaptiveLevel(depth, policy.depth).level();
+      tile.required_level = marine_bathymetry_store::depthAdaptiveLevel(depth,
+        policy.depth).level();
       const auto achieved = counts.achievedLevelPercentile(grid, policy.achieved_percentile, n_req);
       tile.achieved_level = (achieved && !achieved->saturated) ?
         static_cast<uint8_t>(std::clamp<int>(achieved->level, coarsest, finest)) : coarsest;

@@ -73,63 +73,66 @@ namespace cube
 
 /// @brief Everything the plan's decisions depend on. Recorded in the plan's
 ///        JSON and in the build fingerprint (ADR-0003 `tiling.policy`).
-struct LevelPlanPolicy
-{
+  struct LevelPlanPolicy
+  {
   /// The uma#369 depth ladder: scale, coarsest and finest level.
-  marine_bathymetry_store::DepthAdaptiveLevelPolicy depth;
+    marine_bathymetry_store::DepthAdaptiveLevelPolicy depth;
 
   /// GGGS level of the count grid; must satisfy `finest <= count_level <= 20`.
   /// The achieved path can only reach this level (achieved spacing is
   /// `(2*lambda+1)*R`), so it defaults to the ladder's fine end.
-  uint8_t count_level = 14;
+    uint8_t count_level = 14;
 
   /// Minimum observations per estimate node (Calder's n_req before the
   /// blunder allowance).
-  uint32_t min_obs_per_node = 5;
+    uint32_t min_obs_per_node = 5;
 
   /// Fraction of raw soundings assumed to be blunders; inflates n_req.
-  double blunder_allowance = 0.2;
+    double blunder_allowance = 0.2;
 
   /// Percentile (0..1) of a level-14 grid's shallowest soundings taken as its
   /// decision depth -- the flier guard. Applied by recon when it builds the
   /// decision depths; recorded here so the plan states what it rested on.
-  double decision_depth_percentile = 0.02;
+    double decision_depth_percentile = 0.02;
 
   /// Percentile (0..1) of achieved spacing over a tile's occupied cells that
   /// decides the tile's achieved level (Calder uses 0.95-0.99).
-  double achieved_percentile = 0.95;
+    double achieved_percentile = 0.95;
 
   /// n_req after the blunder allowance: `ceil(min_obs_per_node * (1 + allowance))`.
-  uint64_t requiredObservations() const;
+    uint64_t requiredObservations() const;
 
   /// @throws std::invalid_argument naming the first violated constraint:
   ///   finest_level <= 14 (a tile finer than the level-14 survey-index footprint
   ///   breaks ADR-0002's dirty-set guarantee), coarsest_level <= finest_level,
   ///   finest_level <= count_level <= 20, a finite positive scale,
   ///   min_obs_per_node >= 1, allowance >= 0, percentiles in [0, 1].
-  void validate() const;
-};
+    void validate() const;
+  };
 
 /// @brief One emitted tile and the two answers that decided its refinement.
-struct PlannedTile
-{
-  gggs::GridIndex index;
+  struct PlannedTile
+  {
+    gggs::GridIndex index;
   /// Level the depth ladder asks for at this tile's decision depth.
-  uint8_t required_level = 0;
+    uint8_t required_level = 0;
   /// Level the count grid supports over this tile (coarsest when saturated).
-  uint8_t achieved_level = 0;
+    uint8_t achieved_level = 0;
   /// The tile's decision depth (negative down, metres; the shallow percentile
   /// rolled up as the minimum over touched children).
-  float decision_depth = 0.0f;
+    float decision_depth = 0.0f;
   /// Whether the descent continued into this tile's children.
-  bool refined = false;
+    bool refined = false;
 
   /// The coarser of required and achieved, in level numbers.
-  uint8_t targetLevel() const {return required_level < achieved_level ? required_level : achieved_level;}
+    uint8_t targetLevel() const
+    {
+      return required_level < achieved_level ? required_level : achieved_level;
+    }
   /// Required finer than achieved: the data does not yet support what the
   /// depth calls for.
-  bool coverageDeficit() const {return required_level > achieved_level;}
-};
+    bool coverageDeficit() const {return required_level > achieved_level;}
+  };
 
 /// @brief The finest GGGS level whose cell is no finer than @p spacing_m,
 ///        clamped to `[coarsest, finest]`.
@@ -138,65 +141,65 @@ struct PlannedTile
 /// its argument (the unsafe direction for an *achieved* resolution), so this
 /// takes the coarser neighbour unless that level's cell equals @p spacing_m
 /// exactly. +infinity (a saturated level of aggregation) maps to @p coarsest.
-uint8_t levelNoFinerThan(double spacing_m, uint8_t coarsest, uint8_t finest);
+  uint8_t levelNoFinerThan(double spacing_m, uint8_t coarsest, uint8_t finest);
 
-class LevelPlan
-{
+  class LevelPlan
+  {
 public:
-  LevelPlan() = default;
+    LevelPlan() = default;
 
-  const LevelPlanPolicy & policy() const noexcept {return policy_;}
+    const LevelPlanPolicy & policy() const noexcept {return policy_;}
 
   /// Emitted tiles keyed by grid, every level.
-  const std::map<gggs::GridIndex, PlannedTile> & tiles() const noexcept {return tiles_;}
+    const std::map < gggs::GridIndex, PlannedTile > & tiles() const noexcept {return tiles_;}
 
   /// Whether @p grid is an emitted tile.
-  bool isEmitted(const gggs::GridIndex & grid) const;
+    bool isEmitted(const gggs::GridIndex & grid) const;
 
   /// Whether @p grid is in the touched set at its level (a superset of the
   /// emitted set: touched but not emitted means the descent stopped above it).
-  bool isTouched(const gggs::GridIndex & grid) const;
+    bool isTouched(const gggs::GridIndex & grid) const;
 
   /// The emitted tiles at @p level, in grid order.
-  std::vector<gggs::GridIndex> tilesAtLevel(uint8_t level) const;
+    std::vector < gggs::GridIndex > tilesAtLevel(uint8_t level) const;
 
   /// Levels holding at least one emitted tile.
-  std::set<uint8_t> levels() const;
+    std::set < uint8_t > levels() const;
 
   /// Every emitted tile containing the geographic position, one per level at
   /// most (the ancestor chain of the position's grid at each emitted level).
-  std::set<gggs::GridIndex> tilesContaining(double latitude, double longitude) const;
+    std::set < gggs::GridIndex > tilesContaining(double latitude, double longitude) const;
 
   /// Levels at which some emitted tile intersects @p bounds.
-  std::set<uint8_t> levelsIntersecting(const gz4d::BoundsDegrees & bounds) const;
+    std::set < uint8_t > levelsIntersecting(const gz4d::BoundsDegrees & bounds) const;
 
   /// Emitted tiles whose required level is finer than their achieved level.
-  std::vector<gggs::GridIndex> coverageDeficit() const;
+    std::vector < gggs::GridIndex > coverageDeficit() const;
 
   /// @brief Canonical JSON: fixed key order, tiles sorted by (level, row,
   ///        column), no whitespace, numbers in a fixed format. Two plans with
   ///        the same policy and tiles serialise to the same bytes regardless of
   ///        construction order.
-  std::string toJson() const;
+    std::string toJson() const;
 
   /// @throws std::runtime_error on malformed input; std::invalid_argument if
   ///         the recorded policy fails validation.
-  static LevelPlan fromJson(const std::string & json);
+    static LevelPlan fromJson(const std::string & json);
 
   /// @brief Operator report: per-level tile counts, ground area and storage
   ///        (dense and at @p observed_bytes_per_tile), the coverage deficit,
   ///        the area landing coarser than level 10, and the estimate-count
   ///        multiplier that parents-alive costs at import time.
-  std::string report(double observed_bytes_per_tile = 2.42e6) const;
+    std::string report(double observed_bytes_per_tile = 2.42e6) const;
 
 private:
-  friend LevelPlan levelPlanFor(
-    const CountGrid &, const std::map<gggs::GridIndex, float> &, const LevelPlanPolicy &);
+    friend LevelPlan levelPlanFor(
+      const CountGrid &, const std::map < gggs::GridIndex, float > &, const LevelPlanPolicy &);
 
-  LevelPlanPolicy policy_;
-  std::map<gggs::GridIndex, PlannedTile> tiles_;
-  std::map<uint8_t, std::set<gggs::GridIndex>> touched_;
-};
+    LevelPlanPolicy policy_;
+    std::map < gggs::GridIndex, PlannedTile > tiles_;
+    std::map < uint8_t, std::set < gggs::GridIndex >> touched_;
+  };
 
 /// @brief Build the plan.
 ///
@@ -207,10 +210,10 @@ private:
 ///        depth; a grid with no depth anywhere beneath it is never emitted.
 /// @throws std::invalid_argument if the policy fails validation or the count
 ///         grid's level differs from `policy.count_level`.
-LevelPlan levelPlanFor(
-  const CountGrid & counts,
-  const std::map<gggs::GridIndex, float> & decision_depth_by_l14_grid,
-  const LevelPlanPolicy & policy);
+  LevelPlan levelPlanFor(
+    const CountGrid & counts,
+    const std::map < gggs::GridIndex, float > &decision_depth_by_l14_grid,
+    const LevelPlanPolicy & policy);
 
 }  // namespace cube
 

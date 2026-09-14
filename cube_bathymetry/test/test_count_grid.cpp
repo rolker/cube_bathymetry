@@ -157,7 +157,8 @@ TEST_F(CountGridTest, BoxesStitchAcrossTileEdges)
   EXPECT_EQ(grid.countInBox(cell(last, last), 0), 1u);
   // lambda 1: the 3x3 box straddles all four tiles.
   EXPECT_EQ(grid.countInBox(cell(last, last), 1), bruteBox(cell(last, last), 1));
-  EXPECT_EQ(grid.countInBox(cell(last, last), 1), 4u);  // corner, north(0,last), east(last,0), ne(0,0)
+  // corner, north(0,last), east(last,0), ne(0,0)
+  EXPECT_EQ(grid.countInBox(cell(last, last), 1), 4u);
   // lambda 3: everything above is within 3 cells of the corner.
   EXPECT_EQ(grid.countInBox(cell(last, last), 3), bruteBox(cell(last, last), 3));
   EXPECT_EQ(grid.countInBox(cell(last, last), 3), 8u);
@@ -172,7 +173,9 @@ TEST_F(CountGridTest, BoxesStitchAcrossTileEdges)
 TEST_F(CountGridTest, LevelOfAggregationIsTheSmallestSatisfyingBox)
 {
   // Five soundings in one cell: lambda 0 already reaches n_req = 5.
-  for (int i = 0; i < 5; ++i) {grid.add(cell(300, 300));}
+  for (int i = 0; i < 5; ++i) {
+    grid.add(cell(300, 300));
+                                                        }
   auto loa = grid.levelOfAggregation(cell(300, 300), 5);
   EXPECT_FALSE(loa.saturated);
   EXPECT_EQ(loa.lambda, 0u);
@@ -204,7 +207,9 @@ TEST_F(CountGridTest, OneFlierMovesOneCountByOne)
   // The count-based decision is immune to a flier's *depth*: a blunder is one
   // sounding like any other, so it changes the box count by exactly one and
   // cannot by itself refine a cell that the other soundings do not support.
-  for (int i = 0; i < 4; ++i) {grid.add(cell(50, 50));}
+  for (int i = 0; i < 4; ++i) {
+    grid.add(cell(50, 50));
+                                                      }
   auto before = grid.levelOfAggregation(cell(50, 50), 5);
   grid.add(cell(50, 50));  // "the flier" -- indistinguishable in a count grid
   auto after = grid.levelOfAggregation(cell(50, 50), 5);
@@ -218,7 +223,9 @@ TEST_F(CountGridTest, PercentileOverOccupiedCellsInsideACoarseGrid)
   // Dense patch: 25 soundings per cell over a 4x4 block -> lambda 0 everywhere.
   for (uint16_t r = 400; r < 404; ++r) {
     for (uint16_t c = 400; c < 404; ++c) {
-      for (int i = 0; i < 25; ++i) {grid.add(cell(r, c));}
+      for (int i = 0; i < 25; ++i) {
+        grid.add(cell(r, c));
+      }
     }
   }
   // Sparse patch far away: five lone soundings 10 cells apart along one row.
@@ -260,7 +267,9 @@ TEST_F(CountGridTest, LevelHistogramPercentileMatchesTheSpacingPercentile)
   // 61R = 3.5 m -> level 8 (3.62 m cells); 81R = 4.6 m -> level 7 (7.25 m).
   for (uint16_t r = 400; r < 404; ++r) {
     for (uint16_t c = 400; c < 404; ++c) {
-      for (int i = 0; i < 25; ++i) {grid.add(cell(r, c));}
+      for (int i = 0; i < 25; ++i) {
+        grid.add(cell(r, c));
+      }
     }
   }
   for (uint16_t c = 600; c <= 640; c += 10) {
@@ -283,15 +292,19 @@ TEST_F(CountGridTest, LevelHistogramPercentileMatchesTheSpacingPercentile)
   auto p80 = grid.achievedLevelPercentile(coarse, 0.80, 5);  // rank 17 -> first level-8 vote
   ASSERT_TRUE(p80.has_value());
   EXPECT_EQ(p80->level, 8);
-  EXPECT_FALSE(grid.achievedLevelPercentile(gggs::Level(12).gridIndex(43.5, -70.2), 0.95, 5).has_value());
+  EXPECT_FALSE(grid.achievedLevelPercentile(gggs::Level(12).gridIndex(43.5, -70.2), 0.95,
+      5).has_value());
 
   // The cache follows the data: a new sounding changes the histogram.
   const CountGrid::LevelHistogram before = grid.achievedLevelHistogram(home, 5);
-  for (int i = 0; i < 4; ++i) {grid.add(cell(700, 600));}  // 600 now holds 5: lambda 0 there
+  for (int i = 0; i < 4; ++i) {
+    grid.add(cell(700, 600));
+                                                        }  // 600 now holds 5: lambda 0 there
   const CountGrid::LevelHistogram after = grid.achievedLevelHistogram(home, 5);
   EXPECT_NE(before, after) << "histogram must be recomputed after an add";
   EXPECT_EQ(after[14], 17u);
-  EXPECT_THROW(grid.achievedLevelHistogram(CountGrid::neighbourGrid(home, 5, 5), 5), std::invalid_argument);
+  EXPECT_THROW(grid.achievedLevelHistogram(CountGrid::neighbourGrid(home, 5, 5), 5),
+      std::invalid_argument);
   EXPECT_THROW(grid.achievedLevelHistogram(home, 0), std::invalid_argument);
 }
 
@@ -313,7 +326,9 @@ TEST_F(CountGridTest, TileInsideFollowsTheQuadtree)
   EXPECT_TRUE(CountGrid::tileInside(home, home));
   EXPECT_TRUE(CountGrid::tileInside(home, gggs::parent(home)));
   gggs::GridIndex g = home;
-  for (int i = 0; i < 6; ++i) {g = gggs::parent(g);}
+  for (int i = 0; i < 6; ++i) {
+    g = gggs::parent(g);
+                                                   }
   EXPECT_EQ(g.level(), 8);
   EXPECT_TRUE(CountGrid::tileInside(home, g));
   EXPECT_FALSE(CountGrid::tileInside(gggs::parent(home), home));  // coarser is never inside finer
@@ -349,7 +364,9 @@ TEST_F(CountGridTest, MergeIsAdditiveAndSaturating)
 
   // Saturation survives a merge.
   CountGrid a(kLevel), b(kLevel);
-  for (int i = 0; i < 40000; ++i) {a.add(cell(2, 2)); b.add(cell(2, 2));}
+  for (int i = 0; i < 40000; ++i) {
+    a.add(cell(2, 2)); b.add(cell(2, 2));
+                                                                        }
   a.merge(b);
   EXPECT_EQ(a.countAt(cell(2, 2)), std::numeric_limits<CountGrid::Count>::max());
 }
