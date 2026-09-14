@@ -21,6 +21,9 @@
 
 #include "cube_bathymetry/build_fingerprint.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -197,16 +200,25 @@ void BuildFingerprint::write(const std::string & store_dir) const
   const fs::path final_path = fs::path(store_dir) / kFilename;
   const fs::path tmp_path = final_path.string() + ".tmp";
   {
-    // ADR-0003: write the temp file, flush it to disk, then rename over the
-    // previous fingerprint so a partial write never corrupts it.
+    // ADR-0003: write the temp file, fsync it to DISK, then rename over the
+    // previous fingerprint so a partial write never corrupts it. fflush alone
+    // only pushes the bytes out of the C library's buffer into the page cache;
+    // a machine that loses power between the rename and the kernel's writeback
+    // would then publish a fingerprint whose bytes never reached the platter,
+    // and the next run would trust a truncated or empty file as the record of
+    // what the store was built from.
     std::FILE * f = std::fopen(tmp_path.c_str(), "w");
     if (!f) {
       throw std::runtime_error("build_fingerprint: cannot create " + tmp_path.string());
     }
     const std::string text = toJson();
-    const bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size() &&
+    bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size() &&
       std::fflush(f) == 0;
-    std::fclose(f);
+    if (ok) {
+      const int fd = ::fileno(f);
+      ok = fd >= 0 && ::fsync(fd) == 0;
+    }
+    ok = (std::fclose(f) == 0) && ok;
     if (!ok) {
       fs::remove(tmp_path);
       throw std::runtime_error("build_fingerprint: write failed for " + tmp_path.string());
@@ -217,6 +229,13 @@ void BuildFingerprint::write(const std::string & store_dir) const
   if (ec) {
     fs::remove(tmp_path);
     throw std::runtime_error("build_fingerprint: rename failed: " + ec.message());
+  }
+  // The rename itself is a directory operation: fsync the directory too, or the
+  // new name can be lost while the (synced) file contents survive nameless.
+  const int dir_fd = ::open(store_dir.c_str(), O_RDONLY | O_DIRECTORY);
+  if (dir_fd >= 0) {
+    ::fsync(dir_fd);
+    ::close(dir_fd);
   }
 }
 
