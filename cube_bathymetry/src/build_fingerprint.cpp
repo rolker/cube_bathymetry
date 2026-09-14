@@ -59,6 +59,9 @@ bool BuildFingerprint::isStale(const BuildFingerprint & previous) const
       return true;
     }
   }
+  if (iho_order != previous.iho_order) {
+    return true;
+  }
   if (!sameDouble(policy.capture_distance_scale, previous.policy.capture_distance_scale) ||
     !sameDouble(policy.capture_spacing_scale, previous.policy.capture_spacing_scale))
   {
@@ -69,7 +72,11 @@ bool BuildFingerprint::isStale(const BuildFingerprint & previous) const
       policy.finest_level != previous.policy.finest_level ||
       policy.count_level != previous.policy.count_level ||
       policy.min_obs_per_node != previous.policy.min_obs_per_node ||
-      !sameDouble(policy.blunder_allowance, previous.policy.blunder_allowance))
+      !sameDouble(policy.depth_adaptive_scale, previous.policy.depth_adaptive_scale) ||
+      !sameDouble(policy.blunder_allowance, previous.policy.blunder_allowance) ||
+      !sameDouble(
+        policy.decision_depth_percentile, previous.policy.decision_depth_percentile) ||
+      !sameDouble(policy.achieved_percentile, previous.policy.achieved_percentile))
     {
       return true;
     }
@@ -88,21 +95,28 @@ std::string BuildFingerprint::toJson() const
   } else {
     tiling["cell_size_m"] = nullptr;
   }
+  tiling["iho_order"] = iho_order;
   nlohmann::json p;
   p["capture_distance_scale"] = policy.capture_distance_scale;
   p["capture_spacing_scale"] = policy.capture_spacing_scale;
   if (mode == Mode::DepthAdaptive) {
+    p["depth_adaptive_scale"] = policy.depth_adaptive_scale;
     p["coarsest_level"] = policy.coarsest_level;
     p["finest_level"] = policy.finest_level;
     p["count_level"] = policy.count_level;
     p["min_obs_per_node"] = policy.min_obs_per_node;
     p["blunder_allowance"] = policy.blunder_allowance;
+    p["decision_depth_percentile"] = policy.decision_depth_percentile;
+    p["achieved_percentile"] = policy.achieved_percentile;
   } else {
+    p["depth_adaptive_scale"] = nullptr;
     p["coarsest_level"] = nullptr;
     p["finest_level"] = nullptr;
     p["count_level"] = nullptr;
     p["min_obs_per_node"] = nullptr;
     p["blunder_allowance"] = nullptr;
+    p["decision_depth_percentile"] = nullptr;
+    p["achieved_percentile"] = nullptr;
   }
   tiling["policy"] = p;
   tiling["levels_used"] = std::vector<int>(levels_used.begin(), levels_used.end());
@@ -138,15 +152,19 @@ BuildFingerprint BuildFingerprint::fromJson(const std::string & json)
     if (tiling.contains("cell_size_m") && !tiling.at("cell_size_m").is_null()) {
       f.cell_size_m = tiling.at("cell_size_m").get<double>();
     }
+    f.iho_order = tiling.at("iho_order").get<std::string>();
     const auto & p = tiling.at("policy");
     f.policy.capture_distance_scale = p.at("capture_distance_scale").get<double>();
     f.policy.capture_spacing_scale = p.at("capture_spacing_scale").get<double>();
     if (f.mode == Mode::DepthAdaptive) {
+      f.policy.depth_adaptive_scale = p.at("depth_adaptive_scale").get<double>();
       f.policy.coarsest_level = p.at("coarsest_level").get<uint8_t>();
       f.policy.finest_level = p.at("finest_level").get<uint8_t>();
       f.policy.count_level = p.at("count_level").get<uint8_t>();
       f.policy.min_obs_per_node = p.at("min_obs_per_node").get<uint32_t>();
       f.policy.blunder_allowance = p.at("blunder_allowance").get<double>();
+      f.policy.decision_depth_percentile = p.at("decision_depth_percentile").get<double>();
+      f.policy.achieved_percentile = p.at("achieved_percentile").get<double>();
     }
     for (const auto & level : tiling.at("levels_used")) {
       f.levels_used.insert(level.get<uint8_t>());

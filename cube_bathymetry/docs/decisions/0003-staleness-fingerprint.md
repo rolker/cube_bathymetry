@@ -124,14 +124,18 @@ implementation** of the fingerprint.
   "tiling": {
     "mode": "fixed" | "depth_adaptive",
     "cell_size_m": 0.906,
+    "iho_order": "order1a",
     "policy": {
       "capture_distance_scale": 0.05,
       "capture_spacing_scale": 0.71,
+      "depth_adaptive_scale": 0.05,
       "coarsest_level": 8,
       "finest_level": 14,
       "count_level": 14,
       "min_obs_per_node": 5,
-      "blunder_allowance": 0.2
+      "blunder_allowance": 0.2,
+      "decision_depth_percentile": 0.02,
+      "achieved_percentile": 0.95
     },
     "levels_used": [8, 9, 10]
   }
@@ -140,11 +144,22 @@ implementation** of the fingerprint.
 
 - **`mode`**: `fixed` (one sheet at `cell_size_m`, the requested `-r`) or
   `depth_adaptive` (a level plan).
-- **`policy`** is written in **both** modes: the capture gate (ADR-0002
-  amendment, decision 4) changes fixed-level output too, so a fixed store's
-  fingerprint must carry it to be told stale when the gate changes — the job
-  `cell_size_m` did alone in version 1. The depth-adaptive-only keys are `null`
-  in fixed mode.
+- **`policy`** and **`iho_order`** are written in **both** modes: the capture
+  gate (ADR-0002 amendment, decision 4) and the IHO order's error model change
+  fixed-level output too, so a fixed store's fingerprint must carry them to be
+  told stale when either changes — the job `cell_size_m` did alone in version 1.
+  The depth-adaptive-only keys are `null` in fixed mode.
+- **The depth-adaptive keys are every input that decides the plan**, not only
+  the level bounds: the uma#369 ladder scale (`--depth-adaptive-scale`,
+  recorded as `depth_adaptive_scale` — distinct from the capture gate's
+  `capture_distance_scale`, which shares a field name in `LevelPlanPolicy`) and
+  the two percentiles (`--decision-depth-percentile`, `--achieved-percentile`)
+  move tiles between levels exactly as `coarsest_level`/`finest_level` do. A
+  fingerprint that omitted them would call a differently-tiled store fresh.
+- **`capture_distance_scale` has no CLI setter today** — it is a compile-time
+  default — so that one key is inert until one exists. It is recorded anyway:
+  the day it becomes settable, stores built before the change are correctly
+  told stale, and a written-but-inert key costs nothing.
 - **`levels_used`**: every level holding native tiles from this build.
   Informational; it never makes a store stale.
 - **No level-plan hash.** Overlapping native levels are the normal state
@@ -158,6 +173,7 @@ implementation** of the fingerprint.
 | `schema_version` != 2 | Full regen |
 | `tiling.mode` changed | Full regen |
 | fixed mode: `cell_size_m` changed | Full regen |
+| `iho_order` changed | Full regen |
 | any `policy` field changed (the depth-adaptive keys only in that mode) | Full regen |
 | `levels_used` changed | No effect |
 

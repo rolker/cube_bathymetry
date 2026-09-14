@@ -43,23 +43,33 @@
 ///   "tiling": {
 ///     "mode": "fixed" | "depth_adaptive",
 ///     "cell_size_m": 0.906,            // fixed mode only, else null
+///     "iho_order": "order1a",
 ///     "policy": {
 ///       "capture_distance_scale": 0.05,
 ///       "capture_spacing_scale": 0.71,
-///       "coarsest_level": 8,           // depth_adaptive only, else null
-///       "finest_level": 14,            // "
-///       "count_level": 14,             // "
-///       "min_obs_per_node": 5,         // "
-///       "blunder_allowance": 0.2       // "
+///       "depth_adaptive_scale": 0.05,       // depth_adaptive only, else null
+///       "coarsest_level": 8,                // "
+///       "finest_level": 14,                 // "
+///       "count_level": 14,                  // "
+///       "min_obs_per_node": 5,              // "
+///       "blunder_allowance": 0.2,           // "
+///       "decision_depth_percentile": 0.02,  // "
+///       "achieved_percentile": 0.95         // "
 ///     },
 ///     "levels_used": [8, 9, 10]
 ///   }
 /// }
 /// ```
 ///
-/// `policy` is written in **both** modes: the capture gate changes fixed-level
-/// output too, so a fixed store whose fingerprint omitted it could not be told
-/// stale when the gate changes -- the job `cell_size_m` did in schema 1.
+/// `policy` and `iho_order` are written in **both** modes: the capture gate and
+/// the IHO order's error model change fixed-level output too, so a fixed store
+/// whose fingerprint omitted them could not be told stale when they change --
+/// the job `cell_size_m` did in schema 1.
+///
+/// The depth-adaptive keys are **every** input that decides the level plan:
+/// the ladder scale `--depth-adaptive-scale` and the two percentiles
+/// (`--decision-depth-percentile`, `--achieved-percentile`) move tiles between
+/// levels exactly as the level bounds do.
 ///
 /// **This is ADR-0003's first, partial implementation.** The other keys
 /// (`tool_version`, the bag list and hashes, `reference_store`,
@@ -80,20 +90,32 @@ namespace cube
 
     struct Policy
     {
+    /// The node capture gate's depth term (`Parameters::capture_distance_scale`).
+    /// No CLI setter today -- it is a compile-time default -- so this key is
+    /// inert until one exists; it is recorded so that the day it becomes
+    /// settable, stores built before the change are correctly told stale.
       double capture_distance_scale = 0.05;
+    /// The node capture gate's spacing term (`--capture-spacing-scale`).
       double capture_spacing_scale = 0.71;
     // Depth-adaptive only; ignored (written null) in fixed mode.
+    /// The uma#369 ladder scale (`--depth-adaptive-scale`) -- NOT the capture
+    /// gate's scale above, despite sharing a name in `LevelPlanPolicy`.
+      double depth_adaptive_scale = 0.05;
       uint8_t coarsest_level = 8;
       uint8_t finest_level = 14;
       uint8_t count_level = 14;
       uint32_t min_obs_per_node = 5;
       double blunder_allowance = 0.2;
+      double decision_depth_percentile = 0.02;
+      double achieved_percentile = 0.95;
     };
 
     int schema_version = kSchemaVersion;
     Mode mode = Mode::Fixed;
   /// Fixed mode: the requested cell size the single sheet was built with.
     std::optional < double > cell_size_m;
+  /// IHO order the error model ran at (`--iho-order`); both modes.
+    std::string iho_order;
     Policy policy;
   /// Every GGGS level at which the store holds native tiles from this build.
     std::set < uint8_t > levels_used;

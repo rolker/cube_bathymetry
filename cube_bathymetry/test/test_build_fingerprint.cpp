@@ -44,9 +44,13 @@ BuildFingerprint adaptive()
 {
   BuildFingerprint f;
   f.mode = BuildFingerprint::Mode::DepthAdaptive;
+  f.iho_order = "order1a";
+  f.policy.depth_adaptive_scale = 0.05;
   f.policy.coarsest_level = 8;
   f.policy.finest_level = 14;
   f.policy.count_level = 14;
+  f.policy.decision_depth_percentile = 0.02;
+  f.policy.achieved_percentile = 0.95;
   f.levels_used = {8, 9, 10, 13};
   return f;
 }
@@ -56,6 +60,7 @@ BuildFingerprint fixed(double cell)
   BuildFingerprint f;
   f.mode = BuildFingerprint::Mode::Fixed;
   f.cell_size_m = cell;
+  f.iho_order = "order1a";
   f.levels_used = {10};
   return f;
 }
@@ -73,6 +78,13 @@ TEST(BuildFingerprint, RoundTripsBothModes)
     }
     EXPECT_DOUBLE_EQ(back.policy.capture_distance_scale, original.policy.capture_distance_scale);
     EXPECT_DOUBLE_EQ(back.policy.capture_spacing_scale, original.policy.capture_spacing_scale);
+    EXPECT_EQ(back.iho_order, original.iho_order);
+    if (original.mode == BuildFingerprint::Mode::DepthAdaptive) {
+      EXPECT_DOUBLE_EQ(back.policy.depth_adaptive_scale, original.policy.depth_adaptive_scale);
+      EXPECT_DOUBLE_EQ(
+        back.policy.decision_depth_percentile, original.policy.decision_depth_percentile);
+      EXPECT_DOUBLE_EQ(back.policy.achieved_percentile, original.policy.achieved_percentile);
+    }
     EXPECT_EQ(back.levels_used, original.levels_used);
     EXPECT_FALSE(back.isStale(original));
     EXPECT_FALSE(original.isStale(back));
@@ -93,6 +105,10 @@ TEST(BuildFingerprint, PolicyIsWrittenInFixedModeToo)
   c.policy.finest_level = 12;
   EXPECT_FALSE(a.isStale(c));
   EXPECT_NE(a.toJson().find("\"finest_level\": null"), std::string::npos);
+  EXPECT_NE(a.toJson().find("\"achieved_percentile\": null"), std::string::npos);
+  EXPECT_NE(a.toJson().find("\"depth_adaptive_scale\": null"), std::string::npos);
+  // The IHO order is written in fixed mode (not null): it picks the error model.
+  EXPECT_NE(a.toJson().find("\"iho_order\": \"order1a\""), std::string::npos);
 }
 
 TEST(BuildFingerprint, StalenessRules)
@@ -121,6 +137,26 @@ TEST(BuildFingerprint, StalenessRules)
   auto scale = base;
   scale.policy.capture_distance_scale = 0.06;
   EXPECT_TRUE(base.isStale(scale));
+
+  // Every input the level plan rests on moves tiles between levels, so each one
+  // must make a store stale (the plan-deciding keys, #143 review must-fix 4).
+  auto ladder = base;
+  ladder.policy.depth_adaptive_scale = 0.08;
+  EXPECT_TRUE(base.isStale(ladder));
+  auto decision = base;
+  decision.policy.decision_depth_percentile = 0.05;
+  EXPECT_TRUE(base.isStale(decision));
+  auto achieved = base;
+  achieved.policy.achieved_percentile = 0.99;
+  EXPECT_TRUE(base.isStale(achieved));
+
+  // The IHO order picks the error model, so it decides output in both modes.
+  auto order = base;
+  order.iho_order = "special";
+  EXPECT_TRUE(base.isStale(order));
+  auto fixed_order = fixed(1.0);
+  fixed_order.iho_order = "special";
+  EXPECT_TRUE(fixed(1.0).isStale(fixed_order));
 
   // levels_used is informational.
   auto levels = base;

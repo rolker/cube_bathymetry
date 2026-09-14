@@ -1085,22 +1085,28 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
 /// a failure is reported, never fatal -- the store is already written.
 void writeFingerprint(
   const std::string & store_dir, cube::BuildFingerprint::Mode mode, double cell_size_m,
-  const cube::Parameters & parameters, const cube::LevelPlanPolicy * policy,
-  const std::set<uint8_t> & levels_used)
+  const cube::Parameters & parameters, const std::string & iho_order,
+  const cube::LevelPlanPolicy * policy, const std::set<uint8_t> & levels_used)
 {
   cube::BuildFingerprint f;
   f.mode = mode;
   if (mode == cube::BuildFingerprint::Mode::Fixed) {
     f.cell_size_m = cell_size_m;
   }
+  f.iho_order = iho_order;
   f.policy.capture_distance_scale = parameters.capture_distance_scale;
   f.policy.capture_spacing_scale = parameters.capture_spacing_scale;
   if (policy) {
+    // Every input the level plan rests on: the ladder, its bounds, the count
+    // level, the observation requirement and both percentiles.
+    f.policy.depth_adaptive_scale = policy->depth.capture_distance_scale;
     f.policy.coarsest_level = policy->depth.coarsest_level;
     f.policy.finest_level = policy->depth.finest_level;
     f.policy.count_level = policy->count_level;
     f.policy.min_obs_per_node = policy->min_obs_per_node;
     f.policy.blunder_allowance = policy->blunder_allowance;
+    f.policy.decision_depth_percentile = policy->decision_depth_percentile;
+    f.policy.achieved_percentile = policy->achieved_percentile;
   }
   f.levels_used = levels_used;
   try {
@@ -1249,7 +1255,8 @@ int cube_depth_adaptive_finish(
     std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count());
   writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::DepthAdaptive, 0.0,
-    accumulator.sheetAt(*plan->levels().begin()).parameters(), &policy, plan->levels());
+    accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &policy,
+    plan->levels());
   std::cout << "done!" << std::endl;
   return 0;
 }
@@ -1916,7 +1923,7 @@ int main(int argc, char * argv[])
   // store records its mode, the requested cell size and the capture policy.
   writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
-    nullptr, {geo_map_sheet.gridLevel().level()});
+    iho_order, nullptr, {geo_map_sheet.gridLevel().level()});
 
   if (!finishTileReport(
       tile_reporter, tile_size_report_path, tile_refresh_interval_s,
