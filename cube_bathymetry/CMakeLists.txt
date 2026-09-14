@@ -46,6 +46,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 
 find_package(GDAL CONFIG REQUIRED)
+find_package(nlohmann_json REQUIRED)  # level plan JSON (#143)
 
 add_library(cube_bathymetry
   src/angular_response_curve.cpp
@@ -126,6 +127,31 @@ target_link_libraries(cube_bathymetry_survey_index_query
   SQLite::SQLite3
 )
 install(TARGETS cube_bathymetry_survey_index_query EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# Depth-adaptive level planning (#143): the sounding count grid + Calder's
+# level-of-aggregation query, the level plan, and the build fingerprint. Pure
+# (no ROS, no CUBE estimator) so the plan can be computed, inspected and reused
+# without the estimator; its own target so the tiled-raster-store dependency
+# stays scoped to the offline tools that plan.
+add_library(cube_bathymetry_level_plan
+  src/count_grid.cpp
+  src/level_plan.cpp
+)
+target_include_directories(cube_bathymetry_level_plan PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_level_plan
+  marine_autonomy::marine_autonomy   # gggs (Level, GridIndex, CellIndex, parent)
+  marine_tiled_raster_store::marine_tiled_raster_store  # count-tile GeoTIFF io
+  marine_bathymetry_store::marine_bathymetry_store  # depthAdaptiveLevel (uma#369)
+  nlohmann_json::nlohmann_json
+)
+install(TARGETS cube_bathymetry_level_plan EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -454,6 +480,12 @@ if(BUILD_TESTING)
     BATCH_REGEN_BAG_EXE="$<TARGET_FILE:batch_regen_bag>"
   )
   add_dependencies(test_survey_index_query batch_regen_bag)
+
+  # Depth-adaptive level planning (#143): count grid + level of aggregation.
+  ament_add_gtest(test_count_grid test/test_count_grid.cpp)
+  target_link_libraries(test_count_grid cube_bathymetry_level_plan)
+  ament_add_gtest(test_level_plan test/test_level_plan.cpp)
+  target_link_libraries(test_level_plan cube_bathymetry_level_plan)
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers
