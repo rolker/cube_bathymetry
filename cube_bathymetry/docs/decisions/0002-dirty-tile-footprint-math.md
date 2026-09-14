@@ -184,6 +184,15 @@ and rolls each expanded tile up to the **emitted tile at every level the plan
 holds over it**. Parents are estimated in full under their children, so each
 one is dirty; the result is a conservative superset exactly as before.
 
+A footprint tile with **no** emitted ancestor at any plan level — ground the
+plan never covered, such as a plan computed from an earlier survey, or a margin
+tile past the plan's edge — is rolled up to the plan's **coarsest** level and
+kept. The dirty set may therefore name a tile the plan does not emit; rebuilding
+it writes nothing, which is the cheap direction. Dropping it (the alternative)
+would narrow the dirty set below the footprint and lose the new soundings, and
+no downstream guard catches that: the CLI's index-miss guard fires only on a
+*total* miss (an empty dirty set), so a partial miss would have been silent.
+
 The one-L14-tile margin survives unchanged: with `finest_level <= 14` no
 emitted tile is finer than the index footprint, so the ~54 m margin still
 dominates the ≤3 m influence radius at every level. The roll-up **throws**

@@ -367,6 +367,48 @@ TEST_F(DirtyTileQuery, PlanRollsUpToEveryEmittedLevel)
   }
 }
 
+// Ground the plan never covered must still be named (#143 review must-fix 5).
+// ADR-0002's guarantee is a conservative SUPERSET: a footprint tile with no
+// emitted ancestor at any plan level -- a plan computed from an earlier survey,
+// say -- is rolled up to the plan's coarsest level, never dropped. The earlier
+// code emitted no key for it, and only a TOTAL miss (an empty dirty set) was
+// caught downstream, so a partial miss lost the new soundings silently.
+TEST_F(DirtyTileQuery, OffPlanGroundIsRolledUpNotDropped)
+{
+  const gggs::GridIndex fp14 = gggs::Level(kIndexLevel).gridIndex(kLat, kLon);
+  insertBag(1, "/data/bagNew");
+  insertPass(1, fp14, "mbes-bathy", "/mbes", 100, 200, 40);
+
+  // A plan whose only emitted tile is a level-12 tile on the far side of the
+  // world: nothing over this footprint is emitted at any plan level.
+  const gggs::GridIndex elsewhere = gggs::Level(12).gridIndex(-33.87, 151.21);
+  ASSERT_FALSE(cube::LevelPlan::fromJson(planJson({elsewhere})).isEmitted(
+      gggs::Level(12).gridIndex(kLat, kLon)));
+  const cube::LevelPlan plan = cube::LevelPlan::fromJson(planJson({elsewhere}));
+
+  const auto dirty = cube::dirtyTiles(db_, {"/data/bagNew"}, plan);
+  ASSERT_FALSE(dirty.empty()) << "off-plan ground must not vanish from the dirty set";
+  const gggs::GridIndex expected = gggs::Level(12).gridIndex(kLat, kLon);
+  EXPECT_TRUE(contains(dirty, expected))
+    << "the footprint's ancestor at the plan's coarsest level must be dirty";
+  for (const auto & dt : dirty) {
+    EXPECT_EQ(dt.tile.level(), 12) << "rolled up to the plan's coarsest level";
+  }
+  const cube::DirtyTile * dt = find(dirty, expected);
+  ASSERT_NE(dt, nullptr);
+  EXPECT_EQ(dt->passes.size(), 1u) << "the contributing pass travels with it";
+}
+
+// A plan that emits nothing cannot be rolled up to at all: refuse rather than
+// answer "no dirty tiles", which a consumer would read as "nothing to rebuild".
+TEST_F(DirtyTileQuery, PlanWithNoEmittedTilesIsRefused)
+{
+  insertBag(1, "/data/bagNew");
+  insertPass(1, gggs::Level(kIndexLevel).gridIndex(kLat, kLon), "mbes-bathy", "/mbes", 1, 2, 3);
+  const cube::LevelPlan empty_plan = cube::LevelPlan::fromJson(planJson({}));
+  EXPECT_THROW(cube::dirtyTiles(db_, {"/data/bagNew"}, empty_plan), std::invalid_argument);
+}
+
 // A footprint COARSER than an emitted tile cannot be rolled up to it: the
 // query throws (the dry-run's catch falls back to full regen) rather than
 // silently mis-levelling the dirty set.

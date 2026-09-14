@@ -395,9 +395,13 @@ std::vector<DirtyTile> dirtyTiles(
   const std::string & sensor_filter)
 {
   const std::set<std::uint8_t> levels = plan.levels();
+  if (levels.empty()) {
+    throw std::invalid_argument("cube::dirtyTiles: the level plan emits no tiles");
+  }
+  const std::uint8_t coarsest = *levels.begin();
   return dirtyTilesBy(
     db, new_bag_paths, sensor_filter,
-    [&plan, levels](const gggs::GridIndex & tile) {
+    [&plan, levels, coarsest](const gggs::GridIndex & tile) {
       // The emitted ancestor at every plan level over this footprint tile.
       // ancestorAtLevel throws if the tile is coarser than the level -- the
       // "footprint coarser than an emitted tile" case is never silently
@@ -408,6 +412,16 @@ std::vector<DirtyTile> dirtyTiles(
         if (plan.isEmitted(a)) {
           keys.push_back(a);
         }
+      }
+      if (keys.empty()) {
+        // Ground the plan never covered: the new bags reach somewhere the plan
+        // that built this store emits nothing (a plan computed from an earlier
+        // survey, or a footprint margin tile beyond its edge). Dropping it would
+        // silently narrow the dirty set, which ADR-0002 forbids -- the whole
+        // guarantee is that the set is a conservative SUPERSET. Name the ground
+        // at the plan's coarsest level instead: an extra tile costs a rebuild
+        // that emits nothing, a missing one loses soundings.
+        keys.push_back(ancestorAtLevel(tile, coarsest));
       }
       return keys;
     });

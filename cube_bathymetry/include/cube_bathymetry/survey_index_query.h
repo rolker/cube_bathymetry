@@ -115,12 +115,20 @@ namespace cube
   ///        to the emitted tile at EVERY level the plan holds over it (parents
   ///        are estimated in full under their children, so each is dirty).
   ///
-  /// A conservative superset, as ADR-0002 requires. Throws std::invalid_argument
-  /// (from the roll-up) if an index footprint tile is COARSER than an emitted
-  /// tile over it: the index footprint level is read from the DB and may be
-  /// mixed, and a level plan's finest level is validated <= 14, so this cannot
-  /// happen for a level-14 index -- but it must never be silently mis-levelled.
-  /// The dry-run CLI's catch falls back to a full regen.
+  /// A conservative superset, as ADR-0002 requires. A footprint tile with no
+  /// emitted ancestor at ANY plan level -- ground the plan never covered, e.g.
+  /// a plan computed from an earlier survey, or a margin tile past its edge --
+  /// is rolled up to the plan's COARSEST level and kept, never dropped: the
+  /// result may therefore name a tile the plan does not emit. That costs a
+  /// rebuild which writes nothing; omitting it would narrow the dirty set and
+  /// lose the new soundings, which is the one failure mode ADR-0002 rules out.
+  ///
+  /// Throws std::invalid_argument (from the roll-up) if an index footprint tile
+  /// is COARSER than an emitted tile over it: the index footprint level is read
+  /// from the DB and may be mixed, and a level plan's finest level is validated
+  /// <= 14, so this cannot happen for a level-14 index -- but it must never be
+  /// silently mis-levelled. The dry-run CLI's catch falls back to a full regen.
+  /// Also throws std::invalid_argument if @p plan emits no tiles at all.
   std::vector < DirtyTile > dirtyTiles(
     sqlite3 * db,
     const std::vector < std::string > &new_bag_paths,
