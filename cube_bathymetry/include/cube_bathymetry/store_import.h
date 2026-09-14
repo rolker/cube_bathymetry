@@ -28,6 +28,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cube_bathymetry/geo_grid.h"
@@ -438,6 +439,24 @@ public:
     void persistResidentTile(const gggs::GridIndex & index);
 
   /// @brief Tiles currently resident in RAM.
+  /// @brief Persist one resident tile (bathy + backscatter + intensity spill)
+  ///        and drop it from RAM (cube_bathymetry#143 -- the eviction primitive
+  ///        a multi-level import drives across its per-level accumulators).
+  ///
+  /// Preserves both eviction invariants: a persist that THROWS leaves the tile
+  /// resident (logged, returns false -- RAM stays transiently over budget rather
+  /// than losing unsaved data), and a dropped tile is recorded in the evicted
+  /// set so a later `addBatch` reloads it before adding (lossless blend).
+  /// @return true if the tile was dropped; false if it stays resident.
+    bool persistAndDrop(const gggs::GridIndex & index);
+
+  /// @brief The resident tiles and their last-touch stamps (comparable across
+  ///        sheets only when they share a touch clock -- `GeoMapSheet::setTouchClock`).
+    std::vector < std::pair < gggs::GridIndex, uint64_t >> residentTiles() const;
+
+    GeoMapSheet & sheet() {return sheet_;}
+    const GeoMapSheet & sheet() const {return sheet_;}
+
     std::size_t residentTileCount() const;
   /// @brief Indices evicted to disk and not yet reloaded.
     const std::set < gggs::GridIndex > & evictedIndices() const {
