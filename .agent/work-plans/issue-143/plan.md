@@ -585,3 +585,60 @@ uma#386 (independent).
   stitched across count-tile edges, saturation = coarsest; equivalence stated
   against the persisted set and pinned from the requested resolution; Files
   row spill partition corrected to level 10.
+
+## Implementation sync (2026-09-14, on the branch)
+
+Where the committed implementation departs from the text above (inline sync
+per `plan-task`'s during-implementation rules):
+
+- **Emission rule (algorithm step 5)**: a grid is emitted only when its target
+  is **at least its own level**; a child whose own target is coarser than its
+  level is not emitted (its parent carries the ground). Step 5's "emit `g`
+  regardless" produced level-13 tiles over the deep plain beside a shoal; the
+  ADR-0002 amendment records the corrected rule.
+- **Achieved level is evaluated once per count cell** via a per-tile histogram
+  of achieved level (`CountGrid::achievedLevelHistogram` /
+  `achievedLevelPercentile`), and the plan sums histograms per emitted tile;
+  the per-tile percentile of *spacing* is kept for inspection only. Without
+  this a survey was re-evaluated once per emitted tile at every level.
+- **The recorded spread term is `Parameters::maxSpreadRadius`**, the
+  level-independent cap (`CONF_99PC·√horizontal_error`) `influenceRadius`
+  applies before its spacing floor, recorded as a **per-count-tile maximum**
+  (not per cell); the touched set expands by `max(that, cell_L)`. Conservative:
+  over-touched grids that receive nothing are never written.
+- **No `sha256()`**: the plan hash had no consumer once `--replace-tiling` was
+  dropped; canonical JSON determinism is tested by string equality across
+  insertion orders. `LevelPlan` also records the touched sets in its JSON.
+- **Spill partition is level 10** (as in step 4) and the record is the full
+  `GeoSounding` at **64 B** (no padding), so a 10 h M3 day is ~5.9 GB; the
+  free-space check projects from the bags' detections message count × 256
+  beams.
+- **`MultiLevelAccumulator` (step 6)** admits per level through
+  `GeoMapSheet::setAdmission`, applied in `getOrCreateGridsIn` and
+  `gridIndicesForSoundings`; the shared clock is `GeoMapSheet::setTouchClock`;
+  the new `ImportAccumulator` API is `persistAndDrop` + `residentTiles`, and
+  `evictColdTiles` now uses the same primitive. Sheets are built at
+  `requestedCellSizeFor(level)` (the nominal cell nudged 1e-5 coarser so
+  `fromCellSize` cannot snap a level finer); the equivalence test builds both
+  paths at that requested resolution.
+- **A CUBE node sits at its cell's south-west corner** (`GeoGrid::insert`
+  measures distance to `CellIndex::position()`), so a sounding settles the
+  nearest lattice node, which may be indexed by the cell to its north/east;
+  the parents-under-children test accepts any of the four corner nodes.
+- **`--replace-tiling` / plan hash / recon percentile min-count**: removed as
+  the r3 revision says; the min-count guard is subsumed by the counts.
+- **Files**: the mixed-level tests live in `test_mixed_level_import.cpp`
+  (including the RAM-budget case; `test_tile_eviction_rss.cpp` is unchanged)
+  and `test_recon.cpp` covers the recon collector; `import_bag`'s CLI
+  validation is tested by running the binary. `main()` in `import_bag_main.cpp`
+  crossed cpplint's function-size limit and four blocks moved into free
+  functions verbatim.
+- **Backscatter** is written per level into the single `--bs-store` dir; the
+  mixed-level backscatter *read* test is gated on uma#383 and not in this PR's
+  suite (the write path is exercised by the equivalence test's file
+  comparison only for bathy).
+- **Follow-ups filed / owed**: uma#383 (prerequisite for reading mixed-level
+  backscatter), uma#386 (policy floor from horizontal error); to file after
+  the PR: the live-node count-grid + spill follow-up, `.agents/README.md` for
+  this repo, ADR-0003's inert `tool_version`, `build_bathy_store.sh` reach.
+

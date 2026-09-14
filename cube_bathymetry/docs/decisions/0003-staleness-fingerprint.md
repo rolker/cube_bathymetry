@@ -107,3 +107,67 @@ every development commit; version bumps are the intended signal for "outputs may
 - If `unh_echoboats_project11/scripts/build_bathy_store.sh` is run with `--fresh`,
   it passes `--no-incremental` (or omits `--incremental`) so `batch_regen` skips
   the fingerprint check and does a clean full rebuild, then writes a fresh fingerprint.
+
+## Amendment 2026-09-14 — schema version 2: `tiling` replaces `cell_size_m` ([cube_bathymetry#143](https://github.com/rolker/cube_bathymetry/issues/143))
+
+A store may now hold native tiles at several GGGS levels
+([ADR-0002 amendment](0002-dirty-tile-footprint-math.md)), which a scalar
+`cell_size_m` cannot describe. Schema version 2 replaces it with a `tiling`
+object; `schema_version` is bumped so any version-1 file reads as stale (the
+"regenerate is the migration" rule above). No migration code is needed: no
+version-1 file was ever written — this amendment lands **with the first
+implementation** of the fingerprint.
+
+```json
+{
+  "schema_version": 2,
+  "tiling": {
+    "mode": "fixed" | "depth_adaptive",
+    "cell_size_m": 0.906,
+    "policy": {
+      "capture_distance_scale": 0.05,
+      "capture_spacing_scale": 0.71,
+      "coarsest_level": 8,
+      "finest_level": 14,
+      "count_level": 14,
+      "min_obs_per_node": 5,
+      "blunder_allowance": 0.2
+    },
+    "levels_used": [8, 9, 10]
+  }
+}
+```
+
+- **`mode`**: `fixed` (one sheet at `cell_size_m`, the requested `-r`) or
+  `depth_adaptive` (a level plan).
+- **`policy`** is written in **both** modes: the capture gate (ADR-0002
+  amendment, decision 4) changes fixed-level output too, so a fixed store's
+  fingerprint must carry it to be told stale when the gate changes — the job
+  `cell_size_m` did alone in version 1. The depth-adaptive-only keys are `null`
+  in fixed mode.
+- **`levels_used`**: every level holding native tiles from this build.
+  Informational; it never makes a store stale.
+- **No level-plan hash.** Overlapping native levels are the normal state
+  (ADR-0002 amendment, decision 6), so a later import at other levels is not a
+  staleness event.
+
+### Staleness rules, amended
+
+| Condition | Action |
+|---|---|
+| `schema_version` != 2 | Full regen |
+| `tiling.mode` changed | Full regen |
+| fixed mode: `cell_size_m` changed | Full regen |
+| any `policy` field changed (the depth-adaptive keys only in that mode) | Full regen |
+| `levels_used` changed | No effect |
+
+### Implementation status
+
+`build_fingerprint.h/cpp` implements read/write (atomic temp-file + rename, as
+specified) and `isStale` over the `tiling` object **only**; `import_bag` writes
+the file after every successful import (fixed and depth-adaptive). The other
+keys (`tool_version`, `bags`, `reference_store`, `backscatter_correction`) and
+`batch_regen --incremental`'s consumer remain unimplemented; adding them is
+additive within schema 2. `tool_version` as specified reads `package.xml`'s
+`<version>`, which is `0.0.0` and has never been bumped, so that key would be
+inert until a versioning practice exists — a follow-up, not this amendment.

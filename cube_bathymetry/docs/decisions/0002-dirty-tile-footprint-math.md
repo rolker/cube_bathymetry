@@ -110,3 +110,89 @@ construction (same scatter-gather path, same reference gating). The only cost is
   bounds. If TPU grows pathologically, a full regen is available via `--fresh`.
 - This ADR applies to the bathy dirty set; the backscatter store shares the same
   footprint and uses the same dirty L10 set (ADR-0007 addendum).
+
+## Amendment 2026-09-14 — depth-adaptive stores ([cube_bathymetry#143](https://github.com/rolker/cube_bathymetry/issues/143))
+
+The store may now hold **native tiles at several GGGS levels on the same
+ground**, written by `import_bag --depth-adaptive` from a *level plan*. This
+amendment records the decisions behind that plan (the operator ruled out a new
+ADR for them; they live here because the dirty-tile math below depends on them)
+and re-argues the margin for a multi-level store.
+
+### Decisions carried here
+
+1. **Unit of decision: the emitted GGGS tile, chosen top-down as a quadtree
+   *prefix*, not a cut.** Descending from every touched grid at the policy's
+   coarsest level, a grid is emitted when its *target* level is at least its own
+   level and refined into its touched children while its target is finer; a
+   child whose own target is coarser than its level is left to its parent. So a
+   coarse parent keeps a complete estimate under the finer tiles that refine
+   part of it — it is the LOD level above them and the native tile for the
+   unrefined remainder. uma ADR-0011's overview pyramid skips a parent slot that
+   holds a native tile, so the coarse LOD shows the parent's own CUBE estimate.
+   Rejected: per-tile at a fixed level (circular), per-region at a fixed
+   decision level (exact nesting forces a 3.5 km region, so one shoal drags 3.5
+   km of ground fine), a quadtree *cut* (discards the coarse estimate the LOD
+   needs, forces a leaf filter that drops seam tiles, and makes any later
+   re-tiling a destructive replace), and a depth-only decision (cannot tell
+   "shallow and well sounded" from "shallow and sparse").
+2. **Two resolutions decide the target.** The level the survey *requires* is
+   the uma#369 depth ladder (`depthAdaptiveLevel`, cell = `capture_distance_scale
+   × |depth|`, clamped to `[coarsest, finest]`) at the tile's *decision depth*:
+   the 2nd percentile of the shallowest soundings per level-14 grid (a flier
+   guard), rolled up as the minimum over touched children. The level the data
+   *achieves* is Calder's level of aggregation (B. R. Calder, *Resolution
+   Determination through Level of Aggregation Analysis*, US Hydro 2019) over a
+   count grid: the smallest box around each occupied cell holding `n_req`
+   soundings gives the finest spacing the data supports there; the tile's
+   achieved level is the 95th percentile of that over its occupied cells,
+   rounded toward the coarser level. The target is the **coarser** of the two.
+   Where required is finer than achieved, the plan reports a *coverage
+   deficit*: the survey has not collected the data its depth calls for.
+3. **Touched sets are per level.** A level-L tile is touched when some
+   occupied count cell, expanded by `max(the soundings' maximum spread radius,
+   the level-L cell)`, intersects it — the same floor `influenceRadius` applies
+   and `GeoMapSheet`'s selection window adds. At a single level the emitted set
+   is exactly the set of grids the fixed-level import selects, which is what
+   makes the single-level equivalence test byte-identical.
+4. **Capture distance is spacing-aware.** The node accepts a sounding within
+   `max(capture_distance_scale × |depth|, capture_spacing_scale × node spacing)`,
+   `capture_spacing_scale` = 0.71 (half the cell diagonal, so every sounding
+   reaches at least one node). Calder's hard-coded 0.5 m floor
+   (`Capture_Distance_Minimum`, the CUBE User Manual's shallow-water starvation
+   guard, which the manual itself says to lower to half the grid spacing) is
+   removed: with a fixed floor a coarse parent above the ladder level had cell
+   corners no node captured, and every grid finer than ~0.45 m averaged over the
+   same 0.5 m disc. The physical floor (horizontal positioning error) moves into
+   the uma#369 policy ([uma#386](https://github.com/rolker/unh_marine_autonomy/issues/386)).
+5. **Invariant: `finest_level <= 14`, the survey index's footprint level.**
+   Validated at startup by both tools. Everything below rests on it.
+6. **A later import at other levels is additive**, like any other import; there
+   is no re-tiling guard and no `--replace-tiling`. What that leaves behind: a
+   re-import over already-covered ground under a different policy leaves the
+   earlier import's finer native tiles in place, and a fine-LOD reader prefers
+   those over the newer, coarser, complete estimate — the same additive-merge
+   contract the store has for same-level re-imports (`importTiles` merges,
+   `save()` never deletes).
+
+### Dirty-tile math for a level plan
+
+`survey_index_query.cpp::dirtyTiles(db, bags, plan)` (the fixed-level function
+is renamed `dirtyTilesAtLevel`; it already took a store level, so "L10" was a
+misnomer) takes the same L14 footprint plus one-tile margin (steps 1–2 above)
+and rolls each expanded tile up to the **emitted tile at every level the plan
+holds over it**. Parents are estimated in full under their children, so each
+one is dirty; the result is a conservative superset exactly as before.
+
+The one-L14-tile margin survives unchanged: with `finest_level <= 14` no
+emitted tile is finer than the index footprint, so the ~54 m margin still
+dominates the ≤3 m influence radius at every level. The roll-up **throws**
+(`ancestorAtLevel`'s existing check) if an index footprint tile is coarser than
+an emitted tile over it — the index footprint level is read from the DB and may
+be mixed — and the dry-run's catch falls back to full regen rather than trusting
+a mis-levelled dirty set.
+
+`batch_regen --level-plan` scatters every batch to every emitted tile at every
+level (each level's routing sheet admits only the plan's tiles at that level,
+the same admission the import applies) and gathers each tile at its own level;
+its output is byte-identical to the import's `MultiLevelAccumulator`.
