@@ -391,9 +391,15 @@ LevelPlan levelPlanFor(
   // radius of their count tile's edge can reach a neighbour, so those are the
   // only cells examined individually.
   const double count_cell_m = counts.cellSizeMeters();
-  for (const auto & [count_tile, tile] : counts.tiles()) {
+  for (const auto & count_tile : counts.grids()) {
     const double spread = counts.maxSpreadTerm(count_tile);
-    const auto & band = tile.band(0);
+    const CountGrid::Tile * count_tile_data = counts.tileAt(count_tile);
+    if (!count_tile_data) {
+      continue;
+    }
+    // Copied, not referenced: the count grid is spill-backed, so any later tile
+    // access may evict this one (see CountGrid::tileAt).
+    const std::vector<CountGrid::Count> band = count_tile_data->band(0);
     // Occupied-cell extent within the tile (rows/cols), for a cheap
     // interior/edge-band split.
     bool any = false;

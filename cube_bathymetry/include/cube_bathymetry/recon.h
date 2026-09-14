@@ -22,6 +22,7 @@
 #ifndef CUBE_BATHYMETRY__RECON_H_
 #define CUBE_BATHYMETRY__RECON_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -120,11 +121,16 @@ public:
   /// @param scratch_dir Directory for the spill file and the count-grid tile
   ///        spill (created as needed); empty disables both (recon-only runs
   ///        that never replay, and that hold every count tile in RAM).
-  /// @throws std::invalid_argument on a bad policy; std::runtime_error if the
-  ///         scratch dir cannot be created, or if it already exists and is not
-  ///         empty (an orphaned scratch dir from a killed run: appending to its
-  ///         spill would replay another run's soundings).
-    ReconCollector(const LevelPlanPolicy & policy, std::string scratch_dir);
+  /// @param count_resident_tiles Resident count-tile budget when a scratch dir
+  ///        is given (`CountGrid::setSpillDir`); ~1.8 MB per tile at level 14.
+  /// @throws std::invalid_argument on a bad policy or a budget below
+  ///         `CountGrid::kMinResidentTiles`; std::runtime_error if the scratch
+  ///         dir cannot be created, or if it already exists and is not empty
+  ///         (an orphaned scratch dir from a killed run: appending to its spill
+  ///         would replay another run's soundings).
+    ReconCollector(
+      const LevelPlanPolicy & policy, std::string scratch_dir,
+      std::size_t count_resident_tiles = CountGrid::kDefaultResidentTiles);
     ~ReconCollector();
 
   /// @brief Count, reservoir and spill one ping's soundings.
@@ -163,8 +169,11 @@ public:
   /// done by the destructor).
     void cleanup();
 
-  /// Path of the spill file; empty when the spill is disabled.
+  /// Path of the sounding spill file; empty when the spill is disabled.
     std::string spillPath() const;
+
+  /// Subdirectory of the scratch dir that holds the spilled count tiles.
+    static constexpr const char * kCountSpillSubdir = "counts";
 
 private:
     LevelPlanPolicy policy_;

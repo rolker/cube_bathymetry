@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstddef>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -246,7 +247,12 @@ bool loadCurveFromBagSonarInfo(
     "achieved level).\n";
   std::cout << "    --scratch-dir <dir>: where the recon spill goes (default: beside "
     "the -o store, never /tmp -- it is often tmpfs). Free space is checked "
-    "against the projected spill before the pass starts.\n";
+    "against the projected spill before the pass starts. The count grid spills "
+    "there too.\n";
+  std::cout << "    --count-resident-tiles <N> (256): recon count tiles held in RAM; "
+    "colder ones are written to the scratch dir and reloaded on demand. A "
+    "level-14 count tile is 1.8 MB, so the default budget is ~460 MB. The plan "
+    "report states the resident peak.\n";
   std::cout << "    --level-plan-out <file>: RECON ONLY -- write the level plan (JSON) "
     "and print its report (tiles, area and storage per level, the coverage "
     "deficit, the ground stored coarser than level 10), then exit without "
@@ -969,6 +975,7 @@ bool resolveBackscatterCorrection(
 /// it is fatal here rather than hours into the pass. Exits via usage() on error.
 void validateDepthAdaptiveOptions(
   bool depth_adaptive, cube::LevelPlanPolicy & level_policy, bool count_level_given,
+  bool count_resident_tiles_given,
   const std::string & level_plan_out, const std::string & level_plan_in,
   const std::string & count_grid_out, const std::string & scratch_dir,
   const std::string & tile_size_report_path)
@@ -977,10 +984,10 @@ void validateDepthAdaptiveOptions(
   // refusing rather than ignoring.
   if (!depth_adaptive &&
     (!level_plan_out.empty() || !level_plan_in.empty() || !count_grid_out.empty() ||
-    !scratch_dir.empty() || count_level_given))
+    !scratch_dir.empty() || count_level_given || count_resident_tiles_given))
   {
     std::cerr << "error: --level-plan-out/--level-plan/--count-grid-out/--scratch-dir/"
-      "--count-level need --depth-adaptive\n";
+      "--count-level/--count-resident-tiles need --depth-adaptive\n";
     usage();
   }
   if (depth_adaptive) {
@@ -1007,6 +1014,40 @@ void validateDepthAdaptiveOptions(
 }
 
 
+/// Warn about `.recon_spill_<pid>` directories a killed run left behind
+/// (cube#143). They are never swept automatically: a concurrent import may own
+/// one, and the spill of an aborted multi-hour run can be gigabytes the
+/// operator should see before anything deletes it.
+void warnAboutOrphanedSpills(const std::string & spill_root, const std::string & mine)
+{
+  std::error_code ec;
+  if (!std::filesystem::is_directory(spill_root, ec)) {
+    return;
+  }
+  std::vector<std::string> orphans;
+  for (std::filesystem::directory_iterator it(spill_root, ec), end; it != end && !ec;
+    it.increment(ec))
+  {
+    const std::string name = it->path().filename().string();
+    if (it->is_directory(ec) && name.rfind(".recon_spill_", 0) == 0 &&
+      it->path().string() != mine)
+    {
+      orphans.push_back(it->path().string());
+    }
+  }
+  if (orphans.empty()) {
+    return;
+  }
+  std::cerr << "warning: " << orphans.size() << " leftover recon spill director"
+            << (orphans.size() == 1 ? "y" : "ies") << " under " << spill_root
+            << " (an aborted run, or a concurrent import). Nothing is deleted "
+    "automatically; remove them by hand once no import is using them:"
+            << std::endl;
+  for (const auto & path : orphans) {
+    std::cerr << "  " << path << std::endl;
+  }
+}
+
 /// Build the recon collector (cube#143). Spill scratch beside the output store
 /// unless --scratch-dir says otherwise (never temp_directory_path(): it is often
 /// tmpfs, and a day's spill is gigabytes). The free-space check uses the bags'
@@ -1014,10 +1055,11 @@ void validateDepthAdaptiveOptions(
 /// upper bound. Null on a free-space shortfall (already reported).
 std::unique_ptr<cube::ReconCollector> makeRecon(
   const cube::LevelPlanPolicy & level_policy, const std::string & scratch_dir,
-  const std::string & store_dir, uint64_t projected_pings)
+  const std::string & store_dir, uint64_t projected_pings, std::size_t count_resident_tiles)
 {
   const std::string spill_root = scratch_dir.empty() ? store_dir : scratch_dir;
   const std::string spill_dir = spill_root + "/.recon_spill_" + std::to_string(::getpid());
+  warnAboutOrphanedSpills(spill_root, spill_dir);
   const uint64_t projected_bytes =
     projected_pings * 256ull * cube::ReconCollector::kBytesPerSpilledSounding;
   std::cout << "Recon spill: " << spill_dir << " (~" << projected_bytes / (1024 * 1024)
@@ -1030,7 +1072,13 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
     std::cerr << "error: " << e.what() << std::endl;
     return nullptr;
   }
-  return std::make_unique<cube::ReconCollector>(level_policy, spill_dir);
+  try {
+    return std::make_unique<cube::ReconCollector>(
+      level_policy, spill_dir, count_resident_tiles);
+  } catch (const std::exception & e) {
+    std::cerr << "error: " << e.what() << std::endl;
+    return nullptr;
+  }
 }
 
 /// Write the ADR-0003 fingerprint for a finished import (cube#143). Best-effort:
@@ -1114,7 +1162,15 @@ int cube_depth_adaptive_finish(
     std::cout << "Computing the level plan..." << std::endl;
     plan = std::make_shared<cube::LevelPlan>(recon.plan());
   }
-  std::cout << plan->report() << std::flush;
+  std::cout << plan->report();
+  std::cout << "Recon count grid: " << recon.counts().tileCount() << " tile(s), resident peak "
+            << recon.counts().residentPeak() << " of "
+            << (recon.counts().residentBudget() == 0 ?
+  std::string("unbounded") : std::to_string(recon.counts().residentBudget()))
+            << " (~" << (recon.counts().residentPeak() * 2ull * cube::CountGrid::kEdge *
+  cube::CountGrid::kEdge) / (1024 * 1024)
+            << " MB peak), " << recon.counts().spilledTileCount()
+            << " currently spilled to disk." << std::endl;
 
   if (!level_plan_out.empty()) {
     std::ofstream out(level_plan_out);
@@ -1250,6 +1306,8 @@ int main(int argc, char * argv[])
   bool depth_adaptive = false;
   cube::LevelPlanPolicy level_policy;
   bool count_level_given = false;
+  std::size_t count_resident_tiles = cube::CountGrid::kDefaultResidentTiles;
+  bool count_resident_tiles_given = false;
   std::string scratch_dir;
   std::string level_plan_out;
   std::string level_plan_in;
@@ -1404,6 +1462,10 @@ int main(int argc, char * argv[])
     } else if (*arg == "--achieved-percentile") {
       level_policy.achieved_percentile = parse_double(
         "--achieved-percentile", next_value("--achieved-percentile")) / 100.0;
+    } else if (*arg == "--count-resident-tiles") {
+      count_resident_tiles = static_cast<std::size_t>(
+        parse_int("--count-resident-tiles", next_value("--count-resident-tiles")));
+      count_resident_tiles_given = true;
     } else if (*arg == "--scratch-dir") {
       scratch_dir = next_value("--scratch-dir");
     } else if (*arg == "--level-plan-out") {
@@ -1455,8 +1517,8 @@ int main(int argc, char * argv[])
   }
 
   validateDepthAdaptiveOptions(
-    depth_adaptive, level_policy, count_level_given, level_plan_out, level_plan_in,
-    count_grid_out, scratch_dir, tile_size_report_path);
+    depth_adaptive, level_policy, count_level_given, count_resident_tiles_given,
+    level_plan_out, level_plan_in, count_grid_out, scratch_dir, tile_size_report_path);
 
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;
@@ -1585,7 +1647,7 @@ int main(int argc, char * argv[])
   std::unique_ptr<cube::ReconCollector> recon;
   if (depth_adaptive) {
     recon = makeRecon(level_policy, scratch_dir, store_dir,
-        bag_readers.messageCount(detections_topic));
+        bag_readers.messageCount(detections_topic), count_resident_tiles);
     if (!recon) {
       return 1;
     }

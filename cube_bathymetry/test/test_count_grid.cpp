@@ -24,7 +24,9 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "cube_bathymetry/count_grid.h"
 
@@ -62,10 +64,11 @@ protected:
         while (cc < 0) {cc += CountGrid::kEdge; --gc;}
         while (cc >= CountGrid::kEdge) {cc -= CountGrid::kEdge; ++gc;}
         const gggs::GridIndex g = CountGrid::neighbourGrid(c.grid(), gr, gc);
-        if (!grid.tiles().count(g)) {
+        const CountGrid::Tile * tile = grid.tileAt(g);
+        if (!tile) {
           continue;
         }
-        sum += grid.tiles().at(g).get(static_cast<uint16_t>(rr), static_cast<uint16_t>(cc), 0);
+        sum += tile->get(static_cast<uint16_t>(rr), static_cast<uint16_t>(cc), 0);
       }
     }
     return sum;
@@ -395,6 +398,95 @@ TEST_F(CountGridTest, SaveAndMergeFromRoundTripsAdditively)
   CountGrid wrong_level(13);
   EXPECT_THROW(wrong_level.mergeFrom(dir), std::invalid_argument);
   EXPECT_THROW(CountGrid::levelOf(dir + "_missing"), std::runtime_error);
+  std::filesystem::remove_all(dir);
+}
+
+// Directory-backed count tiles (#143). A survey-sized recon cannot hold every
+// count tile in RAM (~630 MB/km^2 at level 14), so cold tiles spill to a
+// scratch directory and reload on demand. The spilled grid must answer exactly
+// as an unbounded one -- counts, totals and the level-of-aggregation queries
+// that read a 3x3 neighbourhood -- while never exceeding its budget.
+TEST_F(CountGridTest, SpillBackedGridAnswersLikeAnUnboundedOne)
+{
+  const auto dir = tempDir("spill");
+  constexpr std::size_t kBudget = CountGrid::kMinResidentTiles;
+  constexpr int kSpan = 5;  // 5x5 = 25 tiles, comfortably over the budget
+
+  CountGrid unbounded(kLevel);
+  CountGrid spilled(kLevel);
+  spilled.setSpillDir(dir, kBudget);
+
+  std::vector<gggs::CellIndex> cells;
+  for (int dr = 0; dr < kSpan; ++dr) {
+    for (int dc = 0; dc < kSpan; ++dc) {
+      const gggs::GridIndex tile = CountGrid::neighbourGrid(home, dr, dc);
+      ASSERT_TRUE(tile.valid());
+      for (uint16_t k = 0; k < 12; ++k) {
+        const gggs::CellIndex c(tile, static_cast<uint16_t>(100 + k), static_cast<uint16_t>(200));
+        cells.push_back(c);
+        for (int rep = 0; rep <= dr; ++rep) {
+          unbounded.add(c, 0.25 * (dc + 1));
+          spilled.add(c, 0.25 * (dc + 1));
+        }
+      }
+    }
+  }
+
+  // The budget held throughout, and tiles really did go to disk.
+  EXPECT_LE(spilled.residentTileCount(), kBudget);
+  EXPECT_LE(spilled.residentPeak(), kBudget);
+  EXPECT_GT(spilled.residentPeak(), 0u);
+  EXPECT_EQ(spilled.residentBudget(), kBudget);
+  EXPECT_EQ(spilled.tileCount(), unbounded.tileCount());
+  EXPECT_GT(spilled.spilledTileCount(), 0u);
+  EXPECT_EQ(unbounded.residentBudget(), 0u);
+  EXPECT_EQ(unbounded.spilledTileCount(), 0u);
+
+  // Every count survived the round trip, and the reads stayed inside the budget.
+  EXPECT_EQ(spilled.total(), unbounded.total());
+  for (const auto & c : cells) {
+    EXPECT_EQ(spilled.countAt(c), unbounded.countAt(c)) << "cell in tile " << c.grid().row();
+  }
+  EXPECT_LE(spilled.residentTileCount(), kBudget);
+  for (const auto & tile : unbounded.grids()) {
+    EXPECT_DOUBLE_EQ(spilled.maxSpreadTerm(tile), unbounded.maxSpreadTerm(tile));
+  }
+
+  // The queries that read a neighbourhood agree too -- the case that would
+  // dangle a band reference if an access evicted the tile being scanned.
+  const gggs::CellIndex probe = cells.front();
+  EXPECT_EQ(spilled.countInBox(probe, 3), unbounded.countInBox(probe, 3));
+  EXPECT_EQ(
+    spilled.levelOfAggregation(probe, 4).lambda,
+    unbounded.levelOfAggregation(probe, 4).lambda);
+  const gggs::GridIndex coarse = gggs::Level(8).gridIndex(43.07, -70.76);
+  const auto spilled_level = spilled.achievedLevelPercentile(coarse, 0.95, 4);
+  const auto unbounded_level = unbounded.achievedLevelPercentile(coarse, 0.95, 4);
+  ASSERT_TRUE(spilled_level.has_value());
+  ASSERT_TRUE(unbounded_level.has_value());
+  EXPECT_EQ(spilled_level->level, unbounded_level->level);
+  EXPECT_EQ(spilled_level->saturated, unbounded_level->saturated);
+  EXPECT_LE(spilled.residentTileCount(), kBudget);
+
+  // saveTo reaches the spilled tiles, not only the resident ones.
+  const auto out = tempDir("spill_out");
+  EXPECT_EQ(spilled.saveTo(out), unbounded.tileCount());
+
+  // discardSpill drops what lives only on disk and leaves the grid usable.
+  spilled.discardSpill();
+  EXPECT_FALSE(std::filesystem::exists(dir));
+  EXPECT_EQ(spilled.residentBudget(), 0u);
+  EXPECT_EQ(spilled.spilledTileCount(), 0u);
+  EXPECT_EQ(spilled.tileCount(), spilled.residentTileCount());
+  std::filesystem::remove_all(out);
+}
+
+TEST_F(CountGridTest, SpillDirRejectsABudgetTooSmallForANeighbourhood)
+{
+  const auto dir = tempDir("budget");
+  EXPECT_THROW(grid.setSpillDir(dir, CountGrid::kMinResidentTiles - 1), std::invalid_argument);
+  EXPECT_THROW(grid.setSpillDir("", CountGrid::kDefaultResidentTiles), std::invalid_argument);
+  EXPECT_EQ(grid.residentBudget(), 0u);
   std::filesystem::remove_all(dir);
 }
 

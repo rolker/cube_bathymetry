@@ -94,7 +94,8 @@ float ShallowReservoir::decisionDepth(double percentile) const
   return shallowest[static_cast<std::size_t>(rank - 1)];
 }
 
-ReconCollector::ReconCollector(const LevelPlanPolicy & policy, std::string scratch_dir)
+ReconCollector::ReconCollector(
+  const LevelPlanPolicy & policy, std::string scratch_dir, std::size_t count_resident_tiles)
 : policy_(policy), scratch_dir_(std::move(scratch_dir)), counts_(policy.count_level)
 {
   policy_.validate();
@@ -114,6 +115,11 @@ ReconCollector::ReconCollector(const LevelPlanPolicy & policy, std::string scrat
       throw std::runtime_error(
               "recon: cannot create scratch dir " + scratch_dir_ + ": " + ec.message());
     }
+    // Bound the count grid too: a level-14 count tile is 1.8 MB and a survey
+    // makes ~340 of them per km^2, so an unbounded recon grows without limit.
+    counts_.setSpillDir(
+      (std::filesystem::path(scratch_dir_) / kCountSpillSubdir).string(),
+      count_resident_tiles);
   }
 }
 
@@ -229,6 +235,7 @@ void ReconCollector::cleanup()
   if (!scratch_dir_.empty()) {
     std::error_code ec;
     std::filesystem::remove(spillPath(), ec);
+    counts_.discardSpill();
   }
   if (!scratch_dir_.empty()) {
     std::error_code ec;

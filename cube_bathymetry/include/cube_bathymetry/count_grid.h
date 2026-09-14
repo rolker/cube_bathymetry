@@ -28,6 +28,7 @@
 #include <list>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -51,6 +52,16 @@
 /// summed-area table (Calder sec. III.A), so each query is O(1) after an O(N)
 /// table build per tile, and the tables are built lazily in a small LRU so a
 /// survey-sized count grid never holds all its tables at once.
+///
+/// **RAM is bounded by a directory-backed LRU.** A level-14 count tile is
+/// 960^2 x 2 B = 1.8 MB over ~54 m of ground (~340 tiles/km^2, so ~630 MB/km^2
+/// if every tile stayed resident); a survey-sized recon would otherwise grow
+/// without limit. `setSpillDir` caps the resident tiles at a budget and writes
+/// colder ones to a scratch directory as single-band UInt16 GeoTIFFs, reloading
+/// them on demand -- during the recon, and again during plan computation, where
+/// a level-of-aggregation query reads only the 3x3 neighbourhood of one tile at
+/// a time. `residentPeak()` reports the high-water mark so the operator sees
+/// what the recon actually cost.
 ///
 /// This is deliberately count-only: it makes no assumption about the data's
 /// structure, is immune to a single flier (which moves one count by one), and
@@ -76,8 +87,46 @@ public:
     static constexpr uint32_t kMaxLambda = kEdge;
 
   /// @brief Construct an empty count grid whose cells are at GGGS @p level.
+  ///        Unbounded (every tile resident) until `setSpillDir`.
   /// @throws std::out_of_range if @p level is not a valid GGGS level.
     explicit CountGrid(uint8_t level);
+
+  /// Default resident count-tile budget: ~460 MB of level-14 tiles.
+    static constexpr std::size_t kDefaultResidentTiles = 256;
+
+  /// Smallest budget `setSpillDir` accepts. A level-of-aggregation query reads
+  /// the 3x3 neighbourhood around a cell's tile, so a budget below that would
+  /// thrash one tile per box evaluation; 16 leaves headroom above the nine.
+    static constexpr std::size_t kMinResidentTiles = 16;
+
+  /// @brief Bound RAM: keep at most @p resident_tiles count tiles in memory,
+  ///        writing colder ones to @p dir as `<level>_<row>_<col>.tif` and
+  ///        reloading them on demand.
+  ///
+  /// Call before the first `add`. Tiles already resident are trimmed to the
+  /// budget immediately.
+  /// @throws std::invalid_argument if @p resident_tiles < kMinResidentTiles or
+  ///         @p dir is empty; std::runtime_error if @p dir cannot be created.
+    void setSpillDir(
+      const std::string & dir,
+      std::size_t resident_tiles = kDefaultResidentTiles);
+
+  /// Count tiles currently in RAM.
+    std::size_t residentTileCount() const noexcept {return tiles_.size();}
+
+  /// High-water mark of `residentTileCount()` over this grid's life.
+    std::size_t residentPeak() const noexcept {return resident_peak_;}
+
+  /// Resident-tile budget; 0 when unbounded (no spill dir).
+    std::size_t residentBudget() const noexcept {return resident_budget_;}
+
+  /// Occupied tiles currently held on disk rather than in RAM.
+    std::size_t spilledTileCount() const noexcept {return grids_.size() - tiles_.size();}
+
+  /// @brief Delete the tile spill directory and **discard every non-resident
+  ///        tile** (they exist only there). End-of-run cleanup: the grid is not
+  ///        a complete count grid afterwards.
+    void discardSpill();
 
     uint8_t level() const noexcept {return level_.level();}
 
@@ -104,11 +153,20 @@ public:
   /// Sum of all counts.
     uint64_t total() const noexcept {return total_;}
 
-  /// Number of count tiles that hold at least one sounding.
-    std::size_t tileCount() const noexcept {return tiles_.size();}
+  /// Number of count tiles that hold at least one sounding (resident or spilled).
+    std::size_t tileCount() const noexcept {return grids_.size();}
 
-  /// The occupied count tiles, keyed by grid.
-    const std::map < gggs::GridIndex, Tile > & tiles() const noexcept {return tiles_;}
+  /// Every occupied count tile's grid, resident or spilled.
+    const std::set < gggs::GridIndex > & grids() const noexcept {return grids_;}
+
+  /// @brief The count tile at @p grid, loaded from the spill if it is not
+  ///        resident; nullptr when @p grid holds no soundings.
+  ///
+  /// **The returned pointer (and any reference into its bands) is invalidated
+  /// by the next access to a DIFFERENT tile**, which may evict this one. Copy
+  /// what you need out of the tile -- as `achievedLevelHistogram` copies the
+  /// occupied mask -- before calling anything that touches another tile.
+    const Tile * tileAt(const gggs::GridIndex & grid) const;
 
   /// Largest spread term recorded for soundings in @p tile; 0 when absent.
     double maxSpreadTerm(const gggs::GridIndex & tile) const;
@@ -231,14 +289,32 @@ public:
 private:
     using Sat = std::vector < uint32_t >;  // (kEdge+1)^2 inclusive prefix sums, saturating
 
-    const Tile * tileAt(const gggs::GridIndex & grid) const;
+  /// Resident tile for @p grid, reloading from the spill or creating an empty
+  /// tile (@p create) as needed; nullptr when absent and @p create is false.
+  /// Touches the LRU and may evict another tile.
+    Tile * fetch(const gggs::GridIndex & grid, bool create);
+  /// The occupied-cell mask of @p grid (kEdge*kEdge bits), taken in one
+  /// access so the caller can query other tiles without holding a reference.
+    std::vector < bool > occupiedMask(const gggs::GridIndex & grid) const;
     const Sat & satFor(const gggs::GridIndex & grid) const;
     static uint32_t satSum(const Sat & sat, int r0, int c0, int r1, int c1);
     void invalidateSat(const gggs::GridIndex & grid) const;
     void checkCell(const gggs::CellIndex & cell) const;
+    std::string tilePath(const gggs::GridIndex & grid) const;
+    void touch(const gggs::GridIndex & grid);
+  /// Evict coldest-first until `tiles_.size() + incoming <= resident_budget_`.
+  /// No-op when unbounded.
+    void trimResident(std::size_t incoming);
 
     gggs::Level level_;
-    std::map < gggs::GridIndex, Tile > tiles_;
+    std::set < gggs::GridIndex > grids_;
+  // Resident subset of `grids_`; mutable so a read can reload a spilled tile.
+    mutable std::map < gggs::GridIndex, Tile > tiles_;
+    mutable std::list < gggs::GridIndex > lru_;  // most recently used first
+    mutable std::map < gggs::GridIndex, std::list < gggs::GridIndex > ::iterator > lru_pos_;
+    std::string spill_dir_;
+    std::size_t resident_budget_ = 0;  // 0 == unbounded
+    mutable std::size_t resident_peak_ = 0;
     std::map < gggs::GridIndex, double > max_spread_term_;
     uint64_t total_ = 0;
 

@@ -79,6 +79,124 @@ CountGrid::CountGrid(uint8_t level)
 {
 }
 
+void CountGrid::setSpillDir(const std::string & dir, std::size_t resident_tiles)
+{
+  if (dir.empty()) {
+    throw std::invalid_argument("CountGrid::setSpillDir: empty directory");
+  }
+  if (resident_tiles < kMinResidentTiles) {
+    throw std::invalid_argument(
+            "CountGrid::setSpillDir: resident budget " + std::to_string(resident_tiles) +
+            " is below the " + std::to_string(kMinResidentTiles) +
+            " a 3x3 level-of-aggregation neighbourhood needs");
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    throw std::runtime_error(
+            "CountGrid::setSpillDir: cannot create " + dir + ": " + ec.message());
+  }
+  spill_dir_ = dir;
+  resident_budget_ = resident_tiles;
+  trimResident(0);
+}
+
+void CountGrid::discardSpill()
+{
+  if (spill_dir_.empty()) {
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(spill_dir_, ec);
+  spill_dir_.clear();
+  resident_budget_ = 0;
+  // The spilled tiles existed only in that directory: forget them rather than
+  // leave `grids_` promising tiles nothing can load.
+  for (auto it = grids_.begin(); it != grids_.end(); ) {
+    it = tiles_.count(*it) ? std::next(it) : grids_.erase(it);
+  }
+}
+
+std::string CountGrid::tilePath(const gggs::GridIndex & grid) const
+{
+  return (std::filesystem::path(spill_dir_) / (tileName(grid) + ".tif")).string();
+}
+
+void CountGrid::touch(const gggs::GridIndex & grid)
+{
+  auto pos = lru_pos_.find(grid);
+  if (pos != lru_pos_.end()) {
+    lru_.splice(lru_.begin(), lru_, pos->second);
+    return;
+  }
+  lru_.push_front(grid);
+  lru_pos_.emplace(grid, lru_.begin());
+}
+
+void CountGrid::trimResident(std::size_t incoming)
+{
+  if (resident_budget_ == 0 || spill_dir_.empty()) {
+    return;  // unbounded: nothing to spill to
+  }
+  while (tiles_.size() + incoming > resident_budget_ && !lru_.empty()) {
+    const gggs::GridIndex victim = lru_.back();
+    auto it = tiles_.find(victim);
+    lru_.pop_back();
+    lru_pos_.erase(victim);
+    if (it == tiles_.end()) {
+      continue;  // stale LRU entry for an already-evicted tile
+    }
+    // Always rewrite: a reloaded tile may have been counted into since, and a
+    // stale file would silently lose those soundings.
+    marine_tiled_raster_store::saveTile<Count>(it->second, tilePath(victim), {std::nullopt});
+    tiles_.erase(it);
+  }
+}
+
+CountGrid::Tile * CountGrid::fetch(const gggs::GridIndex & grid, bool create)
+{
+  auto it = tiles_.find(grid);
+  if (it == tiles_.end()) {
+    const bool known = grids_.count(grid) != 0;
+    if (!known && !create) {
+      return nullptr;
+    }
+    trimResident(1);
+    if (known) {
+      it = tiles_.emplace(
+        grid,
+        marine_tiled_raster_store::loadTile<Count>(tilePath(grid), level_, 1)).first;
+    } else {
+      it = tiles_.emplace(grid, Tile(grid, 1, Count{0})).first;
+      grids_.insert(grid);
+    }
+    resident_peak_ = std::max(resident_peak_, tiles_.size());
+  }
+  touch(grid);
+  return &it->second;
+}
+
+const CountGrid::Tile * CountGrid::tileAt(const gggs::GridIndex & grid) const
+{
+  // Reloading a spilled tile and reordering the LRU are caching operations
+  // behind a logically const read: the observable counts never change.
+  return const_cast<CountGrid *>(this)->fetch(grid, false);
+}
+
+std::vector<bool> CountGrid::occupiedMask(const gggs::GridIndex & grid) const
+{
+  std::vector<bool> mask(static_cast<std::size_t>(kEdge) * kEdge, false);
+  const Tile * tile = tileAt(grid);
+  if (!tile) {
+    return mask;
+  }
+  const auto & band = tile->band(0);
+  for (std::size_t i = 0; i < mask.size() && i < band.size(); ++i) {
+    mask[i] = band[i] != 0;
+  }
+  return mask;
+}
+
 void CountGrid::checkCell(const gggs::CellIndex & cell) const
 {
   if (!cell.valid()) {
@@ -99,13 +217,10 @@ void CountGrid::add(double latitude, double longitude, double spread_term_m)
 void CountGrid::add(const gggs::CellIndex & cell, double spread_term_m)
 {
   checkCell(cell);
-  auto it = tiles_.find(cell.grid());
-  if (it == tiles_.end()) {
-    it = tiles_.emplace(cell.grid(), Tile(cell.grid(), 1, Count{0})).first;
-  }
-  const Count current = it->second.get(cell.row(), cell.column(), 0);
+  Tile & tile = *fetch(cell.grid(), true);
+  const Count current = tile.get(cell.row(), cell.column(), 0);
   if (current < std::numeric_limits<Count>::max()) {
-    it->second.set(cell.row(), cell.column(), 0, static_cast<Count>(current + 1));
+    tile.set(cell.row(), cell.column(), 0, static_cast<Count>(current + 1));
   }
   ++total_;
   if (std::isfinite(spread_term_m) && spread_term_m > 0.0) {
@@ -127,12 +242,6 @@ double CountGrid::maxSpreadTerm(const gggs::GridIndex & tile) const
 {
   auto it = max_spread_term_.find(tile);
   return it == max_spread_term_.end() ? 0.0 : it->second;
-}
-
-const CountGrid::Tile * CountGrid::tileAt(const gggs::GridIndex & grid) const
-{
-  auto it = tiles_.find(grid);
-  return it == tiles_.end() ? nullptr : &it->second;
 }
 
 void CountGrid::invalidateSat(const gggs::GridIndex & grid) const
@@ -315,14 +424,17 @@ std::optional<double> CountGrid::achievedSpacingPercentile(
   }
 
   std::vector<double> spacings;
-  for (const auto & [grid, tile] : tiles_) {
+  // Iterate the grid SET, not the resident map: a query reloads and evicts
+  // tiles, which would invalidate an iterator into `tiles_`. The occupied mask
+  // is copied out in one access for the same reason (see `tileAt`).
+  for (const auto & grid : grids_) {
     if (!tileInside(grid, coarse)) {
       continue;
     }
-    const auto & band = tile.band(0);
+    const std::vector<bool> occupied = occupiedMask(grid);
     for (uint16_t r = 0; r < kEdge; ++r) {
       for (uint16_t c = 0; c < kEdge; ++c) {
-        if (band[static_cast<std::size_t>(r) * kEdge + c] == 0) {
+        if (!occupied[static_cast<std::size_t>(r) * kEdge + c]) {
           continue;
         }
         spacings.push_back(achievedSpacing(levelOfAggregation(gggs::CellIndex(grid, r, c), n_req)));
@@ -347,8 +459,7 @@ const CountGrid::LevelHistogram & CountGrid::achievedLevelHistogram(
   if (n_req == 0) {
     throw std::invalid_argument("CountGrid::achievedLevelHistogram: n_req must be > 0");
   }
-  const Tile * t = tileAt(tile);
-  if (!t) {
+  if (!grids_.count(tile)) {
     throw std::invalid_argument("CountGrid::achievedLevelHistogram: tile is absent");
   }
   const auto key = std::make_pair(tile, n_req);
@@ -357,10 +468,12 @@ const CountGrid::LevelHistogram & CountGrid::achievedLevelHistogram(
     return cached->second;
   }
   LevelHistogram histogram{};
-  const auto & band = t->band(0);
+  // Copy the occupied mask out first: the per-cell queries below read the 3x3
+  // neighbourhood and can evict this very tile (see `tileAt`).
+  const std::vector<bool> occupied = occupiedMask(tile);
   for (uint16_t r = 0; r < kEdge; ++r) {
     for (uint16_t c = 0; c < kEdge; ++c) {
-      if (band[static_cast<std::size_t>(r) * kEdge + c] == 0) {
+      if (!occupied[static_cast<std::size_t>(r) * kEdge + c]) {
         continue;
       }
       const auto loa = levelOfAggregation(gggs::CellIndex(tile, r, c), n_req);
@@ -397,7 +510,9 @@ std::optional<CountGrid::AchievedLevel> CountGrid::achievedLevelPercentile(
   }
   LevelHistogram total{};
   uint64_t votes = 0;
-  for (const auto & [grid, tile] : tiles_) {
+  // The grid set, not the resident map: `achievedLevelHistogram` reloads and
+  // evicts tiles as it queries.
+  for (const auto & grid : grids_) {
     if (!tileInside(grid, coarse)) {
       continue;
     }
@@ -428,18 +543,21 @@ void CountGrid::merge(const CountGrid & other)
   if (other.level_.level() != level_.level()) {
     throw std::invalid_argument("CountGrid::merge: level mismatch");
   }
-  for (const auto & [grid, tile] : other.tiles_) {
-    auto it = tiles_.find(grid);
-    if (it == tiles_.end()) {
-      it = tiles_.emplace(grid, Tile(grid, 1, Count{0})).first;
+  for (const auto & grid : other.grids_) {
+    // One tile of `other` at a time, and the destination fetched only after it
+    // has been copied out: both grids may be spill-backed.
+    const Tile * source = other.tileAt(grid);
+    if (!source) {
+      continue;
     }
-    auto & mine = it->second.band(0);
-    const auto & theirs = tile.band(0);
-    for (std::size_t i = 0; i < mine.size(); ++i) {
+    const std::vector<Count> theirs = source->band(0);
+    Tile & destination = *fetch(grid, true);
+    auto & mine = destination.band(0);
+    for (std::size_t i = 0; i < mine.size() && i < theirs.size(); ++i) {
       const uint32_t sum = static_cast<uint32_t>(mine[i]) + theirs[i];
       mine[i] = static_cast<Count>(std::min<uint32_t>(sum, std::numeric_limits<Count>::max()));
     }
-    it->second.markDirty();
+    destination.markDirty();
     invalidateSat(grid);
     invalidateHistograms(grid);
   }
@@ -472,9 +590,13 @@ std::size_t CountGrid::saveTo(const std::string & dir) const
     }
   }
   std::size_t written = 0;
-  for (const auto & [grid, tile] : tiles_) {
+  for (const auto & grid : grids_) {
+    const Tile * tile = tileAt(grid);  // reloads a spilled tile
+    if (!tile) {
+      continue;
+    }
     const auto path = fs::path(dir) / (tileName(grid) + ".tif");
-    marine_tiled_raster_store::saveTile<Count>(tile, path.string(), {std::nullopt});
+    marine_tiled_raster_store::saveTile<Count>(*tile, path.string(), {std::nullopt});
     ++written;
   }
   return written;
@@ -499,15 +621,28 @@ std::size_t CountGrid::mergeFrom(const std::string & dir)
             "CountGrid::mergeFrom: " + dir + " holds level " + std::to_string(level) +
             " counts, this grid is level " + std::to_string(level_.level()));
   }
-  CountGrid loaded(level);
-  std::map<gggs::GridIndex, Tile> tiles;
-  const std::size_t read = marine_tiled_raster_store::loadTiles<Count>(tiles, dir, level_, 1);
-  for (auto & [grid, tile] : tiles) {
-    const auto & band = tile.band(0);
-    for (const Count c : band) {
-      loaded.total_ += c;
+  // One tile at a time: loading the whole directory into a second grid would
+  // reintroduce the unbounded RAM this class exists to avoid.
+  std::size_t read = 0;
+  for (const auto & entry : std::filesystem::directory_iterator(dir)) {
+    if (!entry.is_regular_file() || entry.path().extension() != ".tif") {
+      continue;
     }
-    loaded.tiles_.emplace(grid, std::move(tile));
+    const Tile loaded =
+      marine_tiled_raster_store::loadTile<Count>(entry.path().string(), level_, 1);
+    const std::vector<Count> theirs = loaded.band(0);
+    const gggs::GridIndex grid = loaded.index();
+    Tile & destination = *fetch(grid, true);
+    auto & mine = destination.band(0);
+    for (std::size_t i = 0; i < mine.size() && i < theirs.size(); ++i) {
+      const uint32_t sum = static_cast<uint32_t>(mine[i]) + theirs[i];
+      mine[i] = static_cast<Count>(std::min<uint32_t>(sum, std::numeric_limits<Count>::max()));
+      total_ += theirs[i];
+    }
+    destination.markDirty();
+    invalidateSat(grid);
+    invalidateHistograms(grid);
+    ++read;
   }
   std::ifstream spread_file(std::filesystem::path(dir) / kSpreadFile);
   std::string line;
@@ -517,9 +652,9 @@ std::size_t CountGrid::mergeFrom(const std::string & dir)
     if (!(in >> lat >> lon >> term)) {
       continue;
     }
-    loaded.max_spread_term_[level_.gridIndex(lat, lon)] = term;
+    double & recorded = max_spread_term_[level_.gridIndex(lat, lon)];
+    recorded = std::max(recorded, term);
   }
-  merge(loaded);
   return read;
 }
 
