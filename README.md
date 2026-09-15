@@ -183,7 +183,29 @@ in short:
     (it would make a single flier the decision depth).
   - `--achieved-percentile <p>` (default 95) is the percentile of the level of
     aggregation across a tile that sets its achieved level, so a few
-    under-covered nodes do not coarsen the whole tile.
+    under-covered nodes do not coarsen the whole tile. It votes over the
+    tile's **occupied** count cells only — a cell the survey never ensonified
+    says nothing about the resolution the surveyed part supports, whereas a
+    gap *between* lines does (the occupied cells around it see the gap in
+    their boxes). It is a **conservative tail** statistic, which is what
+    Calder's 0.95–0.99 range is for: the answer is the level that 95 % of the
+    surveyed ground reaches *or beats*, not the level the typical node
+    reaches.
+    That tail is why a dense survey still reports a coarse achieved level, and
+    the number is not a symptom. On the 2026-06-09 UNH pier bag (12.1 M
+    soundings over 0.0085 km², ~1,400 soundings/m², ~4.6 per level-14 cell)
+    the level-of-aggregation histogram over tile `10/17801/13988`'s 764 k
+    occupied cells is: 37 % reach level 14 outright (λ = 0), a further 54 %
+    reach level 12 (λ = 1) — 91 % of the ground at level 12 or finer — and the
+    remaining 9 % runs out to λ = 43 over the thin fringe of the swath and the
+    gaps between lines. p50/p75/p90 are all level 12; **p95 is level 11** and
+    p99 level 10. The neighbouring tile `10/17801/13989` is thinner (3.3
+    soundings per occupied cell against 7.8) and reaches 93.4 % at level 11,
+    just short of the rank, so its p95 lands at level 10. Raising
+    `--achieved-percentile` toward 50 would report the modal level 12 — and
+    would store a tile whose outer tenth has no estimator support. The default
+    stays conservative; what the report calls a coverage deficit here is
+    real thin coverage at the swath edges, not a mis-measurement.
 - `--level-plan-out <file>` is **recon only**: it writes the plan and prints
   its report — per level, the tile count, the **surveyed ground** those tiles
   cover and the surveyed ground for which they are the finest tile

@@ -312,6 +312,53 @@ TEST_F(CountGridTest, LevelHistogramPercentileMatchesTheSpacingPercentile)
   EXPECT_THROW(grid.achievedLevelHistogram(home, 0), std::invalid_argument);
 }
 
+// A pier-density survey must read as a fine achieved level in its core
+// (cube#143 / cube#161). The 2026-06-09 UNH pier bag carries ~1,400
+// soundings/m^2 -- ~4.6 per 0.057 m level-14 cell -- and the plan reported
+// achieved 10-11 for its tiles, which prompted the question of whether the
+// percentile was voting over unsurveyed ground. It is not: it votes over
+// occupied cells only, and the coarse answer there is the conservative p95
+// tail over the thin fringe of a real swath. Under UNIFORM coverage at that
+// density the same code must read level 12 (n_req = 6 does not fit in one
+// cell at 4.6/cell, so the box opens to lambda = 1: 3 x 0.0566 m = 0.170 m,
+// which is no finer than a level-12 cell). Anything coarser would mean the
+// aggregation itself, not the survey's edges, was losing the resolution.
+TEST_F(CountGridTest, PierDensityCoverageAchievesLevelTwelveInItsCore)
+{
+  // One whole level-14 grid (960 cells ~ 54 m) at ~1,400 soundings/m^2:
+  // 4 and 5 alternating averages 4.5 per cell over a 0.0032 m^2 cell.
+  constexpr uint64_t kNReq = 6;  // 5 obs/node x 1.2 blunder allowance
+  for (uint16_t r = 0; r < CountGrid::kEdge; ++r) {
+    for (uint16_t c = 0; c < CountGrid::kEdge; ++c) {
+      const int n = 4 + ((r + c) % 2);
+      for (int i = 0; i < n; ++i) {
+        grid.add(cell(r, c));
+      }
+    }
+  }
+  const double density_per_m2 = 4.5 / (grid.cellSizeMeters() * grid.cellSizeMeters());
+  EXPECT_NEAR(density_per_m2, 1400.0, 100.0) << "the fixture must model the pier density";
+
+  // The core: no cell of the box falls outside the covered grid.
+  const auto core = grid.levelOfAggregation(cell(CountGrid::kEdge / 2, CountGrid::kEdge / 2),
+      kNReq);
+  EXPECT_FALSE(core.saturated);
+  EXPECT_EQ(core.lambda, 1u) << "4.5 soundings/cell needs the 3x3 box to reach 6";
+  EXPECT_NEAR(grid.achievedSpacing(core), 3.0 * grid.cellSizeMeters(), 1e-9);
+
+  const auto & h = grid.achievedLevelHistogram(home, kNReq);
+  EXPECT_EQ(h[CountGrid::kSaturatedBin], 0u);
+  EXPECT_GT(h[12], 0.99 * CountGrid::kEdge * CountGrid::kEdge)
+      << "only the perimeter ring, whose boxes reach off the covered grid, may be coarser";
+
+  // The tile's achieved level, the number the plan reads.
+  const auto achieved = grid.achievedLevelPercentile(home, 0.95, kNReq);
+  ASSERT_TRUE(achieved.has_value());
+  EXPECT_FALSE(achieved->saturated);
+  EXPECT_GE(achieved->level, 12) << "pier-density coverage must achieve level 12 or finer";
+  EXPECT_LE(achieved->level, 13);
+}
+
 TEST_F(CountGridTest, SaturatedCellsVoteInfinity)
 {
   // Two lone soundings: with n_req = 5 every occupied cell saturates.
