@@ -787,3 +787,47 @@ operator's direction, none deferred; the last fix pass before publish):
   the PR: the live-node count-grid + spill follow-up, `.agents/README.md` for
   this repo, ADR-0003's inert `tool_version`, `build_bathy_store.sh` reach.
 
+
+### Dry-run review fixes (2026-09-15)
+
+The operator's recon-only dry run on a real M3 bag (Lake Massabesic 2026-06-09,
+98 min, 55,100 pings, 12.1 M soundings) found three must-fixes, all actioned:
+
+- **The decision depth is read from a per-grid depth histogram**, not a bounded
+  "shallowest 64" reservoir. At ~200 k soundings per level-14 grid the reservoir
+  answered `decisionDepth(0.02)` with the 64th shallowest *raw* sounding — rank
+  ~0.03 %, not the 2nd percentile — and M3 water-column fliers run to many
+  hundreds per grid, so tile `10/17801/13988` read **−27.25 m** against a stored
+  CUBE surface of −40.90…−36.25 m. `DepthHistogram` bins sparsely at 0.25 m
+  (width doubling above 1024 bins, which bounds per-grid memory), and answers
+  with the shallow edge of the bin the rank lands in: within one bin of the
+  truth and never deeper, so the error is on the finer-tile side. On the same
+  3,000-ping window the decision depth is now **−36.75 m**, inside the stored
+  surface's range — and the tile's required level drops from 10 to 9, which is
+  what the pinned ladder asks for at that depth.
+- **`decision_depth_percentile` is no longer capped at 0.05.** The cap existed
+  only because a 64-deep reservoir could not serve a larger rank; the histogram
+  serves any rank at any density, so the constraint is `(0, 1]` and
+  `kMaxDecisionDepthPercentile` is gone.
+- **The report's areas are surveyed ground**, measured from the count grid's
+  occupied cells and charged to each tile above them, not tile footprints: the
+  one level-8 parent read `12.102 km2` where the survey ensonified `0.0085 km2`.
+  Each level now shows the ground its tiles *cover* and the ground they
+  *natively store* (own minus emitted children's), the plan JSON carries both
+  (schema 2: per-tile `g`, top-level `ground_m2`), and "ground stored coarser
+  than level 10" counts only ground whose finest native tile is coarser than 10
+  — parents-alive tiles over ground that also has a level-10 tile no longer
+  register as lost resolution (it read `15.127 km2`; the full-bag run now reads
+  `0.0000 km2`, and the 3,000-ping window `0.0007 km2`, which is genuine: that
+  window's ground is natively stored at level 9).
+- **The recon timer times the recon pass.** `phase_secs()` reads *and* restarts
+  the clock and the projection loop's reading had already been consumed by the
+  "projected N pings" line, so the recon summary timed the statements in
+  between (2.6e-05 s for a ~10 s pass). One reading now feeds both.
+- **Tests added**: `DepthHistogram.HonoursThePercentileAtSurveyDensity`
+  (102,000 soundings, 2,000 shallow fliers — 30× the old reservoir's capacity —
+  asserting the decision depth stays in the bathymetry),
+  `DepthHistogram.BoundsItsBinsByCoarseningTheWidth`, and
+  `LevelPlanTest.AreasAreSurveyedGroundNotTileFootprints` (ground vs the 16×
+  larger footprint, parents-alive tiles storing no ground of their own, and the
+  coarser-than-10 line reading zero where the native level is 11).
