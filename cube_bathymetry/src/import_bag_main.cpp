@@ -1465,9 +1465,22 @@ int cube_depth_adaptive_finish(
   std::cout << "Building store tiles..." << std::endl;
   const std::size_t resident_before_final = accumulator.residentTileCount();
   const std::size_t evicted_count = accumulator.evictedTileCount();
-  accumulator.finalize(
-    store_metadata.empty() ? nullptr : &store_metadata,
-    (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
+  // Inside the guard, like the replay above it: finalize() persists the
+  // still-resident tiles and the metadata sidecars, and an I/O failure there
+  // leaves exactly the state abortDirtyReplay() describes -- a store that has
+  // been evicted into since the first batch, with any pre-existing fingerprint
+  // still describing the pre-run state. Unwinding past the guard would hand the
+  // operator an uncaught throw over a partial-coverage store (cube#143 triage).
+  try {
+    accumulator.finalize(
+      store_metadata.empty() ? nullptr : &store_metadata,
+      (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
+  } catch (const std::exception & e) {
+    return abortDirtyReplay(
+      store_dir, std::string("the store could not be finalized: ") + e.what() +
+      ". The spill replay completed, so the soundings were all routed, but the "
+      "resident tiles (and the store metadata) are not on disk.");
+  }
   reportPersisted(
     accumulator, store_dir, bs_store_dir, evicted_count, resident_before_final,
     std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count());
@@ -2176,9 +2189,21 @@ int main(int argc, char * argv[])
   // collapsed draft/processed). Single fused grid per layer (uma#221).
   const std::size_t resident_before_final = accumulator.residentTileCount();
   const std::size_t evicted_count = accumulator.evictedIndices().size();
-  accumulator.finalize(
-    store_metadata.empty() ? nullptr : &store_metadata,
-    (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
+  // The same guard as the depth-adaptive path's finalize (cube#143 triage: the
+  // class is swept at every site). Eviction has been writing into the real -o
+  // store since the first batch here too, so an I/O failure while persisting
+  // the resident tiles leaves a partial-coverage store -- reported, with any
+  // stale fingerprint cleared, rather than thrown out of main().
+  try {
+    accumulator.finalize(
+      store_metadata.empty() ? nullptr : &store_metadata,
+      (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
+  } catch (const std::exception & e) {
+    return abortDirtyReplay(
+      store_dir, std::string("the store could not be finalized: ") + e.what() +
+      ". Every ping was projected and accumulated, but the resident tiles (and "
+      "the store metadata) are not on disk.");
+  }
   reportPersisted(
     accumulator, store_dir, bs_store_dir, evicted_count,
     resident_before_final, phase_secs());
