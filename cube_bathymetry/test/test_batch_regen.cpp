@@ -85,6 +85,9 @@ std::vector<GeoSounding> surveyCell(
     s.sounding.intensity = intensity + rep * 0.7f;  // real dispersion (n>=2)
     s.sounding.beam_angle = 0.0f;
     s.sounding.slant_range = depth;
+    // Nadir beam: the sonar-frame z is positive-down and is the WATER DEPTH
+    // under the transducer, which is what the recon decides levels on (#143).
+    s.sounding.sonar_relative_position.z = depth;
     soundings.push_back(s);
   }
   return soundings;
@@ -307,6 +310,8 @@ TEST(BatchRegen, SeamCrossingExactMatch)
       s.sounding.intensity = 30.0f + c + rep * 0.7f;  // real dispersion (n>=2)
       s.sounding.beam_angle = 0.0f;
       s.sounding.slant_range = 12.0f;
+      // Nadir beam: sonar-frame z is the water depth the recon decides on.
+      s.sounding.sonar_relative_position.z = 12.0;
       batch.push_back(s);
     }
   }

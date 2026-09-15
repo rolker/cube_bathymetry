@@ -244,6 +244,37 @@ TEST(ReconCollector, DecidesOnWaterDepthNotTheStoredEllipsoidalHeight)
     marine_bathymetry_store::depthAdaptiveLevel(-40.0f, policy.depth).level());
 }
 
+// A producer that georeferences without carrying `sonar_relative_position`
+// through leaves every z at 0. A histogram of zeros would answer "0 m of
+// water" and ask for the finest level over the whole survey, so such
+// soundings are counted but not histogrammed, and the caller is told.
+TEST(ReconCollector, SoundingsWithNoSonarFrameRangeDoNotDecideALevel)
+{
+  LevelPlanPolicy policy;
+  ReconCollector recon(policy, "");  // no spill
+  Parameters params{CellSizes(1.0f), "order1a"};
+
+  std::vector<GeoSounding> batch;
+  for (int i = 0; i < 10; ++i) {
+    batch.push_back(sounding(43.07, -70.76, -40.0f, 0.01f, 0.0f));  // z = 0
+  }
+  recon.add(batch, params);
+  EXPECT_EQ(recon.soundingsSeen(), 10u);
+  EXPECT_EQ(recon.soundingsWithoutRange(), 10u);
+  // Nothing decided: no grid has a depth, so no tile is planned -- rather than
+  // a plan built from 0 m of water.
+  EXPECT_TRUE(recon.decisionDepths().empty());
+  EXPECT_TRUE(recon.plan().tiles().empty());
+
+  // One real sounding among them decides the grid on its own.
+  recon.add({sounding(43.07, -70.76, -40.0f, 0.01f, 12.0f)}, params);
+  EXPECT_EQ(recon.soundingsWithoutRange(), 10u);
+  const auto depths = recon.decisionDepths();
+  ASSERT_EQ(depths.size(), 1u);
+  EXPECT_GT(depths.begin()->second, -12.0f);
+  EXPECT_LE(depths.begin()->second, -12.0f + DepthHistogram::kInitialBinWidth);
+}
+
 TEST(ReconCollector, SpillRoundTripsEverySoundingFieldInChronologicalOrder)
 {
   const std::string dir = scratch("spill");

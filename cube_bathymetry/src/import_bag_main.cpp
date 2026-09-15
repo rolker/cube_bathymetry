@@ -907,6 +907,12 @@ std::vector<cube::GeoSounding> georeferencePing(
     // Per-beam slant range R = twtt*c/2 (set in the Sounding detections
     // ctor) for the tier-2 TL correction (cube#87).
     gs.sounding.slant_range = s.slant_range;
+    // The sonar-frame position, carried through so the depth-adaptive recon
+    // can read the WATER DEPTH UNDER THE TRANSDUCER off `z` (cube#143): the
+    // georeferenced `depth` above is a WGS84 ellipsoidal height (uma ADR-0002
+    // D4) and the geoid offset would coarsen every tile by one to two levels.
+    // Left unread by the estimator itself (batch_regen.cpp:55).
+    gs.sounding.sonar_relative_position = s.sonar_relative_position;
     soundings.push_back(gs);
   }
   return soundings;
@@ -1302,6 +1308,23 @@ int cube_depth_adaptive_finish(
   std::cout << "Recon pass: " << recon.soundingsSeen() << " soundings counted, "
             << recon.soundingsSpilled() << " spilled, " << recon.counts().tileCount()
             << " count tile(s) in " << recon_secs << "s." << std::endl;
+
+  // The level decision needs the range below the transducer, not the stored
+  // (ellipsoidal) depth -- cube#143. A sounding with no usable sonar-frame z
+  // is counted but cannot decide a level; when that is ALL of them the plan
+  // would be built from nothing and would ask for the finest level everywhere,
+  // so it is refused rather than written.
+  if (recon.soundingsWithoutRange() > 0) {
+    std::cerr << "WARNING: " << recon.soundingsWithoutRange() << " of "
+              << recon.soundingsSeen() << " soundings carried no sonar-frame range "
+              << "(z non-finite or zero), so they did not decide a level." << std::endl;
+    if (recon.soundingsWithoutRange() >= recon.soundingsSeen()) {
+      std::cerr << "error: no sounding carried a range below the transducer, so no "
+                << "water depth could be measured and no level plan can be made."
+                << std::endl;
+      return 1;
+    }
+  }
 
   if (!count_grid_out.empty()) {
     try {

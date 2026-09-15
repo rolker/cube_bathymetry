@@ -88,6 +88,9 @@ std::vector<GeoSounding> surveyCell(double lat, double lon, float depth, int rep
     s.sounding.intensity = -20.0f;
     s.sounding.beam_angle = 0.0f;
     s.sounding.slant_range = depth;
+    // Nadir beam: the sonar-frame z is positive-down and is the WATER DEPTH
+    // under the transducer, which is what the recon decides levels on (#143).
+    s.sounding.sonar_relative_position.z = depth;
     soundings.push_back(s);
   }
   return soundings;

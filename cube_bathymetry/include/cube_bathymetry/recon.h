@@ -180,6 +180,17 @@ public:
     uint64_t soundingsSeen() const noexcept {return counts_.total();}
     uint64_t soundingsSpilled() const noexcept {return spilled_;}
 
+  /// @brief Soundings counted but NOT histogrammed, because their sonar-frame
+  ///        `z` was non-finite or exactly zero and so carried no water depth.
+  ///
+  /// A producer that georeferences without carrying `sonar_relative_position`
+  /// through leaves every `z` at 0, and a histogram of zeros answers 0 m of
+  /// water -- a silently wrong plan that asks for the finest level everywhere
+  /// (it did, before this was plumbed: cube#143 dry-run review round 2). The
+  /// caller reports this, and refuses a plan where it accounts for every
+  /// sounding.
+    uint64_t soundingsWithoutRange() const noexcept {return without_range_;}
+
   /// Decision depth of every level-14 grid that received a sounding: water
   /// depth under the transducer, negative-down.
     std::map < gggs::GridIndex, float > decisionDepths() const;
@@ -227,6 +238,7 @@ private:
     std::map < gggs::GridIndex, DepthHistogram > histograms_;
     std::unique_ptr < std::ofstream > spill_out_;
     uint64_t spilled_ = 0;
+    uint64_t without_range_ = 0;
   };
 
 }  // namespace cube

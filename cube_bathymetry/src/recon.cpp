@@ -193,8 +193,16 @@ void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Param
     //
     // Transducer draft is deliberately ignored: it is sub-metre on these
     // vessels, against a ladder whose levels are a factor of two apart.
-    histograms_[l14.gridIndex(s.latitude, s.longitude)].add(
-      static_cast<float>(-std::abs(s.sounding.sonar_relative_position.z)));
+    const double z = s.sounding.sonar_relative_position.z;
+    if (std::isfinite(z) && z != 0.0) {
+      histograms_[l14.gridIndex(s.latitude, s.longitude)].add(
+        static_cast<float>(-std::abs(z)));
+    } else {
+      // No usable range below the transducer: counted (it is still real
+      // ground) but it cannot decide a level, and a zero fed to the histogram
+      // would answer "0 m of water" and ask for the finest level everywhere.
+      ++without_range_;
+    }
 
     if (scratch_dir_.empty()) {
       continue;
