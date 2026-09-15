@@ -991,11 +991,47 @@ Copilot pointed at.
 `.RefusesBackscatterOnTheMixedLevelPathNamingThePrerequisite`;
 `ReconCollector.RefusesWhatTheEstimatorWouldRefuse`,
 `.ReportsWhatTheDepthHistogramsCost`; the dirty-destination case in
-`CountGridTest.SaveAndMergeFromRoundTripsAdditively`. Three changes have no
-reachable test seam and are covered by inspection plus the docs: the two
-`main()`-only guards (this package has no bag fixture, so `import_bag`'s
-per-ping and finalize paths cannot be driven from a test), the one-line policy
-selection for the fingerprint (whose consequence — every plan-deciding key
-making a store stale — `test_build_fingerprint` already covers), and the
+`CountGridTest.SaveAndMergeFromRoundTripsAdditively`. One change has no
+reachable test seam and is covered by inspection plus the docs: the
 `DIRTY_TILES_JSON` key (there is no `batch_regen_bag` CLI harness; adding one
-needs an on-disk survey-index fixture).
+needs an on-disk survey-index fixture). The `main()`-only guards no longer sit
+in that category — see the real-bag smoke test below.
+
+## Folded in from the dry run (2026-09-15, cube#161 + cube#162)
+
+The operator folded both follow-ups back into this PR rather than leaving them
+as issues.
+
+- **The achieved level is measured correctly; the coarse answer is the
+  statistic, not a defect** (cube#161). The p95 population was instrumented on
+  the pier count grid: it is the **occupied** count cells, so no empty or
+  unsurveyed ground votes. Over tile `10/17801/13988`'s 764,453 occupied cells,
+  37 % reach level 14 at λ = 0 and a further 54 % reach level 12 at λ = 1
+  (91 % at level 12 or finer); the remaining 9 % runs out to λ = 43 over the
+  swath fringe and the gaps between lines. p50/p75/p90 are level 12, p95 is
+  level 11, p99 level 10. The thinner neighbour `10/17801/13989` (3.27
+  soundings per occupied cell against 7.78) reaches 93.4 % at level 11, just
+  short of the rank, so its p95 lands at level 10 — which is exactly the
+  achieved 11 / 10 the plan reports for those two tiles. Calder's 0.95–0.99
+  range is a deliberate conservative tail: the answer is the level 95 % of the
+  surveyed ground reaches *or beats*, not the level the typical node reaches,
+  and the deficit the report prints here is real thin coverage at the swath
+  edges. No code change; the README's achieved-level paragraph now carries
+  these numbers, and `CountGridTest.PierDensityCoverageAchievesLevelTwelveInItsCore`
+  asserts that uniform pier-density coverage (~1,400 soundings/m² over a 54 m
+  grid) does achieve level 12 in its core — so a future regression in the
+  aggregation itself is caught.
+- **The depth-adaptive `main()` path is exercised end to end on a real bag**
+  (cube#162) — `test_real_bag_smoke`, over a 3,000-ping excerpt of the
+  2026-06-09 UNH pier M3 bag written beside its source in the survey archive
+  (`..._m3_detections_3000ping_excerpt`, 18 MB, referenced by path and rebuilt
+  by `scripts/make_bag_excerpt.py`; `CUBE_REAL_BAG_EXCERPT` overrides it). It
+  covers the recon's reported numbers, byte-identity between
+  `import_bag --depth-adaptive` and `batch_regen_bag --level-plan` on real
+  soundings, and the three failure outcomes with a fault injected: a truncated
+  spill and a failed `finalize()` each abort through `abortDirtyReplay`
+  (exit 1, the dirty-store warning, no fingerprint), while an unwritable
+  `build_fingerprint.json` over a complete store is its own outcome (exit 2,
+  and explicitly *not* the dirty-store message). Where the excerpt is
+  unreachable every case **SKIPS with the reason printed and never passes**,
+  and `.agents/ci_local_extra.sh` restates that skip as its own CI line.
