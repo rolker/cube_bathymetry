@@ -128,8 +128,12 @@ in short:
 
 - A **recon pass** over the bags counts every sounding into a fine count grid
   (`--count-level`, default = the ladder's finest level, 14) and spills the
-  projected soundings to scratch (`--scratch-dir`, default beside the `-o`
-  store, never `/tmp`; ~64 B per sounding, free space checked first).
+  projected soundings to scratch as **one chronological file** (`--scratch-dir`,
+  default beside the `-o` store, never `/tmp`; ~64 B per sounding, free space
+  checked first). The count grid is bounded too: `--count-resident-tiles`
+  (default 256, ~460 MB of level-14 tiles) caps what stays in RAM and colder
+  tiles go to the same scratch directory as UInt16 GeoTIFFs, reloaded on demand;
+  the plan report states the resident peak.
 - Each tile's level is the **coarser** of what the depth *requires* (the
   uma#369 ladder: cell = `--depth-adaptive-scale` × depth, clamped to
   `--depth-adaptive-coarsest`..`--depth-adaptive-finest`, default 8..14, and
@@ -146,7 +150,9 @@ in short:
   pinned ladder) — then exits, so the operator can approve before a multi-hour
   import. `--level-plan <file>` reuses that plan for the import;
   `--count-grid-out <dir>` persists the count grid (mergeable into a later run).
-- Phase two replays the spill into **one CUBE accumulator per level**;
+- Phase two replays the spill front to back — arrival order, the order the
+  fixed-level path saw the pings, which is what makes the byte-identity below
+  hold — into **one CUBE accumulator per level**;
   `--max-resident-tiles` is the store-wide total, evicted coldest-first across
   levels. Every import writes `build_fingerprint.json`
   ([ADR-0003 amendment](cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md)).
