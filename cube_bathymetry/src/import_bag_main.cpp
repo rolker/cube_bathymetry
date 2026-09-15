@@ -267,7 +267,9 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  Exit codes: 0 = done; 1 = failed, the store may be incomplete; "
     "2 = the store is complete but build_fingerprint.json could not be written, "
-    "so a later incremental regen must do a FULL regen (ADR-0003).\n";
+    "so a later incremental regen must do a FULL regen (ADR-0003); "
+    "3 = the store and its fingerprint are both complete, only the "
+    "--tile-size-report CSV could not be written (a diagnostic, not the data).\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
     "to the survey/campaign id). Per-cell source interning was retired for the "
@@ -1984,14 +1986,18 @@ int main(int argc, char * argv[])
     store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
     iho_order, nullptr, {geo_map_sheet.gridLevel().level()});
 
-  if (!finishTileReport(
-      tile_reporter, tile_size_report_path, tile_refresh_interval_s,
-      tile_refresh_tiles_per_cycle))
-  {
-    return 1;
-  }
+  // Exit codes rank by what is wrong with the DATA: 1 says the store may be
+  // incomplete, so a failed diagnostic CSV must not borrow it -- that run's
+  // store and fingerprint are both fine. A missing fingerprint (2) outranks a
+  // missing report (3).
+  const bool tile_report_written = finishTileReport(
+    tile_reporter, tile_size_report_path, tile_refresh_interval_s,
+    tile_refresh_tiles_per_cycle);
   if (!fingerprinted) {
     return 2;
+  }
+  if (!tile_report_written) {
+    return 3;
   }
 
   std::cout << "done!" << std::endl;
