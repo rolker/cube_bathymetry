@@ -1339,7 +1339,7 @@ message.
 **Must-fix**: 1 | **Suggestions**: 0
 
 ### Findings
-- [ ] (must-fix) **Fixed-level `batch_regen` path does not validate the sheet its factory returns.** In the plan-driven path the sheet from `factory_(level)` is checked for null and for having snapped to the requested level, throwing a clear `std::invalid_argument`; the fixed-level path (`src/batch_regen.cpp:122`) performs neither check, so a misbehaving factory can null-dereference later or silently gather at a different level. Apply the same invariant (shared helper, one message), add a test that a factory returning null / a wrong-level sheet is rejected on the fixed-level path, and sweep any other `factory_(…)` call site for the same gap — `src/batch_regen.cpp:122`
+- [x] (must-fix) **Fixed-level `batch_regen` path does not validate the sheet its factory returns.** In the plan-driven path the sheet from `factory_(level)` is checked for null and for having snapped to the requested level, throwing a clear `std::invalid_argument`; the fixed-level path (`src/batch_regen.cpp:122`) performs neither check, so a misbehaving factory can null-dereference later or silently gather at a different level. Apply the same invariant (shared helper, one message), add a test that a factory returning null / a wrong-level sheet is rejected on the fixed-level path, and sweep any other `factory_(…)` call site for the same gap — `src/batch_regen.cpp:122`
 
 ### Operator decisions (2026-09-15, host-recorded)
 Fix in PR #159 (operator rule: fix discovered defects where discovered; "if the Copilot review is clean, merge it" — it is clean apart from this one). After the fix: clean build + FULL suite (the real-bag smoke test must run for real). Then the host pushes, waits for hosted CI, and merges.
@@ -1347,3 +1347,29 @@ Fix in PR #159 (operator rule: fix discovered defects where discovered; "if the 
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Fable 5.1`
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 14:25 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #159 at `f4838bd`
+**Branch**: feature/issue-143
+**Addressed**: `## Integrated Review` (2026-09-15 14:15 -04:00) — its single must-fix
+**Commits**: f4838bd
+
+### Actions
+- [x] (must-fix) Fixed-level `batch_regen` path did not validate the sheet its factory returns — `cube_bathymetry/src/batch_regen.cpp:122`. All three `factory_(…)` call sites (plan routing, fixed-level routing, gather) now go through one file-local `makeSheetAtLevel()` helper that refuses a null sheet and a sheet that snapped to a level other than the one requested, with one message and `std::invalid_argument` on every path. The gather site previously threw `std::runtime_error` for the same condition; it is now the shared `invalid_argument` (both `main()`s catch `std::exception`, so operator-facing behaviour is unchanged apart from the clearer message).
+
+### Sweep
+- `MultiLevelAccumulator`'s optional `cfg_.sheet_factory` (`src/multi_level_accumulator.cpp:63`) had the *null* half of the same gap: it dereferenced the returned sheet on the next line to check its level. It now throws `std::invalid_argument` on null first. No other `factory_(…)`/`sheet_factory(…)` call sites exist in the package.
+
+### Tests
+- `BatchRegen.FixedLevelRefusesNullSheetFromFactory` and `BatchRegen.FixedLevelRefusesWrongLevelSheetFromFactory` — both assert `std::invalid_argument` at construction on the fixed-level path.
+
+### Verification
+- Clean rebuild of `cube_bathymetry` (build/install dirs removed first), then the FULL suite: **790 tests, 0 errors, 0 failures, 88 skipped**.
+- `test_real_bag_smoke` **RAN FOR REAL** — 5/5 tests, 0 failures, 0 skipped, 35.97 s against the NAS excerpt `/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections_3000ping_excerpt` (`DepthAdaptiveReconReportsTheSurveyItActuallyCounted`, `ImportAndBatchRegenAgreeByteForByteOnTheRealBag`, the truncated-spill and finalize-failure dirty-store aborts, and the unwritable-fingerprint path).
+- Pre-commit hooks ran on both commits (no `--no-verify`).
+
+### Plan sync
+- `plan.md` item 8 (`batch_regen` level-awareness) states the `SheetFactory` contract, so it now also states the validation invariant: every returned sheet is checked on every path.
