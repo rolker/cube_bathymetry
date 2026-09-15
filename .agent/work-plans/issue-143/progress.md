@@ -807,3 +807,30 @@ fourth review round)
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 10:30 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `88831d5`
+**Source**: the operator-requested recon-only dry run on a real M3 bag (owed by the PR body), posted as https://github.com/rolker/cube_bathymetry/pull/159#issuecomment-5681929538. No other review comments or CI signals had landed on the PR at the time of this entry.
+**Must-fix**: 3 | **Suggestions**: 0
+
+Bag: NAS `gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (Lake Massabesic 2026-06-09, 98 min, 55,100 pings, 12.1 M soundings), run with the topics/frames `build_bathy_store.sh` uses. Recon + plan: 36.8 s wall, 167 MB RSS, count grid 20 level-14 tiles (35 MB peak), plan = 2 native level-10 tiles + level-9/8 parents, coverage deficit 0. Artifacts in `.agent/scratchpad/cube143-dryrun/` on the dev host (`recon.log`, `level_plan.json`, `count_grid/`, `small/` = the 3,000-ping comparison incl. a fixed-level import in `small/fixed`).
+
+### Findings
+- [ ] (must-fix) **The shallow-reservoir flier guard does not hold at survey density.** `ShallowReservoir::kCapacity = 64` per level-14 grid means `decisionDepth(0.02)` at ~200 k soundings per grid returns the 64th-shallowest raw sounding, not the 2nd percentile (rank ~4,000). Real data: tile `10/17801/13988` got decision depth **−27.25 m** while the fixed-level path (`import_bag -r 1.0`, same 3,000-ping window, `small/fixed/processed/10_17801_13988.tif`) stores a CUBE surface of −40.9…−36.25 m — 9 m shallower than anything CUBE accepted; the neighbouring tile (−36.18 vs stored −35.60) shows the correct behaviour. M3 water-column fliers exceed 64 per grid. The percentile must be honoured at scale: a per-grid depth histogram (fixed bins over the ladder's depth range are enough — the decision only needs to resolve a level boundary) or a streaming quantile, with the reservoir's `kMaxDecisionDepthPercentile` coupling revisited accordingly. Add a test with ≥100 k soundings and >64 shallow fliers per grid that asserts the decision depth stays within the bathymetry. Sync README/plan text (the "shallowest 64" wording) — `include/cube_bathymetry/recon.h:98`, `src/recon.cpp:69`, `src/level_plan.cpp:109`
+- [ ] (must-fix) **The plan report's area columns are tile footprints, not surveyed ground.** The count grid holds 2,656,290 occupied level-14 cells ≈ 0.0085 km² of surveyed ground, but the report prints `area(km2) 12.102` for the one level-8 tile and `ground stored coarser than level 10: 15.127 km2` — and that second line is wrong in kind: every square metre of this survey has a native level-10 tile; the level-8/9 tiles exist only as parents-alive. Measure ground from the count grid's occupied cells (per tile, intersected with the tile), and count "stored coarser than level 10" only over ground whose *finest* native level is coarser than 10. Keep the tile counts and MB columns as they are. Update the README's description of the report and the JSON if fields change — `src/level_plan.cpp:337-378`
+- [ ] (must-fix) **The recon timer reports the wrong interval**: `Recon pass: … 20 count tile(s) in 2.6062e-05s` while projection + counting took ~10 s. Start the timer where the recon pass starts (the projection loop) and report the real elapsed time — `src/import_bag_main.cpp:1300`, the `recon_secs` argument's origin near `:1845`
+
+### Not a finding (recorded for the reviewer)
+This bag's depths are −36…−41 m in the `bizzy/map_tide` frame for a 9–17 m lake (sonar-relative z sampled from `/bizzy/sensors/m3/soundings`); the fixed-level path stores the same values, so it is the June bag's vertical datum, not this PR.
+
+### Operator decisions (2026-09-15, host-recorded)
+Fix all three in PR #159 now via `address-findings`, rerun the full suite **and the dry run** (`recon.log` command in `.agent/scratchpad/cube143-dryrun/`; confirm tile `10/17801/13988`'s decision depth lands within the CUBE surface range and the report's ground area is ~0.0085 km²), then the host pushes to the open PR.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
