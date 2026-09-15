@@ -90,23 +90,12 @@ namespace cube
   /// Fraction of raw soundings assumed to be blunders; inflates n_req.
     double blunder_allowance = 0.2;
 
-  /// Largest `decision_depth_percentile` the recon reservoir can serve.
-  ///
-  /// `ShallowReservoir` (recon.h) retains only the shallowest
-  /// `kCapacity` (64) depths per level-14 grid, so a requested rank beyond
-  /// that is served from a saturated reservoir. Reading *shallower* than the
-  /// true percentile is the safe direction (a shallower decision depth asks
-  /// for a FINER tile), but a percentile far beyond the reservoir -- a 0.5
-  /// meant as "the median" -- would silently return the 64th shallowest
-  /// sounding of the whole grid, which is not a median in any sense. Refuse it
-  /// instead: at 0.05 the answer is exact for any grid up to 1280 soundings
-  /// and conservative above.
-    static constexpr double kMaxDecisionDepthPercentile = 0.05;
-
   /// Percentile (0..1) of a level-14 grid's shallowest soundings taken as its
   /// decision depth -- the flier guard. Applied by recon when it builds the
   /// decision depths; recorded here so the plan states what it rested on.
-  /// Must be in (0, kMaxDecisionDepthPercentile].
+  /// Must be in (0, 1]. `recon.h`'s `DepthHistogram` honours any percentile at
+  /// any density (the bounded "shallowest 64" reservoir it replaced could not,
+  /// which is why this once carried a `kMaxDecisionDepthPercentile` cap).
     double decision_depth_percentile = 0.02;
 
   /// Percentile (0..1) of achieved spacing over a tile's occupied cells that

@@ -106,16 +106,13 @@ void LevelPlanPolicy::validate() const
       throw std::invalid_argument("level plan policy: percentiles must be in [0, 1]");
     }
   }
-  // The recon reservoir keeps only the 64 shallowest depths per level-14 grid,
-  // so a rank beyond that is served saturated (see kMaxDecisionDepthPercentile).
-  if (!(decision_depth_percentile > 0.0) ||
-    decision_depth_percentile > kMaxDecisionDepthPercentile)
-  {
+  // A decision depth is a percentile of a grid's depths (recon.h's
+  // DepthHistogram serves any rank at any density); 0 would make the single
+  // shallowest sounding -- a flier -- the decision depth, with no guard at all.
+  if (!(decision_depth_percentile > 0.0)) {
     throw std::invalid_argument(
-            "level plan policy: decision_depth_percentile must be in (0, " +
-            std::to_string(kMaxDecisionDepthPercentile) +
-            "] -- the recon keeps only the shallowest 64 soundings per level-14 grid, "
-            "so a larger percentile would be answered from a saturated reservoir");
+            "level plan policy: decision_depth_percentile must be in (0, 1] -- at 0 the "
+            "shallowest single sounding would set the level, with no flier guard");
   }
 }
 

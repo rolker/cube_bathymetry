@@ -153,10 +153,13 @@ in short:
   drive a tile's level:
   - `--decision-depth-percentile <p>` (default 2) is the percentile of a
     level-14 grid's *shallowest* soundings that sets its depth — the flier
-    guard on the depth side. The recon keeps only the shallowest 64 soundings
-    per grid, so a percentile past that window would be answered from a
-    saturated reservoir: the policy requires **0 < p ≤ 5** and is rejected
-    otherwise.
+    guard on the depth side. The recon holds a **depth histogram** per grid
+    (0.25 m bins, sparse), so the percentile is honoured at survey density —
+    a level-14 grid of a real survey line holds ~200 k soundings and its
+    water-column fliers run to many hundreds. The answer is the shallow edge
+    of the bin the rank falls in: under a bin-width shallower than the true
+    percentile, never deeper. Any **0 < p ≤ 100** is accepted; 0 is rejected
+    (it would make a single flier the decision depth).
   - `--achieved-percentile <p>` (default 95) is the percentile of the level of
     aggregation across a tile that sets its achieved level, so a few
     under-covered nodes do not coarsen the whole tile.

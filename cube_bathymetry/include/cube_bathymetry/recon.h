@@ -47,9 +47,9 @@
 /// - counts every sounding into the `CountGrid` (with its maximum spread
 ///   radius, so the level plan can expand occupied cells by the reach the
 ///   soundings actually had),
-/// - keeps, per level-14 grid, the 64 shallowest soundings so the grid's
-///   **decision depth** -- a low percentile of its shallowest, the flier
-///   guard -- can be read off at the end, and
+/// - keeps, per level-14 grid, a depth histogram so the grid's **decision
+///   depth** -- a low percentile of its shallowest soundings, the flier
+///   guard -- can be read off at the end at any survey density, and
 /// - spills the projected `GeoSounding` in full to **one chronological scratch
 ///   file**, so the expensive projection/TF work runs once and phase two
 ///   replays the spill front to back into the per-level accumulators.
@@ -92,25 +92,49 @@ namespace cube
     GeoSounding toGeoSounding() const;
   };
 
-/// @brief Per-level-14-grid reservoir of the shallowest soundings.
-  struct ShallowReservoir
+/// @brief Per-level-14-grid depth histogram: what the decision depth's
+///        percentile is read from.
+///
+/// A survey puts ~200 k soundings into one level-14 grid, so the decision
+/// depth's rank (p = 0.02 -> ~4,000) lies far beyond any bounded set of
+/// "the shallowest few" -- an earlier revision kept the 64 shallowest and
+/// returned the 64th, which on a real M3 bag read 9 m shallower than anything
+/// CUBE accepted, because M3 water-column fliers run to many hundreds per grid.
+/// A histogram honours the percentile at any density in bounded memory: the
+/// decision only has to resolve a level boundary of the depth ladder, and those
+/// are metres apart, so a 0.25 m bin is far finer than the decision needs.
+///
+/// Bins are sparse (`floor(depth / width)` -> count), so only the depths a grid
+/// actually saw cost anything. Should a grid's depth spread exceed `kMaxBins`
+/// bins -- a flier at the surface over deep water -- the width doubles and the
+/// bins merge, which bounds the memory per grid unconditionally and only
+/// coarsens the answer where the spread is already large.
+  struct DepthHistogram
   {
-  /// Shallowest depths retained per level-14 grid. This is what bounds the
-  /// percentile a decision depth can be asked for:
-  /// `LevelPlanPolicy::validate()` refuses a `decision_depth_percentile`
-  /// above `kMaxDecisionDepthPercentile`, which is sized against this.
-    static constexpr std::size_t kCapacity = 64;
-  /// Total soundings seen (not only the retained ones).
-    uint64_t count = 0;
-  /// The shallowest `<= kCapacity` depths seen, negative-down, so the
-  /// shallowest is the largest value; kept sorted descending.
-    std::vector < float > shallowest;
+  /// Starting bin width, metres. The finest depth-ladder level boundary is
+  /// ~1 m of depth apart (cell = scale x depth), so this resolves every
+  /// boundary with room to spare.
+    static constexpr double kInitialBinWidth = 0.25;
+  /// Bins retained per grid before the width doubles (<= ~50 kB per grid).
+    static constexpr std::size_t kMaxBins = 1024;
 
+  /// Total soundings seen.
+    uint64_t count = 0;
+  /// Current bin width in metres; doubles as needed (see kMaxBins).
+    double bin_width = kInitialBinWidth;
+  /// Occupied bins: `floor(depth / bin_width)` -> soundings in that bin.
+  /// Ordered, so the walk from the shallowest (largest key) is a plain
+  /// reverse iteration.
+    std::map < int32_t, uint64_t > bins;
+
+  /// Count one sounding. Non-finite depths are ignored.
     void add(float depth);
 
-  /// The `max(1, ceil(p * count))`-th shallowest depth, capped at the
-  /// kCapacity-th -- the 2nd percentile exactly for `count <= 3200` at
-  /// p = 0.02, and "at least 64 fliers deep" beyond. NaN when empty.
+  /// @brief The `max(1, ceil(p * count))`-th shallowest depth, to within one
+  ///        bin: the SHALLOW edge of the bin the rank falls in, so the answer
+  ///        lies in `(truth, truth + bin_width]` -- shallow by at most one bin,
+  ///        never deep. That is the safe direction: a shallower decision depth
+  ///        asks for a FINER tile. NaN when empty.
     float decisionDepth(double percentile) const;
   };
 
@@ -137,7 +161,7 @@ public:
       std::size_t count_resident_tiles = CountGrid::kDefaultResidentTiles);
     ~ReconCollector();
 
-  /// @brief Count, reservoir and spill one ping's soundings.
+  /// @brief Count, histogram and spill one ping's soundings.
   /// @param parameters The estimator parameters the import will run with;
   ///        supplies `maxSpreadRadius`.
   /// @throws std::runtime_error if a spill write fails.
@@ -190,7 +214,7 @@ private:
     LevelPlanPolicy policy_;
     std::string scratch_dir_;
     CountGrid counts_;
-    std::map < gggs::GridIndex, ShallowReservoir > reservoirs_;
+    std::map < gggs::GridIndex, DepthHistogram > histograms_;
     std::unique_ptr < std::ofstream > spill_out_;
     uint64_t spilled_ = 0;
   };

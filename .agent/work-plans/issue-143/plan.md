@@ -148,11 +148,13 @@ Algorithm (`levelPlanFor(count_grid, decision_depth_by_grid, policy)`):
    only reach level `C` (achieved spacing is `(2λ+1)·R`, `λ >= 0`), which is why
    the default equals the ladder's fine end. Lowering `C` caps the achieved
    level and quarters the count-grid RAM per level (see RAM below).
-   Recon also keeps, per **level-14** grid, the **64 shallowest soundings** (a
-   bounded max-heap, 256 B per grid); its **decision depth** is the
-   `max(1, ceil(0.02·N))`-th shallowest, capped at the 64th — i.e. the 2nd
-   percentile exactly for N ≤ 3200 soundings and "at least 64 fliers deep"
-   beyond (flier guard, kept from r2). No min-count guard: a grid too sparse for
+   Recon also keeps, per **level-14** grid, a **depth histogram** (sparse
+   0.25 m bins, width doubling if a grid's spread would exceed 1024 bins); its
+   **decision depth** is the `max(1, ceil(0.02·N))`-th shallowest, read off the
+   histogram as the shallow edge of the bin the rank falls in (flier guard,
+   kept from r2). A bounded "shallowest 64" reservoir stood here until the
+   dry-run review: at ~200 k soundings per grid it returned the 64th shallowest
+   raw sounding, 9 m above the surface CUBE stored. No min-count guard: a grid too sparse for
    the percentile is also too sparse to *achieve* a fine level, and counts say so.
 2. **LoA** per count cell via a summed-area table over each count-grid tile
    (Calder §III.A): the smallest λ with `Σ counts in the (2λ+1)² box ≥ n_req`,
@@ -684,10 +686,12 @@ per `plan-task`'s during-implementation rules):
   for the pre-#143 behaviour) from launch/YAML without a rebuild — and a runtime
   `param set` is rejected rather than accepted-and-ignored, since the value is
   read once in `on_configure`.
-- **`decision_depth_percentile` is bounded** to `(0, 0.05]`
-  (`LevelPlanPolicy::kMaxDecisionDepthPercentile`): the reservoir retains only
-  the shallowest 64 depths per level-14 grid, so a larger percentile would be
-  answered from a saturated reservoir.
+- **`decision_depth_percentile` is bounded** to `(0, 1]`: the per-grid depth
+  histogram serves any rank at any density, so the only refused value is 0,
+  which would make a single flier the decision depth. (The `(0, 0.05]` cap and
+  its `kMaxDecisionDepthPercentile` constant existed only to keep a bounded
+  64-deep reservoir from being asked for a rank it could not reach; the
+  reservoir is gone and so is the cap.)
 - **`batch_regen` still neither reads nor writes the fingerprint** — as plan
   step 9 and the ADR-0003 amendment's implementation-status note say, this PR
   is ADR-0003's first *partial* implementation: `import_bag` is the writer,

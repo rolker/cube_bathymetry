@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -58,45 +59,102 @@ GeoSounding sounding(double lat, double lon, float depth, float horiz = 0.01f)
 }
 }  // namespace
 
-TEST(ShallowReservoir, KeepsTheShallowestAndReadsThePercentile)
+TEST(DepthHistogram, ReadsThePercentileToWithinOneBin)
 {
-  ShallowReservoir r;
-  EXPECT_TRUE(std::isnan(r.decisionDepth(0.02)));
+  DepthHistogram h;
+  EXPECT_TRUE(std::isnan(h.decisionDepth(0.02)));
   // 100 soundings from -1 (shallowest) to -100 (deepest), added deep first.
   for (int i = 100; i >= 1; --i) {
-    r.add(static_cast<float>(-i));
+    h.add(static_cast<float>(-i));
   }
-  EXPECT_EQ(r.count, 100u);
-  EXPECT_EQ(r.shallowest.size(), ShallowReservoir::kCapacity);
-  EXPECT_FLOAT_EQ(r.shallowest.front(), -1.0f);
-  EXPECT_FLOAT_EQ(r.shallowest.back(), -64.0f);
-  // p = 0.02 of 100 -> rank 2 -> the second shallowest.
-  EXPECT_FLOAT_EQ(r.decisionDepth(0.02), -2.0f);
+  EXPECT_EQ(h.count, 100u);
+  EXPECT_DOUBLE_EQ(h.bin_width, DepthHistogram::kInitialBinWidth);
+  // The answer is the shallow edge of the bin the rank falls in: always in
+  // (truth, truth + bin_width] -- never deeper than the true percentile (the
+  // unsafe direction), never more than one bin shallower.
+  auto within_a_bin_of = [&h](double p, float truth) {
+      const float d = h.decisionDepth(p);
+      EXPECT_GT(d, truth) << "p=" << p << ": errs deep, the unsafe direction";
+      EXPECT_LE(d, truth + static_cast<float>(h.bin_width)) << "p=" << p;
+    };
+  within_a_bin_of(0.02, -2.0f);   // rank 2 -> the second shallowest
+  within_a_bin_of(0.5, -50.0f);   // the median: served, not refused
+  within_a_bin_of(0.9, -90.0f);   // far past any bounded "shallowest" window
   // p = 0 -> rank clamps to 1 -> the shallowest itself (no flier guard).
-  EXPECT_FLOAT_EQ(r.decisionDepth(0.0), -1.0f);
-  // A percentile past the retained window caps at the 64th shallowest.
-  EXPECT_FLOAT_EQ(r.decisionDepth(0.9), -64.0f);
+  within_a_bin_of(0.0, -1.0f);
 
   // One flier at -0.1 among 101: ceil(0.02 * 101) = 3, the third shallowest
   // (-0.1, -1, -2 -> -2); the flier never becomes the decision depth.
-  r.add(-0.1f);
-  EXPECT_FLOAT_EQ(r.shallowest.front(), -0.1f);
-  EXPECT_FLOAT_EQ(r.decisionDepth(0.02), -2.0f);
+  h.add(-0.1f);
+  within_a_bin_of(0.02, -2.0f);
+
+  // Non-finite depths are ignored, not counted.
+  h.add(std::nanf(""));
+  EXPECT_EQ(h.count, 101u);
 }
 
-TEST(ShallowReservoir, FlierGuardAtSmallCounts)
+TEST(DepthHistogram, HonoursThePercentileAtSurveyDensity)
 {
-  ShallowReservoir r;
-  r.add(-10.0f);
-  r.add(-0.2f);  // flier
-  r.add(-10.5f);
+  // The failure this replaced: a level-14 grid of a real M3 line holds ~200 k
+  // soundings, and water-column fliers run to many hundreds -- far beyond the
+  // 64 the old reservoir kept, so the 2nd percentile came back as the 64th
+  // shallowest raw sounding, metres above anything CUBE accepted.
+  DepthHistogram h;
+  const int kBathy = 100000;
+  const int kFliers = 2000;  // >> the 64 the old reservoir could hold
+  std::mt19937 rng(12345);
+  std::uniform_real_distribution<float> bathy(-41.0f, -36.0f);
+  std::uniform_real_distribution<float> flier(-20.0f, -1.0f);  // water column
+  for (int i = 0; i < kBathy; ++i) {
+    h.add(bathy(rng));
+  }
+  for (int i = 0; i < kFliers; ++i) {
+    h.add(flier(rng));
+  }
+  EXPECT_EQ(h.count, static_cast<uint64_t>(kBathy + kFliers));
+  // The fliers are 2000/102000 = 1.96 % of the grid, just under the 2nd
+  // percentile, so the decision depth must land in the bathymetry.
+  const float d = h.decisionDepth(0.02);
+  EXPECT_GE(d, -41.5f);
+  EXPECT_LE(d, -35.5f) << "the decision depth is above the bathymetry: "
+                       << "the flier guard did not hold at survey density";
+  // And the whole set's shallowest is nowhere near it.
+  EXPECT_GT(h.decisionDepth(0.0), -21.0f);
+}
+
+TEST(DepthHistogram, BoundsItsBinsByCoarseningTheWidth)
+{
+  // A pathological spread (a surface flier over abyssal depth) must not grow
+  // the per-grid memory without limit: the width doubles and the bins merge.
+  DepthHistogram h;
+  for (int i = 0; i < 4000; ++i) {
+    h.add(static_cast<float>(-i));  // 0 .. -4000 m, 0.25 m bins would be 16000
+  }
+  EXPECT_LE(h.bins.size(), DepthHistogram::kMaxBins);
+  EXPECT_GT(h.bin_width, DepthHistogram::kInitialBinWidth);
+  // Still answers the percentile, now to within the coarsened width.
+  const float d = h.decisionDepth(0.02);
+  EXPECT_GT(d, -80.0f);  // rank 80 of 4000 -> -79
+  EXPECT_LE(d, -79.0f + static_cast<float>(h.bin_width));
+  // Depths outside any plausible bathymetry are clamped, not binned away.
+  h.add(-1e9f);
+  EXPECT_EQ(h.count, 4001u);
+}
+
+TEST(DepthHistogram, FlierGuardAtSmallCounts)
+{
+  DepthHistogram h;
+  h.add(-10.0f);
+  h.add(-0.2f);  // flier
+  h.add(-10.5f);
   // ceil(0.02 * 3) = 1 -> the shallowest (the flier): with three soundings the
   // percentile cannot exclude anything -- the count grid is what keeps such a
   // grid from being refined (it cannot achieve a fine level).
-  EXPECT_FLOAT_EQ(r.decisionDepth(0.02), -0.2f);
+  EXPECT_GE(h.decisionDepth(0.02), -0.25f);
+  EXPECT_LE(h.decisionDepth(0.02), 0.0f);
 }
 
-TEST(ReconCollector, CountsReservoirsAndPlans)
+TEST(ReconCollector, CountsHistogramsAndPlans)
 {
   LevelPlanPolicy policy;
   ReconCollector recon(policy, "");  // no spill
@@ -116,7 +174,10 @@ TEST(ReconCollector, CountsReservoirsAndPlans)
 
   const auto depths = recon.decisionDepths();
   ASSERT_EQ(depths.size(), 1u);
-  EXPECT_FLOAT_EQ(depths.begin()->second, -40.0f);
+  // The histogram answers with its bin's shallow edge: never deeper than the
+  // truth, never a full bin shallower.
+  EXPECT_GT(depths.begin()->second, -40.0f);
+  EXPECT_LE(depths.begin()->second, -40.0f + DepthHistogram::kInitialBinWidth);
   EXPECT_EQ(depths.begin()->first, gggs::Level(14).gridIndex(43.07, -70.76));
 
   // The spread radius is recorded per count tile: CONF_99PC * sqrt(0.01) ~ 0.26 m.

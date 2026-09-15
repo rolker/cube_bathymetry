@@ -66,34 +66,60 @@ GeoSounding SpilledSounding::toGeoSounding() const
   return s;
 }
 
-void ShallowReservoir::add(float depth)
+namespace
 {
-  ++count;
-  // Sorted descending (shallowest first, negative-down). Insert only if it
-  // beats the current deepest retained, or there is room.
-  if (shallowest.size() < kCapacity) {
-    shallowest.insert(
-      std::upper_bound(shallowest.begin(), shallowest.end(), depth, std::greater<float>()),
-      depth);
+/// Floor division, correct for negative numerators (`-1 / 2` truncates to 0 in
+/// C++; the bin below zero must be -1).
+int64_t floorDiv(int64_t a, int64_t b)
+{
+  const int64_t q = a / b;
+  return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
+}
+}  // namespace
+
+void DepthHistogram::add(float depth)
+{
+  if (!std::isfinite(depth)) {
     return;
   }
-  if (depth > shallowest.back()) {
-    shallowest.pop_back();
-    shallowest.insert(
-      std::upper_bound(shallowest.begin(), shallowest.end(), depth, std::greater<float>()),
-      depth);
+  ++count;
+  // Clamp to a range no bathymetry leaves, so a corrupt value cannot push the
+  // bin index out of int32_t (or force an unbounded number of width doublings).
+  const double d = std::clamp(static_cast<double>(depth), -12000.0, 12000.0);
+  bins[static_cast<int32_t>(std::floor(d / bin_width))] += 1;
+  while (bins.size() > kMaxBins) {
+    // Halve the resolution: merge adjacent bin pairs. Only reachable when a
+    // single grid's depths span > kMaxBins * bin_width, i.e. a flier decades
+    // away from the bathymetry.
+    std::map<int32_t, uint64_t> merged;
+    for (const auto & [bin, n] : bins) {
+      merged[static_cast<int32_t>(floorDiv(bin, 2))] += n;
+    }
+    bins.swap(merged);
+    bin_width *= 2.0;
   }
 }
 
-float ShallowReservoir::decisionDepth(double percentile) const
+float DepthHistogram::decisionDepth(double percentile) const
 {
-  if (shallowest.empty()) {
+  if (bins.empty()) {
     return std::numeric_limits<float>::quiet_NaN();
   }
   uint64_t rank = static_cast<uint64_t>(std::ceil(percentile * static_cast<double>(count)));
   rank = std::max<uint64_t>(1, rank);
-  rank = std::min<uint64_t>(rank, shallowest.size());
-  return shallowest[static_cast<std::size_t>(rank - 1)];
+  rank = std::min<uint64_t>(rank, count);
+  // Walk from the shallowest bin (largest key, negative-down) until the rank is
+  // reached, and answer with that bin's shallow edge -- see the header: the
+  // error is < bin_width and it is on the safe (shallow, finer-tile) side.
+  uint64_t seen = 0;
+  for (auto it = bins.rbegin(); it != bins.rend(); ++it) {
+    seen += it->second;
+    if (seen >= rank) {
+      return static_cast<float>((static_cast<double>(it->first) + 1.0) * bin_width);
+    }
+  }
+  // Unreachable: the counts in the bins sum to `count`, and rank <= count.
+  return static_cast<float>((static_cast<double>(bins.begin()->first) + 1.0) * bin_width);
 }
 
 ReconCollector::ReconCollector(
@@ -149,7 +175,7 @@ void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Param
     }
     const double reach = parameters.maxSpreadRadius(s.sounding);
     counts_.add(s.latitude, s.longitude, std::isfinite(reach) ? reach : 0.0);
-    reservoirs_[l14.gridIndex(s.latitude, s.longitude)].add(s.sounding.depth);
+    histograms_[l14.gridIndex(s.latitude, s.longitude)].add(s.sounding.depth);
 
     if (scratch_dir_.empty()) {
       continue;
@@ -175,8 +201,8 @@ void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Param
 std::map<gggs::GridIndex, float> ReconCollector::decisionDepths() const
 {
   std::map<gggs::GridIndex, float> depths;
-  for (const auto & [grid, reservoir] : reservoirs_) {
-    const float d = reservoir.decisionDepth(policy_.decision_depth_percentile);
+  for (const auto & [grid, histogram] : histograms_) {
+    const float d = histogram.decisionDepth(policy_.decision_depth_percentile);
     if (!std::isnan(d)) {
       depths.emplace(grid, d);
     }

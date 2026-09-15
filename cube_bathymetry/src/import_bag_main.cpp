@@ -242,8 +242,8 @@ bool loadCurveFromBagSonarInfo(
     "level -- ADR-0002), --count-level <L> (= finest; finest <= L <= 20), "
     "--min-obs-per-node <N> (5), --blunder-allowance <f> (0.2), "
     "--decision-depth-percentile <p> (2: percentile of a level-14 grid's shallowest "
-    "soundings that decides its depth, the flier guard; 0 < p <= 5, the recon "
-    "keeps only the shallowest 64 per grid), --achieved-percentile <p> "
+    "soundings that decides its depth, the flier guard; 0 < p <= 100, read from a "
+    "per-grid depth histogram), --achieved-percentile <p> "
     "(95: percentile of the level of aggregation over a tile that decides its "
     "achieved level).\n";
   std::cout << "    --scratch-dir <dir>: where the recon spill goes (default: beside "
