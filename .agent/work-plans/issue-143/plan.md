@@ -404,7 +404,10 @@ a CUBE constant, once it lands.
 8. **`batch_regen` level-awareness (ADR-0002 amendment)** — `SheetFactory`
    becomes `std::function<std::unique_ptr<GeoMapSheet>(gggs::Level)>`; scatter
    routes to **every emitted tile containing the sounding** (parents included);
-   the gather builds each bucket's sheet at that tile's own level. **Rename**
+   the gather builds each bucket's sheet at that tile's own level. Every sheet
+   the factory returns is validated on **every** path (plan routing, fixed-level
+   routing, gather) through one helper: null, or a sheet that snapped to a level
+   other than the one asked for, throws `std::invalid_argument`. **Rename**
    `dirtyL10Tiles` → `dirtyTilesAtLevel` (it already takes `store_level`) and add
    `dirtyTiles(sqlite3*, new_bags, const LevelPlan &, sensor_filter)`: for each
    expanded level-14 footprint tile, the emitted ancestor at **every** level the
