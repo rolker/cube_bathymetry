@@ -673,3 +673,64 @@ Lifecycle: **Implementation** -> **review-code** (third pre-push round, re-revie
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-15 09:32 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-143 at `968e8b8`
+**Mode**: pre-push
+**Depth**: Deep (reason: round-2 fix pass, ~460 lines over 13 files, on-disk format + exit-code contract + a data-integrity guarantee)
+**Must-fix**: 2 | **Suggestions**: 5
+**Round**: 3 | **Ship**: recommended — must-fix is down 3 -> 2, both are precise file:line corrections with an obvious fix (wrap one call in the try/catch its siblings already use; correct one error message), and no design question is re-opened
+
+Reviewed the round-2 fix pass `8869bc1..HEAD` (13 files, +456 -50) with fresh eyes against the
+round-2 review entry and the `## Implementation` entry. Specialists: Static Analysis
+(cpplint, uncrustify, cppcheck, lint_cmake, copyright, flake8, pep257, xmllint -- 8/8 pass,
+re-run independently), Governance, Plan Drift, Claude Adversarial Lens A + Lens B. Copilot
+and local off (default).
+
+**Eight of the ten round-2 findings verified resolved in code**, not cosmetically: the
+post-rename directory fsync throws instead of returning success (with a test that makes only
+that step fail); `capture_spacing_scale` carries a `read_only` descriptor mirroring
+`publish_dirty_subwindow`; `--count-resident-tiles` rejects a negative value; the scratch dir
+is keyed on pid AND start time; `cleanup()` and `discardSpill()` report what they could not
+delete; `discardSpill()` erases the spread terms of the grids it forgets (asserted in the
+spill test); the tile-size-report CSV has its own exit code 3, correctly ranked below 2 and
+unreachable on the depth-adaptive path (`--tile-size-report` is refused there); README
+documents both percentiles and the reservoir bound. Plan drift: none -- the round-2 sync is
+real and the two stale bullets were corrected. Eight test binaries re-run on this build tree:
+8/8 pass (94 s), lints 8/8 (17 s).
+
+The **spill-replay count check is where the round-2 fix is incomplete**, in two independent
+ways (each cross-confirmed by both adversarial lenses): its own throwing sibling paths escape
+`main()` uncaught, and the store is already being written when the check fires.
+
+Judgement calls examined and accepted: the free-space **allowance** (doubling the sounding
+spill to budget the count-tile spill) is honestly labelled an allowance and not a bound in the
+comment, `--help` and README -- the count term follows ground covered, which no ping count
+predicts; and exit code 3 is strictly additive, correctly ranked, and has no consumer in the
+tree or in `build_bathy_store.sh`.
+
+### Findings
+- [ ] (must-fix) The new `forEachSpilled` throws (failed flush, failed close, partial trailing record) are uncaught: the call is the one fallible call in `cube_depth_adaptive_finish` with no try/catch, and `main` has none, so a disk-full at the tail -- the scenario the fix targets -- aborts via `std::terminate` (SIGABRT) instead of the documented `error: ...` + exit 1 that its silent-short-count sibling produces. Cross-confirmed by Lens A and Lens B — `src/import_bag_main.cpp:1269`, `src/recon.cpp:200`
+- [ ] (must-fix) The count check fires after the replay, but `accumulator.addBatch` evicts tiles into the real `-o` store on every batch (`MultiLevelAccumulator::evictToBudget` -> `persistAndDrop`), so on a short spill the destination store already holds partial-coverage tiles when the error prints "Nothing is finalized and no build_fingerprint.json is written" and advises "free space ... and re-run". Re-running over those tiles double-counts soundings -- the hazard `build_bathy_store.sh` guards with `--fresh`. The message and the comment above it must say the store holds partial tiles from the aborted run and must be archived/removed first — `src/import_bag_main.cpp:1284`, `src/multi_level_accumulator.cpp:141`
+- [ ] (suggestion) The post-rename directory fsync throws on any errno, `EINVAL`/`ENOTSUP`/`ENOSYS` included -- returned by mounts whose directory ops have no fsync -- so a store on such a mount would exit 2 on every run and force a FULL regen forever, while the message says the fingerprint "could not be written" although the rename put a valid one in place. Tolerate the not-supported errnos with a warning; keep the throw for `EIO`/`ENOSPC`/`EBADF` — `src/build_fingerprint.cpp:249`, `src/import_bag_main.cpp:1159`
+- [ ] (suggestion) On the short-replay abort, a pre-existing `build_fingerprint.json` survives untouched while the aborted run has already mutated tiles under it, so a later `batch_regen --incremental` would trust it. Consider removing it (or marking the store dirty) on that path — `src/import_bag_main.cpp:1288`
+- [ ] (suggestion) `requireNonNegative` reports "expects a count >= 0" but the effective minimum is `CountGrid::kMinResidentTiles` (16); 1-15 passes the option parser and is refused later by the `ReconCollector` ctor, after the orphan warning and the spill banner have printed. State the real range at parse time and in `--help` — `src/import_bag_main.cpp:1063`, `src/count_grid.cpp:88`
+- [ ] (suggestion) Doubling the preflight requirement can now refuse a run whose spill would have fit, and the only advice offered is `--scratch-dir`; consider an explicit override, or say in `--help` that the check is satisfied by pointing `--scratch-dir` at a larger device — `src/import_bag_main.cpp:1101`
+- [ ] (suggestion) README's `capture_spacing_scale` paragraph does not say the parameter is now `read_only` -- set it from launch/YAML, a runtime `ros2 param set` is rejected. That is the operator-facing half of the round-2 must-fix — `README.md:113`
+
+### Next step
+
+Lifecycle: **Local Review (Pre-Push)** -> **address-findings** (2 mechanical must-fixes) -> push / open PR
+
+Ship is **recommended**: apply the two must-fixes (and, if the operator wants the guarantee
+closed rather than merely stated honestly, suggestion 2 with it) and push, rather than run a
+fourth full review round. The verdict is advisory -- the operator decides.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
