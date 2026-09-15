@@ -689,6 +689,15 @@ per `plan-task`'s during-implementation rules):
   the budget and the spilled count. `tiles()` is gone from the public API;
   `grids()` + `tileAt()` replace it, and a returned `Tile *` is invalidated by
   the next access to a different tile.
+- **The decision-depth histograms are the one recon structure that budget does
+  NOT bound** (Copilot triage, 2026-09-15): every grid's histogram is read when
+  the plan takes its percentile, so none can be spilled, and the total grows
+  with the ground covered. It is a small term (`kMaxBins` caps a grid at ~50 kB
+  against a count tile's 1.8 MB — ~17 MB/km² against ~630 MB/km², and at the dry
+  run's scale far below the 167 MB peak RSS), so it is **reported**, measured
+  from the bins actually occupied, beside the count grid's peak rather than
+  bounded. README says the same; the bounded-RAM claim no longer covers it
+  silently.
 - **Fingerprint records every input that decides the tiling** (must-fix 4):
   `iho_order`, `depth_adaptive_scale` (the ladder's `depth.capture_distance_scale`,
   which `--depth-adaptive-scale` actually sets), `decision_depth_percentile` and

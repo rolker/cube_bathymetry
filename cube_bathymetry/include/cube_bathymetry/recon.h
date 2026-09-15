@@ -206,6 +206,23 @@ public:
   /// depth under the transducer, negative-down.
     std::map < gggs::GridIndex, float > decisionDepths() const;
 
+  /// Level-14 grids holding a depth histogram (one per grid the survey touched).
+    std::size_t histogramCount() const noexcept {return histograms_.size();}
+
+  /// @brief Resident bytes the depth histograms hold, measured from the bins
+  ///        actually occupied.
+  ///
+  /// UNLIKE the count grid, this is NOT bounded by `--count-resident-tiles`:
+  /// the histograms are all needed at the end (the plan reads every grid's
+  /// percentile), so they are never spilled and the total grows with the ground
+  /// covered. It is a small term beside the count grid -- kMaxBins caps a grid
+  /// at ~50 kB, against a level-14 count tile's 1.8 MB, and the code's own
+  /// ~340 grids per km^2 makes it ~17 MB/km^2 worst case against the count
+  /// grid's ~630 MB/km^2 -- but small is not bounded, so the import REPORTS it
+  /// rather than letting the bounded-RAM claim cover it silently (cube#143
+  /// triage).
+    std::size_t histogramBytes() const;
+
   /// The plan for what was collected: `levelPlanFor(counts, decisionDepths, policy)`.
     LevelPlan plan() const;
 

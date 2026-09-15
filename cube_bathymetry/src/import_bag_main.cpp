@@ -1488,6 +1488,14 @@ int cube_depth_adaptive_finish(
   cube::CountGrid::kEdge) / (1024 * 1024)
             << " MB peak), " << recon.counts().spilledTileCount()
             << " currently spilled to disk." << std::endl;
+  // Reported beside the count grid because it is the one recon structure the
+  // --count-resident-tiles budget does NOT bound: every grid's histogram is
+  // needed when the plan reads its percentile, so none is ever spilled and the
+  // total grows with the ground covered (cube#143 triage).
+  std::cout << "Recon decision-depth histograms: " << recon.histogramCount()
+            << " level-14 grid(s), ~" << recon.histogramBytes() / (1024 * 1024)
+            << " MB resident (NOT bounded by --count-resident-tiles -- they grow "
+    "with ground covered)." << std::endl;
 
   if (!level_plan_out.empty()) {
     std::ofstream out(level_plan_out);

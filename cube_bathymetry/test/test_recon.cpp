@@ -275,6 +275,43 @@ TEST(ReconCollector, SoundingsWithNoSonarFrameRangeDoNotDecideALevel)
   EXPECT_LE(depths.begin()->second, -12.0f + DepthHistogram::kInitialBinWidth);
 }
 
+// The histograms are the one recon structure --count-resident-tiles does not
+// bound (they are all needed when the plan reads each grid's percentile), so
+// the import reports their size instead. Measured from the bins occupied, not
+// assumed at kMaxBins (cube#143 triage).
+TEST(ReconCollector, ReportsWhatTheDepthHistogramsCost)
+{
+  LevelPlanPolicy policy;
+  ReconCollector recon(policy, "");  // no spill
+  Parameters params{CellSizes(1.0f), "order1a"};
+  EXPECT_EQ(recon.histogramCount(), 0u);
+  EXPECT_EQ(recon.histogramBytes(), 0u);
+
+  // One grid, one depth: one bin, not kMaxBins.
+  recon.add({sounding(43.07, -70.76, -12.0f)}, params);
+  EXPECT_EQ(recon.histogramCount(), 1u);
+  const std::size_t one_bin = recon.histogramBytes();
+  EXPECT_GT(one_bin, 0u);
+  EXPECT_LT(one_bin, DepthHistogram::kMaxBins * 16u)
+    << "sparse bins must not be charged as a full histogram";
+
+  // More depths in the same grid cost more bins but no new grid.
+  std::vector<GeoSounding> spread;
+  for (int i = 0; i < 100; ++i) {
+    spread.push_back(sounding(43.07, -70.76, -12.0f, 0.01f, 12.0f + 0.5f * i));
+  }
+  recon.add(spread, params);
+  EXPECT_EQ(recon.histogramCount(), 1u);
+  EXPECT_GT(recon.histogramBytes(), one_bin);
+
+  // A second grid is a second histogram: the total grows with GROUND covered,
+  // which is the property the report exists to surface.
+  const std::size_t before = recon.histogramBytes();
+  recon.add({sounding(43.08, -70.75, -12.0f)}, params);
+  EXPECT_EQ(recon.histogramCount(), 2u);
+  EXPECT_GT(recon.histogramBytes(), before);
+}
+
 // The recon must admit exactly what the estimator will (cube#143 triage).
 // GeoGrid::insert rejects a non-finite uncertainty, a non-positive vertical
 // error and a negative horizontal error on top of the position/depth checks;

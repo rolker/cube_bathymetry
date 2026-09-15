@@ -140,7 +140,14 @@ in short:
   count grid is bounded too: `--count-resident-tiles`
   (default 256, ~460 MB of level-14 tiles) caps what stays in RAM and colder
   tiles go to the same scratch directory as UInt16 GeoTIFFs, reloaded on demand;
-  the plan report states the resident peak.
+  the plan report states the resident peak. One recon structure is **not**
+  bounded by that budget: the per-level-14-grid decision-depth histograms, which
+  are all needed when the plan reads each grid's percentile and so are never
+  spilled. They are a small term beside the count tiles (≤ ~50 kB per grid
+  against a count tile's 1.8 MB — roughly 17 MB/km² against ~630 MB/km²) but
+  they grow with the ground covered, so the recon reports their resident size
+  next to the count grid's rather than letting the bounded-RAM claim cover them
+  silently.
 - Each tile's level is the **coarser** of what the depth *requires* (the
   uma#369 ladder: cell = `--depth-adaptive-scale` × depth, clamped to
   `--depth-adaptive-coarsest`..`--depth-adaptive-finest`, default 8..14, and

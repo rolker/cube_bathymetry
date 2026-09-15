@@ -240,6 +240,21 @@ void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Param
   }
 }
 
+std::size_t ReconCollector::histogramBytes() const
+{
+  // Measured, not assumed: the bins are sparse, so a grid that saw one depth
+  // costs one node, not kMaxBins. std::map's per-node overhead (three pointers
+  // + colour, padded) is counted alongside the key/value pair.
+  constexpr std::size_t kMapNodeOverhead = 4 * sizeof(void *);
+  std::size_t bytes = 0;
+  for (const auto & [grid, histogram] : histograms_) {
+    bytes += sizeof(gggs::GridIndex) + sizeof(DepthHistogram) + kMapNodeOverhead;
+    bytes += histogram.bins.size() *
+      (sizeof(int32_t) + sizeof(uint64_t) + kMapNodeOverhead);
+  }
+  return bytes;
+}
+
 std::map<gggs::GridIndex, float> ReconCollector::decisionDepths() const
 {
   std::map<gggs::GridIndex, float> depths;
