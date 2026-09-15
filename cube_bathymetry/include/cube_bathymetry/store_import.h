@@ -438,7 +438,6 @@ public:
   /// the persisted-tile counters.
     void persistResidentTile(const gggs::GridIndex & index);
 
-  /// @brief Tiles currently resident in RAM.
   /// @brief Persist one resident tile (bathy + backscatter + intensity spill)
   ///        and drop it from RAM (cube_bathymetry#143 -- the eviction primitive
   ///        a multi-level import drives across its per-level accumulators).
