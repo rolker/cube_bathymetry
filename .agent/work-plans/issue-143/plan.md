@@ -677,11 +677,13 @@ per `plan-task`'s during-implementation rules):
   coarsest level rather than silently dropped; an empty plan throws.
 - **Spill cleanup moved after `finalize()`** so a crash between replay and
   persist no longer costs the projection pass, and `import_bag` warns about
-  leftover `.recon_spill_<pid>` directories (never deleting them: a concurrent
-  import may own one).
-- **The live node takes `capture_spacing_scale` as a ROS parameter** so a
-  deployment can pin the new gate (e.g. to `0.5 / cell_size` for the pre-#143
-  behaviour) without a rebuild.
+  leftover `.recon_spill_<pid>_<start time>` directories (never deleting them: a
+  concurrent import may own one).
+- **The live node takes `capture_spacing_scale` as a ROS parameter**, declared
+  `read_only`, so a deployment can pin the new gate (e.g. to `0.5 / cell_size`
+  for the pre-#143 behaviour) from launch/YAML without a rebuild — and a runtime
+  `param set` is rejected rather than accepted-and-ignored, since the value is
+  read once in `on_configure`.
 - **`decision_depth_percentile` is bounded** to `(0, 0.05]`
   (`LevelPlanPolicy::kMaxDecisionDepthPercentile`): the reservoir retains only
   the shallowest 64 depths per level-14 grid, so a larger percentile would be
@@ -690,6 +692,44 @@ per `plan-task`'s during-implementation rules):
   step 9 and the ADR-0003 amendment's implementation-status note say, this PR
   is ADR-0003's first *partial* implementation: `import_bag` is the writer,
   `batch_regen --incremental`'s consumer is explicitly out of scope.
+### Round-2 pre-push review fixes (2026-09-15)
+
+The second pre-push review round (3 must-fix, 7 suggestions — all actioned, none
+deferred):
+
+- **A short spill replay is now fatal.** `ReconCollector::forEachSpilled` checks
+  the stream after `flush()`/`close()`, throws on a partial trailing record, and
+  returns the replayed count; `import_bag` compares that with
+  `soundingsSpilled()` and fails **before** `finalize()`, so a disk-full at the
+  last buffered flush can no longer drop the tail of a survey into a store that
+  is then fingerprinted as complete.
+- **`BuildFingerprint::write` reports the post-rename directory `open`/`fsync`
+  failure** instead of returning success for a durability that did not happen —
+  the same standard the temp-file write is held to.
+- **Exit codes**: a failed `--tile-size-report` CSV no longer returns 1 ("the
+  store may be incomplete"); it has its own code **3**, ranked below the missing
+  fingerprint (2), documented in `--help`.
+- **Recon free-space preflight** budgets the sounding spill *plus* an allowance
+  of the same size for the count-tile spill that now shares the scratch dir. The
+  count term scales with ground covered, which is not knowable before the pass,
+  so it is stated as an allowance and not a bound.
+- **`--count-resident-tiles` rejects a negative value** (cast to `size_t` it
+  became `SIZE_MAX`, silently restoring the unbounded count grid); the check
+  lives in a free function so `main()` stays inside cpplint's size limit.
+- **Scratch dir keyed on pid *and* start time**, so a pid-reuse collision cannot
+  present as an "already exists" refusal blamed on an unrelated dead process.
+- **`ReconCollector::cleanup()` and `CountGrid::discardSpill()` report what they
+  could not delete** (warnings — `cleanup()` runs from the destructor), and
+  `discardSpill()` drops the `max_spread_term_` entries of the grids it forgets.
+- **README** documents `--decision-depth-percentile`, `--achieved-percentile`,
+  the `0 < p ≤ 5` bound the 64-deep reservoir imposes, and what the free-space
+  check budgets.
+- **Tests added**: `ReconCollector.ATruncatedSpillIsReportedRatherThanReplayedShort`
+  (partial record throws; a whole lost record shows only in the returned count),
+  `BuildFingerprint.ReportsAFailedDirectoryFsyncInsteadOfClaimingSuccess`
+  (write-and-search-only directory; skipped as root), and a spread-term
+  assertion in the count-grid spill test.
+
 - **Follow-ups filed / owed**: uma#383 (prerequisite for reading mixed-level
   backscatter), uma#386 (policy floor from horizontal error); to file after
   the PR: the live-node count-grid + spill follow-up, `.agents/README.md` for
