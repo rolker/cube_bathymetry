@@ -311,6 +311,10 @@ a CUBE constant, once it lands.
    `coarsest_level`: a fine tile's replay reads one file; a coarse parent's
    replay reads its descendants' files. Residency during replay rests on the
    accumulator's eviction, not on the partition.
+   **Superseded during implementation** (see Implementation sync): the level-10
+   partition is gone — the spill is one chronological file replayed front to
+   back, because CUBE's sliding-median pre-filter is order-dependent and a
+   spatial partition breaks the byte-identity claim for tiles coarser than it.
 5. **`--level-plan-out <f>` / `--level-plan <f>` / `--count-grid-out <d>`** —
    recon-only and reuse-a-plan modes, so the operator can inspect the estimate
    and the coverage deficit and approve before committing a multi-hour import.
@@ -433,8 +437,11 @@ a CUBE constant, once it lands.
 | `cube_bathymetry/include/cube_bathymetry/level_plan.h` / `src/level_plan.cpp` | **New** — quadtree prefix, required-vs-achieved, queries, canonical JSON + sha256, plan report. |
 | `cube_bathymetry/include/cube_bathymetry/build_fingerprint.h` / `src/build_fingerprint.cpp` | **New** — minimal ADR-0003 v2 read/write (`schema_version` + `tiling`). |
 | (same files) | Optional shared touch clock. |
+| `cube_bathymetry/include/cube_bathymetry/multi_level_accumulator.h` / `src/multi_level_accumulator.cpp` | **New** (sync) — `MultiLevelAccumulator` landed in its own pair of files rather than inside `store_import.*`: per-level sheets, shared touch clock, store-wide budget, global coldest-first eviction. |
+| `cube_bathymetry/include/cube_bathymetry/recon.h` / `src/recon.cpp` | **New** (sync) — `ReconCollector`: count grid + `ShallowReservoir` decision depths + the chronological sounding spill and its replay; free-space check. |
+| `cube_bathymetry/include/cube_bathymetry/map_sheet.h` | (sync) Admission predicate + touch-clock hooks on the sheet interface that `GeoMapSheet` implements. |
 | `cube_bathymetry/include/cube_bathymetry/store_import.h` / `src/store_import.cpp` | `MultiLevelAccumulator` (routing, shared budget, global eviction, single sidecar write); `ImportAccumulator::residentTiles()` / `persistAndDrop()`. |
-| `cube_bathymetry/src/import_bag_main.cpp` | Recon (count grid + per-cell max spread term + reservoir + per-level-10 spill under `--scratch-dir` with free-space check); `--depth-adaptive*`, `--count-level`, `--min-obs-per-node`, `--blunder-allowance`, `--level-plan[-out]`, `--count-grid-out`; validation incl. `finest <= 14`; multi-level path; fingerprint write; drop the `:1128-1130` single-resolution comment. |
+| `cube_bathymetry/src/import_bag_main.cpp` | Recon (count grid + per-cell max spread term + reservoir + one chronological spill under `--scratch-dir` with free-space check, `--count-resident-tiles`); `--depth-adaptive*`, `--count-level`, `--min-obs-per-node`, `--blunder-allowance`, `--level-plan[-out]`, `--count-grid-out`; validation incl. `finest <= 14`; multi-level path; fingerprint write; drop the `:1128-1130` single-resolution comment. |
 | `cube_bathymetry/include/cube_bathymetry/batch_regen.h` / `src/batch_regen.cpp` | Level-parameterised `SheetFactory`; scatter to every emitted containing tile; per-tile gather. |
 | `cube_bathymetry/src/batch_regen_main.cpp` | Accept a level plan; drop the fixed `cell_size_m` pin when a plan is in use; drop the `:825-827` comment; `dirtyTilesAtLevel` call at `:394`. |
 | `cube_bathymetry/include/cube_bathymetry/survey_index_query.h` / `src/survey_index_query.cpp` | Rename `dirtyL10Tiles` → `dirtyTilesAtLevel`; add `dirtyTiles(..., const LevelPlan &, ...)` (throws on a coarser footprint). |
@@ -449,6 +456,8 @@ a CUBE constant, once it lands.
 | `cube_bathymetry/test/test_tile_eviction_rss.cpp` | Mixed-level case: the store-wide budget holds across levels. |
 | `cube_bathymetry/test/test_batch_regen.cpp` | Mixed-level scatter/gather + `dirtyTiles(plan)`. |
 | `cube_bathymetry/test/test_survey_index_query.cpp` | Rename follow-through. |
+| `cube_bathymetry/test/test_recon.cpp` | **New** (sync) — reservoir percentile, the chronological spill round-trip, scratch-dir refusal and cleanup. |
+| `cube_bathymetry/test/test_geo_grid.cpp`, `test/test_parameters.cpp`, `test/test_publish_equivalence.cpp` | (sync) Follow-through only: the new `capture_spacing_scale` parameter in the fixtures these tests construct. |
 | `README.md` | `import_bag` / `batch_regen_bag` flag tables; depth-adaptive section (operator summary, links ADR-0002 amendment); bounded-RAM comparison row; the new capture parameter and its live effect; fix the stale layer names at `README.md:99-100` (uma#248 is described as collapsing to `survey` + `reference`; the on-disk layers are `processed/`, `draft/`, `reference/`, `chart/`, legacy `survey/` auto-migrating — uma `marine_bathymetry_store/README.md:137-140`). |
 | `unh_marine_autonomy` | **Separate PRs, not this diff** — uma#383 (prerequisite), uma#386 (policy floor). |
 
@@ -609,10 +618,18 @@ per `plan-task`'s during-implementation rules):
 - **No `sha256()`**: the plan hash had no consumer once `--replace-tiling` was
   dropped; canonical JSON determinism is tested by string equality across
   insertion orders. `LevelPlan` also records the touched sets in its JSON.
-- **Spill partition is level 10** (as in step 4) and the record is the full
-  `GeoSounding` at **64 B** (no padding), so a 10 h M3 day is ~5.9 GB; the
-  free-space check projects from the bags' detections message count × 256
-  beams.
+- **The spill is ONE chronological file**, not the level-10 partition of step 4
+  (pre-push review must-fix 1, operator-settled): CUBE's sliding-median
+  pre-filter is order-dependent, so a spatially partitioned replay would hand
+  tiles coarser than the partition a different ping order than the fixed-level
+  path saw, and the byte-identity claim would be false for the default levels 8
+  and 9. Replaying one file front to back makes the equivalence hold by
+  construction, and it also removes the unbounded per-grid `ofstream` set
+  (must-fix 3). The record is the full `GeoSounding` at **64 B** (no padding),
+  so a 10 h M3 day is ~5.9 GB; the free-space check projects from the bags'
+  detections message count × 256 beams. `test_mixed_level_import`'s
+  single-level equivalence case now runs the whole recon → plan → replay path,
+  not `addBatch` alone.
 - **`MultiLevelAccumulator` (step 6)** admits per level through
   `GeoMapSheet::setAdmission`, applied in `getOrCreateGridsIn` and
   `gridIndicesForSoundings`; the shared clock is `GeoMapSheet::setTouchClock`;
@@ -637,6 +654,42 @@ per `plan-task`'s during-implementation rules):
   mixed-level backscatter *read* test is gated on uma#383 and not in this PR's
   suite (the write path is exercised by the equivalence test's file
   comparison only for bathy).
+- **Count grid is directory-backed with an LRU** (must-fix 2, operator-settled):
+  `CountGrid::setSpillDir` caps the resident count tiles (`--count-resident-tiles`,
+  default 256 ≈ 460 MB of level-14 tiles) and writes colder ones to the recon
+  scratch dir as single-band UInt16 GeoTIFFs, reloaded on demand — during the
+  recon and during plan computation, whose level-of-aggregation query needs only
+  a 3×3 tile neighbourhood at a time. The plan report prints the resident peak,
+  the budget and the spilled count. `tiles()` is gone from the public API;
+  `grids()` + `tileAt()` replace it, and a returned `Tile *` is invalidated by
+  the next access to a different tile.
+- **Fingerprint records every input that decides the tiling** (must-fix 4):
+  `iho_order`, `depth_adaptive_scale` (the ladder's `depth.capture_distance_scale`,
+  which `--depth-adaptive-scale` actually sets), `decision_depth_percentile` and
+  `achieved_percentile` join the schema-2 `tiling` object and `isStale`.
+  `BuildFingerprint::write` now `fsync`s the temp file **and** the store
+  directory after the rename (must-fix 6 — ADR-0003 says fsync and the code
+  only `fflush`ed). A failed fingerprint write is no longer a warning that still
+  prints "done!": `import_bag` exits **2** ("store complete, fingerprint not —
+  a later incremental regen must do a full regen"), documented in `--help`.
+- **Plan-aware `dirtyTiles` stays a conservative superset** (must-fix 5):
+  footprint ground the plan emits nothing over is rolled up to the plan's
+  coarsest level rather than silently dropped; an empty plan throws.
+- **Spill cleanup moved after `finalize()`** so a crash between replay and
+  persist no longer costs the projection pass, and `import_bag` warns about
+  leftover `.recon_spill_<pid>` directories (never deleting them: a concurrent
+  import may own one).
+- **The live node takes `capture_spacing_scale` as a ROS parameter** so a
+  deployment can pin the new gate (e.g. to `0.5 / cell_size` for the pre-#143
+  behaviour) without a rebuild.
+- **`decision_depth_percentile` is bounded** to `(0, 0.05]`
+  (`LevelPlanPolicy::kMaxDecisionDepthPercentile`): the reservoir retains only
+  the shallowest 64 depths per level-14 grid, so a larger percentile would be
+  answered from a saturated reservoir.
+- **`batch_regen` still neither reads nor writes the fingerprint** — as plan
+  step 9 and the ADR-0003 amendment's implementation-status note say, this PR
+  is ADR-0003's first *partial* implementation: `import_bag` is the writer,
+  `batch_regen --incremental`'s consumer is explicitly out of scope.
 - **Follow-ups filed / owed**: uma#383 (prerequisite for reading mixed-level
   backscatter), uma#386 (policy floor from horizontal error); to file after
   the PR: the live-node count-grid + spill follow-up, `.agents/README.md` for
