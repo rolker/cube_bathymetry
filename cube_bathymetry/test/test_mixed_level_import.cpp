@@ -461,6 +461,63 @@ TEST(ImportBagCli, RefusesAnInvalidCaptureSpacingScale)
     << out;
 }
 
+// The resident count-tile budget has a real floor (CountGrid::kMinResidentTiles
+// = the 3x3 level-of-aggregation neighbourhood plus headroom). It must be
+// refused at parse time with the true range, not accepted by the option parser
+// and thrown out by the ReconCollector constructor after the orphan warning and
+// the spill banner have already printed.
+TEST(ImportBagCli, RefusesACountResidentBudgetBelowTheRealMinimum)
+{
+  const std::vector<std::string> below{"-1", "0", "15"};
+  for (const std::string & value : below) {
+    int status = -1;
+    const std::string out = runImportBag(
+      "--depth-adaptive --count-resident-tiles " + value +
+      " -o /nonexistent/store -d /t /nonexistent.bag", &status);
+    EXPECT_NE(status, 0) << out;
+    EXPECT_NE(
+      out.find("'--count-resident-tiles' expects a count >= " +
+      std::to_string(CountGrid::kMinResidentTiles)), std::string::npos) << out;
+    // Refused before anything about the pass is printed.
+    EXPECT_EQ(out.find("Recon spill:"), std::string::npos) << out;
+  }
+
+  int status = -1;
+  const std::string out = runImportBag(
+    "--depth-adaptive --count-resident-tiles " +
+    std::to_string(CountGrid::kMinResidentTiles) +
+    " -o /nonexistent/store -d /t /nonexistent.bag", &status);
+  EXPECT_EQ(out.find("expects a count >="), std::string::npos)
+    << "the minimum itself must be accepted\n" << out;
+}
+
+// The count-tile allowance doubles what the preflight free-space check demands,
+// which can refuse a dense survey over little ground whose spill would have fit.
+// It is tunable, validated, and (like its siblings) meaningless without
+// --depth-adaptive.
+TEST(ImportBagCli, CountSpillAllowanceIsTunableAndValidated)
+{
+  int status = -1;
+  std::string out = runImportBag(
+    "--depth-adaptive --count-spill-allowance -0.5 -o /nonexistent/store "
+    "-d /t /nonexistent.bag", &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(
+    out.find("'--count-spill-allowance' expects a finite factor >= 0"),
+    std::string::npos) << out;
+
+  out = runImportBag(
+    "--count-spill-allowance 0.5 -o /nonexistent/store -d /t /nonexistent.bag", &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("need --depth-adaptive"), std::string::npos) << out;
+
+  out = runImportBag(
+    "--depth-adaptive --count-spill-allowance 0 -o /nonexistent/store "
+    "-d /t /nonexistent.bag", &status);
+  EXPECT_EQ(out.find("expects a finite factor"), std::string::npos)
+    << "0 removes the allowance; it is not an invalid value\n" << out;
+}
+
 TEST(ImportBagCli, UsageDocumentsTheDepthAdaptiveFlags)
 {
   int status = -1;
@@ -469,6 +526,9 @@ TEST(ImportBagCli, UsageDocumentsTheDepthAdaptiveFlags)
   EXPECT_NE(out.find("--level-plan-out"), std::string::npos);
   EXPECT_NE(out.find("--capture-spacing-scale"), std::string::npos);
   EXPECT_NE(out.find("--scratch-dir"), std::string::npos);
+  EXPECT_NE(out.find("--count-spill-allowance"), std::string::npos);
+  // The real minimum, not ">= 0", is what --help states.
+  EXPECT_NE(out.find("--count-resident-tiles <N> (256, minimum 16)"), std::string::npos);
 }
 #endif  // IMPORT_BAG_EXE
 

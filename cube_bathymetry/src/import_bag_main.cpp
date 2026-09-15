@@ -249,13 +249,21 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "    --scratch-dir <dir>: where the recon spill goes (default: beside "
     "the -o store, never /tmp -- it is often tmpfs). The count grid spills "
     "there too, so the free-space check run before the pass starts budgets the "
-    "projected sounding spill plus an allowance of the same size for the "
-    "count-tile spill (that term scales with the ground covered, which is not "
-    "knowable up front, so it is an allowance and not a bound).\n";
-  std::cout << "    --count-resident-tiles <N> (256): recon count tiles held in RAM; "
-    "colder ones are written to the scratch dir and reloaded on demand. A "
-    "level-14 count tile is 1.8 MB, so the default budget is ~460 MB. The plan "
-    "report states the resident peak.\n";
+    "projected sounding spill plus an allowance for the count-tile spill (that "
+    "term scales with the ground covered, which is not knowable up front, so it "
+    "is an allowance and not a bound).\n";
+  std::cout << "    --count-spill-allowance <factor> (1.0): size of that count-tile "
+    "allowance, as a multiple of the projected sounding spill. The default "
+    "doubles what the preflight check demands, which can refuse a dense survey "
+    "over little ground whose spill would have fit; lower it (0 removes the "
+    "allowance) or raise it for a wide, sparse survey. Only the preflight check "
+    "is affected -- nothing about the pass itself changes.\n";
+  std::cout << "    --count-resident-tiles <N> (256, minimum 16): recon count tiles held "
+    "in RAM; colder ones are written to the scratch dir and reloaded on demand. "
+    "A level-14 count tile is 1.8 MB, so the default budget is ~460 MB. The "
+    "minimum is the 3x3 level-of-aggregation neighbourhood plus headroom -- a "
+    "smaller budget would thrash one tile per box evaluation. The plan report "
+    "states the resident peak.\n";
   std::cout << "    --level-plan-out <file>: RECON ONLY -- write the level plan (JSON) "
     "and print its report (tiles, area and storage per level, the coverage "
     "deficit, the ground stored coarser than level 10), then exit without "
@@ -983,7 +991,7 @@ bool resolveBackscatterCorrection(
 /// it is fatal here rather than hours into the pass. Exits via usage() on error.
 void validateDepthAdaptiveOptions(
   bool depth_adaptive, cube::LevelPlanPolicy & level_policy, bool count_level_given,
-  bool count_resident_tiles_given,
+  bool count_resident_tiles_given, bool count_spill_allowance_given,
   const std::string & level_plan_out, const std::string & level_plan_in,
   const std::string & count_grid_out, const std::string & scratch_dir,
   const std::string & tile_size_report_path)
@@ -992,10 +1000,12 @@ void validateDepthAdaptiveOptions(
   // refusing rather than ignoring.
   if (!depth_adaptive &&
     (!level_plan_out.empty() || !level_plan_in.empty() || !count_grid_out.empty() ||
-    !scratch_dir.empty() || count_level_given || count_resident_tiles_given))
+    !scratch_dir.empty() || count_level_given || count_resident_tiles_given ||
+    count_spill_allowance_given))
   {
     std::cerr << "error: --level-plan-out/--level-plan/--count-grid-out/--scratch-dir/"
-      "--count-level/--count-resident-tiles need --depth-adaptive\n";
+      "--count-level/--count-resident-tiles/--count-spill-allowance need "
+      "--depth-adaptive\n";
     usage();
   }
   if (depth_adaptive) {
@@ -1056,28 +1066,84 @@ void warnAboutOrphanedSpills(const std::string & spill_root, const std::string &
   }
 }
 
-/// A count option that must not be negative (cube#143): cast to std::size_t a
-/// negative value becomes SIZE_MAX, which for --count-resident-tiles silently
-/// restores the unbounded count grid the resident LRU replaced. Reports the
-/// option error and exits, like every other option failure.
-std::size_t requireNonNegative(const char * flag, int value)
+/// A count option with a real floor (cube#143). Negative is the dangerous case
+/// -- cast to std::size_t it becomes SIZE_MAX, which for --count-resident-tiles
+/// silently restores the unbounded count grid the resident LRU replaced -- but
+/// the floor is checked here too, so a value the ReconCollector constructor
+/// would refuse is refused at parse time rather than after the orphan warning
+/// and the spill banner have already printed. Reports the option error and
+/// exits, like every other option failure.
+std::size_t requireAtLeast(const char * flag, int value, std::size_t minimum)
 {
-  if (value < 0) {
-    std::cerr << "error: option '" << flag << "' expects a count >= 0, got '"
-              << value << "'\n";
+  if (value < 0 || static_cast<std::size_t>(value) < minimum) {
+    std::cerr << "error: option '" << flag << "' expects a count >= " << minimum
+              << ", got '" << value << "'\n";
     usage();
   }
   return static_cast<std::size_t>(value);
+}
+
+/// A factor option that must be finite and non-negative (cube#143). Reports the
+/// option error and exits, like every other option failure.
+double requireFiniteFactor(const char * flag, double value)
+{
+  if (!(value >= 0.0) || !std::isfinite(value)) {
+    std::cerr << "error: option '" << flag << "' expects a finite factor >= 0, got '"
+              << value << "'\n";
+    usage();
+  }
+  return value;
+}
+
+/// Print the span the bags cover (cube#143: lifted out of main(), which is at
+/// the cpplint function-size limit).
+void reportBagTimeSpan(
+  const std::chrono::system_clock::time_point & begin_time,
+  const std::chrono::system_clock::time_point & end_time)
+{
+  auto start_time_t = std::chrono::system_clock::to_time_t(begin_time);
+  std::cout << "start time: "
+            << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+  auto end_time_t = std::chrono::system_clock::to_time_t(end_time);
+  std::cout << "end time: "
+            << std::put_time(std::gmtime(&end_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+  std::cout << "total time: "
+            << std::chrono::duration_cast<std::chrono::seconds>(end_time - begin_time).count()
+            << " seconds" << std::endl;
+}
+
+/// Report what tiling the run will use, before the pass starts (cube#143:
+/// lifted out of main(), which is at the cpplint function-size limit).
+void reportTilingChoice(
+  bool depth_adaptive, const cube::LevelPlanPolicy & level_policy,
+  const cube::GeoMapSheet & geo_map_sheet, double resolution, float capture_spacing_scale)
+{
+  if (depth_adaptive) {
+    std::cout << "Depth-adaptive multi-level store (cube#143): levels "
+              << static_cast<int>(level_policy.depth.coarsest_level) << ".."
+              << static_cast<int>(level_policy.depth.finest_level)
+              << ", count level " << static_cast<int>(level_policy.count_level)
+              << ", n_req " << level_policy.requiredObservations()
+              << "; the -r resolution is not used (each level's sheet is built at "
+      "its own cell size)." << std::endl;
+  } else {
+    std::cout << "requested resolution: " << resolution << " nominal used: "
+              << geo_map_sheet.nominalCellSizeMeters() << std::endl;
+  }
+  std::cout << "Capture distance: max(" << geo_map_sheet.parameters().capture_distance_scale
+            << " x |depth|, " << capture_spacing_scale << " x node spacing)" << std::endl;
 }
 
 /// Build the recon collector (cube#143). Spill scratch beside the output store
 /// unless --scratch-dir says otherwise (never temp_directory_path(): it is often
 /// tmpfs, and a day's spill is gigabytes). The free-space check uses the bags'
 /// detections message count as the ping count and 256 beams per ping as an
-/// upper bound. Null on a free-space shortfall (already reported).
+/// upper bound, plus @p count_spill_allowance times that for the count-tile
+/// spill. Null on a free-space shortfall (already reported).
 std::unique_ptr<cube::ReconCollector> makeRecon(
   const cube::LevelPlanPolicy & level_policy, const std::string & scratch_dir,
-  const std::string & store_dir, uint64_t projected_pings, std::size_t count_resident_tiles)
+  const std::string & store_dir, uint64_t projected_pings, std::size_t count_resident_tiles,
+  double count_spill_allowance)
 {
   const std::string spill_root = scratch_dir.empty() ? store_dir : scratch_dir;
   // Keyed on pid AND start time: a pid-reuse collision with a dead run's
@@ -1095,20 +1161,30 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
   // spill alone under-counts what the pass will write. That term scales with
   // the ground COVERED, which nothing knows before the pass -- the surveyed
   // area cannot be inferred from a ping count -- so it is budgeted as an
-  // allowance of the same size as the sounding spill rather than left out
-  // entirely. It is an allowance, not a bound: a wide, sparse survey covers
-  // more ground per sounding and can still exceed it.
-  const uint64_t count_spill_allowance = projected_bytes;
-  const uint64_t projected_total_bytes = projected_bytes + count_spill_allowance;
+  // allowance of a share of the sounding spill rather than left out entirely.
+  // It is an allowance, not a bound, in BOTH directions: a wide, sparse survey
+  // covers more ground per sounding and can still exceed it, and a dense one
+  // over little ground can be refused a run that would have fit. Hence
+  // --count-spill-allowance: the operator who knows the survey can lower the
+  // share (0 removes it) or raise it, rather than being stuck with a doubling.
+  const uint64_t count_spill_bytes =
+    static_cast<uint64_t>(static_cast<double>(projected_bytes) * count_spill_allowance);
+  const uint64_t projected_total_bytes = projected_bytes + count_spill_bytes;
   std::cout << "Recon spill: " << spill_dir << " (~" << projected_bytes / (1024 * 1024)
             << " MB projected for " << projected_pings << " pings at 256 beams, "
             << cube::ReconCollector::kBytesPerSpilledSounding << " B/sounding, plus a ~"
-            << count_spill_allowance / (1024 * 1024)
-            << " MB allowance for the count-tile spill)" << std::endl;
+            << count_spill_bytes / (1024 * 1024)
+            << " MB allowance for the count-tile spill at --count-spill-allowance "
+            << count_spill_allowance << ")" << std::endl;
   try {
     cube::ReconCollector::requireFreeSpace(spill_root, projected_total_bytes);
   } catch (const std::exception & e) {
     std::cerr << "error: " << e.what() << std::endl;
+    std::cerr << "Both terms are upper bounds, not measurements: 256 beams per ping and a "
+      "count-tile allowance of " << count_spill_allowance << " x the sounding spill. If "
+      "this survey is denser than it is wide, lower the allowance with "
+      "--count-spill-allowance <factor> (0 removes it); otherwise point --scratch-dir at "
+      "a larger device." << std::endl;
     return nullptr;
   }
   try {
@@ -1437,6 +1513,11 @@ int main(int argc, char * argv[])
   bool count_level_given = false;
   std::size_t count_resident_tiles = cube::CountGrid::kDefaultResidentTiles;
   bool count_resident_tiles_given = false;
+  // Count-tile spill allowance, as a multiple of the projected sounding spill
+  // (cube#143). 1.0 doubles the preflight requirement; the operator who knows
+  // the survey can lower or raise it.
+  double count_spill_allowance = 1.0;
+  bool count_spill_allowance_given = false;
   std::string scratch_dir;
   std::string level_plan_out;
   std::string level_plan_in;
@@ -1592,10 +1673,16 @@ int main(int argc, char * argv[])
       level_policy.achieved_percentile = parse_double(
         "--achieved-percentile", next_value("--achieved-percentile")) / 100.0;
     } else if (*arg == "--count-resident-tiles") {
-      count_resident_tiles = requireNonNegative(
+      count_resident_tiles = requireAtLeast(
         "--count-resident-tiles",
-        parse_int("--count-resident-tiles", next_value("--count-resident-tiles")));
+        parse_int("--count-resident-tiles", next_value("--count-resident-tiles")),
+        cube::CountGrid::kMinResidentTiles);
       count_resident_tiles_given = true;
+    } else if (*arg == "--count-spill-allowance") {
+      count_spill_allowance = requireFiniteFactor(
+        "--count-spill-allowance",
+        parse_double("--count-spill-allowance", next_value("--count-spill-allowance")));
+      count_spill_allowance_given = true;
     } else if (*arg == "--scratch-dir") {
       scratch_dir = next_value("--scratch-dir");
     } else if (*arg == "--level-plan-out") {
@@ -1648,7 +1735,8 @@ int main(int argc, char * argv[])
 
   validateDepthAdaptiveOptions(
     depth_adaptive, level_policy, count_level_given, count_resident_tiles_given,
-    level_plan_out, level_plan_in, count_grid_out, scratch_dir, tile_size_report_path);
+    count_spill_allowance_given, level_plan_out, level_plan_in, count_grid_out, scratch_dir,
+    tile_size_report_path);
 
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;
@@ -1675,17 +1763,7 @@ int main(int argc, char * argv[])
   std::cout << "calculating total time..." << std::endl;
   auto begin_time = bag_readers.start_time();
   auto end_time = bag_readers.end_time();
-  auto total_duration = end_time - begin_time;
-
-  auto start_time_t = std::chrono::system_clock::to_time_t(begin_time);
-  std::cout << "start time: "
-            << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
-  auto end_time_t = std::chrono::system_clock::to_time_t(end_time);
-  std::cout << "end time: "
-            << std::put_time(std::gmtime(&end_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
-  std::cout << "total time: "
-            << std::chrono::duration_cast<std::chrono::seconds>(total_duration).count()
-            << " seconds" << std::endl;
+  reportBagTimeSpan(begin_time, end_time);
 
   // Single, deterministic per-cell timestamp: the bag's nominal start time in ns
   // since the Unix epoch. A single value per import keeps the epoch deterministic
@@ -1709,20 +1787,8 @@ int main(int argc, char * argv[])
 
   cube::GeoMapSheet geo_map_sheet(resolution, iho_order);
   geo_map_sheet.setCaptureSpacingScale(capture_spacing_scale);
-  if (depth_adaptive) {
-    std::cout << "Depth-adaptive multi-level store (cube#143): levels "
-              << static_cast<int>(level_policy.depth.coarsest_level) << ".."
-              << static_cast<int>(level_policy.depth.finest_level)
-              << ", count level " << static_cast<int>(level_policy.count_level)
-              << ", n_req " << level_policy.requiredObservations()
-              << "; the -r resolution is not used (each level's sheet is built at "
-      "its own cell size)." << std::endl;
-  } else {
-    std::cout << "requested resolution: " << resolution << " nominal used: "
-              << geo_map_sheet.nominalCellSizeMeters() << std::endl;
-  }
-  std::cout << "Capture distance: max(" << geo_map_sheet.parameters().capture_distance_scale
-            << " x |depth|, " << capture_spacing_scale << " x node spacing)" << std::endl;
+  reportTilingChoice(
+    depth_adaptive, level_policy, geo_map_sheet, resolution, capture_spacing_scale);
 
   // Backscatter angular-response correction (cube#81). The setter must run AFTER
   // the sheet is constructed (its grids hold a const ref to the sheet Parameters).
@@ -1777,7 +1843,8 @@ int main(int argc, char * argv[])
   std::unique_ptr<cube::ReconCollector> recon;
   if (depth_adaptive) {
     recon = makeRecon(level_policy, scratch_dir, store_dir,
-        bag_readers.messageCount(detections_topic), count_resident_tiles);
+        bag_readers.messageCount(detections_topic), count_resident_tiles,
+        count_spill_allowance);
     if (!recon) {
       return 1;
     }
@@ -1819,7 +1886,7 @@ int main(int argc, char * argv[])
 
   const int64_t begin_ns = cell_timestamp_ns;
   const int64_t total_ns =
-    std::chrono::duration_cast<std::chrono::nanoseconds>(total_duration).count();
+    std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - begin_time).count();
 
   // Speed-over-ground samples, pruned to a rolling window as pings drain (see
   // drain_pending) so the map stays bounded across a long multi-bag run instead
