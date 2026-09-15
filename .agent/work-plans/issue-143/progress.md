@@ -834,3 +834,41 @@ Fix all three in PR #159 now via `address-findings`, rerun the full suite **and 
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Fable 5.1`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 11:00 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `8088fae`   **PR**: #159
+**Addressed**: the `## Integrated Review` of 2026-09-15 10:30 -04:00 (PR #159 at `88831d5`) — 3 must-fix, 0 suggestions, all actioned, none deferred
+**Commits**: `ccff244` (histogram), `da1c382` (recon timer), `3f21512` (surveyed ground), `8088fae` (plan sync)
+
+### Actions
+- [x] (must-fix) Decision depth read from a per-grid **depth histogram** instead of the 64-deep `ShallowReservoir` — `include/cube_bathymetry/recon.h`, `src/recon.cpp`. `DepthHistogram` bins sparsely at 0.25 m (`floor(depth/width)` → count), doubling the width and merging pairs above 1024 bins so per-grid memory is bounded whatever the spread, and clamping depths to ±12000 m. `decisionDepth(p)` walks from the shallowest bin to rank `max(1, ceil(p·N))` and returns that bin's **shallow edge**: the answer lies in `(truth, truth + bin_width]` — at most one bin shallow, never deep, which is the finer-tile (safe) side. The `kMaxDecisionDepthPercentile = 0.05` cap existed only to keep the bounded reservoir from being asked for a rank it could not reach, so it is **removed**: `decision_depth_percentile` is now `(0, 1]`, refusing only 0 (a single flier would set the level) — `include/cube_bathymetry/level_plan.h`, `src/level_plan.cpp`. Tests: `DepthHistogram.HonoursThePercentileAtSurveyDensity` (102,000 soundings with 2,000 shallow fliers — 30× the old capacity — asserting the decision depth stays inside the bathymetry), `…ReadsThePercentileToWithinOneBin`, `…BoundsItsBinsByCoarseningTheWidth`, `…FlierGuardAtSmallCounts`. README, `--help` and plan.md wording synced off "shallowest 64".
+- [x] (must-fix) Report areas are **surveyed ground**, not tile footprints — `src/level_plan.cpp`, `include/cube_bathymetry/level_plan.h`. `levelPlanFor` counts each count tile's occupied cells in the pass that already reads every tile (the grid is spill-backed, so a second sweep would re-read the spill) and charges `occupied × cell²` to every ancestor; `PlannedTile::ground_m2` is the ground a tile covers and `LevelPlan::nativeGroundM2()` the ground it is the *finest* emitted tile for (own minus emitted children's). The report prints `covered(km2)` and `native(km2)` per level plus a `surveyed ground (occupied count cells)` line, the estimate-count multiplier divides by surveyed ground, and "ground stored coarser than level 10" sums **native** ground below level 10 only. Tile counts and the MB columns are unchanged; the now-unused `tileAreaM2` helper is gone. Plan JSON is **schema 2** (per-tile `"g"`, top-level `"ground_m2"`); a schema-1 plan is refused rather than reported against without areas. Tests: `LevelPlanTest.AreasAreSurveyedGroundNotTileFootprints` (ground vs the 16× larger footprint, parents-alive tiles storing no ground of their own, the coarser-than-10 line reading zero where the native level is 11), round-trip and report assertions extended; `test_survey_index_query`'s hand-built plan JSON moved to schema 2.
+- [x] (must-fix) The recon timer times the **recon pass** — `src/import_bag_main.cpp`. `phase_secs()` reads *and* restarts the clock, and the projection loop's reading was already consumed by the "projected N pings in Xs" line, so the recon summary timed the handful of statements in between. One reading now feeds both.
+
+### Verification (operator-requested)
+
+**Clean build + full suite on HEAD** — `sensors_ws/build/install/cube_bathymetry` removed and rebuilt (the `PlannedTile`/recon struct layouts changed, so an incremental build would have been unsafe), then `./sensors_ws/test.sh cube_bathymetry`:
+
+    Summary: 765 tests, 0 errors, 0 failures, 87 skipped
+
+The 87 skipped are the whole `cppcheck` linter suite (the tool is absent on this host) — unchanged from before this pass. `test_mixed_level_import` ran 10 tests, 0 failures, so **byte-identity with a fixed-level import still holds**. uncrustify and cpplint are green. (This repo carries no `.pre-commit-config.yaml` and no installed hook; the package's lint runs inside the test suite, which passed. No `--no-verify` anywhere.)
+
+**Dry run re-run** — same command as `recon.log`, outputs in a new `.agent/scratchpad/cube143-dryrun/rerun/` (originals untouched). Bag: NAS `gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections`. 33.8 s wall, 167 MB peak RSS, 20 count tiles (35 MB peak), exit 0.
+
+- **Recon timer**: `Recon pass: 12125207 soundings counted, 12125207 spilled, 20 count tile(s) in 9.34608s.` — seconds, and equal to the projection line's 9.34608 s, where the old run printed `2.6062e-05s`. ✅
+- **Surveyed ground**: `surveyed ground (occupied count cells): 0.0085 km2`, and every level's covered column reads `0.0085` (the ~12.1 km² level-8 footprint is gone). `ground stored coarser than level 10: 0.0000 km2` — correct in kind: every square metre of this survey has a native level-10 tile (the 15.127 km² the old report printed was parents-alive footprints). Multiplier 3.00× the surveyed ground over 4 tiles (1 at level 8, 1 at 9, 2 at 10) — same tiling as before. ✅
+- **Decision depth for `l=10, r=17801, c=13988`**: the review's comparison is against `small/fixed`, a **3,000-ping** fixed-level import, so the like-for-like check is a recon over that same window (`-l 3000`, written to `rerun/small/`): **d = −36.75 m**, inside the stored CUBE surface's −40.897…−36.255 m (band 1 of `small/fixed/processed/10_17801_13988.tif`, 2,315 valid cells, median −38.94). The old code answered **−27.25 m** on that window, 9 m above anything CUBE accepted. ✅ With the level now set from a real depth, that window's required level drops 10 → 9 — the ladder's answer at 36.75 m — and its report reads `ground stored coarser than level 10: 0.0007 km2`, which is genuine.
+- **Full-bag value for the same tile is −30.25 m**, not −36.75: the full 98-minute survey covers much more of that tile than the 3,000-ping window. That is bathymetry, not a residual flier tail — sweeping the percentile over the full bag moves it almost not at all (p2 → −30.25, p5 → −30.50, p15 → −31.25, p30 → −32.25), whereas a flier tail would collapse within a few percent. The neighbouring tile `…13989` reads −32.25 (was −26.35).
+
+### Notes for the re-review
+- The histogram's answer is quantised: within one 0.25 m bin, always on the shallow side. Level-ladder boundaries are metres apart (cell = 0.05 × depth), so this cannot move a level decision except within 0.25 m of a boundary, and then only toward the finer tile.
+- Plan JSON schema 1 → 2 is a hard break: an older plan file is refused by `--level-plan`. Nothing outside this branch has ever written one.
+- `nativeGroundM2` subtracts child ground from parent ground in floating point and clamps a negative residual to 0; the values are sums of the same per-count-tile terms, so the residual is at most a few ulp.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
