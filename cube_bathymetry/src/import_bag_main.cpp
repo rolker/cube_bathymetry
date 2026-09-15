@@ -1167,6 +1167,46 @@ bool writeFingerprint(
   }
 }
 
+/// Abort a depth-adaptive run whose spill replay did not complete (cube#143),
+/// and report what that leaves on disk. The accumulator has been evicting tiles
+/// into the real `-o` store since the first batch
+/// (`MultiLevelAccumulator::evictToBudget` -> `persistAndDrop`), so by the time
+/// a short or failed replay is detected the destination already holds
+/// partial-coverage tiles: a re-run over them double-counts the soundings in
+/// every tile written twice -- the hazard `build_bathy_store.sh` guards with
+/// `--fresh`. Nothing is finalized and no fingerprint is written for THIS run,
+/// and a fingerprint left by an earlier complete build is deleted here rather
+/// than left describing tiles this run has since mutated (a later
+/// `batch_regen --incremental` would otherwise trust it). Returns the exit code.
+int abortDirtyReplay(const std::string & store_dir, const std::string & detail)
+{
+  std::cerr << "error: " << detail << std::endl;
+  std::cerr << "The store in " << store_dir
+            << " is NOT empty and NOT complete: every batch replayed before the failure "
+    "was already evicted into it, so it holds partial-coverage tiles. Nothing is "
+    "finalized and no " << cube::BuildFingerprint::kFilename
+            << " is written for this run. Archive or remove that store (or re-import "
+    "with --fresh) before re-running -- importing again over these tiles "
+    "double-counts their soundings." << std::endl;
+  const std::filesystem::path fingerprint =
+    std::filesystem::path(store_dir) / cube::BuildFingerprint::kFilename;
+  std::error_code ec;
+  if (std::filesystem::exists(fingerprint, ec) && !ec) {
+    if (std::filesystem::remove(fingerprint, ec) && !ec) {
+      std::cerr << "Removed the pre-existing " << fingerprint.string()
+                << ": it described the store as it was BEFORE this aborted run mutated it."
+                << std::endl;
+    } else {
+      std::cerr << "warning: could not remove the pre-existing " << fingerprint.string()
+                << " (" << ec.message()
+                << "). Delete it by hand: it describes the store as it was BEFORE this "
+        "aborted run mutated it, and a later batch_regen --incremental would trust it."
+                << std::endl;
+    }
+  }
+  return 1;
+}
+
 /// Depth-adaptive finish (cube#143): plan, report, recon-only exit, phase-two
 /// replay into one accumulator per level, finalize, fingerprint. Returns the
 /// process exit code.
@@ -1269,33 +1309,48 @@ int cube_depth_adaptive_finish(
   constexpr std::size_t kChunk = 256;
   std::vector<cube::GeoSounding> chunk;
   chunk.reserve(kChunk);
-  const uint64_t read_back = recon.forEachSpilled([&](const cube::GeoSounding & s) {
-        chunk.push_back(s);
-        if (chunk.size() >= kChunk) {
-          accumulator.addBatch(chunk);
-          replayed += chunk.size();
-          chunk.clear();
-        }
-    });
-  if (!chunk.empty()) {
-    accumulator.addBatch(chunk);
-    replayed += chunk.size();
-    chunk.clear();
+  uint64_t read_back = 0;
+  // forEachSpilled throws on a failed flush or close of the spill file and on a
+  // partial trailing record -- the disk-full tail this whole check exists for.
+  // It is the one fallible call on this path, and main() has no catch of its
+  // own, so an escaping throw would end the run in std::terminate (SIGABRT)
+  // instead of the `error: ...` + exit 1 its silent-short-count sibling below
+  // produces for the very same condition.
+  try {
+    read_back = recon.forEachSpilled([&](const cube::GeoSounding & s) {
+          chunk.push_back(s);
+          if (chunk.size() >= kChunk) {
+            accumulator.addBatch(chunk);
+            replayed += chunk.size();
+            chunk.clear();
+          }
+      });
+    if (!chunk.empty()) {
+      accumulator.addBatch(chunk);
+      replayed += chunk.size();
+      chunk.clear();
+    }
+  } catch (const std::exception & e) {
+    return abortDirtyReplay(
+      store_dir, std::string(e.what()) + ". Replayed " + std::to_string(replayed) + " of " +
+      std::to_string(recon.soundingsSpilled()) + " spilled sounding(s) before the failure.");
   }
   const double replay_secs =
     std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count();
   // The spill is the only copy of the projected soundings, so a short replay is
   // a truncated survey, not a detail: fail before finalize() rather than write
   // the store and fingerprint it as a complete build (ADR-0003) -- a later
-  // `batch_regen --incremental` would then trust it and never rebuild it.
+  // `batch_regen --incremental` would then trust it and never rebuild it. What
+  // is already on disk is NOT nothing, though: addBatch evicts to the real -o
+  // store as it goes, so abortDirtyReplay() says so and clears any stale
+  // fingerprint sitting over the mutated tiles.
   if (read_back != replayed || replayed != recon.soundingsSpilled()) {
-    std::cerr << "error: phase one spilled " << recon.soundingsSpilled()
-              << " soundings but phase two replayed only " << replayed
-              << " (read back " << read_back << ") from " << recon.spillPath()
-              << ". The spill is short -- a full scratch device is the usual cause. "
-      "Nothing is finalized and no build_fingerprint.json is written; free space "
-      "(or pass --scratch-dir) and re-run." << std::endl;
-    return 1;
+    return abortDirtyReplay(
+      store_dir, "phase one spilled " + std::to_string(recon.soundingsSpilled()) +
+      " soundings but phase two replayed only " + std::to_string(replayed) +
+      " (read back " + std::to_string(read_back) + ") from " + recon.spillPath() +
+      ". The spill is short -- a full scratch device is the usual cause; free space "
+      "(or pass --scratch-dir) before the re-run.");
   }
   std::cout << "Replayed " << replayed << " soundings in " << replay_secs <<
     "s; batches per level:";
