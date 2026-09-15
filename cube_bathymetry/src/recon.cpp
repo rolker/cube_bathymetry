@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -230,7 +231,7 @@ uint64_t ReconCollector::forEachSpilled(const std::function<void(const GeoSoundi
   if (in.gcount() != 0) {
     throw std::runtime_error(
             "recon: spill file " + spillPath() + " ends in a partial record (" +
-            std::to_string(static_cast<long long>(in.gcount())) + " of " +
+            std::to_string(static_cast<int64_t>(in.gcount())) + " of " +
             std::to_string(sizeof(record)) + " bytes) after " +
             std::to_string(replayed) + " soundings; the spill is truncated");
   }

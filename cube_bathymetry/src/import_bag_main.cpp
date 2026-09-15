@@ -1056,6 +1056,20 @@ void warnAboutOrphanedSpills(const std::string & spill_root, const std::string &
   }
 }
 
+/// A count option that must not be negative (cube#143): cast to std::size_t a
+/// negative value becomes SIZE_MAX, which for --count-resident-tiles silently
+/// restores the unbounded count grid the resident LRU replaced. Reports the
+/// option error and exits, like every other option failure.
+std::size_t requireNonNegative(const char * flag, int value)
+{
+  if (value < 0) {
+    std::cerr << "error: option '" << flag << "' expects a count >= 0, got '"
+              << value << "'\n";
+    usage();
+  }
+  return static_cast<std::size_t>(value);
+}
+
 /// Build the recon collector (cube#143). Spill scratch beside the output store
 /// unless --scratch-dir says otherwise (never temp_directory_path(): it is often
 /// tmpfs, and a day's spill is gigabytes). The free-space check uses the bags'
@@ -1256,12 +1270,12 @@ int cube_depth_adaptive_finish(
   std::vector<cube::GeoSounding> chunk;
   chunk.reserve(kChunk);
   const uint64_t read_back = recon.forEachSpilled([&](const cube::GeoSounding & s) {
-      chunk.push_back(s);
-      if (chunk.size() >= kChunk) {
-        accumulator.addBatch(chunk);
-        replayed += chunk.size();
-        chunk.clear();
-      }
+        chunk.push_back(s);
+        if (chunk.size() >= kChunk) {
+          accumulator.addBatch(chunk);
+          replayed += chunk.size();
+          chunk.clear();
+        }
     });
   if (!chunk.empty()) {
     accumulator.addBatch(chunk);
@@ -1523,16 +1537,9 @@ int main(int argc, char * argv[])
       level_policy.achieved_percentile = parse_double(
         "--achieved-percentile", next_value("--achieved-percentile")) / 100.0;
     } else if (*arg == "--count-resident-tiles") {
-      // Reject a negative budget here: cast to size_t it becomes SIZE_MAX,
-      // which silently restores the unbounded count grid the LRU replaced.
-      const int requested =
-        parse_int("--count-resident-tiles", next_value("--count-resident-tiles"));
-      if (requested < 0) {
-        std::cerr << "error: option '--count-resident-tiles' expects a positive count, got '"
-                  << requested << "'\n";
-        usage();
-      }
-      count_resident_tiles = static_cast<std::size_t>(requested);
+      count_resident_tiles = requireNonNegative(
+        "--count-resident-tiles",
+        parse_int("--count-resident-tiles", next_value("--count-resident-tiles")));
       count_resident_tiles_given = true;
     } else if (*arg == "--scratch-dir") {
       scratch_dir = next_value("--scratch-dir");
