@@ -1018,3 +1018,9 @@ re-opened; nothing below touches them.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+### Operator decisions (2026-09-15, host-recorded, after the triage above)
+- Fix **all 5 must-fix and all 6 should-fix** in this PR via `address-findings`. The 3 low items may be fixed if cheap; otherwise note them as deferred.
+- **`--bs-store` with `--depth-adaptive` / `--level-plan`: TEMPORARY refusal.** Refuse the combination with a message that names rolker/unh_marine_autonomy#383 as the prerequisite (per-level backscatter layout) and says the refusal is lifted by the PR that consumes it. This is not a reversal of the 2026-09-14 decision (mixed-level backscatter is gated on uma#383, not abandoned): it only avoids writing a store nothing can load today. README/`--help`/plan.md say the same; the gated mixed-level backscatter test stays as it is.
+- Recurrence classes (uncaught throws at a second site; finalize outside the abort guard; fingerprint from the wrong policy; capture_spacing_scale not carried): fix **every** site of the class, not the one Copilot pointed at, and say in the commit message that the class was swept.
+- After the fixes: clean build + FULL suite, then re-run the dry run (`rerun3/`, same command as `recon.log`, plus the `-l 3000` window) and confirm the plan/report numbers are unchanged from `rerun2/` (decision depths −6.5…−7.5 m, required 12, achieved 10–11, deficit 5 tiles / 0.0085 km²). Then the host pushes.
