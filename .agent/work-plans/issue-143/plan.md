@@ -730,6 +730,54 @@ deferred):
   (write-and-search-only directory; skipped as root), and a spread-term
   assertion in the count-grid spill test.
 
+### Round-3 pre-push review fixes (2026-09-15)
+
+The third pre-push review round (2 must-fix, 5 suggestions — all actioned at the
+operator's direction, none deferred; the last fix pass before publish):
+
+- **A failed spill replay is caught, not fatal-by-abort.** The `forEachSpilled`
+  throws (failed flush, failed close, partial trailing record) had no handler on
+  the depth-adaptive finish path and none in `main()`, so the disk-full tail the
+  round-2 fix targets ended the run in `std::terminate` (SIGABRT) rather than the
+  documented `error: ...` + exit 1.
+- **The abort says what is on disk.** `addBatch` evicts tiles into the real `-o`
+  store from the first batch, so a short or failed replay leaves partial-coverage
+  tiles there; the old message ("Nothing is finalized … free space and re-run")
+  invited a re-import that double-counts every twice-written tile. Both abort
+  paths now go through `abortDirtyReplay()`, which names the store as dirty and
+  **removes any pre-existing `build_fingerprint.json`** — it describes the store
+  as it was before this run mutated it, and a later `batch_regen --incremental`
+  would otherwise trust it. The double-count guarantee is closed, not just
+  documented.
+- **A filesystem with no directory fsync is not a failed write.** `EINVAL`,
+  `ENOTSUP` and `ENOSYS` from the post-rename directory `fsync` (a number of
+  network and FUSE mounts) now warn and return — the rename put a valid
+  fingerprint in place, and throwing would exit 2 on every run and condemn such a
+  store to a FULL regen forever. `EIO`/`ENOSPC`/`EBADF` still throw.
+- **`--count-resident-tiles` states its real floor** (`CountGrid::kMinResidentTiles`
+  = 16, the 3×3 level-of-aggregation neighbourhood plus headroom) at parse time
+  and in `--help`, instead of validating ">= 0" and letting the `ReconCollector`
+  constructor refuse 1–15 after the orphan warning and spill banner had printed.
+- **The count-tile allowance is tunable**: `--count-spill-allowance <factor>`
+  (default 1.0, 0 removes it). The doubling is an allowance in both directions —
+  it can also refuse a dense survey over little ground whose spill would have
+  fit, and `--scratch-dir` was the only advice on offer. Only the preflight check
+  is affected.
+- **README** says `capture_spacing_scale` is `read_only`: set from launch or
+  YAML, a runtime `ros2 param set` is rejected (the operator-facing half of the
+  round-2 must-fix).
+- **Tests added**: `BuildFingerprint.TellsAnUnsupportedDirectoryFsyncFromAFailedOne`,
+  `ImportBagCli.RefusesACountResidentBudgetBelowTheRealMinimum` and
+  `ImportBagCli.CountSpillAllowanceIsTunableAndValidated` (both through the
+  existing `runImportBag` harness), plus `--help` assertions for the new flag and
+  the stated minimum. The two abort paths in `cube_depth_adaptive_finish` have no
+  test: they are inside `main()`'s call tree past a real bag read, and this
+  package has no bag fixture.
+- **`main()` size**: the two new option paths pushed it past cpplint's 500-line
+  function limit again, so the bag time-span report, the tiling-choice report and
+  the finite-factor option check moved to free functions beside the other
+  helpers.
+
 - **Follow-ups filed / owed**: uma#383 (prerequisite for reading mixed-level
   backscatter), uma#386 (policy floor from horizontal error); to file after
   the PR: the live-node count-grid + spill follow-up, `.agents/README.md` for
