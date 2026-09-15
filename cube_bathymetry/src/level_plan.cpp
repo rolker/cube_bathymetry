@@ -562,7 +562,16 @@ LevelPlan levelPlanFor(
     }
     for (int level = coarsest; level <= finest; ++level) {
       auto & touched = plan.touched_[static_cast<uint8_t>(level)];
-      const double radius = std::max(spread, gggs::Level(level).cellSize());
+      // The disc is centred on the count CELL, but the sounding that occupied
+      // it can sit anywhere inside it -- up to half a cell diagonal from the
+      // centre -- while the fixed path selects from the sounding's own
+      // position. Without that offset a deposit landing in a seam-neighbour
+      // tile inside the sliver reaches a tile the plan never emitted and
+      // admission drops it: #104's failure mode in miniature, and a hole in the
+      // single-level equivalence claim at tile seams. ~0.04 m at level 14
+      // (cube#143 triage).
+      const double cell_offset = 0.5 * std::sqrt(2.0) * count_cell_m;
+      const double radius = std::max(spread, gggs::Level(level).cellSize()) + cell_offset;
       // Home chain.
       const gggs::GridIndex home = ancestorAt(count_tile, static_cast<uint8_t>(level));
       if (home.valid()) {
