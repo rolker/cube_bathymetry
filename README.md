@@ -109,8 +109,13 @@ off-boat re-run is authoritative).
 Both tools take `--capture-spacing-scale <k>` (default 0.71): the node capture
 distance is `max(0.05 × |depth|, k × node spacing)`. CUBE's fixed 0.5 m floor
 (`Capture_Distance_Minimum`) is gone (#143) — the spacing term replaces it, so a
-fixed-level run at level 10 now gathers within 0.64 m instead of 0.5 m below
-~13 m of water, and deeper the depth term dominates as before. The live node
+fixed-level run at level 10 now gathers within 0.71 m instead of 0.5 m below
+~14 m of water, and deeper the depth term dominates as before. (0.71 m, not
+0.64 m: `Parameters::distance_scale` takes the **requested** cell size, which is
+`-r 1.0` by default, so `k × spacing` is 0.71 m on a default fixed-level run.
+The depth-adaptive sheets are built at each level's nominal cell
+(`requestedCellSizeFor`), so a level-10 sheet there gathers within
+0.71 × ~0.906 = 0.64 m.) The live node
 applies the same gate at its fixed level and takes the same multiplier as the
 ROS parameter `capture_spacing_scale` (default 0.71), so a deployment can pin
 it — to `0.5 / cell_size` to reproduce the pre-#143 gate exactly, say — without

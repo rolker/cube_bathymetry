@@ -584,6 +584,19 @@ void CountGrid::merge(const CountGrid & other)
 std::size_t CountGrid::saveTo(const std::string & dir) const
 {
   namespace fs = std::filesystem;
+  // A non-empty destination is refused, not written into (cube#143 triage).
+  // The write is per-tile and mergeFrom() reads the WHOLE directory, so a
+  // leftover tile from an earlier, larger survey would be merged back as if
+  // this grid had counted it -- an achieved level supported by soundings that
+  // are not in these bags. ReconCollector sets the same precedent for its
+  // scratch dir; this directory is likewise operator-facing.
+  std::error_code ec;
+  if (fs::exists(dir, ec) && !ec && !fs::is_empty(dir, ec) && !ec) {
+    throw std::runtime_error(
+            "CountGrid::saveTo: " + dir + " is not empty. A count-grid directory is read "
+            "back whole, so a tile left by an earlier survey would merge into this one; "
+            "point --count-grid-out at a new directory, or remove that one first.");
+  }
   fs::create_directories(dir);
   {
     std::ofstream level_file(fs::path(dir) / kLevelFile);

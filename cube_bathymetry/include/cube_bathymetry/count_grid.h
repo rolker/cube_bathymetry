@@ -271,9 +271,12 @@ public:
   ///
   /// The written state is the whole grid (not only tiles changed since the
   /// last save): a count grid is small and a partial write would be
-  /// unmergeable. Creates @p dir as needed.
+  /// unmergeable. Creates @p dir as needed, and REFUSES a @p dir that already
+  /// holds anything -- `mergeFrom` reads the whole directory, so a tile left by
+  /// an earlier, larger survey would merge in as if this grid had counted it.
   /// @return The number of tiles written.
-  /// @throws std::runtime_error on any GDAL or filesystem failure.
+  /// @throws std::runtime_error if @p dir is not empty, or on any GDAL or
+  ///         filesystem failure.
     std::size_t saveTo(const std::string & dir) const;
 
   /// @brief Merge the tiles found under @p dir into this grid (additive).

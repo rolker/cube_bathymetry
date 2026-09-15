@@ -396,6 +396,18 @@ TEST_F(CountGridTest, SaveAndMergeFromRoundTripsAdditively)
   EXPECT_EQ(loaded.mergeFrom(dir), 2u);
   EXPECT_EQ(loaded.countAt(cell(30, 31)), 4u);
 
+  // A second save into the SAME directory is refused (cube#143 triage): the
+  // directory is read back whole, so a tile from an earlier, larger survey
+  // would merge in as if this grid had counted it -- an achieved level
+  // supported by soundings that are not in these bags.
+  CountGrid other(kLevel);
+  other.add(cell(1, 1));
+  EXPECT_THROW(other.saveTo(dir), std::runtime_error);
+  // A fresh directory is still fine, and an empty one that already exists too.
+  const auto fresh = tempDir("roundtrip_fresh");
+  std::filesystem::create_directories(fresh);
+  EXPECT_EQ(other.saveTo(fresh), 1u);
+
   CountGrid wrong_level(13);
   EXPECT_THROW(wrong_level.mergeFrom(dir), std::invalid_argument);
   EXPECT_THROW(CountGrid::levelOf(dir + "_missing"), std::runtime_error);
