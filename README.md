@@ -129,8 +129,11 @@ in short:
 - A **recon pass** over the bags counts every sounding into a fine count grid
   (`--count-level`, default = the ladder's finest level, 14) and spills the
   projected soundings to scratch as **one chronological file** (`--scratch-dir`,
-  default beside the `-o` store, never `/tmp`; ~64 B per sounding, free space
-  checked first). The count grid is bounded too: `--count-resident-tiles`
+  default beside the `-o` store, never `/tmp`; ~64 B per sounding). Free space
+  is checked before the pass starts, budgeting that spill plus an allowance of
+  the same size for the count-tile spill below — an allowance, not a bound: the
+  count term follows the ground covered, which nothing knows up front. The
+  count grid is bounded too: `--count-resident-tiles`
   (default 256, ~460 MB of level-14 tiles) caps what stays in RAM and colder
   tiles go to the same scratch directory as UInt16 GeoTIFFs, reloaded on demand;
   the plan report states the resident peak.
@@ -142,6 +145,17 @@ in short:
   which each node still gathers `--min-obs-per-node` soundings, inflated by
   `--blunder-allowance`). Where the depth requires finer than the data achieves
   the plan reports a **coverage deficit**.
+- Both decisions read a **percentile**, not an extremum, so one flier cannot
+  drive a tile's level:
+  - `--decision-depth-percentile <p>` (default 2) is the percentile of a
+    level-14 grid's *shallowest* soundings that sets its depth — the flier
+    guard on the depth side. The recon keeps only the shallowest 64 soundings
+    per grid, so a percentile past that window would be answered from a
+    saturated reservoir: the policy requires **0 < p ≤ 5** and is rejected
+    otherwise.
+  - `--achieved-percentile <p>` (default 95) is the percentile of the level of
+    aggregation across a tile that sets its achieved level, so a few
+    under-covered nodes do not coarsen the whole tile.
 - `--level-plan-out <file>` is **recon only**: it writes the plan and prints
   its report — tiles, ground area and storage per level (dense and at the
   observed ~2.4 MB/tile fill), the estimate-count multiplier that parents-alive
