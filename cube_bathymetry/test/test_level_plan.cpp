@@ -128,6 +128,16 @@ TEST(LevelPlanPolicyTest, ValidationNamesEachConstraint)
   p = ok;
   p.depth.capture_distance_scale = 0.0;
   EXPECT_THROW(p.validate(), std::invalid_argument);
+  // The recon reservoir keeps only the 64 shallowest depths per level-14 grid,
+  // so a percentile beyond kMaxDecisionDepthPercentile would be answered from a
+  // saturated reservoir -- refused, not silently mis-answered (#143).
+  p = ok;
+  p.decision_depth_percentile = LevelPlanPolicy::kMaxDecisionDepthPercentile;
+  EXPECT_NO_THROW(p.validate());
+  p.decision_depth_percentile = 0.5;
+  EXPECT_THROW(p.validate(), std::invalid_argument);
+  p.decision_depth_percentile = 0.0;
+  EXPECT_THROW(p.validate(), std::invalid_argument);
 }
 
 TEST(LevelNoFinerThanTest, RoundsTowardTheCoarserLevel)

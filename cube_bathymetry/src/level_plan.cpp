@@ -106,6 +106,17 @@ void LevelPlanPolicy::validate() const
       throw std::invalid_argument("level plan policy: percentiles must be in [0, 1]");
     }
   }
+  // The recon reservoir keeps only the 64 shallowest depths per level-14 grid,
+  // so a rank beyond that is served saturated (see kMaxDecisionDepthPercentile).
+  if (!(decision_depth_percentile > 0.0) ||
+    decision_depth_percentile > kMaxDecisionDepthPercentile)
+  {
+    throw std::invalid_argument(
+            "level plan policy: decision_depth_percentile must be in (0, " +
+            std::to_string(kMaxDecisionDepthPercentile) +
+            "] -- the recon keeps only the shallowest 64 soundings per level-14 grid, "
+            "so a larger percentile would be answered from a saturated reservoir");
+  }
 }
 
 uint8_t levelNoFinerThan(double spacing_m, uint8_t coarsest, uint8_t finest)

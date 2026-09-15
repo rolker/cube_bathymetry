@@ -95,6 +95,10 @@ namespace cube
 /// @brief Per-level-14-grid reservoir of the shallowest soundings.
   struct ShallowReservoir
   {
+  /// Shallowest depths retained per level-14 grid. This is what bounds the
+  /// percentile a decision depth can be asked for:
+  /// `LevelPlanPolicy::validate()` refuses a `decision_depth_percentile`
+  /// above `kMaxDecisionDepthPercentile`, which is sized against this.
     static constexpr std::size_t kCapacity = 64;
   /// Total soundings seen (not only the retained ones).
     uint64_t count = 0;
