@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <set>
@@ -386,9 +387,11 @@ TEST_F(LevelPlanTest, CanonicalJsonRoundTripsAndIsOrderIndependent)
     EXPECT_EQ(b.achieved_level, tile.achieved_level);
     EXPECT_FLOAT_EQ(b.decision_depth, tile.decision_depth);
     EXPECT_EQ(b.refined, tile.refined);
+    EXPECT_DOUBLE_EQ(b.ground_m2, tile.ground_m2);
     EXPECT_TRUE(back.isTouched(grid));
   }
   EXPECT_EQ(back.policy().count_level, policy.count_level);
+  EXPECT_DOUBLE_EQ(back.surveyedGroundM2(), plan.surveyedGroundM2());
 
   // Order independence: build the same survey with the grids filled in the
   // reverse order; the bytes are identical.
@@ -409,7 +412,10 @@ TEST_F(LevelPlanTest, CanonicalJsonRoundTripsAndIsOrderIndependent)
   EXPECT_EQ(levelPlanFor(counts2, depths2, policy).toJson(), json);
 
   EXPECT_THROW(LevelPlan::fromJson("not json"), std::runtime_error);
-  EXPECT_THROW(LevelPlan::fromJson("{\"schema\":2}"), std::runtime_error);
+  // A schema-1 plan (before the surveyed-ground fields) is refused rather than
+  // read back without the areas the report needs.
+  EXPECT_THROW(LevelPlan::fromJson("{\"schema\":1}"), std::runtime_error);
+  EXPECT_THROW(LevelPlan::fromJson("{\"schema\":3}"), std::runtime_error);
 }
 
 TEST_F(LevelPlanTest, ReportStatesStorageDeficitAndMultiplier)
@@ -419,9 +425,61 @@ TEST_F(LevelPlanTest, ReportStatesStorageDeficitAndMultiplier)
   const auto plan = levelPlanFor(counts, depths, policy);
   const std::string r = plan.report(2.42e6);
   EXPECT_NE(r.find("level  cell(m)"), std::string::npos);
+  EXPECT_NE(r.find("covered(km2)"), std::string::npos);
+  EXPECT_NE(r.find("native(km2)"), std::string::npos);
   EXPECT_NE(r.find("estimate-count multiplier"), std::string::npos);
   EXPECT_NE(r.find("coverage deficit"), std::string::npos);
   EXPECT_NE(r.find("coarser than level 10"), std::string::npos);
+  EXPECT_NE(r.find("surveyed ground (occupied count cells)"), std::string::npos);
+}
+
+TEST_F(LevelPlanTest, AreasAreSurveyedGroundNotTileFootprints)
+{
+  // One level-14 grid's worth of ground, filled on a 4x4 lattice: a sixteenth
+  // of its cells are occupied. Every parent above it is emitted
+  // (parents-alive), and a footprint-based report would charge each of them
+  // its whole multi-km2 tile. At 10 m the ladder's native level is 11, so
+  // nothing here is stored coarser than level 10.
+  const auto g = l14(kLat, kLon);
+  fillGrid(g, 6, -10.0f);
+  const auto plan = levelPlanFor(counts, depths, policy);
+
+  const double cell = gggs::Level(14).cellSize();
+  const double occupied_cells = (CountGrid::kEdge / 4.0) * (CountGrid::kEdge / 4.0);
+  const double expected_ground = occupied_cells * cell * cell;
+  EXPECT_NEAR(plan.surveyedGroundM2(), expected_ground, 1e-6 * expected_ground);
+  // A level-14 tile's own footprint is 16x the ground the lattice occupies.
+  const double footprint = cell * gggs::cell_rows_per_grid * cell * gggs::cell_rows_per_grid;
+  EXPECT_NEAR(footprint, 16.0 * expected_ground, 1e-6 * footprint);
+
+  // Every emitted tile covers exactly that ground (they are all ancestors of
+  // the one filled grid), and only the finest one stores it natively.
+  ASSERT_FALSE(plan.tiles().empty());
+  uint8_t finest_emitted = 0;
+  for (const auto & [grid, tile] : plan.tiles()) {
+    EXPECT_NEAR(tile.ground_m2, expected_ground, 1e-6 * expected_ground)
+      << "level " << static_cast<int>(grid.level());
+    finest_emitted = std::max(finest_emitted, grid.level());
+  }
+  double native_total = 0.0;
+  for (const auto & [grid, tile] : plan.tiles()) {
+    const double native = plan.nativeGroundM2(grid);
+    native_total += native;
+    if (grid.level() != finest_emitted) {
+      EXPECT_NEAR(native, 0.0, 1e-6 * expected_ground)
+        << "a parents-alive tile at level " << static_cast<int>(grid.level())
+        << " stores no ground of its own";
+    }
+  }
+  EXPECT_NEAR(native_total, expected_ground, 1e-6 * expected_ground);
+
+  // The report's coarser-than-10 line: this survey's ground has a native tile
+  // at level 10 or finer, so nothing is lost to the coarse levels, however
+  // many parents-alive tiles sit above it.
+  const std::string r = plan.report(2.42e6);
+  ASSERT_GE(finest_emitted, 10);
+  EXPECT_NE(r.find("coarser than level 10 (today's fixed level): 0.0000 km2"),
+      std::string::npos) << r;
 }
 
 }  // namespace cube

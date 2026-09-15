@@ -315,13 +315,13 @@ std::string planJson(const std::vector<gggs::GridIndex> & tiles)
     if (!touched.empty()) {touched += ","; emitted += ",";}
     touched += "[" + l + "," + r + "," + c + "]";
     emitted += "{\"l\":" + l + ",\"r\":" + r + ",\"c\":" + c +
-      ",\"req\":" + l + ",\"ach\":" + l + ",\"d\":-10,\"ref\":false}";
+      ",\"req\":" + l + ",\"ach\":" + l + ",\"d\":-10,\"ref\":false,\"g\":1000}";
   }
-  return "{\"schema\":1,\"policy\":{\"capture_distance_scale\":0.05,\"coarsest_level\":8,"
+  return "{\"schema\":2,\"policy\":{\"capture_distance_scale\":0.05,\"coarsest_level\":8,"
          "\"finest_level\":14,\"count_level\":14,\"min_obs_per_node\":5,"
          "\"blunder_allowance\":0.2,\"decision_depth_percentile\":0.02,"
-         "\"achieved_percentile\":0.95},\"touched\":[" + touched + "],\"tiles\":[" +
-         emitted + "]}";
+         "\"achieved_percentile\":0.95},\"ground_m2\":1000,\"touched\":[" +
+         touched + "],\"tiles\":[" + emitted + "]}";
 }
 
 // Depth-adaptive dirty set (#143): the same L14 footprint rolls up to the emitted

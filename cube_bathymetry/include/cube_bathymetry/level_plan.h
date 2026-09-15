@@ -126,6 +126,12 @@ namespace cube
     float decision_depth = 0.0f;
   /// Whether the descent continued into this tile's children.
     bool refined = false;
+  /// Surveyed ground under this tile, square metres: the occupied cells of the
+  /// recon count grid that fall inside it, times a count cell's area. This is
+  /// ground the survey actually ensonified -- NOT the tile's footprint, which
+  /// for a level-8 parent over one survey line is three orders of magnitude
+  /// larger (cube#143 dry-run review).
+    double ground_m2 = 0.0;
 
   /// The coarser of required and achieved, in level numbers.
     uint8_t targetLevel() const
@@ -179,6 +185,18 @@ public:
   /// Emitted tiles whose required level is finer than their achieved level.
     std::vector < gggs::GridIndex > coverageDeficit() const;
 
+  /// @brief Surveyed ground, square metres: every occupied cell of the recon
+  ///        count grid, times a count cell's area. The denominator of the
+  ///        report's storage multiplier, and what its area columns sum to.
+    double surveyedGroundM2() const noexcept {return surveyed_ground_m2_;}
+
+  /// @brief Ground, square metres, for which @p grid is the FINEST emitted
+  ///        tile -- its own ground minus its emitted children's. This is the
+  ///        ground the tile actually stores; a refined parent keeps whatever
+  ///        its children did not take (a child is emitted only where the
+  ///        descent reached it). Zero for a grid that is not emitted.
+    double nativeGroundM2(const gggs::GridIndex & grid) const;
+
   /// @brief Canonical JSON: fixed key order, tiles sorted by (level, row,
   ///        column), no whitespace, numbers in a fixed format. Two plans with
   ///        the same policy and tiles serialise to the same bytes regardless of
@@ -189,10 +207,12 @@ public:
   ///         the recorded policy fails validation.
     static LevelPlan fromJson(const std::string & json);
 
-  /// @brief Operator report: per-level tile counts, ground area and storage
-  ///        (dense and at @p observed_bytes_per_tile), the coverage deficit,
-  ///        the area landing coarser than level 10, and the estimate-count
-  ///        multiplier that parents-alive costs at import time.
+  /// @brief Operator report: per-level tile counts, SURVEYED GROUND (covered
+  ///        and natively stored, from the count grid's occupied cells) and
+  ///        storage (dense and at @p observed_bytes_per_tile), the coverage
+  ///        deficit, the ground whose finest native level is coarser than 10,
+  ///        and the estimate-count multiplier that parents-alive costs at
+  ///        import time.
     std::string report(double observed_bytes_per_tile = 2.42e6) const;
 
 private:
@@ -200,6 +220,7 @@ private:
       const CountGrid &, const std::map < gggs::GridIndex, float > &, const LevelPlanPolicy &);
 
     LevelPlanPolicy policy_;
+    double surveyed_ground_m2_ = 0.0;
     std::map < gggs::GridIndex, PlannedTile > tiles_;
     std::map < uint8_t, std::set < gggs::GridIndex >> touched_;
   };

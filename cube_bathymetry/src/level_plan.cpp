@@ -41,12 +41,6 @@ constexpr uint8_t kSurveyIndexFootprintLevel = 14;  // ADR-0002: the dirty-set f
 constexpr uint8_t kMaxGggsLevel = 20;
 constexpr double kDenseBytesPerTile = 960.0 * 960.0 * 2.0 * 8.0;  // 2-band Float64 (uma#376)
 
-double tileAreaM2(uint8_t level)
-{
-  const double edge = gggs::Level(level).cellSize() * gggs::cell_rows_per_grid;
-  return edge * edge;
-}
-
 gggs::GridIndex ancestorAt(gggs::GridIndex grid, uint8_t level)
 {
   while (grid.valid() && grid.level() > level) {
@@ -210,12 +204,32 @@ std::vector<gggs::GridIndex> LevelPlan::coverageDeficit() const
   return result;
 }
 
+double LevelPlan::nativeGroundM2(const gggs::GridIndex & grid) const
+{
+  const auto it = tiles_.find(grid);
+  if (it == tiles_.end()) {
+    return 0.0;
+  }
+  double ground = it->second.ground_m2;
+  if (it->second.refined) {
+    for (const auto & child : gggs::children(grid)) {
+      const auto c = tiles_.find(child);
+      if (c != tiles_.end()) {
+        ground -= c->second.ground_m2;
+      }
+    }
+  }
+  // Floating-point subtraction of the same summed cell areas, so a residual of
+  // a few ulp either way is possible; ground is never negative.
+  return ground > 0.0 ? ground : 0.0;
+}
+
 std::string LevelPlan::toJson() const
 {
   // Hand-written so the byte layout is fixed: key order, tile order (the map is
   // ordered by GridIndex: level, then row, then column), number formats.
   std::ostringstream out;
-  out << "{\"schema\":1,\"policy\":{"
+  out << "{\"schema\":2,\"policy\":{"
       << "\"capture_distance_scale\":" << formatScale(policy_.depth.capture_distance_scale)
       << ",\"coarsest_level\":" << static_cast<int>(policy_.depth.coarsest_level)
       << ",\"finest_level\":" << static_cast<int>(policy_.depth.finest_level)
@@ -224,7 +238,8 @@ std::string LevelPlan::toJson() const
       << ",\"blunder_allowance\":" << formatScale(policy_.blunder_allowance)
       << ",\"decision_depth_percentile\":" << formatScale(policy_.decision_depth_percentile)
       << ",\"achieved_percentile\":" << formatScale(policy_.achieved_percentile)
-      << "},\"touched\":[";
+      << "},\"ground_m2\":" << formatScale(surveyed_ground_m2_)
+      << ",\"touched\":[";
   bool first = true;
   for (const auto & [level, grids] : touched_) {
     for (const auto & grid : grids) {
@@ -245,7 +260,8 @@ std::string LevelPlan::toJson() const
         << ",\"req\":" << static_cast<int>(tile.required_level)
         << ",\"ach\":" << static_cast<int>(tile.achieved_level)
         << ",\"d\":" << formatDepth(tile.decision_depth)
-        << ",\"ref\":" << (tile.refined ? "true" : "false") << "}";
+        << ",\"ref\":" << (tile.refined ? "true" : "false")
+        << ",\"g\":" << formatScale(tile.ground_m2) << "}";
   }
   out << "]}";
   return out.str();
@@ -261,7 +277,10 @@ LevelPlan LevelPlan::fromJson(const std::string & json)
   }
   LevelPlan plan;
   try {
-    if (j.at("schema").get<int>() != 1) {
+    // Schema 2 (cube#143 dry-run review) added the surveyed-ground fields; a
+    // schema-1 plan carries tile footprints only and cannot answer the report's
+    // area columns, so it is refused rather than reported against wrongly.
+    if (j.at("schema").get<int>() != 2) {
       throw std::runtime_error("LevelPlan::fromJson: unsupported schema");
     }
     const auto & p = j.at("policy");
@@ -291,6 +310,7 @@ LevelPlan LevelPlan::fromJson(const std::string & json)
         return grid;
       };
 
+    plan.surveyed_ground_m2_ = j.at("ground_m2").get<double>();
     for (const auto & t : j.at("touched")) {
       const gggs::GridIndex grid = gridFrom(t.at(0).get<uint8_t>(), t.at(1).get<uint32_t>(),
         t.at(2).get<uint32_t>());
@@ -304,6 +324,7 @@ LevelPlan LevelPlan::fromJson(const std::string & json)
       tile.achieved_level = t.at("ach").get<uint8_t>();
       tile.decision_depth = t.at("d").get<float>();
       tile.refined = t.at("ref").get<bool>();
+      tile.ground_m2 = t.at("g").get<double>();
       plan.tiles_.emplace(tile.index, tile);
     }
   } catch (const nlohmann::json::exception & e) {
@@ -331,47 +352,61 @@ std::string LevelPlan::report(double observed_bytes_per_tile) const
     out << "  no tiles: the survey touched no ground with data\n";
     return out.str();
   }
-  double total_area = 0.0, total_dense = 0.0, total_observed = 0.0;
-  double coarse_area = 0.0, deficit_area = 0.0;
+  // Areas are SURVEYED GROUND -- the count grid's occupied cells, per tile --
+  // not tile footprints: one level-8 parent over a single survey line covers
+  // 12 km2 of footprint and ~0.008 km2 of ensonified bottom (cube#143 dry-run
+  // review). "covered" is the ground a level's tiles sit over; "native" is the
+  // ground for which they are the finest emitted tile, i.e. what they store.
+  double total_covered = 0.0, total_dense = 0.0, total_observed = 0.0;
+  double coarse_native = 0.0, deficit_ground = 0.0;
   std::size_t total_tiles = 0, deficit_tiles = 0;
-  out << "  level  cell(m)  tiles  area(km2)  dense(MB)  observed(MB)\n";
+  out << "  level  cell(m)  tiles  covered(km2)  native(km2)  dense(MB)  observed(MB)\n";
   for (uint8_t level : lvls) {
     const auto at = tilesAtLevel(level);
-    const double area = at.size() * tileAreaM2(level);
+    double covered = 0.0, native = 0.0;
+    for (const auto & grid : at) {
+      const auto & tile = tiles_.at(grid);
+      covered += tile.ground_m2;
+      const double own = nativeGroundM2(grid);
+      native += own;
+      if (tile.coverageDeficit()) {
+        ++deficit_tiles;
+        deficit_ground += own;
+      }
+    }
     const double dense = at.size() * kDenseBytesPerTile;
     const double observed = at.size() * observed_bytes_per_tile;
-    total_area += area;
+    total_covered += covered;
     total_dense += dense;
     total_observed += observed;
     total_tiles += at.size();
     if (level < 10) {
-      coarse_area += area;
-    }
-    for (const auto & grid : at) {
-      if (tiles_.at(grid).coverageDeficit()) {
-        ++deficit_tiles;
-        deficit_area += tileAreaM2(level);
-      }
+      coarse_native += native;
     }
     out << "  " << std::setw(5) << static_cast<int>(level)
         << "  " << std::setw(7) << std::setprecision(3) << gggs::Level(level).cellSize()
         << "  " << std::setw(5) << at.size()
-        << "  " << std::setw(9) << std::setprecision(3) << area / 1e6
+        << "  " << std::setw(12) << std::setprecision(4) << covered / 1e6
+        << "  " << std::setw(11) << std::setprecision(4) << native / 1e6
         << "  " << std::setw(9) << std::setprecision(1) << dense / 1e6
         << "  " << std::setw(12) << std::setprecision(1) << observed / 1e6 << "\n";
   }
-  const double ground_area = tilesAtLevel(*lvls.begin()).size() * tileAreaM2(*lvls.begin());
+  out << "  surveyed ground (occupied count cells): " << std::setprecision(4)
+      << surveyed_ground_m2_ / 1e6 << " km2\n";
   out << "  total: " << total_tiles << " tiles, " << std::setprecision(1) << total_dense / 1e6
       << " MB dense, " << total_observed / 1e6 << " MB at " << observed_bytes_per_tile / 1e6
       << " MB/tile observed fill\n";
   out << "  estimate-count multiplier (parents estimated under children): "
-      << std::setprecision(2) << (ground_area > 0.0 ? total_area / ground_area : 0.0)
-      << "x the coarsest level's ground\n";
+      << std::setprecision(2)
+      << (surveyed_ground_m2_ > 0.0 ? total_covered / surveyed_ground_m2_ : 0.0)
+      << "x the surveyed ground\n";
   out << "  coverage deficit (depth requires finer than the data achieves): "
-      << deficit_tiles << " tiles, " << std::setprecision(3) << deficit_area / 1e6 << " km2\n";
+      << deficit_tiles << " tiles, " << std::setprecision(4) << deficit_ground / 1e6 << " km2\n";
   out << "  ground stored coarser than level 10 (today's fixed level): "
-      << std::setprecision(3) << coarse_area / 1e6 << " km2 -- resolution lost against "
-    "today's stores in >36 m water; inherent to the pinned uma#369 ladder\n";
+      << std::setprecision(4) << coarse_native / 1e6 << " km2 -- resolution lost against "
+    "today's stores in >36 m water; inherent to the pinned uma#369 ladder. Ground with a "
+    "native tile at level 10 or finer is not counted here, however many parents-alive "
+    "tiles also cover it\n";
   return out.str();
 }
 
@@ -399,6 +434,12 @@ LevelPlan levelPlanFor(
   // radius of their count tile's edge can reach a neighbour, so those are the
   // only cells examined individually.
   const double count_cell_m = counts.cellSizeMeters();
+  // Surveyed ground per count tile: its occupied cells times a cell's area.
+  // Gathered in this pass because the count grid is spill-backed -- a second
+  // sweep would re-read every spilled tile from disk.
+  const double count_cell_area_m2 = count_cell_m * count_cell_m;
+  std::map<gggs::GridIndex, double> ground_by_grid;
+  double surveyed_ground_m2 = 0.0;
   for (const auto & count_tile : counts.grids()) {
     const double spread = counts.maxSpreadTerm(count_tile);
     const CountGrid::Tile * count_tile_data = counts.tileAt(count_tile);
@@ -408,14 +449,25 @@ LevelPlan levelPlanFor(
     // Copied, not referenced: the count grid is spill-backed, so any later tile
     // access may evict this one (see CountGrid::tileAt).
     const std::vector<CountGrid::Count> band = count_tile_data->band(0);
-    // Occupied-cell extent within the tile (rows/cols), for a cheap
-    // interior/edge-band split.
-    bool any = false;
-    for (std::size_t i = 0; i < band.size() && !any; ++i) {
-      any = band[i] != 0;
+    uint64_t occupied_cells = 0;
+    for (std::size_t i = 0; i < band.size(); ++i) {
+      if (band[i] != 0) {
+        ++occupied_cells;
+      }
     }
-    if (!any) {
+    if (occupied_cells == 0) {
       continue;
+    }
+    // Ground under this count tile, charged to every ancestor that could carry
+    // it. A count tile is at or below `finest`, so it lies wholly inside one
+    // tile at each planned level -- the ancestor chain is exact, no clipping.
+    const double tile_ground_m2 = static_cast<double>(occupied_cells) * count_cell_area_m2;
+    surveyed_ground_m2 += tile_ground_m2;
+    for (int level = coarsest; level <= finest; ++level) {
+      const gggs::GridIndex a = ancestorAt(count_tile, static_cast<uint8_t>(level));
+      if (a.valid()) {
+        ground_by_grid[a] += tile_ground_m2;
+      }
     }
     for (int level = coarsest; level <= finest; ++level) {
       auto & touched = plan.touched_[static_cast<uint8_t>(level)];
@@ -539,6 +591,15 @@ LevelPlan levelPlanFor(
     for (const auto & root : roots->second) {
       descend(root);
     }
+  }
+
+  // Surveyed ground, per emitted tile and in total. Reported instead of tile
+  // footprints, which over a single survey line overstate the ground by three
+  // orders of magnitude (cube#143 dry-run review).
+  plan.surveyed_ground_m2_ = surveyed_ground_m2;
+  for (auto & [grid, tile] : plan.tiles_) {
+    const auto g = ground_by_grid.find(grid);
+    tile.ground_m2 = g == ground_by_grid.end() ? 0.0 : g->second;
   }
   return plan;
 }

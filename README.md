@@ -164,11 +164,18 @@ in short:
     aggregation across a tile that sets its achieved level, so a few
     under-covered nodes do not coarsen the whole tile.
 - `--level-plan-out <file>` is **recon only**: it writes the plan and prints
-  its report — tiles, ground area and storage per level (dense and at the
-  observed ~2.4 MB/tile fill), the estimate-count multiplier that parents-alive
-  costs, the coverage deficit, and the ground stored coarser than level 10
-  (resolution lost against today's stores in >36 m water; inherent to the
-  pinned ladder) — then exits, so the operator can approve before a multi-hour
+  its report — per level, the tile count, the **surveyed ground** those tiles
+  cover and the surveyed ground for which they are the finest tile
+  (`native`), and the storage (dense and at the observed ~2.4 MB/tile fill);
+  then the estimate-count multiplier that parents-alive costs, the coverage
+  deficit, and the ground stored coarser than level 10 (resolution lost
+  against today's stores in >36 m water; inherent to the pinned ladder).
+  Every area is ground the survey ensonified, measured from the count grid's
+  occupied cells — not a tile footprint, which for a level-8 parent over one
+  survey line is three orders of magnitude larger — and the coarser-than-10
+  line counts only ground whose *finest* tile is coarser than 10, so
+  parents-alive tiles over ground that also has a level-10 tile do not
+  register as lost resolution. Then it exits, so the operator can approve before a multi-hour
   import. `--level-plan <file>` reuses that plan for the import;
   `--count-grid-out <dir>` persists the count grid (mergeable into a later run).
 - Phase two replays the spill front to back — arrival order, the order the
