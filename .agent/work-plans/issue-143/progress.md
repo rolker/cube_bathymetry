@@ -884,7 +884,7 @@ The 87 skipped are the whole `cppcheck` linter suite (the tool is absent on this
 **Must-fix**: 1 | **Suggestions**: 0
 
 ### Findings
-- [ ] (must-fix) **The level plan feeds the ladder an ellipsoidal height, not a water depth.** Stored depths are WGS84 ellipsoidal heights by design (unh_marine_autonomy ADR-0002 §D4; `registry.hpp:54` "Stored values are always ellipsoidal"), and the geoid at the pier is ~28 m below the ellipsoid, so 8–13 m of water under the sonar arrives at `ReconCollector` as `s.sounding.depth` ≈ −36…−41 m (`src/recon.cpp:152` feeds exactly that into the depth histogram). `marine_bathymetry_store::depthAdaptiveLevel(depth_m)`'s contract is water depth: `0.05 × |depth|` is a footprint argument, and footprint scales with range below the transducer. Every required level in the dry run was therefore computed from water depth + ~28 m — one to two levels coarser than the water asks for — which is also why the run reports zero coverage deficit. **Fix**: decide on the water depth under the transducer. The spill record already carries `sonar_relative_z` (`src/recon.cpp:50`, from `sounding.sonar_relative_position.z`); feed the histogram `-|sonar_relative_z|` (keep the histogram's negative-down, shallowest-is-largest convention — verify the sign of `sonar_relative_position.z` in `include/cube_bathymetry/sounding.h` and the projector before choosing the sign, and say which in a comment). Transducer draft is ignored deliberately (sub-metre against a factor-of-two level ladder) — state that. Rename/redefine `PlannedTile::decision_depth` and the plan JSON `d` as "water depth under the transducer, negative-down" (schema note; schema 2 was minted this morning and is unreleased, so amend it rather than mint 3), update README §depth-adaptive, ADR-0002 amendment text, `--help`, and plan.md. Add a test that a sounding with ellipsoidal depth −40 and sonar-relative 12 decides as 12 m water. The single-level byte-identity guarantee is unaffected (the policy pin bypasses the decision) — keep `test_mixed_level_import` green — `src/recon.cpp:152`, `src/level_plan.cpp:513-514`, `include/cube_bathymetry/level_plan.h:135`
+- [x] (must-fix) **The level plan feeds the ladder an ellipsoidal height, not a water depth.** Stored depths are WGS84 ellipsoidal heights by design (unh_marine_autonomy ADR-0002 §D4; `registry.hpp:54` "Stored values are always ellipsoidal"), and the geoid at the pier is ~28 m below the ellipsoid, so 8–13 m of water under the sonar arrives at `ReconCollector` as `s.sounding.depth` ≈ −36…−41 m (`src/recon.cpp:152` feeds exactly that into the depth histogram). `marine_bathymetry_store::depthAdaptiveLevel(depth_m)`'s contract is water depth: `0.05 × |depth|` is a footprint argument, and footprint scales with range below the transducer. Every required level in the dry run was therefore computed from water depth + ~28 m — one to two levels coarser than the water asks for — which is also why the run reports zero coverage deficit. **Fix**: decide on the water depth under the transducer. The spill record already carries `sonar_relative_z` (`src/recon.cpp:50`, from `sounding.sonar_relative_position.z`); feed the histogram `-|sonar_relative_z|` (keep the histogram's negative-down, shallowest-is-largest convention — verify the sign of `sonar_relative_position.z` in `include/cube_bathymetry/sounding.h` and the projector before choosing the sign, and say which in a comment). Transducer draft is ignored deliberately (sub-metre against a factor-of-two level ladder) — state that. Rename/redefine `PlannedTile::decision_depth` and the plan JSON `d` as "water depth under the transducer, negative-down" (schema note; schema 2 was minted this morning and is unreleased, so amend it rather than mint 3), update README §depth-adaptive, ADR-0002 amendment text, `--help`, and plan.md. Add a test that a sounding with ellipsoidal depth −40 and sonar-relative 12 decides as 12 m water. The single-level byte-identity guarantee is unaffected (the policy pin bypasses the decision) — keep `test_mixed_level_import` green — `src/recon.cpp:152`, `src/level_plan.cpp:513-514`, `include/cube_bathymetry/level_plan.h:135`
 
 ### Operator decisions (2026-09-15, host-recorded)
 Fix in PR #159 now. After the fix: clean build + FULL suite, then re-run the dry run into `.agent/scratchpad/cube143-dryrun/rerun2/` (same command as `recon.log`, and the `-l 3000` window into `rerun2/small/`). Expected: decision depths ≈ −7…−20 m, required levels 11–12, and — since the achieved level was 10–11 — a **non-zero coverage deficit**; record the actual numbers in the `## Implementation` entry rather than the expectation. Then the host pushes.
@@ -892,3 +892,71 @@ Fix in PR #159 now. After the fix: clean build + FULL suite, then re-run the dry
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Fable 5.1`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 12:10 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `44b9af3`   **PR**: #159
+**Addressed**: the `## Integrated Review` of 2026-09-15 11:42 -04:00 (PR #159 at `00f3736`) — 1 must-fix, 0 suggestions, actioned, none deferred
+**Commits**: `a6b9249` (decide on water depth), `1f0e372` (plan sync), `caf2332` (carry the sonar-frame position through + the missing-range guard), `44b9af3` (plan sync)
+
+### Actions
+- [x] (must-fix) The level plan decides on the **water depth under the transducer**, not the stored ellipsoidal height — `src/recon.cpp`, `include/cube_bathymetry/recon.h`, `include/cube_bathymetry/level_plan.h`, `src/level_plan.cpp`. `ReconCollector::add` histograms `-|sonar_relative_position.z|`. **Sign verified**: the projector builds `z = range · cos(tx) · cos(rx)` (`sounding.h:77`), i.e. positive-down — `DetectionsProjectorTest.MissingAttitudeYieldsNaNUncertainty` asserts `z == 15.0` for a nadir beam at 15 m range — so the negation is the histogram's negative-down water depth; the absolute value is belt-and-braces against a driver or frame reporting the other sign, and the comment says so. Transducer draft is ignored deliberately (sub-metre against a factor-of-two ladder), stated in the code, README, ADR and plan. `PlannedTile::decision_depth` and the plan JSON's `d` are redefined as water depth under the transducer, negative-down; **schema 2 amended, not a schema 3 minted** (schema 2 was introduced the same morning, unreleased). README §depth-adaptive, the ADR-0002 amendment, `--help` and plan.md updated. Test: `ReconCollector.DecidesOnWaterDepthNotTheStoredEllipsoidalHeight` — a sounding stored at −40 m with 12 m of water under the sonar decides at −12 m (to within a bin, shallow side) and asks for a strictly finer level than −40 m would have. `test_mixed_level_import` stays green.
+
+### A second defect the fix exposed (fixed here, `caf2332`)
+
+The review's premise — "the spill record already carries `sonar_relative_z`" — is true of the *record* but was not true of the *producer*. `georeferencePing` (`src/import_bag_main.cpp:880-911`) used the sonar-frame point for the ECEF transform and then copied only `vertical_error`, `horizontal_error`, `intensity`, `beam_angle` and `slant_range` into the `GeoSounding` it built. `sonar_relative_position` was left at its default, so **every spilled sounding carried z = 0**. The first re-run of the dry run on the real bag decided every tile at `d = 0.25` m (the histogram's shallow bin edge at zero) and asked for level 14 everywhere — a plausible-looking plan built from no depth measurement at all.
+
+- The field is now carried through. The estimator does not read it (`batch_regen.cpp:55`), so the fixed-level path and the byte-identity guarantee are untouched.
+- Silent recurrence is closed off: a sounding whose sonar-frame z is non-finite or exactly zero is counted but **not** histogrammed, `ReconCollector::soundingsWithoutRange()` reports how many there were, `import_bag` warns when any exist and **refuses to write a plan** when they account for every sounding. Test: `ReconCollector.SoundingsWithNoSonarFrameRangeDoNotDecideALevel`.
+- The hand-built fixtures in `test_mixed_level_import` and `test_batch_regen` now set the nadir z their depth always implied (they had constructed `GeoSounding`s with `slant_range = depth` and no sonar-frame position). Their six failures against the guard were the guard working, not a regression.
+
+### Verification (operator-requested)
+
+**Clean build + FULL suite on HEAD** — `sensors_ws/build/cube_bathymetry` and `install/cube_bathymetry` removed and rebuilt (the recon struct gained a field), then `./sensors_ws/test.sh cube_bathymetry`:
+
+    Summary: 767 tests, 0 errors, 0 failures, 87 skipped
+
+765 before this pass, +2 new tests. The 87 skipped are the whole `cppcheck` suite (the tool is absent on this host) — unchanged. uncrustify and cpplint green. `test_mixed_level_import` ran 10 tests, 0 failures: **byte-identity with a fixed-level import still holds**. (No `.pre-commit-config.yaml` in this repo; the package's lint runs inside the suite. No `--no-verify`.)
+
+**Dry run** — the exact `Command being timed:` line from `.agent/scratchpad/cube143-dryrun/recon.log`, output paths substituted to `.agent/scratchpad/cube143-dryrun/rerun2/`; the earlier directories were not touched. Bag: NAS `gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (Piscataqua River off the UNH pier, 98 min, 55,100 pings). **36.2 s wall**, 167 MB peak RSS, 20 count tiles (~35 MB peak), exit 0, recon pass 9.94 s. No missing-range warning (0 of 12,125,207 soundings).
+
+Full bag — `rerun2/level_plan.json`, surveyed ground 8,515.6 m² (0.0085 km²):
+
+| tile | decision depth | required | achieved | refined | ground (m²) |
+|---|---|---|---|---|---|
+| `8/4450/3497`   | **−6.50 m** | 12 | 10 | yes | 8515.6 |
+| `9/8900/6994`   | **−6.50 m** | 12 | 10 | yes | 8515.6 |
+| `10/17801/13988`| **−7.50 m** | 12 | 11 | yes | 2450.7 |
+| `10/17801/13989`| **−6.50 m** | 12 | 10 | no  | 6064.9 |
+| `11/35602/27977`| **−7.50 m** | 12 | 11 | no  | 2450.7 |
+
+    coverage deficit (depth requires finer than the data achieves): 5 tiles, 0.0085 km2
+
+The plan now emits a **level-11 tile** (it did not before), and the deficit is non-zero over the whole surveyed ground — the survey has not collected the density its water depth calls for, which the ellipsoidal-height version could not see. `ground stored coarser than level 10` reads 0.0000 km²; the estimate-count multiplier is 3.29×.
+
+3,000-ping window (`-l 3000`, `rerun2/small/`) — 2.6 s wall, 613,242 soundings, 4 count tiles, surveyed ground 706.0 m²:
+
+| tile | decision depth | required | achieved |
+|---|---|---|---|
+| `8/4450/3497`   | **−9.25 m** | 11 | 10 |
+| `9/8900/6994`   | **−9.25 m** | 11 | 10 |
+| `10/17801/13988`| **−10.00 m** | 11 | 10 |
+| `10/17801/13989`| **−9.25 m** | 11 | 10 |
+
+    coverage deficit: 4 tiles, 0.0007 km2
+
+**Cross-check against the stored surface.** In that same window the fixed-level path stores `10/17801/13988` as a CUBE surface of −40.897…−36.255 m (ellipsoidal). Against a measured water depth of −10.00 m for the same tile, the implied geoid/datum offset is ~26 m — the ~28 m the review derived for the pier, to within the tile's own relief. The two numbers are now different quantities, and both are the right one for their job: the store keeps ellipsoidal heights, the ladder is fed water depth.
+
+Against the operator's expectation (≈ −7…−20 m water, required 11–12, non-zero deficit): measured −6.50…−10.00 m, required 11–12, deficit non-zero in both runs. The full-bag depths land just shallower than the low end of the expected band.
+
+### Notes for the re-review
+- `sonar_relative_position` is now carried on every georeferenced sounding from `import_bag`. `batch_regen_main.cpp` builds `GeoSounding`s the same way and was **not** changed: it consumes a plan and runs no recon, so it has no reader for the field. If a recon is ever run from the regen path, that copy is the site to add.
+- The refusal is all-or-nothing by design: a *partial* absence warns and proceeds, because a survey can legitimately mix sources. If a mixed import ever puts a large share of undecidable soundings in one grid, the grid's percentile is taken over the remainder — the shallow bias is unchanged but the effective N is smaller.
+- The decision depth ignores transducer draft, so it is the range below the *transducer*, not below the waterline. At these depths that is a few percent and always on the shallow (finer-tile) side.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
