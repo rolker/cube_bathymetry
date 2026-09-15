@@ -219,6 +219,37 @@ TEST_F(LevelPlanTest, DeepPlainEmitsAFullPrefixDownToTheRequiredLevel)
   EXPECT_TRUE(plan.levelsIntersecting(far).empty());
 }
 
+// The coverage question a reused plan has to answer (cube#143 triage): is there
+// any emitted tile over this ground at all? Admission is per-tile, so ground
+// with no emitted ancestor takes no soundings and is silently dropped.
+TEST_F(LevelPlanTest, CoversAnswersWhetherGroundReachesThePlanAtAll)
+{
+  const auto g = l14(kLat, kLon);
+  fillGrid(g, 6, -40.0f);
+  const auto plan = levelPlanFor(counts, depths, policy);
+
+  // The surveyed count tile and every ancestor of it are covered...
+  EXPECT_TRUE(plan.covers(g));
+  for (gggs::GridIndex a = g; a.level() > policy.depth.coarsest_level; a = gggs::parent(a)) {
+    EXPECT_TRUE(plan.covers(a)) << "ancestor at level " << static_cast<int>(a.level());
+  }
+  // Above the coarsest emitted level the emitted tile is a DESCENDANT, not an
+  // ancestor, so covers() -- which asks "does a sounding here reach the plan" --
+  // is false. A count tile is never coarser than `finest`, so the import's check
+  // never asks this.
+  EXPECT_FALSE(plan.covers(gggs::parent(gggs::Level(policy.depth.coarsest_level)
+    .gridIndex(kLat, kLon))));
+  // ...as is a descendant of an emitted tile (a finer grid inside it).
+  const auto emitted9 = plan.tilesAtLevel(9).front();
+  EXPECT_TRUE(plan.covers(gggs::children(emitted9).front()));
+  // Ground the survey never touched is not, at any level -- this is what a plan
+  // from another survey looks like to the count grid of this one.
+  EXPECT_FALSE(plan.covers(l14(44.0, -69.0)));
+  EXPECT_FALSE(plan.covers(gggs::Level(9).gridIndex(44.0, -69.0)));
+  // An empty plan covers nothing, including the ground it was built over.
+  EXPECT_FALSE(LevelPlan().covers(g));
+}
+
 TEST_F(LevelPlanTest, ShoalRefinesOnlyTheTouchedChildren)
 {
   // A level-11 block (4x4 = 16 level-14 grids... at level 11 one grid holds

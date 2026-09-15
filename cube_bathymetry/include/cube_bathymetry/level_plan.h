@@ -172,6 +172,16 @@ public:
   /// Whether @p grid is an emitted tile.
     bool isEmitted(const gggs::GridIndex & grid) const;
 
+  /// @brief Whether @p grid itself, or any ancestor of it, is an emitted tile:
+  ///        whether a sounding landing in @p grid reaches this plan AT ALL.
+  ///
+  /// Parents stay alive, so a covered grid always has an emitted ancestor at
+  /// the coarsest level; an UNCOVERED one is ground the plan never emitted, and
+  /// every sounding over it would be admitted by no accumulator. That is what
+  /// makes a plan from another survey (or a re-run over changed bags) a
+  /// silently-incomplete store rather than a refusal (cube#143 triage).
+    bool covers(const gggs::GridIndex & grid) const;
+
   /// Whether @p grid is in the touched set at its level (a superset of the
   /// emitted set: touched but not emitted means the descent stopped above it).
     bool isTouched(const gggs::GridIndex & grid) const;

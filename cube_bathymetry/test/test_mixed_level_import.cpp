@@ -269,6 +269,47 @@ TEST(MixedLevelImport, SingleLevelPolicyIsByteIdenticalToTheFixedPath)
   std::filesystem::remove_all(adaptive_dir);
 }
 
+// A plan that does not span the data being replayed (another survey's plan, or
+// a re-run over changed bags) routes those soundings NOWHERE: every level's
+// admission refuses them. The replay's own accounting counts records read back
+// from the spill, not soundings any accumulator took, so without this counter
+// the store would be finalized and fingerprinted as a complete build over
+// partial coverage (cube#143 triage).
+TEST(MixedLevelImport, SoundingsNoLevelAdmitsAreCountedAsUnrouted)
+{
+  const std::string dir = makeTempDir("unrouted");
+  const auto here = lawn(43.07, -70.76, 4, 3.0e-5, 12.0f);
+  LevelPlanPolicy policy;
+  Parameters params{CellSizes(1.0f), "order1a"};
+  auto plan = std::make_shared<LevelPlan>(planFor(here, policy, params));
+  ASSERT_FALSE(plan->tiles().empty());
+
+  MultiLevelAccumulatorConfig cfg;
+  cfg.store_dir = dir;
+  cfg.max_resident_tiles = 0;
+  MultiLevelAccumulator acc(plan, cfg);
+
+  // Soundings over the ground the plan WAS built for are routed.
+  std::size_t routed = 0;
+  for (const auto & b : here) {
+    acc.addBatch(b);
+    routed += b.size();
+  }
+  EXPECT_EQ(acc.unroutedSoundings(), 0u);
+
+  // The same survey, 100 km away: no emitted tile at any level intersects it.
+  std::size_t elsewhere_soundings = 0;
+  for (const auto & b : lawn(44.0, -69.0, 4, 3.0e-5, 12.0f)) {
+    acc.addBatch(b);
+    elsewhere_soundings += b.size();
+  }
+  EXPECT_GT(elsewhere_soundings, 0u);
+  EXPECT_EQ(acc.unroutedSoundings(), elsewhere_soundings);
+
+  acc.finalize();
+  std::filesystem::remove_all(dir);
+}
+
 // Property 2. A deep plain (40 m -> required level 9) with a shoal (3 m ->
 // required 13), both densely sounded: the store holds native tiles at several
 // levels, and the parent tiles over the shoal are complete estimates.

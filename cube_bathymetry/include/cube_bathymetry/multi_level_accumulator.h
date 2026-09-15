@@ -132,6 +132,15 @@ public:
       return batches_per_level_;
     }
 
+  /// @brief Soundings in batches that NO level took: no emitted tile at any
+  ///        level intersected them, so they were dropped.
+  ///
+  /// Non-zero means the plan does not span the data being replayed -- a plan
+  /// from another survey, or a re-run over changed bags. The caller must treat
+  /// it as a failed import: the store would be partial-coverage and would
+  /// otherwise be fingerprinted as a complete build (cube#143).
+    uint64_t unroutedSoundings() const noexcept {return unrouted_soundings_;}
+
 private:
     struct Level
     {
@@ -148,6 +157,7 @@ private:
     std::set < uint8_t > levels_;
     std::map < uint8_t, Level > per_level_;
     std::map < uint8_t, uint64_t > batches_per_level_;
+    uint64_t unrouted_soundings_ = 0;
     double coarsest_cell_m_ = 0.0;
   };
 

@@ -132,6 +132,7 @@ void MultiLevelAccumulator::addBatch(
     return;
   }
   const auto bounds = batchBounds(soundings);
+  std::size_t levels_taken = 0;
   for (uint8_t level : plan_->levelsIntersecting(bounds)) {
     auto it = per_level_.find(level);
     if (it == per_level_.end()) {
@@ -139,6 +140,16 @@ void MultiLevelAccumulator::addBatch(
     }
     it->second.accumulator->addBatch(soundings, time);
     ++batches_per_level_[level];
+    ++levels_taken;
+  }
+  if (levels_taken == 0) {
+    // No emitted tile at any level intersects this batch: it went nowhere. The
+    // caller's spill-replay accounting counts records READ, not soundings
+    // routed, so without this the batch would vanish silently and the store
+    // would still be fingerprinted as a complete build (cube#143 triage). The
+    // second site of the same class as the plan-coverage check the import runs
+    // before the replay -- this one catches what survives it.
+    unrouted_soundings_ += soundings.size();
   }
   evictToBudget();
 }

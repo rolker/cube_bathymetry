@@ -134,6 +134,19 @@ bool LevelPlan::isEmitted(const gggs::GridIndex & grid) const
   return tiles_.count(grid) > 0;
 }
 
+bool LevelPlan::covers(const gggs::GridIndex & grid) const
+{
+  for (gggs::GridIndex g = grid; g.valid(); g = gggs::parent(g)) {
+    if (tiles_.count(g) > 0) {
+      return true;
+    }
+    if (g.level() == 0) {
+      break;
+    }
+  }
+  return false;
+}
+
 bool LevelPlan::isTouched(const gggs::GridIndex & grid) const
 {
   auto it = touched_.find(grid.level());

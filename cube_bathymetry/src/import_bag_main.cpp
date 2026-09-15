@@ -34,6 +34,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -1409,6 +1410,56 @@ int cube_depth_adaptive_finish(
     return 1;
   }
 
+  // Plan coverage (cube#143 triage). Admission is `plan->isEmitted`, and the
+  // short-replay gate below counts records read back from the spill, not
+  // soundings any accumulator accepted -- so a plan that does not span this
+  // survey (another survey's plan, or a re-run over changed bags) replays every
+  // record, routes them nowhere and still passes the gate, leaving a
+  // silently-incomplete store that is then fingerprinted as a complete build.
+  // The recon holds the evidence: every occupied count tile must have an
+  // emitted ancestor. This runs BEFORE the replay, so nothing has been written
+  // to -o yet and the refusal costs the operator only the recon pass.
+  {
+    std::vector<gggs::GridIndex> uncovered;
+    for (const auto & count_tile : recon.counts().grids()) {
+      if (!plan->covers(count_tile)) {
+        uncovered.push_back(count_tile);
+      }
+    }
+    if (!uncovered.empty()) {
+      // Formatted into a buffer rather than with stream manipulators: std::fixed
+      // on std::cerr would stay set and reformat every later number.
+      char share[32];
+      std::snprintf(
+        share, sizeof(share), "%.1f", 100.0 * static_cast<double>(uncovered.size()) /
+        static_cast<double>(recon.counts().tileCount()));
+      std::cerr << (level_plan_in.empty() ? "WARNING: " : "error: ") << uncovered.size()
+                << " of " << recon.counts().tileCount()
+                << " occupied count tile(s) (" << share
+                << "% of them) lie under no emitted tile at any level, so every sounding "
+        "over them would be admitted by no accumulator and dropped." << std::endl;
+      std::cerr << "First uncovered count tile: L"
+                << static_cast<int>(uncovered.front().level()) << " row="
+                << uncovered.front().row() << " col=" << uncovered.front().column()
+                << "." << std::endl;
+      if (!level_plan_in.empty()) {
+        std::cerr << "The plan in " << level_plan_in << " does not span these bags. Re-run "
+          "the recon without --level-plan (or with --level-plan-out) to build a plan for "
+          "THIS survey; importing against a foreign plan would write a partial-coverage "
+          "store and fingerprint it as a complete build (ADR-0003)." << std::endl;
+        return 1;
+      }
+      // A freshly computed plan omits a count tile only where no sounding under
+      // it carried a range below the transducer (a grid with no depth is never
+      // emitted), so say so rather than refuse the run the recon just paid for.
+      std::cerr << "This plan was computed from THIS recon, so the cause is soundings with "
+        "no range below the transducer (" << recon.soundingsWithoutRange() << " of "
+                << recon.soundingsSeen() << "): a level-14 grid with no depth anywhere "
+        "beneath it is never emitted. That ground is counted but will not be estimated."
+                << std::endl;
+    }
+  }
+
   std::cout << "Phase two: replaying the spill into " << plan->levels().size()
             << " per-level accumulator(s)..." << std::endl;
   cube::MultiLevelAccumulatorConfig cfg;
@@ -1476,6 +1527,17 @@ int cube_depth_adaptive_finish(
       " (read back " + std::to_string(read_back) + ") from " + recon.spillPath() +
       ". The spill is short -- a full scratch device is the usual cause; free space "
       "(or pass --scratch-dir) before the re-run.");
+  }
+  // Replayed is not the same as routed: the gate above proves every spilled
+  // record was read back, not that any accumulator admitted it. A batch no
+  // emitted tile intersects is dropped, and the store would still be finalized
+  // and fingerprinted as complete (cube#143 triage).
+  if (accumulator.unroutedSoundings() > 0) {
+    return abortDirtyReplay(
+      store_dir, std::to_string(accumulator.unroutedSoundings()) + " of " +
+      std::to_string(replayed) + " replayed sounding(s) were admitted by no level of the "
+      "plan -- the plan does not span these bags. Re-run the recon without --level-plan "
+      "to build a plan for THIS survey.");
   }
   std::cout << "Replayed " << replayed << " soundings in " << replay_secs <<
     "s; batches per level:";
