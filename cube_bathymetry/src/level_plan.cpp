@@ -350,20 +350,55 @@ LevelPlan LevelPlan::fromJson(const std::string & json)
       };
 
     plan.surveyed_ground_m2_ = j.at("ground_m2").get<double>();
+    if (!(plan.surveyed_ground_m2_ >= 0.0) || !std::isfinite(plan.surveyed_ground_m2_)) {
+      throw std::runtime_error("LevelPlan::fromJson: ground_m2 must be finite and >= 0");
+    }
+    // Every record is validated against the policy the file itself declares
+    // (cube#143 triage). A plan is an operator-facing artifact passed between
+    // runs, so it is an external input: a file with finest_level 14 and a tile
+    // at level 15 was accepted, and MultiLevelAccumulator would then build a
+    // sheet finer than the survey index's footprint level -- the ADR-0002
+    // dirty-set invariant the policy check exists to protect.
+    auto requireLevelInLadder = [&plan](uint8_t level, const char * what) {
+        if (level < plan.policy_.depth.coarsest_level ||
+          level > plan.policy_.depth.finest_level)
+        {
+          throw std::runtime_error(
+                  std::string("LevelPlan::fromJson: ") + what + " " +
+                  std::to_string(static_cast<int>(level)) + " is outside the plan's own "
+                  "ladder [" + std::to_string(
+                    static_cast<int>(plan.policy_.depth.coarsest_level)) + ", " +
+                  std::to_string(static_cast<int>(plan.policy_.depth.finest_level)) + "]");
+        }
+      };
     for (const auto & t : j.at("touched")) {
       const gggs::GridIndex grid = gridFrom(t.at(0).get<uint8_t>(), t.at(1).get<uint32_t>(),
         t.at(2).get<uint32_t>());
+      requireLevelInLadder(grid.level(), "touched grid at level");
       plan.touched_[grid.level()].insert(grid);
     }
     for (const auto & t : j.at("tiles")) {
       PlannedTile tile;
       tile.index = gridFrom(t.at("l").get<uint8_t>(), t.at("r").get<uint32_t>(),
         t.at("c").get<uint32_t>());
+      requireLevelInLadder(tile.index.level(), "tile at level");
       tile.required_level = t.at("req").get<uint8_t>();
       tile.achieved_level = t.at("ach").get<uint8_t>();
+      // req/ach are the two answers that DECIDED the tile, both clamped to the
+      // ladder when the plan was built; a value outside it means the record and
+      // the policy disagree about what plan this is.
+      requireLevelInLadder(tile.required_level, "tile required level");
+      requireLevelInLadder(tile.achieved_level, "tile achieved level");
       tile.decision_depth = t.at("d").get<float>();
       tile.refined = t.at("ref").get<bool>();
       tile.ground_m2 = t.at("g").get<double>();
+      // Surveyed ground: finite and non-negative. It is the denominator of the
+      // report's storage multiplier and the area columns sum to it, so a NaN
+      // here makes every number in the report NaN.
+      if (!(tile.ground_m2 >= 0.0) || !std::isfinite(tile.ground_m2)) {
+        throw std::runtime_error(
+                "LevelPlan::fromJson: tile ground_m2 must be finite and >= 0");
+      }
       plan.tiles_.emplace(tile.index, tile);
     }
   } catch (const nlohmann::json::exception & e) {

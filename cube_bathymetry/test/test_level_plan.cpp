@@ -410,6 +410,45 @@ TEST_F(LevelPlanTest, SingleLevelPolicyEmitsExactlyTheTouchedSet)
   }
 }
 
+// A plan file is an operator-facing artifact passed between runs, so it is an
+// external input: fromJson validated the recorded POLICY but no tile record
+// against it, and a tile at level 15 under a finest_level of 14 was accepted --
+// MultiLevelAccumulator would then build a sheet finer than the survey index's
+// footprint level, breaking ADR-0002's dirty-set guarantee (cube#143 triage).
+TEST_F(LevelPlanTest, RejectsTileRecordsThatContradictTheRecordedPolicy)
+{
+  fillGrid(l14(kLat, kLon), 6, -40.0f);
+  const std::string good = levelPlanFor(counts, depths, policy).toJson();
+  ASSERT_NO_THROW(LevelPlan::fromJson(good));
+
+  // Retarget one record's level past the ladder's fine end. The plan the test
+  // builds emits levels 8 and 9 under finest_level 14, so 15 is both past the
+  // ladder and past the survey index footprint level.
+  auto withTileLevel = [&good](const std::string & from, const std::string & to) {
+      const std::size_t at = good.find(from);
+      EXPECT_NE(at, std::string::npos) << "the fixture's JSON changed shape";
+      std::string edited = good;
+      return edited.replace(at, from.size(), to);
+    };
+  EXPECT_THROW(LevelPlan::fromJson(withTileLevel("{\"l\":9,", "{\"l\":15,")),
+    std::runtime_error);
+  // Coarser than the ladder's coarse end is refused the same way.
+  EXPECT_THROW(LevelPlan::fromJson(withTileLevel("{\"l\":9,", "{\"l\":2,")),
+    std::runtime_error);
+  // req/ach are the two answers that decided the tile; both are clamped to the
+  // ladder when a plan is built, so a value outside it is a contradiction.
+  EXPECT_THROW(LevelPlan::fromJson(withTileLevel("\"req\":9", "\"req\":15")),
+    std::runtime_error);
+  EXPECT_THROW(LevelPlan::fromJson(withTileLevel("\"ach\":14", "\"ach\":19")),
+    std::runtime_error);
+  // A touched grid outside the ladder too.
+  EXPECT_THROW(LevelPlan::fromJson(withTileLevel("[9,", "[15,")), std::runtime_error);
+  // Areas feed the report's sums and multiplier, so a NaN there makes every
+  // number in it NaN.
+  EXPECT_THROW(LevelPlan::fromJson(withTileLevel("\"g\":", "\"g\":-")),
+    std::runtime_error);
+}
+
 TEST_F(LevelPlanTest, CanonicalJsonRoundTripsAndIsOrderIndependent)
 {
   const auto shoal = l14(kLat, kLon);
