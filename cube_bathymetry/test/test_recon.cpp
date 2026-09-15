@@ -275,6 +275,46 @@ TEST(ReconCollector, SoundingsWithNoSonarFrameRangeDoNotDecideALevel)
   EXPECT_LE(depths.begin()->second, -12.0f + DepthHistogram::kInitialBinWidth);
 }
 
+// The recon must admit exactly what the estimator will (cube#143 triage).
+// GeoGrid::insert rejects a non-finite uncertainty, a non-positive vertical
+// error and a negative horizontal error on top of the position/depth checks;
+// counting those soundings would make the achieved level read finer than the
+// data supports and would call ground with no estimate surveyed, and spilling
+// them replays them for nothing. A missing-attitude ping is exactly this case.
+TEST(ReconCollector, RefusesWhatTheEstimatorWouldRefuse)
+{
+  const std::string dir = scratch("refused");
+  LevelPlanPolicy policy;
+  ReconCollector recon(policy, dir);
+  Parameters params{CellSizes(1.0f), "order1a"};
+
+  constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+  // A missing-attitude ping: NaN uncertainty in both terms.
+  auto no_attitude = sounding(43.07, -70.76, -12.0f);
+  no_attitude.sounding.vertical_error = kNaN;
+  no_attitude.sounding.horizontal_error = kNaN;
+  // A zero vertical error would divide by zero in the CUBE variance math.
+  auto zero_vertical = sounding(43.07, -70.76, -12.0f);
+  zero_vertical.sounding.vertical_error = 0.0f;
+  // A negative horizontal error reintroduces NaN through influenceRadius' sqrt.
+  auto negative_horizontal = sounding(43.07, -70.76, -12.0f);
+  negative_horizontal.sounding.horizontal_error = -1.0f;
+
+  recon.add({no_attitude, zero_vertical, negative_horizontal}, params);
+  EXPECT_EQ(recon.soundingsRefused(), 3u);
+  EXPECT_EQ(recon.soundingsSeen(), 0u) << "a refused sounding must not inflate the counts";
+  EXPECT_EQ(recon.soundingsSpilled(), 0u) << "a refused sounding must not be replayed";
+  EXPECT_EQ(recon.soundingsWithoutRange(), 0u) << "refused is not the same as no-range";
+  EXPECT_TRUE(recon.plan().tiles().empty());
+
+  // A good sounding at the same place still lands.
+  recon.add({sounding(43.07, -70.76, -12.0f)}, params);
+  EXPECT_EQ(recon.soundingsRefused(), 3u);
+  EXPECT_EQ(recon.soundingsSeen(), 1u);
+  EXPECT_EQ(recon.soundingsSpilled(), 1u);
+  recon.cleanup();
+}
+
 TEST(ReconCollector, SpillRoundTripsEverySoundingFieldInChronologicalOrder)
 {
   const std::string dir = scratch("spill");

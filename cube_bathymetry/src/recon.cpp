@@ -168,9 +168,24 @@ void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Param
 {
   const gggs::Level l14(14);
   for (const auto & s : soundings) {
+    // The SAME door gate GeoGrid::insert applies (cube#143 triage). The recon
+    // has to admit exactly what the estimator will: a sounding the estimator
+    // refuses inflates the count grid -- so the achieved level reads finer than
+    // the data supports, and ground that will carry no estimate counts as
+    // surveyed -- and is then spilled and replayed for nothing. A missing-attitude
+    // ping yields exactly this (vertical_error/horizontal_error NaN via
+    // Parameters::influenceRadius' sentinel: see
+    // DetectionsProjectorTest.MissingAttitudeYieldsNaNUncertainty), so it is a
+    // normal MRU-dropout condition, not a pathological input. Keep in step with
+    // geo_grid.cpp's gate.
     if (!std::isfinite(s.latitude) || !std::isfinite(s.longitude) ||
-      !std::isfinite(s.sounding.depth))
+      !std::isfinite(s.sounding.depth) ||
+      !std::isfinite(s.sounding.vertical_error) ||
+      !std::isfinite(s.sounding.horizontal_error) ||
+      s.sounding.vertical_error <= 0.0f ||
+      s.sounding.horizontal_error < 0.0f)
     {
+      ++refused_;
       continue;
     }
     const double reach = parameters.maxSpreadRadius(s.sounding);

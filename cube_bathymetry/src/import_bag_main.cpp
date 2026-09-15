@@ -1420,6 +1420,16 @@ int cube_depth_adaptive_finish(
   std::cout << "Recon pass: " << recon.soundingsSeen() << " soundings counted, "
             << recon.soundingsSpilled() << " spilled, " << recon.counts().tileCount()
             << " count tile(s) in " << recon_secs << "s." << std::endl;
+  if (recon.soundingsRefused() > 0) {
+    // Refused at the same door the estimator refuses them at, so they neither
+    // counted nor spilled. Surfaced because the usual cause is an MRU dropout
+    // (missing attitude -> NaN uncertainty), which the operator wants to know
+    // about rather than see only as a thinner survey.
+    std::cout << "  " << recon.soundingsRefused()
+              << " sounding(s) were refused by the estimator's own gate (non-finite "
+      "position/depth/uncertainty, or a non-positive vertical error) and are neither "
+      "counted nor spilled; a missing-attitude ping is the usual cause." << std::endl;
+  }
 
   // The level decision needs the range below the transducer, not the stored
   // (ellipsoidal) depth -- cube#143. A sounding with no usable sonar-frame z

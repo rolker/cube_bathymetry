@@ -180,6 +180,17 @@ public:
     uint64_t soundingsSeen() const noexcept {return counts_.total();}
     uint64_t soundingsSpilled() const noexcept {return spilled_;}
 
+  /// @brief Soundings the ESTIMATOR would refuse, so the recon refuses them
+  ///        too: a non-finite position, depth or uncertainty, a non-positive
+  ///        vertical error, or a negative horizontal error (`GeoGrid::insert`'s
+  ///        door gate).
+  ///
+  /// They are neither counted nor histogrammed nor spilled: counting them would
+  /// make the achieved level read finer than the data supports and would call
+  /// ground with no estimate surveyed. A missing-attitude ping produces them, so
+  /// a non-zero count here is an MRU dropout, not a corrupt bag.
+    uint64_t soundingsRefused() const noexcept {return refused_;}
+
   /// @brief Soundings counted but NOT histogrammed, because their sonar-frame
   ///        `z` was non-finite or exactly zero and so carried no water depth.
   ///
@@ -239,6 +250,7 @@ private:
     std::unique_ptr < std::ofstream > spill_out_;
     uint64_t spilled_ = 0;
     uint64_t without_range_ = 0;
+    uint64_t refused_ = 0;
   };
 
 }  // namespace cube
