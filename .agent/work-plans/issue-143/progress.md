@@ -609,3 +609,67 @@ review round. The verdict is advisory -- the operator decides.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 09:23 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `9fee51d`
+**Addressed**: `## Local Review (Pre-Push)` round 2, 2026-09-15 09:12 -04:00, reviewing `8869bc1` (entry committed as `6966563`)
+**Commits**: `70a3e5b`, `12ad751`, `f43ce4f`, `14b42c8`, `f1d5440`, `a473234`, `2e27336`, `9832eb3`, `0c56deb`, `b639e39`, `9fee51d`
+
+All ten findings actioned (3 must-fix + 7 suggestions); none deferred, per the
+operator's decision to leave nothing for a third round.
+
+### Actions
+- [x] (must-fix) `forEachSpilled` now checks the stream after `flush()`/`close()`, throws on a partial trailing record, and returns the replayed count; `import_bag` compares it with `soundingsSpilled()` and fails before `finalize()`, so a truncated spill is never written and fingerprinted as a complete store — `src/recon.cpp:192`, `src/import_bag_main.cpp:1270`, `include/cube_bathymetry/recon.h:161` (`70a3e5b`)
+- [x] (must-fix) The post-rename store-directory `open`/`fsync` in `BuildFingerprint::write` now throws on either failure instead of returning success for a durability that did not happen — `src/build_fingerprint.cpp:235` (`12ad751`)
+- [x] (must-fix) `capture_spacing_scale` is declared with a `read_only` descriptor mirroring `publish_dirty_subwindow`, so a runtime `param set` is rejected rather than accepted-and-inert — `src/cube_bathymetry_node.cpp:115` (`f43ce4f`)
+- [x] (suggestion) The recon free-space preflight budgets the sounding spill plus an allowance of the same size for the count-tile spill sharing the scratch dir; `--help` and the shortfall message name it as an allowance, not a bound (the count term follows ground covered, which is not knowable before the pass) — `src/import_bag_main.cpp:1081`, `src/recon.cpp:255` (`14b42c8`)
+- [x] (suggestion) A negative `--count-resident-tiles` is rejected instead of becoming `SIZE_MAX` and restoring the unbounded count grid — `src/import_bag_main.cpp:1059` (`f1d5440`, helper extracted in `b639e39`)
+- [x] (suggestion) `ReconCollector::cleanup()` reports both failed removals (warnings: it runs from the destructor) — `src/recon.cpp:256` (`a473234`)
+- [x] (suggestion) `CountGrid::discardSpill()` erases the `max_spread_term_` entries of the grids it forgets, and reports a failed `remove_all`; the spill test asserts the terms are gone — `src/count_grid.cpp:104` (`2e27336`)
+- [x] (suggestion) The recon scratch dir is keyed on pid **and** start time, so a pid-reuse collision cannot present as an "already exists" refusal blamed on an unrelated dead process — `src/import_bag_main.cpp:1079` (`f1d5440`)
+- [x] (suggestion) A failed `--tile-size-report` CSV gets its own exit code 3 (ranked below the missing fingerprint, 2) instead of borrowing 1, "the store may be incomplete"; documented in `--help` — `src/import_bag_main.cpp:1965` (`9832eb3`)
+- [x] (suggestion) README documents `--decision-depth-percentile`, `--achieved-percentile`, the `0 < p <= 5` bound the 64-deep reservoir imposes, and what the free-space check budgets — `README.md:145` (`0c56deb`)
+
+### Tests added
+- `ReconCollector.ATruncatedSpillIsReportedRatherThanReplayedShort` — a partial
+  final record throws; a whole record lost at a record boundary leaves the
+  stream state clean and shows only in the returned count, which is what the
+  import compares against `soundingsSpilled()`.
+- `BuildFingerprint.ReportsAFailedDirectoryFsyncInsteadOfClaimingSuccess` — a
+  write-and-search-only store directory lets the temp write, fsync and rename
+  succeed and fails only the directory fsync; the assertion pins the thrown
+  message to `fsync`. Skipped when run as root.
+- A spread-term assertion in `CountGridTest.SpillBackedGridAnswersLikeAnUnboundedOne`.
+- No test for the `read_only` descriptor: this package has no ROS-node
+  parameter test harness (`test_node.cpp` covers the `cube::Node` algorithm
+  class), and the `publish_dirty_subwindow` precedent it mirrors has none either.
+
+### Verification
+Clean build (`build/` and `install/` for the package removed first) plus the
+full suite on HEAD `9fee51d`:
+
+- Build: 1 package finished, 1 min 38 s. The only `-Wall` warnings are
+  pre-existing ones in files this branch does not touch (`grid.cpp`,
+  `node.cpp`, `map_sheet.cpp`, `error_model.cpp`, `geo_map_sheet.cpp`,
+  `bag_to_geotiff.cpp`); no warning in any touched file.
+- Tests: **759 tests, 0 errors, 0 failures, 87 skipped** (2 min 45 s) — 72
+  ctest entries, all passed. 364 gtest cases across 28 binaries, plus the lint
+  suites (cpplint, uncrustify, cppcheck, copyright, flake8, lint_cmake,
+  pep257, xmllint) all clean.
+- Two lint regressions introduced by the fixes were themselves fixed before the
+  final run (`b639e39`): the `--count-resident-tiles` validation pushed `main()`
+  past cpplint's 500-line function limit (moved to a free function beside the
+  other option helpers) and `gcount()` was cast to `long` (now `int64_t`);
+  uncrustify re-indented the replay lambda after its first line grew.
+
+### Next step
+
+Lifecycle: **Implementation** -> **review-code** (third pre-push round, re-review the fixes)
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
