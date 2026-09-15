@@ -552,3 +552,60 @@ Lifecycle: **Implementation** → **review-code** (re-review the fixes)
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-15 09:12 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-143 at `8869bc1`
+**Mode**: pre-push
+**Depth**: Deep (reason: fix pass ~1.1k lines over 25 files, cross-module, on-disk format, two ADR amendments)
+**Must-fix**: 3 | **Suggestions**: 7
+**Round**: 2 | **Ship**: recommended — must-fix is down 6 -> 3, every one a precise file:line fix with an obvious correction and no design question left open; apply them and push rather than spend a third full round
+
+Reviewed the fix pass `2f93049..HEAD` (25 files, +1163 -225) with fresh eyes, against the
+round-1 entry and the `## Implementation` entry. Specialists: Static Analysis (cpplint,
+uncrustify, cppcheck, lint_cmake -- clean on every touched line), Governance, Plan Drift,
+Claude Adversarial Lens A + Lens B. Copilot and local off (default).
+
+**All six round-1 must-fixes verified resolved in code**, by the lead reviewer and
+independently by Lens A -- not cosmetically: the spill is one chronological file replayed
+front to back (`test_recon` now asserts exact replay order over interleaved level-10
+grids, and `test_mixed_level_import`'s byte-identity case runs recon -> plan -> replay
+instead of bypassing the spill); the count grid is bounded by a directory-backed LRU whose
+new test cross-checks a budget-16 spilled grid against an unbounded one on totals, per-cell
+counts, spread terms, a box query and an achieved-level query; every read path that scans a
+neighbourhood copies the band or mask out first, so an eviction mid-scan cannot dangle;
+`isStale` keys on all four new fingerprint fields; the dirty set rolls off-plan ground up to
+the plan's coarsest level; the fingerprint fsyncs the temp file, checks `fclose`, and fsyncs
+the store directory. Plan drift: none -- the claimed plan sync is real. Governance: both
+amended ADRs match the code field by field.
+
+The six test binaries covering the fix pass were re-run independently on this build tree:
+test_survey_index_query, test_count_grid, test_level_plan, test_build_fingerprint,
+test_recon, test_mixed_level_import -- 6/6 passed (67 s).
+
+### Findings
+- [ ] (must-fix) `forEachSpilled` ignores the stream state after `flush()`/`close()` and the read loop ends silently on a short final record, while `import_bag` never compares `replayed` with `soundingsSpilled()` -- a disk-full at the last buffered flush drops the tail of the survey, writes the store, and fingerprints it as complete — `src/recon.cpp:196`, `src/import_bag_main.cpp:1252`
+- [ ] (must-fix) The post-rename store-directory `open`/`fsync` swallows failure: `write()` returns success and the caller prints "Wrote build_fingerprint.json", so the durability the comment above it promises is unenforced on the one path where it cannot happen (cross-confirmed by both adversarial lenses; same class as round-1 must-fix 6) — `src/build_fingerprint.cpp:235`
+- [ ] (must-fix) The new `capture_spacing_scale` parameter is declared with no `read_only` descriptor and read only in `on_configure`, so a runtime `ros2 param set` succeeds, reads back and is inert -- the "accepted, reads back, inert" trap this same file documents at lines 1120-1126 (the Appledore outage) and closes for `publish_dirty_subwindow` at 581-592 — `src/cube_bathymetry_node.cpp:115`
+- [ ] (suggestion) The free-space preflight budgets only the sounding spill, not the count-tile spill now written to the same scratch dir (~630 MB/km2 of cold tiles), so a dense survey can still exhaust the disk mid-recon despite passing the check — `src/import_bag_main.cpp:1067`
+- [ ] (suggestion) `--count-resident-tiles` parses as `int` and is cast to `size_t`; a negative value becomes SIZE_MAX and silently restores the unbounded count-grid budget must-fix 2 removed — `src/import_bag_main.cpp:1492`
+- [ ] (suggestion) `cleanup()` discards the `error_code` from both `remove` calls, so a spill that cannot be deleted leaves gigabytes on disk with no warning on this run (only the next run's orphan sweep sees it) — `src/recon.cpp:237`
+- [ ] (suggestion) `discardSpill()` leaves `max_spread_term_` entries for the grids it erases; harmless today because nothing queries after cleanup, latent if a grid is reused — `src/count_grid.cpp:115`
+- [ ] (suggestion) The scratch dir is keyed on pid alone; a pid-reuse collision surfaces as a confusing "already exists" error attributable to an unrelated dead process. A start-time suffix removes the ambiguity — `src/import_bag_main.cpp:1065`
+- [ ] (suggestion) Exit 1 from `finishTileReport` takes precedence over exit 2, so a run whose store and fingerprint are both fine but whose diagnostic CSV failed reports "the store may be incomplete" — `src/import_bag_main.cpp:1947`
+- [ ] (suggestion) `--decision-depth-percentile` / `--achieved-percentile` and the new `0 < p <= 0.05` bound are in `--help` and ADR-0003 but not in README's depth-adaptive flag walkthrough — `README.md`
+
+### Next step
+
+Lifecycle: **Local Review (Pre-Push)** -> **address-findings** (3 mechanical must-fixes) -> push / open PR
+
+Ship is **recommended**: apply the three must-fixes and push rather than run a third full
+review round. The verdict is advisory -- the operator decides.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
