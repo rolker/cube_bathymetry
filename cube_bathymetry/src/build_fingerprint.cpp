@@ -30,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
@@ -247,10 +248,33 @@ void BuildFingerprint::write(const std::string & store_dir) const
   const int sync_errno = errno;
   ::close(dir_fd);
   if (!synced) {
+    // A filesystem with no directory fsync is not a failed write: the rename
+    // above already put a valid fingerprint in place, and throwing would exit 2
+    // on every run on such a store and condemn it to a FULL regen forever.
+    // Warn (the durability guarantee really is weaker there) and return; a real
+    // failure -- EIO, ENOSPC, EBADF -- still throws.
+    if (fsyncErrnoMeansUnsupported(sync_errno)) {
+      std::cerr << "warning: " << store_dir
+                << " is on a filesystem with no directory fsync ("
+                << std::strerror(sync_errno) << "). " << BuildFingerprint::kFilename
+                << " was renamed into place and its contents are synced, but the "
+        "rename itself is not guaranteed to survive a power loss." << std::endl;
+      return;
+    }
     throw std::runtime_error(
             "build_fingerprint: fsync of " + store_dir + " failed: " +
             std::strerror(sync_errno));
   }
+}
+
+bool fsyncErrnoMeansUnsupported(int err) noexcept
+{
+  // EINVAL is what Linux returns for an fsync the filesystem does not implement
+  // for that file type; ENOTSUP (the same value as EOPNOTSUPP on Linux, so it
+  // is not spelled twice) and ENOSYS are the other spellings network and FUSE
+  // mounts use. Deliberately NOT here: EIO, ENOSPC, EBADF, EDQUOT -- those are
+  // failures of a sync that was attempted.
+  return err == EINVAL || err == ENOTSUP || err == ENOSYS;
 }
 
 }  // namespace cube

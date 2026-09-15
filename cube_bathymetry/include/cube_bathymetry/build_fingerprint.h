@@ -150,6 +150,18 @@ namespace cube
 
   const char * toString(BuildFingerprint::Mode mode);
 
+/// @brief True when @p err is a filesystem saying it has no directory fsync at
+///        all, rather than reporting a failure of one.
+///
+/// Some mounts (a number of network and FUSE filesystems) answer `fsync` on a
+/// directory descriptor with `EINVAL`/`ENOTSUP`/`ENOSYS`. Treating that as a
+/// write failure would make `BuildFingerprint::write` throw on every run on
+/// such a store -- forcing a FULL regen forever (ADR-0003) -- while the rename
+/// has in fact put a valid fingerprint in place. Durability is weaker there,
+/// so `write` warns; a real failure (`EIO`, `ENOSPC`, `EBADF`, ...) still
+/// throws.
+  bool fsyncErrnoMeansUnsupported(int err) noexcept;
+
 }  // namespace cube
 
 #endif  // CUBE_BATHYMETRY__BUILD_FINGERPRINT_H_

@@ -23,6 +23,7 @@
 
 #include <unistd.h>
 
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -241,6 +242,24 @@ TEST(BuildFingerprint, ReportsAFailedDirectoryFsyncInsteadOfClaimingSuccess)
   std::filesystem::permissions(
     dir, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
   std::filesystem::remove_all(dir);
+}
+
+// A mount with no directory fsync at all (EINVAL/ENOTSUP/ENOSYS from a number
+// of network and FUSE filesystems) must not be treated as a failed write: the
+// rename has already put a valid fingerprint in place, and throwing there would
+// exit 2 on every run and condemn the store to a FULL regen forever. A sync
+// that was attempted and failed still throws.
+TEST(BuildFingerprint, TellsAnUnsupportedDirectoryFsyncFromAFailedOne)
+{
+  EXPECT_TRUE(fsyncErrnoMeansUnsupported(EINVAL));
+  EXPECT_TRUE(fsyncErrnoMeansUnsupported(ENOTSUP));
+  EXPECT_TRUE(fsyncErrnoMeansUnsupported(ENOSYS));
+
+  EXPECT_FALSE(fsyncErrnoMeansUnsupported(EIO));
+  EXPECT_FALSE(fsyncErrnoMeansUnsupported(ENOSPC));
+  EXPECT_FALSE(fsyncErrnoMeansUnsupported(EBADF));
+  EXPECT_FALSE(fsyncErrnoMeansUnsupported(EACCES));
+  EXPECT_FALSE(fsyncErrnoMeansUnsupported(0));
 }
 
 }  // namespace cube
