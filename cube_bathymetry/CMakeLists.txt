@@ -455,7 +455,9 @@ if(BUILD_TESTING)
   # an eviction-forcing budget reproduces the unbounded bathy + backscatter store
   # exactly (lossless persist-then-drop + reload-on-revisit), and a persist
   # failure never drops a tile.
-  ament_add_gtest(test_import_eviction test/test_import_eviction.cpp)
+  # TIMEOUT 300: the eviction cases run ~44 s against the 60 s ament default,
+  # too little headroom on a loaded or slower machine (cube_bathymetry#143).
+  ament_add_gtest(test_import_eviction test/test_import_eviction.cpp TIMEOUT 300)
   target_link_libraries(test_import_eviction
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
