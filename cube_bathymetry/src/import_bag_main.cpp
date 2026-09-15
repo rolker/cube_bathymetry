@@ -247,9 +247,11 @@ bool loadCurveFromBagSonarInfo(
     "(95: percentile of the level of aggregation over a tile that decides its "
     "achieved level).\n";
   std::cout << "    --scratch-dir <dir>: where the recon spill goes (default: beside "
-    "the -o store, never /tmp -- it is often tmpfs). Free space is checked "
-    "against the projected spill before the pass starts. The count grid spills "
-    "there too.\n";
+    "the -o store, never /tmp -- it is often tmpfs). The count grid spills "
+    "there too, so the free-space check run before the pass starts budgets the "
+    "projected sounding spill plus an allowance of the same size for the "
+    "count-tile spill (that term scales with the ground covered, which is not "
+    "knowable up front, so it is an allowance and not a bound).\n";
   std::cout << "    --count-resident-tiles <N> (256): recon count tiles held in RAM; "
     "colder ones are written to the scratch dir and reloaded on demand. A "
     "level-14 count tile is 1.8 MB, so the default budget is ~460 MB. The plan "
@@ -1066,12 +1068,23 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
   warnAboutOrphanedSpills(spill_root, spill_dir);
   const uint64_t projected_bytes =
     projected_pings * 256ull * cube::ReconCollector::kBytesPerSpilledSounding;
+  // The count grid spills its cold tiles into the same directory (1.8 MB per
+  // level-14 tile, ~630 MB per km^2 of ground), so budgeting the sounding
+  // spill alone under-counts what the pass will write. That term scales with
+  // the ground COVERED, which nothing knows before the pass -- the surveyed
+  // area cannot be inferred from a ping count -- so it is budgeted as an
+  // allowance of the same size as the sounding spill rather than left out
+  // entirely. It is an allowance, not a bound: a wide, sparse survey covers
+  // more ground per sounding and can still exceed it.
+  const uint64_t count_spill_allowance = projected_bytes;
+  const uint64_t projected_total_bytes = projected_bytes + count_spill_allowance;
   std::cout << "Recon spill: " << spill_dir << " (~" << projected_bytes / (1024 * 1024)
             << " MB projected for " << projected_pings << " pings at 256 beams, "
-            << cube::ReconCollector::kBytesPerSpilledSounding << " B/sounding)"
-            << std::endl;
+            << cube::ReconCollector::kBytesPerSpilledSounding << " B/sounding, plus a ~"
+            << count_spill_allowance / (1024 * 1024)
+            << " MB allowance for the count-tile spill)" << std::endl;
   try {
-    cube::ReconCollector::requireFreeSpace(spill_root, projected_bytes);
+    cube::ReconCollector::requireFreeSpace(spill_root, projected_total_bytes);
   } catch (const std::exception & e) {
     std::cerr << "error: " << e.what() << std::endl;
     return nullptr;

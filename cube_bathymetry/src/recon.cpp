@@ -247,7 +247,7 @@ void ReconCollector::requireFreeSpace(const std::string & dir, uint64_t needed_b
   if (info.available < needed_bytes) {
     throw std::runtime_error(
             "recon: " + dir + " has " + std::to_string(info.available / (1024 * 1024)) +
-            " MB free, the sounding spill needs ~" +
+            " MB free, the recon spill (soundings plus the count-tile spill) needs ~" +
             std::to_string(needed_bytes / (1024 * 1024)) + " MB (use --scratch-dir)");
   }
 }
