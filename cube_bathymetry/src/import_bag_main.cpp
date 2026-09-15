@@ -1133,8 +1133,8 @@ constexpr double kMaxFactor = 1e9;
 double requireFiniteFactor(const char * flag, double value)
 {
   if (!(value >= 0.0) || !std::isfinite(value) || value > kMaxFactor) {
-    std::cerr << "error: option '" << flag << "' expects a finite factor in [0, "
-              << kMaxFactor << "], got '" << value << "'\n";
+    std::cerr << "error: option '" << flag << "' expects a finite factor >= 0 and no "
+      "greater than " << kMaxFactor << ", got '" << value << "'\n";
     usage();
   }
   return value;
