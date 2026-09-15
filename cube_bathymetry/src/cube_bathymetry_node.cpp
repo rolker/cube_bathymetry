@@ -112,7 +112,23 @@ public:
     // as the offline tools' did. Both offline tools expose the multiplier as
     // --capture-spacing-scale, so the live node exposes it too rather than
     // inheriting a changed gate with no way to set it back.
-    declare_parameter("capture_spacing_scale", 0.71);
+    rcl_interfaces::msg::ParameterDescriptor spacing_desc;
+    spacing_desc.description =
+      "Multiplier on the node spacing in the capture gate: a sounding is "
+      "captured within max(capture_distance_scale x |depth|, this x node "
+      "spacing) of a node. Calder's manual puts the floor at half the grid "
+      "spacing for sub-metre grids; 0.71 is that, widened to the cell "
+      "diagonal. Read at configure; read_only, so a runtime set is rejected "
+      "rather than silently ignored.";
+    // read_only enforces the "read at configure" promise: the value is pushed
+    // into the sheet here and nowhere else, so without it a runtime
+    // `ros2 param set capture_spacing_scale` SUCCEEDS, reads back the new
+    // value and changes no gate at all -- the accepted/reads-back/inert trap
+    // this file documents at the Appledore note below and closes for
+    // publish_dirty_subwindow. Launch/YAML overrides are unaffected:
+    // read_only only rejects a set after declaration.
+    spacing_desc.read_only = true;
+    declare_parameter("capture_spacing_scale", 0.71, spacing_desc);
     const double capture_spacing_scale = get_parameter("capture_spacing_scale").as_double();
     try {
       geo_map_sheet_->setCaptureSpacingScale(static_cast<float>(capture_spacing_scale));
