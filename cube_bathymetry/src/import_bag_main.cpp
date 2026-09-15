@@ -1293,6 +1293,28 @@ int abortDirtyReplay(const std::string & store_dir, const std::string & detail)
   return 1;
 }
 
+/// Report an I/O fault raised inside the per-ping pass (cube#143) and return the
+/// exit code. Which store state it describes depends on the pass: the recon
+/// writes nothing to `-o` (the spill goes with ~ReconCollector as the run
+/// unwinds), while the fixed-level accumulator has been evicting tiles into the
+/// real store since the first batch.
+int reportFatalPassError(
+  const std::string & detail, bool during_recon, int64_t pings, const std::string & store_dir)
+{
+  if (during_recon) {
+    std::cerr << "error: the recon pass failed after " << pings << " ping(s): "
+              << detail << std::endl;
+    std::cerr << "Nothing was estimated and nothing was written to " << store_dir
+              << "; the recon spill is removed as this run unwinds. A full scratch "
+      "device is the usual cause -- free space (or pass --scratch-dir) before the "
+      "re-run." << std::endl;
+    return 1;
+  }
+  return abortDirtyReplay(
+    store_dir, detail + ". The import stopped after " + std::to_string(pings) +
+    " ping(s); a full device is the usual cause.");
+}
+
 /// Depth-adaptive finish (cube#143): plan, report, recon-only exit, phase-two
 /// replay into one accumulator per level, finalize, fingerprint. Returns the
 /// process exit code.
@@ -2134,24 +2156,7 @@ int main(int argc, char * argv[])
   // Flush detections still pending at end-of-stream against available coverage.
   drain_pending(true);
   if (!fatal_error.empty()) {
-    if (recon) {
-      // Phase one: nothing has been estimated and nothing written to -o. The
-      // spill (and the spilled count tiles) go with ~ReconCollector as this
-      // returns, which is the whole point of not terminating here.
-      std::cerr << "error: the recon pass failed after " << ping_count << " ping(s): "
-                << fatal_error << std::endl;
-      std::cerr << "Nothing was estimated and nothing was written to " << store_dir
-                << "; the recon spill is removed as this run unwinds. A full scratch "
-        "device is the usual cause -- free space (or pass --scratch-dir) before the "
-        "re-run." << std::endl;
-      return 1;
-    }
-    // Fixed level: the accumulator has been evicting tiles into the real -o
-    // store since the first batch, so the destination is neither empty nor
-    // complete -- exactly the state abortDirtyReplay() exists to report.
-    return abortDirtyReplay(
-      store_dir, fatal_error + ". The import stopped after " + std::to_string(ping_count) +
-      " ping(s); a full device is the usual cause.");
+    return reportFatalPassError(fatal_error, recon != nullptr, ping_count, store_dir);
   }
   if (limit_reached) {
     std::cout << "\nPing count limit of " << ping_count_limit << " reached" << std::endl;
