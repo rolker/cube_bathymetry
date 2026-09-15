@@ -264,6 +264,18 @@ must merge and `core_ws` be rebuilt before this PR's mixed-level backscatter
 test can pass; the level-plan, count-grid, capture and fingerprint commits do
 not touch backscatter and proceed immediately.
 
+**Amended (2026-09-15, Copilot triage, operator-recorded)** — until uma#383
+lands, `--bs-store` is **refused** on both mixed-level paths (`import_bag
+--depth-adaptive` and `batch_regen_bag --level-plan`), with a message naming
+uma#383 as the prerequisite and saying the refusal is lifted by the PR that
+consumes it. This is *not* a reversal of the decision above: mixed-level
+backscatter stays gated on uma#383 rather than abandoned, and the gated
+mixed-level backscatter test is unchanged. What the refusal avoids is the
+interim state the code actually had — every level's `ImportAccumulator` handed
+the same flat `<bs_store>/survey/` root, which writes a backscatter store
+nothing can load, silently (`mbes_store.hpp:51`: "All tiles live at a single
+GGGS level"; `loadTile(path, level)` rejects a tile written at another).
+
 **[uma#386](https://github.com/rolker/unh_marine_autonomy/issues/386)** — the
 finest-cell floor from horizontal positioning error in `DepthAdaptiveLevelPolicy`.
 Not a build prerequisite (the policy's default floor is 0), but the plan report
@@ -372,8 +384,10 @@ a CUBE constant, once it lands.
    so `addBatch`'s reload-before-add reloads it (`:1103-1106`).
    **Sidecars**: `MultiLevelAccumulator::finalize` writes `registry.json` and
    the backscatter metadata **once**, after all levels have finalised, rather
-   than each accumulator writing its own (r2 suggestion). **Backscatter**: one
-   `MbesBackscatterStore` per level into the single `--bs-store` dir (uma#383).
+   than each accumulator writing its own (r2 suggestion). **Backscatter**:
+   `--bs-store` is refused on this path until uma#383 gives the store a
+   per-level layout (see Prerequisite, amended 2026-09-15) — every level would
+   otherwise share one single-level store root.
 7. **`import_bag` wiring** — `--depth-adaptive` (off by default; fixed-level
    stays the default and the only `draft`/live behaviour) selects recon + spill
    + `MultiLevelAccumulator`. Policy tunables `--depth-adaptive-scale/-coarsest/
@@ -661,10 +675,11 @@ per `plan-task`'s during-implementation rules):
   validation is tested by running the binary. `main()` in `import_bag_main.cpp`
   crossed cpplint's function-size limit and four blocks moved into free
   functions verbatim.
-- **Backscatter** is written per level into the single `--bs-store` dir; the
-  mixed-level backscatter *read* test is gated on uma#383 and not in this PR's
-  suite (the write path is exercised by the equivalence test's file
-  comparison only for bathy).
+- **Backscatter** on the mixed-level paths is **refused** until uma#383 lands
+  (Copilot triage, 2026-09-15): the store is single-level by construction and
+  every level was being handed the same root. The mixed-level backscatter *read*
+  test stays gated on uma#383 and is not in this PR's suite; the fixed-level
+  `--bs-store` write path is unchanged.
 - **Count grid is directory-backed with an LRU** (must-fix 2, operator-settled):
   `CountGrid::setSpillDir` caps the resident count tiles (`--count-resident-tiles`,
   default 256 ≈ 460 MB of level-14 tiles) and writes colder ones to the recon

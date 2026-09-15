@@ -170,7 +170,9 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store `survey` "
     "layer from the same CUBE pass (optional; surfaces the co-estimated "
     "intensity -- uncorrected by default, angle-corrected when "
-    "--backscatter-correction empirical is set, cube#81)\n";
+    "--backscatter-correction empirical is set, cube#81). NOT supported with "
+    "--depth-adaptive yet: the backscatter store is single-level by construction "
+    "(per-level layout = uma#383; the PR that consumes it lifts the refusal).\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
     "topic to replay through CUBE (required)\n";
   std::cout << "  --odom-topic <topic>: nav_msgs/Odometry topic for per-ping "
@@ -995,6 +997,27 @@ bool resolveBackscatterCorrection(
 }
 
 
+/// Refuse `--bs-store` on a mixed-level path, naming the prerequisite
+/// (cube#143). TEMPORARY: `marine_mbes_backscatter_store` is single-level by
+/// construction -- "All tiles live at a single GGGS level" (`mbes_store.hpp`),
+/// and `loadTile(path, level)` rejects a tile written at another level -- while
+/// every level's ImportAccumulator is handed the SAME flat `<bs_store>/survey/`
+/// root. A mixed-level run would therefore write a backscatter store nothing
+/// can load, silently. The per-level layout is uma#383; the PR that consumes it
+/// lifts this refusal. Mixed-level backscatter is gated on that work, not
+/// abandoned.
+[[noreturn]] void refuseMixedLevelBackscatter(const char * mode_flag)
+{
+  std::cerr << "error: --bs-store is not supported with " << mode_flag << " yet.\n"
+    "marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level, and a "
+    "mixed-level run hands every level the same store root -- the result is a "
+    "backscatter store nothing can load. The per-level layout is\n"
+    "  https://github.com/rolker/unh_marine_autonomy/issues/383\n"
+    "and the PR that consumes it lifts this refusal. Until then, run the bathymetry "
+    "import mixed-level and take backscatter from a separate fixed-level run.\n";
+  usage();
+}
+
 /// Depth-adaptive option validation (cube#143), run ONCE before any bag is
 /// opened -- a policy throw is a misconfiguration identical for every tile, so
 /// it is fatal here rather than hours into the pass. Exits via usage() on error.
@@ -1003,7 +1026,7 @@ void validateDepthAdaptiveOptions(
   bool count_resident_tiles_given, bool count_spill_allowance_given,
   const std::string & level_plan_out, const std::string & level_plan_in,
   const std::string & count_grid_out, const std::string & scratch_dir,
-  const std::string & tile_size_report_path)
+  const std::string & tile_size_report_path, const std::string & bs_store_dir)
 {
   // The plan-side flags without --depth-adaptive are a contradiction worth
   // refusing rather than ignoring.
@@ -1036,6 +1059,9 @@ void validateDepthAdaptiveOptions(
       std::cerr << "error: --level-plan-out (recon only) and --level-plan (reuse a "
         "plan) are exclusive\n";
       usage();
+    }
+    if (!bs_store_dir.empty()) {
+      refuseMixedLevelBackscatter("--depth-adaptive");
     }
   }
 }
@@ -1860,7 +1886,7 @@ int main(int argc, char * argv[])
   validateDepthAdaptiveOptions(
     depth_adaptive, level_policy, count_level_given, count_resident_tiles_given,
     count_spill_allowance_given, level_plan_out, level_plan_in, count_grid_out, scratch_dir,
-    tile_size_report_path);
+    tile_size_report_path, bs_store_dir);
 
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;

@@ -562,6 +562,33 @@ TEST(ImportBagCli, CountSpillAllowanceIsTunableAndValidated)
     << "0 removes the allowance; it is not an invalid value\n" << out;
 }
 
+// TEMPORARY refusal (cube#143 triage): marine_mbes_backscatter_store is
+// single-level by construction, and every level of a depth-adaptive run is
+// handed the same store root -- the run would write a backscatter store nothing
+// can load. The refusal must name uma#383 (the per-level layout) so the operator
+// knows it is gated work, not a dead end. Delete this test with the refusal when
+// the PR that consumes uma#383 lands.
+TEST(ImportBagCli, RefusesBackscatterOnTheMixedLevelPathNamingThePrerequisite)
+{
+  int status = -1;
+  const std::string out = runImportBag(
+    "--depth-adaptive --bs-store /tmp/bs -o /nonexistent/store -d /t /nonexistent.bag",
+    &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("--bs-store is not supported with --depth-adaptive"), std::string::npos)
+    << out;
+  EXPECT_NE(out.find("unh_marine_autonomy/issues/383"), std::string::npos)
+    << "the refusal must name the prerequisite\n" << out;
+  EXPECT_EQ(out.find("cannot open"), std::string::npos)
+    << "the refusal must land before any bag is opened\n" << out;
+
+  // Fixed-level runs are untouched: --bs-store there is not refused (this run
+  // fails later, on the bag, not on the option).
+  const std::string fixed = runImportBag(
+    "--bs-store /tmp/bs -o /nonexistent/store -d /t /nonexistent.bag", &status);
+  EXPECT_EQ(fixed.find("--bs-store is not supported"), std::string::npos) << fixed;
+}
+
 TEST(ImportBagCli, UsageDocumentsTheDepthAdaptiveFlags)
 {
   int status = -1;

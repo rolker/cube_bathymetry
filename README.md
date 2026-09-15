@@ -198,9 +198,17 @@ in short:
   finer tiles in place, and a fine-LOD reader prefers them.
 - With the policy pinned to one level the depth-adaptive path is
   **byte-identical** to the fixed path (`test_mixed_level_import`).
-- The backscatter store (`--bs-store`) gets one store per level in the same
-  directory; reading a mixed-level backscatter store back needs
-  [uma#383](https://github.com/rolker/unh_marine_autonomy/issues/383).
+- `--bs-store` is **refused** on both mixed-level paths (`import_bag
+  --depth-adaptive` and `batch_regen_bag --level-plan`) for now.
+  `marine_mbes_backscatter_store` is single-level by construction ("All tiles
+  live at a single GGGS level"; `loadTile(path, level)` rejects a tile written
+  at another level), while every level is handed the same store root — so a
+  mixed-level run would write a backscatter store nothing can load. The
+  per-level layout is
+  [uma#383](https://github.com/rolker/unh_marine_autonomy/issues/383); the PR
+  that consumes it lifts the refusal. Mixed-level backscatter is gated on that
+  work, not abandoned: take backscatter from a separate fixed-level run
+  meanwhile.
 
 `batch_regen_bag --level-plan <file>` rebuilds a depth-adaptive store from the
 same plan (each tile gathered at its own level), and its `--index-db` dry run

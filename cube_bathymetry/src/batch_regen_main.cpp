@@ -104,7 +104,9 @@
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store `survey` "
     "layer from the same CUBE pass (optional; surfaces the co-estimated "
     "intensity -- uncorrected by default, angle-corrected when "
-    "--backscatter-correction empirical is set, cube#81)\n";
+    "--backscatter-correction empirical is set, cube#81). NOT supported with "
+    "--level-plan yet: the backscatter store is single-level by construction "
+    "(per-level layout = uma#383; the PR that consumes it lifts the refusal).\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
     "topic to replay through CUBE (required)\n";
   std::cout << "  --odom-topic <topic>: nav_msgs/Odometry topic for per-ping "
@@ -698,6 +700,24 @@ int main(int argc, char * argv[])
     }
     if (level_plan->tiles().empty()) {
       std::cerr << "error: --level-plan " << level_plan_path << " emits no tiles\n";
+      return 1;
+    }
+    if (!bs_store_dir.empty()) {
+      // TEMPORARY, and the same refusal import_bag --depth-adaptive gives:
+      // marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level
+      // ("All tiles live at a single GGGS level", mbes_store.hpp; loadTile()
+      // rejects a tile written at another level), while every level of a
+      // plan-driven rebuild gathers into the SAME store root. The per-level
+      // layout is uma#383 and the PR that consumes it lifts this. Refusing
+      // beats writing a backscatter store nothing can load.
+      std::cerr << "error: --bs-store is not supported with --level-plan yet.\n"
+        "marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level, and a "
+        "mixed-level rebuild gathers every level into the same store root -- the result "
+        "is a backscatter store nothing can load. The per-level layout is\n"
+        "  https://github.com/rolker/unh_marine_autonomy/issues/383\n"
+        "and the PR that consumes it lifts this refusal. Until then, rebuild the "
+        "bathymetry from the plan and take backscatter from a separate fixed-level "
+        "rebuild.\n";
       return 1;
     }
   }
