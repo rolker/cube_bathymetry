@@ -1251,8 +1251,10 @@ bool writeFingerprint(
   }
 }
 
-/// Abort a depth-adaptive run whose spill replay did not complete (cube#143),
-/// and report what that leaves on disk. The accumulator has been evicting tiles
+/// Abort a run whose accumulation did not complete (cube#143) -- a failed or
+/// short spill replay, a finalize that threw, or an I/O fault mid-pass on the
+/// fixed-level path -- and report what that leaves on disk. The accumulator has
+/// been evicting tiles
 /// into the real `-o` store since the first batch
 /// (`MultiLevelAccumulator::evictToBudget` -> `persistAndDrop`), so by the time
 /// a short or failed replay is detected the destination already holds
@@ -1266,7 +1268,7 @@ int abortDirtyReplay(const std::string & store_dir, const std::string & detail)
 {
   std::cerr << "error: " << detail << std::endl;
   std::cerr << "The store in " << store_dir
-            << " is NOT empty and NOT complete: every batch replayed before the failure "
+            << " is NOT empty and NOT complete: every batch accumulated before the failure "
     "was already evicted into it, so it holds partial-coverage tiles. Nothing is "
     "finalized and no " << cube::BuildFingerprint::kFilename
             << " is written for this run. Archive or remove that store (or re-import "
@@ -1932,6 +1934,16 @@ int main(int argc, char * argv[])
   std::deque<std::pair<int64_t, marine_acoustic_msgs::msg::SonarDetections>> pending;
 
   bool limit_reached = false;
+  // A fatal I/O failure raised from inside the per-ping work (cube#143 triage):
+  // the recon's spill/count-tile writes and the accumulator's eviction writes
+  // both throw on a full device, and NEITHER main() nor the per-ping handler
+  // (which catches only tf2::TransformException) would have caught it -- the
+  // run would end in std::terminate (SIGABRT), skipping ~ReconCollector and
+  // leaving a multi-GB spill dir behind for the next run's orphan warning.
+  // Recorded here instead, which stops the pass and lets the normal return path
+  // report it and unwind every destructor. Swept at BOTH sites of the class:
+  // the recon path and the fixed-level accumulator path.
+  std::string fatal_error;
 
   auto tile_reporter = makeTileReporter(
     tile_size_report_path, tile_report_interval_s, tile_refresh_interval_s,
@@ -1994,6 +2006,16 @@ int main(int argc, char * argv[])
         if (proj_totals.dropped_georef <= 5) {
           std::cerr << "Transform Exception: " << e.what() << std::endl;
         }
+      } catch (const std::exception & e) {
+        // Everything else from the per-ping work is an I/O fault, not a
+        // per-ping condition: the recon's spill write or count-tile spill, or
+        // the accumulator's eviction write into the -o store. Both mean the
+        // device is full (or gone), so the next ping would fail the same way.
+        // Record and stop rather than let it escape to std::terminate; the
+        // caller reports it below and every destructor still runs.
+        // (tf2::TransformException derives from std::runtime_error, so this
+        // handler must stay BELOW the one above.)
+        fatal_error = e.what();
       }
     };
 
@@ -2002,7 +2024,7 @@ int main(int argc, char * argv[])
   // remains at end-of-stream against the available coverage.
   auto drain_pending = [&](bool flush) {
       int64_t last_drained_ns = std::numeric_limits<int64_t>::min();
-      while (!pending.empty() && !limit_reached) {
+      while (!pending.empty() && !limit_reached && fatal_error.empty()) {
         const int64_t ping_ns = pending.front().first;
         if (!flush && (tf_frontier_ns == std::numeric_limits<int64_t>::min() ||
           ping_ns > tf_frontier_ns - kGuardNs))
@@ -2027,7 +2049,7 @@ int main(int argc, char * argv[])
     };
 
   std::cout << "projecting detections (single interleaved pass)..." << std::endl;
-  for (auto message = bag_readers.next(); message && !limit_reached;
+  for (auto message = bag_readers.next(); message && !limit_reached && fatal_error.empty();
     message = bag_readers.next())
   {
     const bool is_tf = message->data_type == "tf2_msgs/msg/TFMessage";
@@ -2098,6 +2120,26 @@ int main(int argc, char * argv[])
   }
   // Flush detections still pending at end-of-stream against available coverage.
   drain_pending(true);
+  if (!fatal_error.empty()) {
+    if (recon) {
+      // Phase one: nothing has been estimated and nothing written to -o. The
+      // spill (and the spilled count tiles) go with ~ReconCollector as this
+      // returns, which is the whole point of not terminating here.
+      std::cerr << "error: the recon pass failed after " << ping_count << " ping(s): "
+                << fatal_error << std::endl;
+      std::cerr << "Nothing was estimated and nothing was written to " << store_dir
+                << "; the recon spill is removed as this run unwinds. A full scratch "
+        "device is the usual cause -- free space (or pass --scratch-dir) before the "
+        "re-run." << std::endl;
+      return 1;
+    }
+    // Fixed level: the accumulator has been evicting tiles into the real -o
+    // store since the first batch, so the destination is neither empty nor
+    // complete -- exactly the state abortDirtyReplay() exists to report.
+    return abortDirtyReplay(
+      store_dir, fatal_error + ". The import stopped after " + std::to_string(ping_count) +
+      " ping(s); a full device is the usual cause.");
+  }
   if (limit_reached) {
     std::cout << "\nPing count limit of " << ping_count_limit << " reached" << std::endl;
   }
