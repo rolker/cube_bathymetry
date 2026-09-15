@@ -243,7 +243,9 @@ bool loadCurveFromBagSonarInfo(
     "--min-obs-per-node <N> (5), --blunder-allowance <f> (0.2), "
     "--decision-depth-percentile <p> (2: percentile of a level-14 grid's shallowest "
     "soundings that decides its depth, the flier guard; 0 < p <= 100, read from a "
-    "per-grid depth histogram), --achieved-percentile <p> "
+    "per-grid histogram of WATER DEPTH UNDER THE TRANSDUCER -- not the stored "
+    "ellipsoidal height, which the geoid offsets by tens of metres), "
+    "--achieved-percentile <p> "
     "(95: percentile of the level of aggregation over a tile that decides its "
     "achieved level).\n";
   std::cout << "    --scratch-dir <dir>: where the recon spill goes (default: beside "

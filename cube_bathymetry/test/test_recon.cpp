@@ -44,7 +44,13 @@ std::string scratch(const std::string & tag)
   return dir.string();
 }
 
-GeoSounding sounding(double lat, double lon, float depth, float horiz = 0.01f)
+/// A sounding at `depth` (the STORED value, negative-down) whose water depth
+/// under the transducer is `water` -- by default the same magnitude, i.e. a
+/// geoid-free datum. The recon's decision depth reads the second, never the
+/// first (see `ReconCollector::add`), so the two are separable here.
+GeoSounding sounding(
+  double lat, double lon, float depth, float horiz = 0.01f,
+  float water = std::numeric_limits<float>::quiet_NaN())
 {
   GeoSounding s(gz4d::GeoPointLatLongDegrees(lat, lon, depth));
   s.sounding.vertical_error = 0.05f;
@@ -54,7 +60,9 @@ GeoSounding sounding(double lat, double lon, float depth, float horiz = 0.01f)
   s.sounding.slant_range = 12.5f;
   s.sounding.sonar_relative_position.x = 1.0;
   s.sounding.sonar_relative_position.y = -2.0;
-  s.sounding.sonar_relative_position.z = 10.0;
+  // Positive down, as the projector builds it (range * cos(tx) * cos(rx)).
+  s.sounding.sonar_relative_position.z =
+    std::isfinite(water) ? std::abs(water) : std::abs(depth);
   return s;
 }
 }  // namespace
@@ -194,6 +202,46 @@ TEST(ReconCollector, CountsHistogramsAndPlans)
   std::vector<GeoSounding> bad{sounding(43.07, -70.76, std::nanf(""))};
   recon.add(bad, params);
   EXPECT_EQ(recon.soundingsSeen(), 40u);
+}
+
+// The ladder is a FOOTPRINT argument, so the recon decides on the water depth
+// under the transducer -- not the stored value, which is a WGS84 ellipsoidal
+// height (uma ADR-0002 D4) and at the UNH pier sits ~28 m below the water
+// depth. Feeding the stored height coarsened every tile by one to two levels
+// (cube#143 dry-run review).
+TEST(ReconCollector, DecidesOnWaterDepthNotTheStoredEllipsoidalHeight)
+{
+  LevelPlanPolicy policy;
+  ReconCollector recon(policy, "");  // no spill
+  Parameters params{CellSizes(1.0f), "order1a"};
+
+  // Stored depth -40 m (ellipsoidal), 12 m of water under the sonar.
+  std::vector<GeoSounding> batch;
+  for (int i = 0; i < 200; ++i) {
+    batch.push_back(sounding(43.07 + i * 1e-8, -70.76, -40.0f, 0.01f, 12.0f));
+  }
+  recon.add(batch, params);
+
+  const auto depths = recon.decisionDepths();
+  ASSERT_EQ(depths.size(), 1u);
+  const float d = depths.begin()->second;
+  // 12 m of water, to within the histogram's bin (shallow side) -- not -40.
+  EXPECT_GT(d, -12.0f);
+  EXPECT_LE(d, -12.0f + DepthHistogram::kInitialBinWidth);
+
+  // And the level follows the water: the ladder asks for a strictly finer tile
+  // at 12 m than the stored -40 m would have bought.
+  const LevelPlan plan = recon.plan();
+  const auto root = gggs::Level(policy.depth.coarsest_level).gridIndex(43.07, -70.76);
+  ASSERT_TRUE(plan.isEmitted(root));
+  const auto & tile = plan.tiles().at(root);
+  EXPECT_FLOAT_EQ(tile.decision_depth, d);
+  EXPECT_EQ(
+    tile.required_level,
+    marine_bathymetry_store::depthAdaptiveLevel(d, policy.depth).level());
+  EXPECT_GT(
+    tile.required_level,
+    marine_bathymetry_store::depthAdaptiveLevel(-40.0f, policy.depth).level());
 }
 
 TEST(ReconCollector, SpillRoundTripsEverySoundingFieldInChronologicalOrder)

@@ -42,7 +42,8 @@
 /// (`marine_bathymetry_store::depthAdaptiveLevel`, uma#369: a cell of
 /// `capture_distance_scale * |depth|`, clamped to `[coarsest, finest]`),
 /// evaluated at the tile's *decision depth* -- a flier-guarded shallow
-/// percentile, rolled up as the minimum over children. The resolution the
+/// percentile of the **water depth under the transducer** (not the stored
+/// ellipsoidal height; see `recon.h`), rolled up as the minimum over children. The resolution the
 /// data *achieves* comes from Calder's level of aggregation over a count grid
 /// (`CountGrid`, US Hydro 2019): the finest spacing at which every occupied
 /// cell in the tile still gathers `n_req` observations, taken at a high
@@ -90,8 +91,8 @@ namespace cube
   /// Fraction of raw soundings assumed to be blunders; inflates n_req.
     double blunder_allowance = 0.2;
 
-  /// Percentile (0..1) of a level-14 grid's shallowest soundings taken as its
-  /// decision depth -- the flier guard. Applied by recon when it builds the
+  /// Percentile (0..1) of a level-14 grid's shallowest water depths under the
+  /// transducer taken as its decision depth -- the flier guard. Applied by recon when it builds the
   /// decision depths; recorded here so the plan states what it rested on.
   /// Must be in (0, 1]. `recon.h`'s `DepthHistogram` honours any percentile at
   /// any density (the bounded "shallowest 64" reservoir it replaced could not,
@@ -121,8 +122,14 @@ namespace cube
     uint8_t required_level = 0;
   /// Level the count grid supports over this tile (coarsest when saturated).
     uint8_t achieved_level = 0;
-  /// The tile's decision depth (negative down, metres; the shallow percentile
-  /// rolled up as the minimum over touched children).
+  /// The tile's decision depth: **water depth under the transducer**, metres,
+  /// negative-down -- the shallow percentile of the recon's per-level-14-grid
+  /// depth histogram, rolled up as the minimum over touched children. NOT the
+  /// stored ellipsoidal height the tile's values carry (uma ADR-0002 D4): the
+  /// ladder's argument is a footprint argument, and a footprint scales with
+  /// range below the transducer, not with height above the ellipsoid.
+  /// Transducer draft is deliberately ignored (sub-metre against a
+  /// factor-of-two ladder).
     float decision_depth = 0.0f;
   /// Whether the descent continued into this tile's children.
     bool refined = false;
@@ -230,7 +237,8 @@ private:
 /// @param counts The recon count grid (level `policy.count_level`), with its
 ///        per-tile maximum spread terms.
 /// @param decision_depth_by_l14_grid The decision depth of every level-14 grid
-///        the survey touched (negative down). Grids absent here contribute no
+///        the survey touched: water depth under the transducer, negative-down
+///        (`ReconCollector::decisionDepths()`). Grids absent here contribute no
 ///        depth; a grid with no depth anywhere beneath it is never emitted.
 /// @throws std::invalid_argument if the policy fails validation or the count
 ///         grid's level differs from `policy.count_level`.

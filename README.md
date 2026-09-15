@@ -153,7 +153,16 @@ in short:
   drive a tile's level:
   - `--decision-depth-percentile <p>` (default 2) is the percentile of a
     level-14 grid's *shallowest* soundings that sets its depth — the flier
-    guard on the depth side. The recon holds a **depth histogram** per grid
+    guard on the depth side. What is measured is the **water depth under the
+    transducer** (`-|sonar_relative_position.z|`, negative-down), *not* the
+    sounding's stored depth: stored depths are WGS84 ellipsoidal heights
+    (uma ADR-0002 §D4) and the geoid runs tens of metres from the ellipsoid
+    (~28 m at the UNH pier), while the ladder's argument is a footprint
+    argument — a beam's footprint scales with its range below the transducer.
+    Feeding the ellipsoidal height would coarsen every tile by one to two
+    levels. Transducer draft is deliberately ignored: sub-metre, against a
+    ladder whose levels are a factor of two apart.
+    The recon holds a **depth histogram** per grid
     (0.25 m bins, sparse), so the percentile is honoured at survey density —
     a level-14 grid of a real survey line holds ~200 k soundings and its
     water-column fliers run to many hundreds. The answer is the shallow edge

@@ -140,7 +140,15 @@ and re-argues the margin for a multi-level store.
    the uma#369 depth ladder (`depthAdaptiveLevel`, cell = `capture_distance_scale
    × |depth|`, clamped to `[coarsest, finest]`) at the tile's *decision depth*:
    the 2nd percentile of the shallowest soundings per level-14 grid (a flier
-   guard), rolled up as the minimum over touched children. The level the data
+   guard), rolled up as the minimum over touched children. The decision depth
+   is the **water depth under the transducer**
+   (`-|sonar_relative_position.z|`, negative-down), not the stored value: the
+   store's depths are WGS84 ellipsoidal heights (uma ADR-0002 §D4) and the
+   geoid runs tens of metres from the ellipsoid, while `capture_distance_scale
+   × |depth|` is a footprint argument — a beam's footprint scales with its
+   range below the transducer, so a geoid-sized offset coarsens every tile by
+   one to two levels. Transducer draft is ignored deliberately: sub-metre,
+   against a ladder whose levels are a factor of two apart. The level the data
    *achieves* is Calder's level of aggregation (B. R. Calder, *Resolution
    Determination through Level of Aggregation Analysis*, US Hydro 2019) over a
    count grid: the smallest box around each occupied cell holding `n_req`

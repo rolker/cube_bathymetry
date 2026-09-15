@@ -259,6 +259,7 @@ std::string LevelPlan::toJson() const
         << ",\"c\":" << grid.column()
         << ",\"req\":" << static_cast<int>(tile.required_level)
         << ",\"ach\":" << static_cast<int>(tile.achieved_level)
+        // "d": decision depth = water depth under the transducer, negative-down.
         << ",\"d\":" << formatDepth(tile.decision_depth)
         << ",\"ref\":" << (tile.refined ? "true" : "false")
         << ",\"g\":" << formatScale(tile.ground_m2) << "}";
@@ -277,9 +278,13 @@ LevelPlan LevelPlan::fromJson(const std::string & json)
   }
   LevelPlan plan;
   try {
-    // Schema 2 (cube#143 dry-run review) added the surveyed-ground fields; a
-    // schema-1 plan carries tile footprints only and cannot answer the report's
-    // area columns, so it is refused rather than reported against wrongly.
+    // Schema 2 (cube#143 dry-run review) added the surveyed-ground fields and
+    // defines `d` as the water depth under the transducer (negative-down), not
+    // the stored ellipsoidal height an earlier revision wrote there; both
+    // changes landed before any plan file was released, so schema 2 was
+    // amended rather than a schema 3 minted. A schema-1 plan carries tile
+    // footprints only and cannot answer the report's area columns, so it is
+    // refused rather than reported against wrongly.
     if (j.at("schema").get<int>() != 2) {
       throw std::runtime_error("LevelPlan::fromJson: unsupported schema");
     }
@@ -345,7 +350,8 @@ std::string LevelPlan::report(double observed_bytes_per_tile) const
       << ", n_req " << policy_.requiredObservations() << " (" << policy_.min_obs_per_node
       << " obs/node + " << std::setprecision(0) << policy_.blunder_allowance * 100.0
       << "% blunders), achieved p" << policy_.achieved_percentile * 100.0
-      << ", decision depth p" << policy_.decision_depth_percentile * 100.0 << "\n";
+      << ", decision depth p" << policy_.decision_depth_percentile * 100.0
+      << " (water depth under the transducer)\n";
 
   const auto lvls = levels();
   if (lvls.empty()) {

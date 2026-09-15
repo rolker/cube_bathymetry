@@ -49,7 +49,14 @@
 ///   soundings actually had),
 /// - keeps, per level-14 grid, a depth histogram so the grid's **decision
 ///   depth** -- a low percentile of its shallowest soundings, the flier
-///   guard -- can be read off at the end at any survey density, and
+///   guard -- can be read off at the end at any survey density. What is
+///   histogrammed is the **water depth under the transducer**
+///   (`-|sonar_relative_position.z|`, negative-down), NOT the sounding's
+///   stored depth: stored depths are WGS84 ellipsoidal heights (uma ADR-0002
+///   D4) and the geoid offset (~28 m at the UNH pier) would coarsen every
+///   tile by one to two levels, since the ladder's argument is a footprint
+///   argument. Transducer draft is deliberately ignored (sub-metre against a
+///   factor-of-two ladder), and
 /// - spills the projected `GeoSounding` in full to **one chronological scratch
 ///   file**, so the expensive projection/TF work runs once and phase two
 ///   replays the spill front to back into the per-level accumulators.
@@ -127,7 +134,9 @@ namespace cube
   /// reverse iteration.
     std::map < int32_t, uint64_t > bins;
 
-  /// Count one sounding. Non-finite depths are ignored.
+  /// Count one sounding's depth. Negative-down, and in the recon that is the
+  /// **water depth under the transducer**, not the stored ellipsoidal height
+  /// (see the file comment and `ReconCollector::add`). Non-finite is ignored.
     void add(float depth);
 
   /// @brief The `max(1, ceil(p * count))`-th shallowest depth, to within one
@@ -171,7 +180,8 @@ public:
     uint64_t soundingsSeen() const noexcept {return counts_.total();}
     uint64_t soundingsSpilled() const noexcept {return spilled_;}
 
-  /// Decision depth of every level-14 grid that received a sounding.
+  /// Decision depth of every level-14 grid that received a sounding: water
+  /// depth under the transducer, negative-down.
     std::map < gggs::GridIndex, float > decisionDepths() const;
 
   /// The plan for what was collected: `levelPlanFor(counts, decisionDepths, policy)`.

@@ -175,7 +175,26 @@ void ReconCollector::add(const std::vector<GeoSounding> & soundings, const Param
     }
     const double reach = parameters.maxSpreadRadius(s.sounding);
     counts_.add(s.latitude, s.longitude, std::isfinite(reach) ? reach : 0.0);
-    histograms_[l14.gridIndex(s.latitude, s.longitude)].add(s.sounding.depth);
+    // The ladder is fed WATER DEPTH UNDER THE TRANSDUCER, not the stored
+    // depth. Stored depths are WGS84 ellipsoidal heights by design (uma
+    // ADR-0002 D4), and the geoid runs tens of metres from the ellipsoid --
+    // ~28 m below it at the UNH pier, where 8-13 m of water arrives here as
+    // `s.sounding.depth` = -36..-41 m. `depthAdaptiveLevel`'s argument is a
+    // footprint argument (cell = scale x |depth|) and a beam's footprint
+    // scales with its range below the transducer, so a geoid-sized offset
+    // would coarsen every tile by one to two levels.
+    //
+    // Sign: `sonar_relative_position.z` is `range * cos(tx) * cos(rx)`
+    // (`sounding.h`), so it is POSITIVE DOWN -- a nadir beam at 15 m range
+    // gives z = +15 (see DetectionsProjectorTest). The histogram's convention
+    // is negative-down (shallowest is the largest value), so the depth it is
+    // fed is `-|z|`; the absolute value is belt-and-braces against a driver or
+    // frame that reports the other sign.
+    //
+    // Transducer draft is deliberately ignored: it is sub-metre on these
+    // vessels, against a ladder whose levels are a factor of two apart.
+    histograms_[l14.gridIndex(s.latitude, s.longitude)].add(
+      static_cast<float>(-std::abs(s.sounding.sonar_relative_position.z)));
 
     if (scratch_dir_.empty()) {
       continue;
