@@ -1064,7 +1064,13 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
   const std::string & store_dir, uint64_t projected_pings, std::size_t count_resident_tiles)
 {
   const std::string spill_root = scratch_dir.empty() ? store_dir : scratch_dir;
-  const std::string spill_dir = spill_root + "/.recon_spill_" + std::to_string(::getpid());
+  // Keyed on pid AND start time: a pid-reuse collision with a dead run's
+  // orphaned directory would otherwise surface as an "already exists" refusal
+  // attributable to a process that has nothing to do with this one.
+  const auto started_at = std::chrono::system_clock::now().time_since_epoch();
+  const std::string spill_dir = spill_root + "/.recon_spill_" +
+    std::to_string(::getpid()) + "_" +
+    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(started_at).count());
   warnAboutOrphanedSpills(spill_root, spill_dir);
   const uint64_t projected_bytes =
     projected_pings * 256ull * cube::ReconCollector::kBytesPerSpilledSounding;
@@ -1515,8 +1521,16 @@ int main(int argc, char * argv[])
       level_policy.achieved_percentile = parse_double(
         "--achieved-percentile", next_value("--achieved-percentile")) / 100.0;
     } else if (*arg == "--count-resident-tiles") {
-      count_resident_tiles = static_cast<std::size_t>(
-        parse_int("--count-resident-tiles", next_value("--count-resident-tiles")));
+      // Reject a negative budget here: cast to size_t it becomes SIZE_MAX,
+      // which silently restores the unbounded count grid the LRU replaced.
+      const int requested =
+        parse_int("--count-resident-tiles", next_value("--count-resident-tiles"));
+      if (requested < 0) {
+        std::cerr << "error: option '--count-resident-tiles' expects a positive count, got '"
+                  << requested << "'\n";
+        usage();
+      }
+      count_resident_tiles = static_cast<std::size_t>(requested);
       count_resident_tiles_given = true;
     } else if (*arg == "--scratch-dir") {
       scratch_dir = next_value("--scratch-dir");
