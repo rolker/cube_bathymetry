@@ -1114,3 +1114,24 @@ Not pushed (sub-agent contract; the host pushes).
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 13:25 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `4eabf3d`
+**Source**: operator decision 2026-09-15 — fold two follow-ups filed from the M3 dry run back into this PR instead of leaving them as issues (fix discovered defects where discovered). No new review comments; CI green on the previous head.
+**Must-fix**: 2 | **Suggestions**: 0
+
+### Findings
+- [ ] (must-fix) **Verify the achieved level** — https://github.com/rolker/cube_bathymetry/issues/161. The pier bag has 12.1 M soundings over 0.0085 km² (~1,400/m²): ~4.5 obs/node at level 14, ~18 at level 13, ~70 at level 12, yet every tile reports achieved 10–11. Instrument the level-of-aggregation on `rerun3/` (per-box LoA histogram for tile `10/17801/13988`; is the p95 population all boxes in the tile, occupied boxes, or covered ground? does the 3×3 neighbourhood or the blunder allowance dominate?). If the percentile runs over empty/edge boxes, change it to run over occupied boxes (or covered ground) and justify in ADR-0002 text + README; if the current answer is right, say why in the README's achieved-level paragraph with the pier numbers. Add a density test: a synthetic swath at 1,400 soundings/m² over a 54 m grid must achieve level 12–13 in its core. Re-run the dry run into `rerun4/` and record the achieved levels + deficit line — `src/level_plan.cpp` (achieved-level / LoA code), `src/count_grid.cpp`
+- [ ] (must-fix) **Real-bag smoke test** — https://github.com/rolker/cube_bathymetry/issues/162. Nothing in the suite reaches `main()`'s depth-adaptive path (this pass and the previous ones recorded three guards as inspection-only for that reason). Add: (1) a 3,000-ping excerpt of the pier bag written with `ros2 bag` tooling to the NAS archive next to the source (`/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/`, name it `..._m3_detections_3000ping_excerpt`; ~20 MB; referenced by path, not committed) — if writing to the NAS is not possible from this host, put it under `~/data/logs/fixtures/` and say so; (2) a gtest/ctest smoke test that runs `import_bag --depth-adaptive --level-plan-out` on it and asserts exit 0, no missing-range warning, surveyed ground within 10 % of 706 m², decision depths within −7…−20 m, recon seconds > 1, plan JSON at the current schema; then the fixed-level import on the same window and byte-identity of `batch_regen_bag --level-plan` against it; then the two abort paths with a fault injected (truncate the spill between phases; unwritable fingerprint dir) asserting the documented exit codes and the dirty-store message; (3) the test is **SKIPPED with a printed reason, never passed**, when the excerpt is unreachable (`GTEST_SKIP`), and `ci_local.sh`'s project hook (see `.agents/ci_local_upstream_extra.sh` conventions in the workspace) exposes the same skip semantics — `test/`, `CMakeLists.txt`
+
+### Operator decisions (2026-09-15, host-recorded)
+Fold both into PR #159 now. After: clean build + FULL suite; the smoke test must run for real on this host (the bag is reachable) and be observed to SKIP when pointed at a missing path. Then the host pushes and closes #161/#162 with the commit SHAs.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
