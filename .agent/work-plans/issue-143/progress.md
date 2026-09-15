@@ -445,3 +445,110 @@ All plan-review must-fixes from rounds 1-4 were traced to code and confirmed hon
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 08:28 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `d4a6430`
+**Addressed**: `## Local Review (Pre-Push)` (2026-09-14 14:03 -04:00, round 1, verdict changes-requested, branch at `2f93049`) — all 6 must-fixes and all 10 suggestions
+**Commits**: `74a0d19`, `330c0f3`, `7f4fdfc`, `a924ec6`, `fca1f59`, `0fbdb1d`, `4798bb3`, `bbc38b8`, `5627f25`, `1c1261a`, `af45cd6`, `1a397e9`, `35fd054`, `d4a6430`
+
+An earlier pass of this skill committed `74a0d19`..`4798bb3` and then died before
+verifying, testing or reporting. This pass re-read each of those fixes against
+the committed code rather than redoing them, then completed the remaining
+suggestions, ran a clean rebuild and the full suite, and closed the entry.
+
+### Actions
+
+Must-fixes (the first seven commits above; verified against the code as committed):
+
+- [x] Spill replay order — the level-10 spill partition is gone; `ReconCollector`
+  writes **one chronological file** and `forEachSpilled` replays it front to back,
+  so phase two sees the arrival order the fixed path saw and the byte-identity
+  holds by construction. `test_mixed_level_import`'s single-level equivalence case
+  now runs the whole recon → plan → replay path instead of `addBatch` alone —
+  `src/recon.cpp:152`, `src/import_bag_main.cpp:1228`, `test/test_mixed_level_import.cpp:205` (`74a0d19`)
+- [x] Count-grid RAM — `CountGrid::setSpillDir` caps resident count tiles
+  (`--count-resident-tiles`, default 256 ≈ 460 MB of level-14 tiles) with an LRU,
+  writing colder tiles to the recon scratch dir as UInt16 GeoTIFFs and reloading
+  on demand; `tiles()` is replaced by `grids()` + `tileAt()`, and the plan report
+  prints the resident peak, the budget and the spilled count —
+  `include/cube_bathymetry/count_grid.h:95`, `src/count_grid.cpp`, `src/import_bag_main.cpp:1183` (`330c0f3`)
+- [x] Unbounded open spill streams — resolved by the single chronological spill
+  above: one `ofstream` for the whole recon — `src/recon.cpp:155` (`74a0d19`)
+- [x] Fingerprint inputs — `iho_order`, `depth_adaptive_scale` (the ladder scale
+  `--depth-adaptive-scale` actually sets), `decision_depth_percentile` and
+  `achieved_percentile` now join the schema-2 `tiling` object, `isStale` and the
+  JSON round-trip — `src/build_fingerprint.cpp:65`, `src/import_bag_main.cpp:1112` (`7f4fdfc`)
+- [x] Plan-aware `dirtyTiles` conservative superset — footprint ground the plan
+  emits nothing over is rolled up to the plan's coarsest level instead of being
+  dropped, and an empty plan throws — `src/survey_index_query.cpp:416` (`a924ec6`)
+- [x] Fingerprint fsync — `BuildFingerprint::write` now fsyncs the temp file and
+  the store directory after the rename (a rename is a directory operation), and
+  checks `fclose` — `src/build_fingerprint.cpp:203` (`fca1f59`)
+
+Suggestions:
+
+- [x] Spill kept until the tiles are persisted — `recon.cleanup()` moved after
+  `accumulator.finalize()` — `src/import_bag_main.cpp:1267` (`0fbdb1d`)
+- [x] Orphaned spill dirs — `ReconCollector` refuses a non-empty scratch dir, and
+  `import_bag` warns about leftover `.recon_spill_<pid>` directories without
+  deleting any (a concurrent import may own one) —
+  `src/recon.cpp:104`, `src/import_bag_main.cpp:1021` (`74a0d19`, `330c0f3`)
+- [x] Failed fingerprint write — no longer a warning that still prints "done!":
+  the run exits **2** ("the store is complete, the fingerprint is not — a later
+  incremental regen must do a FULL regen"), documented in `--help`, on both the
+  fixed and depth-adaptive paths — `src/import_bag_main.cpp:1085` (`0fbdb1d`)
+- [x] Live-node capture gate — `capture_spacing_scale` is a ROS parameter, so a
+  deployment can pin it (e.g. `0.5 / cell_size` for the pre-#143 gate) without a
+  rebuild — `src/cube_bathymetry_node.cpp`, README (`4798bb3`)
+- [x] ShallowReservoir capacity vs percentile — `LevelPlanPolicy::validate()` now
+  refuses a `decision_depth_percentile` outside `(0, kMaxDecisionDepthPercentile]`
+  (0.05), naming the 64-deep reservoir it is sized against; the usage text states
+  the range and `test_level_plan` covers the boundary. Reading shallower than the
+  true percentile is the safe direction (it asks for a finer tile), so the bound
+  targets the silently-wrong case — `include/cube_bathymetry/level_plan.h:96`,
+  `src/level_plan.cpp:104`, `include/cube_bathymetry/recon.h:95` (`af45cd6`)
+- [x] Plan bookkeeping — `multi_level_accumulator.*`, `recon.*`, `map_sheet.h`,
+  `test_recon.cpp` and the three follow-through test files are now in
+  Files-to-Change; the Implementation sync records the whole fix pass (chronological
+  spill superseding the level-10 partition, the count-grid LRU, the fingerprint
+  fields, the dirty-set rollup, exit code 2, the node parameter, the percentile
+  bound), and approach step 4 carries a "superseded during implementation" note —
+  `.agent/work-plans/issue-143/plan.md` (`35fd054`)
+- [x] Duplicate `@brief` — the orphaned line is gone from `persistAndDrop` —
+  `include/cube_bathymetry/store_import.h:441` (`bbc38b8`)
+- [x] Brace indentation — six stray closing braces dedented —
+  `test/test_count_grid.cpp`, `test/test_survey_index_query.cpp` (`5627f25`)
+- [x] Test timeout — `test_import_eviction` gets `TIMEOUT 300` like the
+  mixed-level test (~44 s against the 60 s default is too little headroom) —
+  `CMakeLists.txt:458` (`1c1261a`)
+- [x] `batch_regen` fingerprint (deferred: out of scope by design). Plan step 9
+  and the ADR-0003 amendment's implementation-status note both state that this PR
+  is ADR-0003's **first partial** implementation — `import_bag` is the writer, and
+  `batch_regen --incremental`'s consumer stays unimplemented and is marked so in
+  the ADR. Implementing it here would be scope the plan explicitly excluded —
+  `src/batch_regen_main.cpp`, `docs/decisions/0003-staleness-fingerprint.md:179`
+
+### Verification
+
+Clean rebuild of `cube_bathymetry` (build + install trees removed first) on this
+HEAD: success, no new warnings beyond the pre-existing GDAL `warn_unused_result`
+and one unused-variable warning in `test_tile_eviction_rss.cpp` (both predate this
+branch's fix pass). Full package suite on the same HEAD:
+
+**757 tests, 0 errors, 0 failures, 87 skipped** (the last full run, 752 tests,
+predated the seven fix commits). Pre-commit hooks ran on every commit; none
+bypassed.
+
+### Next step
+
+Lifecycle: **Implementation** → **review-code** (re-review the fixes)
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 143 --skill review-code
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
