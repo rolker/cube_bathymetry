@@ -920,3 +920,82 @@ A follow-up look at the same dry run found one more must-fix, actioned here:
   `ReconCollector.SoundingsWithNoSonarFrameRangeDoNotDecideALevel` for the
   guard above; the hand-built fixtures in `test_mixed_level_import` and
   `test_batch_regen` now set the nadir z their depth always implied.
+
+### Copilot review triage fixes (2026-09-15)
+
+Two Copilot reviews (R1 @ `88831d5`, R2 @ `00f3736`) were triaged against the
+code at `79f438b` and against the local timeline; the operator ruled all 5
+must-fix and all 6 should-fix in scope, and the 3 low items in if cheap (all
+three were). Recurrence classes were swept at **every** site, not only the one
+Copilot pointed at.
+
+- **An I/O fault in the per-ping pass is reported, not `std::terminate`d.** The
+  per-ping handler caught only `tf2::TransformException` and `main()` has none,
+  so a full scratch device during the recon ended the run in SIGABRT and skipped
+  `~ReconCollector`, stranding the multi-GB spill. Swept at both sites (recon
+  and fixed-level accumulator); the fixed-level one reports through
+  `abortDirtyReplay`, since eviction has been writing into the real `-o` store
+  since the first batch.
+- **`finalize()` is inside the abort guard, on both paths.** An I/O failure
+  persisting the resident tiles or the sidecars unwound past the guard, handing
+  the operator an uncaught throw over a partial-coverage store with a stale
+  fingerprint still describing the pre-run state.
+- **A level plan that does not cover the survey is refused.** The replay gate
+  counts records *read back*, not soundings *routed*, so a foreign plan replayed
+  everything, routed it nowhere, and the store was fingerprinted as complete.
+  Two checks, because they catch different things: before the replay, every
+  occupied count tile must have an emitted ancestor (`LevelPlan::covers`) —
+  refused for a reused plan, warned for a freshly computed one, where the only
+  possible cause is soundings with no range below the transducer; and during the
+  replay, `MultiLevelAccumulator::unroutedSoundings()` counts what no level
+  admitted.
+- **`--bs-store` is refused on the mixed-level paths** — see the amended
+  Prerequisite section. TEMPORARY, naming uma#383.
+- **The fingerprint records the policy that chose the tiles** — the plan's own
+  when `--level-plan` supplied them, not the CLI/default one.
+- **Numeric CLI options are range-checked before they are narrowed**:
+  `--depth-adaptive-coarsest/-finest` and `--count-level` through `requireLevel`
+  (256 wrapped to level 0, 270 to level 14), `--min-obs-per-node` through
+  `requireAtLeast` (−1 became `UINT32_MAX`), and both factors bounded above. The
+  two conversion sites are made safe independently of the CLI, since a plan
+  file's policy never passed through it: `requiredObservations()` clamps,
+  `validate()` bounds the allowance, and the spill preflight's arithmetic
+  saturates — toward "more than this device can hold", the safe direction for a
+  refusal.
+- **The recon admits exactly what the estimator will.** `GeoGrid::insert`
+  additionally rejects non-finite or non-positive uncertainties; soundings in
+  that gap inflated the count grid (a finer achieved level than the data
+  supports, and ground with no estimate counted as surveyed) and were spilled
+  for nothing. A missing-attitude ping is exactly this case, so it is an MRU
+  dropout, not a pathological input; `soundingsRefused()` reports it.
+- **Every plan tile record is validated against the plan's own policy** — level,
+  `req`/`ach` and every touched grid inside `[coarsest, finest]`, areas finite
+  and non-negative. A plan file is an external input.
+- **The decision-depth histograms are reported** — see above.
+- **The plan carries `capture_spacing_scale`** — see above.
+- **`DIRTY_TILES_JSON` no longer claims one store level in plan mode** — with a
+  plan in force the key is `store_levels`, the emitted level set.
+- **Low, all fixed**: the tile-selection disc gains the count cell's
+  half-diagonal (the sounding can sit anywhere in the cell the disc is centred
+  on — #104's failure mode in miniature at tile seams); `CountGrid::saveTo`
+  refuses a non-empty destination (`mergeFrom` reads the directory whole);
+  README states both capture gates (0.71 m fixed-level default, 0.64 m for a
+  depth-adaptive level-10 sheet).
+
+**Tests added**: `LevelPlanTest.CoversAnswersWhetherGroundReachesThePlanAtAll`,
+`.RejectsTileRecordsThatContradictTheRecordedPolicy`,
+`.CarriesTheCaptureSpacingScaleThroughTheJson`, the allowance bound in
+`.ValidationNamesEachConstraint`;
+`MixedLevelImport.SoundingsNoLevelAdmitsAreCountedAsUnrouted`;
+`ImportBagCli.NumericOptionsAreCheckedBeforeTheyAreNarrowed`,
+`.RefusesBackscatterOnTheMixedLevelPathNamingThePrerequisite`;
+`ReconCollector.RefusesWhatTheEstimatorWouldRefuse`,
+`.ReportsWhatTheDepthHistogramsCost`; the dirty-destination case in
+`CountGridTest.SaveAndMergeFromRoundTripsAdditively`. Three changes have no
+reachable test seam and are covered by inspection plus the docs: the two
+`main()`-only guards (this package has no bag fixture, so `import_bag`'s
+per-ping and finalize paths cannot be driven from a test), the one-line policy
+selection for the fingerprint (whose consequence — every plan-deciding key
+making a store stale — `test_build_fingerprint` already covers), and the
+`DIRTY_TILES_JSON` key (there is no `batch_regen_bag` CLI harness; adding one
+needs an on-disk survey-index fixture).
