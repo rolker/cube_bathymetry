@@ -715,13 +715,13 @@ predicts; and exit code 3 is strictly additive, correctly ranked, and has no con
 tree or in `build_bathy_store.sh`.
 
 ### Findings
-- [ ] (must-fix) The new `forEachSpilled` throws (failed flush, failed close, partial trailing record) are uncaught: the call is the one fallible call in `cube_depth_adaptive_finish` with no try/catch, and `main` has none, so a disk-full at the tail -- the scenario the fix targets -- aborts via `std::terminate` (SIGABRT) instead of the documented `error: ...` + exit 1 that its silent-short-count sibling produces. Cross-confirmed by Lens A and Lens B — `src/import_bag_main.cpp:1269`, `src/recon.cpp:200`
-- [ ] (must-fix) The count check fires after the replay, but `accumulator.addBatch` evicts tiles into the real `-o` store on every batch (`MultiLevelAccumulator::evictToBudget` -> `persistAndDrop`), so on a short spill the destination store already holds partial-coverage tiles when the error prints "Nothing is finalized and no build_fingerprint.json is written" and advises "free space ... and re-run". Re-running over those tiles double-counts soundings -- the hazard `build_bathy_store.sh` guards with `--fresh`. The message and the comment above it must say the store holds partial tiles from the aborted run and must be archived/removed first — `src/import_bag_main.cpp:1284`, `src/multi_level_accumulator.cpp:141`
-- [ ] (suggestion) The post-rename directory fsync throws on any errno, `EINVAL`/`ENOTSUP`/`ENOSYS` included -- returned by mounts whose directory ops have no fsync -- so a store on such a mount would exit 2 on every run and force a FULL regen forever, while the message says the fingerprint "could not be written" although the rename put a valid one in place. Tolerate the not-supported errnos with a warning; keep the throw for `EIO`/`ENOSPC`/`EBADF` — `src/build_fingerprint.cpp:249`, `src/import_bag_main.cpp:1159`
-- [ ] (suggestion) On the short-replay abort, a pre-existing `build_fingerprint.json` survives untouched while the aborted run has already mutated tiles under it, so a later `batch_regen --incremental` would trust it. Consider removing it (or marking the store dirty) on that path — `src/import_bag_main.cpp:1288`
-- [ ] (suggestion) `requireNonNegative` reports "expects a count >= 0" but the effective minimum is `CountGrid::kMinResidentTiles` (16); 1-15 passes the option parser and is refused later by the `ReconCollector` ctor, after the orphan warning and the spill banner have printed. State the real range at parse time and in `--help` — `src/import_bag_main.cpp:1063`, `src/count_grid.cpp:88`
-- [ ] (suggestion) Doubling the preflight requirement can now refuse a run whose spill would have fit, and the only advice offered is `--scratch-dir`; consider an explicit override, or say in `--help` that the check is satisfied by pointing `--scratch-dir` at a larger device — `src/import_bag_main.cpp:1101`
-- [ ] (suggestion) README's `capture_spacing_scale` paragraph does not say the parameter is now `read_only` -- set it from launch/YAML, a runtime `ros2 param set` is rejected. That is the operator-facing half of the round-2 must-fix — `README.md:113`
+- [x] (must-fix) The new `forEachSpilled` throws (failed flush, failed close, partial trailing record) are uncaught: the call is the one fallible call in `cube_depth_adaptive_finish` with no try/catch, and `main` has none, so a disk-full at the tail -- the scenario the fix targets -- aborts via `std::terminate` (SIGABRT) instead of the documented `error: ...` + exit 1 that its silent-short-count sibling produces. Cross-confirmed by Lens A and Lens B — `src/import_bag_main.cpp:1269`, `src/recon.cpp:200`
+- [x] (must-fix) The count check fires after the replay, but `accumulator.addBatch` evicts tiles into the real `-o` store on every batch (`MultiLevelAccumulator::evictToBudget` -> `persistAndDrop`), so on a short spill the destination store already holds partial-coverage tiles when the error prints "Nothing is finalized and no build_fingerprint.json is written" and advises "free space ... and re-run". Re-running over those tiles double-counts soundings -- the hazard `build_bathy_store.sh` guards with `--fresh`. The message and the comment above it must say the store holds partial tiles from the aborted run and must be archived/removed first — `src/import_bag_main.cpp:1284`, `src/multi_level_accumulator.cpp:141`
+- [x] (suggestion) The post-rename directory fsync throws on any errno, `EINVAL`/`ENOTSUP`/`ENOSYS` included -- returned by mounts whose directory ops have no fsync -- so a store on such a mount would exit 2 on every run and force a FULL regen forever, while the message says the fingerprint "could not be written" although the rename put a valid one in place. Tolerate the not-supported errnos with a warning; keep the throw for `EIO`/`ENOSPC`/`EBADF` — `src/build_fingerprint.cpp:249`, `src/import_bag_main.cpp:1159`
+- [x] (suggestion) On the short-replay abort, a pre-existing `build_fingerprint.json` survives untouched while the aborted run has already mutated tiles under it, so a later `batch_regen --incremental` would trust it. Consider removing it (or marking the store dirty) on that path — `src/import_bag_main.cpp:1288`
+- [x] (suggestion) `requireNonNegative` reports "expects a count >= 0" but the effective minimum is `CountGrid::kMinResidentTiles` (16); 1-15 passes the option parser and is refused later by the `ReconCollector` ctor, after the orphan warning and the spill banner have printed. State the real range at parse time and in `--help` — `src/import_bag_main.cpp:1063`, `src/count_grid.cpp:88`
+- [x] (suggestion) Doubling the preflight requirement can now refuse a run whose spill would have fit, and the only advice offered is `--scratch-dir`; consider an explicit override, or say in `--help` that the check is satisfied by pointing `--scratch-dir` at a larger device — `src/import_bag_main.cpp:1101`
+- [x] (suggestion) README's `capture_spacing_scale` paragraph does not say the parameter is now `read_only` -- set it from launch/YAML, a runtime `ros2 param set` is rejected. That is the operator-facing half of the round-2 must-fix — `README.md:113`
 
 ### Next step
 
@@ -730,6 +730,79 @@ Lifecycle: **Local Review (Pre-Push)** -> **address-findings** (2 mechanical mus
 Ship is **recommended**: apply the two must-fixes (and, if the operator wants the guarantee
 closed rather than merely stated honestly, suggestion 2 with it) and push, rather than run a
 fourth full review round. The verdict is advisory -- the operator decides.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 10:04 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `623f942`
+**Addressed**: `## Local Review (Pre-Push)` round 3, 2026-09-15 09:32 -04:00, reviewing `968e8b8` (entry committed as `b063999`)
+**Commits**: `945f9dc`, `3ed5f74`, `c5b03b8`, `774da62`, `623f942`
+
+All seven findings actioned (2 must-fix + 5 suggestions); none deferred, per the
+operator's decision that this is the last fix pass before publish.
+
+### Actions
+- [x] (must-fix) The `forEachSpilled` throws (failed flush, failed close, partial trailing record) are caught: the replay runs inside a try/catch that reports `error: ...` and returns 1, so the disk-full tail this check exists for no longer ends the run in `std::terminate` (SIGABRT) — `src/import_bag_main.cpp:1395` (`945f9dc`)
+- [x] (must-fix) Both abort paths go through `abortDirtyReplay()`, which says the `-o` store holds partial-coverage tiles evicted during the replay and must be archived or removed before a re-run (re-importing over them double-counts their soundings), instead of "Nothing is finalized … free space and re-run" — `src/import_bag_main.cpp:1257,1410,1424` (`945f9dc`)
+- [x] (suggestion) The post-rename directory fsync tolerates `EINVAL`/`ENOTSUP`/`ENOSYS` with a warning — a mount with no directory fsync had a valid fingerprint in place and would have been refused on every run, forcing a FULL regen forever — while `EIO`/`ENOSPC`/`EBADF` still throw — `src/build_fingerprint.cpp:256,270`, `include/cube_bathymetry/build_fingerprint.h:163` (`3ed5f74`)
+- [x] (suggestion) `abortDirtyReplay()` also removes a pre-existing `build_fingerprint.json`, so stale metadata never sits over tiles the aborted run mutated (a failed removal warns and names the file) — `src/import_bag_main.cpp:1275` (`945f9dc`)
+- [x] (suggestion) `--count-resident-tiles` is validated against the real floor (`CountGrid::kMinResidentTiles` = 16) at parse time rather than ">= 0", so 1–15 is refused before the orphan warning and the spill banner print; `--help` states the minimum — `src/import_bag_main.cpp:1076,1691`, `src/count_grid.cpp:88` (`c5b03b8`)
+- [x] (suggestion) The count-tile free-space allowance is `--count-spill-allowance <factor>` (default 1.0, 0 removes it), documented in `--help` and named in the shortfall message, so a dense survey over little ground is no longer refused a run that would have fit with no override — `src/import_bag_main.cpp:1088,1170,1682` (`c5b03b8`)
+- [x] (suggestion) README says `capture_spacing_scale` is `read_only` — set it from launch or a YAML overrides file; a runtime `ros2 param set` is rejected — `README.md:117` (`774da62`)
+
+### Tests added
+- `BuildFingerprint.TellsAnUnsupportedDirectoryFsyncFromAFailedOne` — pins which
+  errnos mean "this filesystem has no directory fsync" (EINVAL, ENOTSUP, ENOSYS)
+  against those that mean a sync was attempted and failed (EIO, ENOSPC, EBADF,
+  EACCES). The classifier is exposed as `cube::fsyncErrnoMeansUnsupported` so the
+  distinction is testable without a mount that behaves that way; the existing
+  unreadable-directory test still covers the throwing path end to end.
+- `ImportBagCli.RefusesACountResidentBudgetBelowTheRealMinimum` — `-1`, `0` and
+  `15` are refused with the true range, before anything about the pass is
+  printed; `16` is accepted.
+- `ImportBagCli.CountSpillAllowanceIsTunableAndValidated` — a negative factor is
+  refused, the flag without `--depth-adaptive` is refused, and `0` is a valid
+  value (it removes the allowance).
+- `ImportBagCli.UsageDocumentsTheDepthAdaptiveFlags` gained assertions for
+  `--count-spill-allowance` and for the stated `minimum 16`.
+- **No test for the two abort paths in `cube_depth_adaptive_finish`**: they sit
+  past a real bag read inside `main()`'s call tree, and this package has no bag
+  fixture — the `runImportBag` harness can only reach option validation. The
+  throws they now catch are themselves covered by
+  `ReconCollector.ATruncatedSpillIsReportedRatherThanReplayedShort`.
+
+### Verification
+Clean build (the package's `build/` and `install/` removed first) plus the full
+suite on HEAD `623f942`:
+
+- Build: 1 package finished, 1 min 41 s clean / 19–23 s incremental. The only
+  `-Wall` warnings are pre-existing ones in files this branch does not touch
+  (`grid.cpp`, `node.cpp`, `map_sheet.cpp`, `error_model.cpp`,
+  `geo_map_sheet.cpp`, `bag_to_geotiff.cpp`); no warning in any touched file.
+- Tests: **762 tests, 0 errors, 0 failures, 87 skipped** (3 min 45 s) — 36 ctest
+  entries including the eight lint suites (cpplint, uncrustify, cppcheck,
+  copyright, flake8, lint_cmake, pep257, xmllint), all clean.
+- Two lint regressions the fixes introduced were fixed before the final run
+  rather than left: the new option paths pushed `main()` past cpplint's 500-line
+  limit again (the bag time-span report, the tiling-choice report and the
+  finite-factor check moved to free functions beside the other helpers), and
+  uncrustify re-indented one continuation line in the new abort message.
+- A self-inflicted defect caught and fixed before committing: the first
+  extraction of `reportTilingChoice()` left the helper calling itself (infinite
+  recursion) and still compiled and tested green — nothing in the suite reaches
+  `main()`'s depth-adaptive banner. Fixed and re-verified; it is worth recording
+  that this path has no automated coverage at all.
+
+### Next step
+
+Lifecycle: **Implementation** -> push / open PR (the operator's decision: no
+fourth review round)
 
 ---
 **Authored-By**: `Claude Code Agent`
