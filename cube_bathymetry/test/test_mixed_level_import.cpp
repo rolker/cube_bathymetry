@@ -562,6 +562,58 @@ TEST(ImportBagCli, CountSpillAllowanceIsTunableAndValidated)
     << "0 removes the allowance; it is not an invalid value\n" << out;
 }
 
+// Numeric options are range-checked BEFORE they are narrowed or converted
+// (cube#143 triage). Every case here used to be accepted: 256 and 270 wrapped
+// through uint8_t into levels validate() likes, -1 became UINT32_MAX and passed
+// `min_obs_per_node >= 1`, and an unbounded factor made a product that is an
+// undefined conversion in requiredObservations() and in the spill preflight.
+TEST(ImportBagCli, NumericOptionsAreCheckedBeforeTheyAreNarrowed)
+{
+  const std::string tail = " -o /nonexistent/store -d /t /nonexistent.bag";
+  int status = -1;
+
+  // uint8_t wrap: 256 -> 0 (a level validate() accepts as the coarsest).
+  std::string out = runImportBag("--depth-adaptive --depth-adaptive-coarsest 256" + tail,
+    &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("'--depth-adaptive-coarsest' expects a GGGS level in [0, 20]"),
+    std::string::npos) << out;
+
+  // 270 -> 14, exactly the finest level the policy allows.
+  out = runImportBag("--depth-adaptive --depth-adaptive-finest 270" + tail, &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("'--depth-adaptive-finest' expects a GGGS level in [0, 20]"),
+    std::string::npos) << out;
+
+  out = runImportBag("--depth-adaptive --count-level 270" + tail, &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("'--count-level' expects a GGGS level in [0, 20]"),
+    std::string::npos) << out;
+
+  // Negative into uint32_t.
+  out = runImportBag("--depth-adaptive --min-obs-per-node -1" + tail, &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("'--min-obs-per-node' expects a count >= 1"), std::string::npos) << out;
+
+  // An unbounded factor: reachable by reportTilingChoice() before a bag opens.
+  out = runImportBag("--depth-adaptive --blunder-allowance 1e300" + tail, &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("'--blunder-allowance' expects a finite factor"), std::string::npos)
+    << out;
+  out = runImportBag("--depth-adaptive --count-spill-allowance 1e300" + tail, &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("'--count-spill-allowance' expects a finite factor"), std::string::npos)
+    << out;
+
+  // Values in range are still accepted (these fail on the bag, not the option).
+  out = runImportBag(
+    "--depth-adaptive --depth-adaptive-coarsest 8 --depth-adaptive-finest 12 "
+    "--count-level 14 --min-obs-per-node 1 --blunder-allowance 0" + tail, &status);
+  EXPECT_EQ(out.find("expects a GGGS level"), std::string::npos) << out;
+  EXPECT_EQ(out.find("expects a count >="), std::string::npos) << out;
+  EXPECT_EQ(out.find("expects a finite factor"), std::string::npos) << out;
+}
+
 // TEMPORARY refusal (cube#143 triage): marine_mbes_backscatter_store is
 // single-level by construction, and every level of a depth-adaptive run is
 // handed the same store root -- the run would write a backscatter store nothing

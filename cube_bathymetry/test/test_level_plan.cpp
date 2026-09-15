@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -123,6 +124,19 @@ TEST(LevelPlanPolicyTest, ValidationNamesEachConstraint)
   p = ok;
   p.blunder_allowance = -0.1;
   EXPECT_THROW(p.validate(), std::invalid_argument);
+  // Upper-bounded too: the allowance multiplies a count into a uint64_t, and a
+  // policy read from a plan file never passed the CLI's own check (#143 triage).
+  p.blunder_allowance = 1e300;
+  EXPECT_THROW(p.validate(), std::invalid_argument);
+  p.blunder_allowance = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(p.validate(), std::invalid_argument);
+  p.blunder_allowance = 1e9;
+  EXPECT_NO_THROW(p.validate());
+  // requiredObservations() stays representable at the bound rather than
+  // converting a double that does not fit (undefined).
+  p.min_obs_per_node = 4000000000u;
+  EXPECT_GT(p.requiredObservations(), 0u);
+  EXPECT_LT(p.requiredObservations(), std::numeric_limits<uint64_t>::max());
   p = ok;
   p.achieved_percentile = 1.5;
   EXPECT_THROW(p.validate(), std::invalid_argument);

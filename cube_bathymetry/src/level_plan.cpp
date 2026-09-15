@@ -66,7 +66,19 @@ std::string formatScale(double value)
 
 uint64_t LevelPlanPolicy::requiredObservations() const
 {
-  return static_cast<uint64_t>(std::ceil(min_obs_per_node * (1.0 + blunder_allowance)));
+  // Computed in double and clamped before the conversion (cube#143 triage): a
+  // float-to-integer conversion whose value does not fit the target is
+  // UNDEFINED, and this is reached by the tiling report before any bag is
+  // opened. validate() rejects an allowance big enough to get here, so the
+  // clamp is the defence for a policy that never went through it -- a plan file
+  // is an operator-facing artifact passed between runs.
+  const double required = std::ceil(
+    static_cast<double>(min_obs_per_node) * (1.0 + blunder_allowance));
+  if (!(required >= 1.0)) {
+    return 1;
+  }
+  constexpr double kMaxRepresentable = 9.0e18;  // < 2^63, safely inside uint64_t
+  return static_cast<uint64_t>(std::min(required, kMaxRepresentable));
 }
 
 void LevelPlanPolicy::validate() const
@@ -92,8 +104,17 @@ void LevelPlanPolicy::validate() const
   if (min_obs_per_node < 1) {
     throw std::invalid_argument("level plan policy: min_obs_per_node must be >= 1");
   }
-  if (!std::isfinite(blunder_allowance) || blunder_allowance < 0.0) {
-    throw std::invalid_argument("level plan policy: blunder_allowance must be >= 0");
+  // Upper-bounded, not just finite: the allowance multiplies an observation
+  // count into a uint64_t (requiredObservations), and the bound keeps that
+  // product representable by construction rather than by clamping after the
+  // fact. kMaxBlunderAllowance is nine orders of magnitude above the 0.2
+  // default -- no real survey is near it (cube#143 triage).
+  constexpr double kMaxBlunderAllowance = 1e9;
+  if (!std::isfinite(blunder_allowance) || blunder_allowance < 0.0 ||
+    blunder_allowance > kMaxBlunderAllowance)
+  {
+    throw std::invalid_argument(
+            "level plan policy: blunder_allowance must be in [0, 1e9]");
   }
   for (double p : {decision_depth_percentile, achieved_percentile}) {
     if (!(p >= 0.0 && p <= 1.0)) {

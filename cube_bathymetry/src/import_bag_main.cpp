@@ -1120,14 +1120,40 @@ std::size_t requireAtLeast(const char * flag, int value, std::size_t minimum)
 
 /// A factor option that must be finite and non-negative (cube#143). Reports the
 /// option error and exits, like every other option failure.
+///
+/// The upper bound is not cosmetic: both factors end up multiplying a count
+/// into a `uint64_t` -- `requiredObservations()` (reached by the tiling report
+/// before a bag is opened) and the spill free-space preflight -- and a product
+/// past 2^64 is an undefined conversion, which in the preflight silently
+/// defeats the very check the operator is relying on. kMaxFactor is far above
+/// any real value (the defaults are 0.2 and 1.0) and far below where any
+/// product of it can overflow.
+constexpr double kMaxFactor = 1e9;
+
 double requireFiniteFactor(const char * flag, double value)
 {
-  if (!(value >= 0.0) || !std::isfinite(value)) {
-    std::cerr << "error: option '" << flag << "' expects a finite factor >= 0, got '"
-              << value << "'\n";
+  if (!(value >= 0.0) || !std::isfinite(value) || value > kMaxFactor) {
+    std::cerr << "error: option '" << flag << "' expects a finite factor in [0, "
+              << kMaxFactor << "], got '" << value << "'\n";
     usage();
   }
   return value;
+}
+
+/// A GGGS level option (cube#143 triage). The narrowing to uint8_t is what made
+/// the range check ineffective: `--depth-adaptive-coarsest 256` wrapped to 0 and
+/// `--depth-adaptive-finest 270` to 14, both of which LevelPlanPolicy::validate()
+/// then accepts -- the operator asked for one thing and got another, silently.
+/// Checked BEFORE the cast.
+uint8_t requireLevel(const char * flag, int value)
+{
+  constexpr int kMaxGggsLevel = 20;
+  if (value < 0 || value > kMaxGggsLevel) {
+    std::cerr << "error: option '" << flag << "' expects a GGGS level in [0, "
+              << kMaxGggsLevel << "], got '" << value << "'\n";
+    usage();
+  }
+  return static_cast<uint8_t>(value);
 }
 
 /// Print the span the bags cover (cube#143: lifted out of main(), which is at
@@ -1169,6 +1195,36 @@ void reportTilingChoice(
             << " x |depth|, " << capture_spacing_scale << " x node spacing)" << std::endl;
 }
 
+/// Saturating helpers for the spill free-space preflight (cube#143 triage).
+/// Its terms are upper bounds multiplied together; on overflow the answer must
+/// be "more than this device can hold", never a small wrapped number that
+/// passes the check. A double whose value does not fit a uint64_t is an
+/// UNDEFINED conversion, so that case is clamped before the cast, not after.
+uint64_t saturatingProduct(uint64_t a, uint64_t b)
+{
+  if (a == 0 || b == 0) {
+    return 0;
+  }
+  return a > std::numeric_limits<uint64_t>::max() / b ?
+         std::numeric_limits<uint64_t>::max() : a * b;
+}
+
+uint64_t saturatingSum(uint64_t a, uint64_t b)
+{
+  return a > std::numeric_limits<uint64_t>::max() - b ?
+         std::numeric_limits<uint64_t>::max() : a + b;
+}
+
+uint64_t saturatingFromDouble(double value)
+{
+  constexpr double kMaxRepresentable = 1.8e19;  // < 2^64, safely convertible
+  if (!(value > 0.0)) {
+    return 0;
+  }
+  return value >= kMaxRepresentable ?
+         std::numeric_limits<uint64_t>::max() : static_cast<uint64_t>(value);
+}
+
 /// Build the recon collector (cube#143). Spill scratch beside the output store
 /// unless --scratch-dir says otherwise (never temp_directory_path(): it is often
 /// tmpfs, and a day's spill is gigabytes). The free-space check uses the bags'
@@ -1189,8 +1245,13 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
     std::to_string(::getpid()) + "_" +
     std::to_string(std::chrono::duration_cast<std::chrono::seconds>(started_at).count());
   warnAboutOrphanedSpills(spill_root, spill_dir);
-  const uint64_t projected_bytes =
-    projected_pings * 256ull * cube::ReconCollector::kBytesPerSpilledSounding;
+  // Saturating, not wrapping (cube#143 triage). Every term here is an upper
+  // bound fed into a free-space REFUSAL, so a product that wrapped past 2^64
+  // would report a small requirement and wave through exactly the run that
+  // cannot fit -- the failure this preflight exists to prevent. Saturation
+  // fails the check instead, which is the safe direction.
+  const uint64_t projected_bytes = saturatingProduct(
+    projected_pings, 256ull * cube::ReconCollector::kBytesPerSpilledSounding);
   // The count grid spills its cold tiles into the same directory (1.8 MB per
   // level-14 tile, ~630 MB per km^2 of ground), so budgeting the sounding
   // spill alone under-counts what the pass will write. That term scales with
@@ -1202,9 +1263,9 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
   // over little ground can be refused a run that would have fit. Hence
   // --count-spill-allowance: the operator who knows the survey can lower the
   // share (0 removes it) or raise it, rather than being stuck with a doubling.
-  const uint64_t count_spill_bytes =
-    static_cast<uint64_t>(static_cast<double>(projected_bytes) * count_spill_allowance);
-  const uint64_t projected_total_bytes = projected_bytes + count_spill_bytes;
+  const uint64_t count_spill_bytes = saturatingFromDouble(
+    static_cast<double>(projected_bytes) * count_spill_allowance);
+  const uint64_t projected_total_bytes = saturatingSum(projected_bytes, count_spill_bytes);
   std::cout << "Recon spill: " << spill_dir << " (~" << projected_bytes / (1024 * 1024)
             << " MB projected for " << projected_pings << " pings at 256 beams, "
             << cube::ReconCollector::kBytesPerSpilledSounding << " B/sounding, plus a ~"
@@ -1810,21 +1871,28 @@ int main(int argc, char * argv[])
       level_policy.depth.capture_distance_scale =
         parse_double("--depth-adaptive-scale", next_value("--depth-adaptive-scale"));
     } else if (*arg == "--depth-adaptive-coarsest") {
-      level_policy.depth.coarsest_level = static_cast<uint8_t>(
+      level_policy.depth.coarsest_level = requireLevel(
+        "--depth-adaptive-coarsest",
         parse_int("--depth-adaptive-coarsest", next_value("--depth-adaptive-coarsest")));
     } else if (*arg == "--depth-adaptive-finest") {
-      level_policy.depth.finest_level = static_cast<uint8_t>(
+      level_policy.depth.finest_level = requireLevel(
+        "--depth-adaptive-finest",
         parse_int("--depth-adaptive-finest", next_value("--depth-adaptive-finest")));
     } else if (*arg == "--count-level") {
-      level_policy.count_level = static_cast<uint8_t>(
-        parse_int("--count-level", next_value("--count-level")));
+      level_policy.count_level = requireLevel(
+        "--count-level", parse_int("--count-level", next_value("--count-level")));
       count_level_given = true;
     } else if (*arg == "--min-obs-per-node") {
+      // Checked before the cast: -1 became UINT32_MAX and sailed past
+      // validate()'s `min_obs_per_node >= 1` (cube#143 triage).
       level_policy.min_obs_per_node = static_cast<uint32_t>(
-        parse_int("--min-obs-per-node", next_value("--min-obs-per-node")));
+        requireAtLeast(
+          "--min-obs-per-node",
+          parse_int("--min-obs-per-node", next_value("--min-obs-per-node")), 1));
     } else if (*arg == "--blunder-allowance") {
-      level_policy.blunder_allowance =
-        parse_double("--blunder-allowance", next_value("--blunder-allowance"));
+      level_policy.blunder_allowance = requireFiniteFactor(
+        "--blunder-allowance",
+        parse_double("--blunder-allowance", next_value("--blunder-allowance")));
     } else if (*arg == "--decision-depth-percentile") {
       level_policy.decision_depth_percentile = parse_double(
         "--decision-depth-percentile", next_value("--decision-depth-percentile")) / 100.0;
