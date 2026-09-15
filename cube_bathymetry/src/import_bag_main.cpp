@@ -1234,7 +1234,7 @@ int cube_depth_adaptive_finish(
   constexpr std::size_t kChunk = 256;
   std::vector<cube::GeoSounding> chunk;
   chunk.reserve(kChunk);
-  recon.forEachSpilled([&](const cube::GeoSounding & s) {
+  const uint64_t read_back = recon.forEachSpilled([&](const cube::GeoSounding & s) {
       chunk.push_back(s);
       if (chunk.size() >= kChunk) {
         accumulator.addBatch(chunk);
@@ -1249,6 +1249,19 @@ int cube_depth_adaptive_finish(
   }
   const double replay_secs =
     std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count();
+  // The spill is the only copy of the projected soundings, so a short replay is
+  // a truncated survey, not a detail: fail before finalize() rather than write
+  // the store and fingerprint it as a complete build (ADR-0003) -- a later
+  // `batch_regen --incremental` would then trust it and never rebuild it.
+  if (read_back != replayed || replayed != recon.soundingsSpilled()) {
+    std::cerr << "error: phase one spilled " << recon.soundingsSpilled()
+              << " soundings but phase two replayed only " << replayed
+              << " (read back " << read_back << ") from " << recon.spillPath()
+              << ". The spill is short -- a full scratch device is the usual cause. "
+      "Nothing is finalized and no build_fingerprint.json is written; free space "
+      "(or pass --scratch-dir) and re-run." << std::endl;
+    return 1;
+  }
   std::cout << "Replayed " << replayed << " soundings in " << replay_secs <<
     "s; batches per level:";
   for (const auto & [level, n] : accumulator.batchesPerLevel()) {

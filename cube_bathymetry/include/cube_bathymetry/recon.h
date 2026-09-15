@@ -159,8 +159,15 @@ public:
   ///        Closes the file for writing first (a replay after `add` is the
   ///        normal phase-one -> phase-two hand-off); re-runnable.
   ///        Does nothing when nothing was spilled.
-  /// @throws std::runtime_error if the file cannot be read.
-    void forEachSpilled(const std::function < void(const GeoSounding &) > &fn);
+  /// @return The number of soundings replayed. The caller MUST compare it with
+  ///         `soundingsSpilled()`: a record lost at a record boundary (a
+  ///         write that never reached the disk) is invisible to the stream
+  ///         state, and replaying a short spill would silently import a
+  ///         truncated survey.
+  /// @throws std::runtime_error if the spill could not be flushed or closed
+  ///         (a disk-full at the last buffered flush loses the tail of the
+  ///         survey), if it cannot be read, or if it ends in a partial record.
+    uint64_t forEachSpilled(const std::function < void(const GeoSounding &) > &fn);
 
   /// Bytes one spilled sounding occupies on disk.
     static constexpr std::size_t kBytesPerSpilledSounding = sizeof(SpilledSounding);

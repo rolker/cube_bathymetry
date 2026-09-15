@@ -186,6 +186,44 @@ TEST(ReconCollector, SpillRoundTripsEverySoundingFieldInChronologicalOrder)
   EXPECT_FALSE(std::filesystem::exists(dir));
 }
 
+TEST(ReconCollector, ATruncatedSpillIsReportedRatherThanReplayedShort)
+{
+  const std::string dir = scratch("truncated_spill");
+  LevelPlanPolicy policy;
+  Parameters params{CellSizes(1.0f), "order1a"};
+  ReconCollector recon(policy, dir);
+  recon.add(
+    {sounding(43.07, -70.76, -12.0f), sounding(43.0701, -70.7601, -12.5f),
+      sounding(43.0702, -70.7602, -13.0f), sounding(43.0703, -70.7603, -13.5f)},
+    params);
+  ASSERT_EQ(recon.soundingsSpilled(), 4u);
+
+  // A clean replay reports exactly what phase one spilled -- the count the
+  // import compares against soundingsSpilled().
+  uint64_t seen = 0;
+  EXPECT_EQ(recon.forEachSpilled([&](const GeoSounding &) {++seen;}), 4u);
+  EXPECT_EQ(seen, recon.soundingsSpilled());
+
+  const std::string path = recon.spillPath();
+  const auto full_size = std::filesystem::file_size(path);
+
+  // A PARTIAL final record (a disk-full part way through a write): the read
+  // loop ends exactly as it ends at EOF, so without the stream-state check the
+  // replay would stop silently mid-record and the store would be built from a
+  // truncated survey.
+  std::filesystem::resize_file(path, full_size - 8);
+  EXPECT_THROW(recon.forEachSpilled([](const GeoSounding &) {}), std::runtime_error);
+
+  // A WHOLE record lost at a record boundary leaves no trace in the stream
+  // state: only the replayed count is short, which is why the caller must
+  // compare it with soundingsSpilled().
+  std::filesystem::resize_file(
+    path, full_size - ReconCollector::kBytesPerSpilledSounding);
+  uint64_t short_replay = 0;
+  EXPECT_EQ(recon.forEachSpilled([&](const GeoSounding &) {++short_replay;}), 3u);
+  EXPECT_NE(short_replay, recon.soundingsSpilled());
+}
+
 TEST(ReconCollector, RefusesAnOrphanedScratchDir)
 {
   const std::string dir = scratch("orphan");

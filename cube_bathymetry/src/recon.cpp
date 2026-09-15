@@ -187,14 +187,27 @@ LevelPlan ReconCollector::plan() const
   return levelPlanFor(counts_, decisionDepths(), policy_);
 }
 
-void ReconCollector::forEachSpilled(const std::function<void(const GeoSounding &)> & fn)
+uint64_t ReconCollector::forEachSpilled(const std::function<void(const GeoSounding &)> & fn)
 {
   if (spilled_ == 0) {
-    return;  // nothing was spilled (no spill dir, or no finite soundings)
+    return 0;  // nothing was spilled (no spill dir, or no finite soundings)
   }
   if (spill_out_) {
+    // The writes above went into the stream's buffer; this is where a disk-full
+    // surfaces for every record still held there. Ignoring the state here is
+    // how the tail of a survey can vanish between phase one and phase two.
     spill_out_->flush();
+    if (!*spill_out_) {
+      throw std::runtime_error(
+              "recon: failed flushing spill file " + spillPath() +
+              " (out of space on the scratch device?); the tail of the survey was lost");
+    }
     spill_out_->close();
+    if (spill_out_->fail()) {
+      throw std::runtime_error(
+              "recon: failed closing spill file " + spillPath() +
+              "; the tail of the survey may not have reached the disk");
+    }
     spill_out_.reset();
   }
   std::ifstream in(spillPath(), std::ios::binary);
@@ -202,12 +215,25 @@ void ReconCollector::forEachSpilled(const std::function<void(const GeoSounding &
     throw std::runtime_error("recon: cannot read spill file " + spillPath());
   }
   SpilledSounding record;
+  uint64_t replayed = 0;
   while (in.read(reinterpret_cast<char *>(&record), sizeof(record))) {
     fn(record.toGeoSounding());
+    ++replayed;
   }
   if (in.bad()) {
     throw std::runtime_error("recon: read error on spill file " + spillPath());
   }
+  // A short final read is a truncated file, not the end of the data: the loop
+  // above ends the same way for both, so without this the replay stops
+  // silently mid-record and the store is written from a partial survey.
+  if (in.gcount() != 0) {
+    throw std::runtime_error(
+            "recon: spill file " + spillPath() + " ends in a partial record (" +
+            std::to_string(static_cast<long long>(in.gcount())) + " of " +
+            std::to_string(sizeof(record)) + " bytes) after " +
+            std::to_string(replayed) + " soundings; the spill is truncated");
+  }
+  return replayed;
 }
 
 void ReconCollector::requireFreeSpace(const std::string & dir, uint64_t needed_bytes)
