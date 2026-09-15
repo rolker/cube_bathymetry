@@ -37,6 +37,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -60,6 +61,9 @@ namespace cube
 namespace
 {
 constexpr float kCellSize = 1.0f;
+// A cell size that lands on a DIFFERENT gggs level than kCellSize -- used to build a
+// sheet the factory was not asked for (#143).
+constexpr float kWrongCellSize = 64.0f;
 
 std::string makeTempDir(const std::string & tag)
 {
@@ -485,6 +489,42 @@ TEST(BatchRegen, MixedLevelPlanMatchesTheMultiLevelImportExactly)
     ASSERT_NE(it, regen_tiles.end()) << "batch-regen is missing " << name;
     EXPECT_TRUE(it->second == bytes) << "tile bytes differ: " << name;
   }
+  std::filesystem::remove_all(root);
+}
+
+// The FIXED-LEVEL rebuild takes its routing sheet from the same caller-supplied
+// factory the plan-driven path does, and must apply the same invariant (#143): a
+// factory that hands back nothing, or a sheet that snapped to a level other than
+// the one asked for, is refused at construction with a clear std::invalid_argument
+// -- never null-dereferenced later, never silently gathered at the wrong level.
+TEST(BatchRegen, FixedLevelRefusesNullSheetFromFactory)
+{
+  const std::string root = makeTempDir("fixed_null_sheet");
+  BatchRegen::SheetFactory null_factory = [](uint8_t) {
+      return std::unique_ptr<GeoMapSheet>();
+    };
+  EXPECT_THROW(
+    BatchRegen(null_factory, makeConfig(root + "/store", root + "/bs")),
+    std::invalid_argument);
+  std::filesystem::remove_all(root);
+}
+
+TEST(BatchRegen, FixedLevelRefusesWrongLevelSheetFromFactory)
+{
+  const std::string root = makeTempDir("fixed_wrong_level");
+  // A sheet much coarser than `cell_size_m` asks for: a real level, just not the
+  // requested one.
+  ASSERT_NE(
+    gggs::Level::fromCellSize(kWrongCellSize).level(),
+    gggs::Level::fromCellSize(kCellSize).level())
+    << "test setup: the wrong-level sheet must land on a different level";
+
+  BatchRegen::SheetFactory wrong_level_factory = [](uint8_t) {
+      return std::make_unique<GeoMapSheet>(kWrongCellSize);
+    };
+  EXPECT_THROW(
+    BatchRegen(wrong_level_factory, makeConfig(root + "/store", root + "/bs")),
+    std::invalid_argument);
   std::filesystem::remove_all(root);
 }
 

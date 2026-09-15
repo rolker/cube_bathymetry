@@ -69,6 +69,13 @@ MultiLevelAccumulator::MultiLevelAccumulator(
         cfg_.backscatter_mode, cfg_.backscatter_curve, cfg_.backscatter_tl_removed,
         cfg_.backscatter_absorption_db_per_m);
     }
+    if (!entry.sheet) {
+      // Same invariant batch_regen applies to its factory (#143): a factory that
+      // returns null must be refused here, not dereferenced on the next line.
+      throw std::invalid_argument(
+              "MultiLevelAccumulator: the sheet factory returned no sheet for level " +
+              std::to_string(level));
+    }
     if (entry.sheet->gridLevel().level() != level) {
       throw std::invalid_argument(
               "MultiLevelAccumulator: the sheet for level " + std::to_string(level) +

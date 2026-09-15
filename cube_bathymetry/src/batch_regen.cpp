@@ -27,7 +27,9 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -40,6 +42,27 @@ namespace cube
 
 namespace
 {
+// Every sheet BatchRegen uses comes from the caller's factory, on three paths (the
+// plan-driven routing sheets, the fixed-level routing sheet, and each gather sheet).
+// A factory that returns null, or a sheet that snapped to a different level than the
+// one asked for, must be refused HERE with one message on every path: null would
+// otherwise be dereferenced later, and a wrong-level sheet would silently gather the
+// tile at a level neither the plan nor `-r` asked for (#143).
+std::unique_ptr<GeoMapSheet> makeSheetAtLevel(
+  const BatchRegen::SheetFactory & factory, uint8_t level, const char * purpose)
+{
+  std::unique_ptr<GeoMapSheet> sheet = factory ? factory(level) : nullptr;
+  const std::string reason = sheet ?
+    ("it snapped to level " + std::to_string(sheet->gridLevel().level())) :
+    std::string("it returned no sheet");
+  if (!sheet || sheet->gridLevel().level() != level) {
+    throw std::invalid_argument(
+            "batch_regen: the sheet factory did not produce a level-" +
+            std::to_string(level) + " sheet for the " + purpose + " -- " + reason);
+  }
+  return sheet;
+}
+
 // Bound on simultaneously-open bucket streams so a wide survey never exhausts file
 // descriptors. Scatter is spatially local (consecutive pings touch adjacent tiles),
 // so a small LRU keeps nearly every write on an already-open stream.
@@ -103,12 +126,7 @@ BatchRegen::BatchRegen(
     // import's MultiLevelAccumulator applies, so the scatter's tile set equals
     // the import's.
     for (const uint8_t level : plan_->levels()) {
-      auto sheet = factory_(level);
-      if (!sheet || sheet->gridLevel().level() != level) {
-        throw std::invalid_argument(
-                "batch_regen: the sheet factory did not produce a level-" +
-                std::to_string(level) + " sheet");
-      }
+      auto sheet = makeSheetAtLevel(factory_, level, "plan routing");
       std::shared_ptr<const LevelPlan> plan_ref = plan_;
       sheet->setAdmission(
         [plan_ref](const gggs::GridIndex & grid) {return plan_ref->isEmitted(grid);});
@@ -119,7 +137,7 @@ BatchRegen::BatchRegen(
     }
   } else {
     const uint8_t level = gggs::Level::fromCellSize(cfg_.cell_size_m).level();
-    index_sheets_.emplace(level, factory_(level));
+    index_sheets_.emplace(level, makeSheetAtLevel(factory_, level, "fixed-level routing"));
   }
   // PREFLIGHT (cube#133): batch-regen is a WRITE-PATH tool and, unlike the live node
   // and store_import's load()/loadWindow() catches, it NEVER load()s the output store --
@@ -371,12 +389,7 @@ void BatchRegen::finalize(
     // The gather sheet is built at the bucket's OWN level (#143): a fixed
     // rebuild has one level; a plan-driven one gathers each tile at the level
     // it was emitted at, with the store level matched to that sheet.
-    std::unique_ptr<GeoMapSheet> sheet = factory_(idx.level());
-    if (!sheet || sheet->gridLevel().level() != idx.level()) {
-      throw std::runtime_error(
-              "batch_regen: the sheet factory did not produce a level-" +
-              std::to_string(idx.level()) + " sheet for the gather");
-    }
+    std::unique_ptr<GeoMapSheet> sheet = makeSheetAtLevel(factory_, idx.level(), "gather");
     ImportAccumulatorConfig tile_cfg = gather_cfg;
     tile_cfg.cell_size_m = static_cast<float>(sheet->nominalCellSizeMeters());
     ImportAccumulator acc(*sheet, tile_cfg);
