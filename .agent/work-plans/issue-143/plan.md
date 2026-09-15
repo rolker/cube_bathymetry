@@ -862,8 +862,26 @@ A follow-up look at the same dry run found one more must-fix, actioned here:
   schema 3**, since schema 2 was minted the same morning and no plan file has
   been released. README §depth-adaptive, the ADR-0002 amendment, `--help` and
   this plan say which quantity it is.
+- **The sonar-frame position had to be plumbed through first.** The spill
+  record carried `sonar_relative_z`, but `georeferencePing` never copied
+  `sonar_relative_position` into the `GeoSounding` it built — it used the
+  sonar-frame point for the ECEF transform and then set only the error,
+  intensity, beam-angle and slant-range fields — so every spilled sounding had
+  z = 0, and the first re-run of the dry run decided every tile at 0.25 m of
+  water (the finest level everywhere). The field is now carried through; the
+  estimator does not read it (`batch_regen.cpp:55`), so the fixed-level path is
+  untouched.
+- **A missing range is refused, not averaged in.** A sounding whose sonar-frame
+  z is non-finite or exactly zero is counted but not histogrammed,
+  `ReconCollector::soundingsWithoutRange()` reports how many there were, and
+  `import_bag` refuses to write a plan when that accounts for every sounding —
+  a plan built from no depth measurement at all would otherwise look entirely
+  plausible.
 - **Test added**: `ReconCollector.DecidesOnWaterDepthNotTheStoredEllipsoidalHeight`
   — a sounding stored at −40 m with 12 m of water under the sonar decides at
   −12 m and asks for a strictly finer level than −40 m would have. The
   single-level byte-identity guarantee is untouched (the policy pin bypasses
-  the decision); `test_mixed_level_import` stays green.
+  the decision); `test_mixed_level_import` stays green. Also
+  `ReconCollector.SoundingsWithNoSonarFrameRangeDoNotDecideALevel` for the
+  guard above; the hand-built fixtures in `test_mixed_level_import` and
+  `test_batch_regen` now set the nadir z their depth always implied.
