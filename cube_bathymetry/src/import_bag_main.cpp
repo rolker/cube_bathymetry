@@ -1598,9 +1598,18 @@ int cube_depth_adaptive_finish(
   // resident tiles, it is the only copy of the projected soundings, and a
   // crash in between would cost the whole (multi-hour) projection pass.
   recon.cleanup();
+  // The policy that actually CHOSE these tiles (cube#143 triage). With
+  // --level-plan the tiles come from the plan file, which carries its own
+  // policy -- ladder bounds, count level, n_req, both percentiles -- and
+  // serialising the CLI/default policy instead would stamp the store with
+  // inputs that did not decide it, so BuildFingerprint::isStale() would later
+  // compare against the wrong ones. Same class as pre-push round 1 must-fix 4:
+  // the artifact records the inputs it rests on.
+  const cube::LevelPlanPolicy & effective_policy =
+    level_plan_in.empty() ? policy : plan->policy();
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::DepthAdaptive, 0.0,
-    accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &policy,
+    accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &effective_policy,
     plan->levels());
   if (!fingerprinted) {
     return 2;
