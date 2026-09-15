@@ -2078,7 +2078,13 @@ int main(int argc, char * argv[])
   }
   std::cout << "\n  buffered " << tf_count << " transforms";
   if (!odom_topic.empty()) {std::cout << ", " << odom_samples_total << " odometry samples";}
-  std::cout << "; projected " << ping_count << " pings in " << phase_secs() << "s." << std::endl;
+  // One reading, used twice: this is the projection pass, which for a
+  // depth-adaptive run IS the recon pass. Calling phase_secs() again below
+  // would restart the clock and time the handful of statements in between
+  // (the dry run reported the recon as 2.6e-05 s, cube#143 review).
+  const double projection_secs = phase_secs();
+  std::cout << "; projected " << ping_count << " pings in " << projection_secs << "s."
+            << std::endl;
 
   std::cout << "\ndone." << std::endl;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
@@ -2089,7 +2095,7 @@ int main(int argc, char * argv[])
       *recon, level_policy, level_plan_in, level_plan_out, count_grid_out, store_dir,
       reference_store_dir, bs_store_dir, max_resident_tiles, iho_order,
       capture_spacing_scale, backscatter_mode, backscatter_curve, store_metadata,
-      bs_metadata, phase_secs());
+      bs_metadata, projection_secs);
   }
 
   std::cout << "Building store tiles..." << std::endl;
