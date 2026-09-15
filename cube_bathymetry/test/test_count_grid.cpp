@@ -24,6 +24,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -473,11 +474,19 @@ TEST_F(CountGridTest, SpillBackedGridAnswersLikeAnUnboundedOne)
   EXPECT_EQ(spilled.saveTo(out), unbounded.tileCount());
 
   // discardSpill drops what lives only on disk and leaves the grid usable.
+  const std::set<gggs::GridIndex> before = spilled.grids();
   spilled.discardSpill();
   EXPECT_FALSE(std::filesystem::exists(dir));
   EXPECT_EQ(spilled.residentBudget(), 0u);
   EXPECT_EQ(spilled.spilledTileCount(), 0u);
   EXPECT_EQ(spilled.tileCount(), spilled.residentTileCount());
+  // The discarded tiles take their recorded spread terms with them: a term left
+  // behind would answer maxSpreadTerm() for a tile whose counts are gone.
+  for (const auto & tile : before) {
+    if (!spilled.grids().count(tile)) {
+      EXPECT_DOUBLE_EQ(spilled.maxSpreadTerm(tile), 0.0) << "stale spread term after discard";
+    }
+  }
   std::filesystem::remove_all(out);
 }
 

@@ -25,6 +25,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -108,12 +109,24 @@ void CountGrid::discardSpill()
   }
   std::error_code ec;
   std::filesystem::remove_all(spill_dir_, ec);
+  if (ec) {
+    std::cerr << "warning: CountGrid could not remove the count-tile spill " << spill_dir_
+              << ": " << ec.message() << " (remove it by hand)" << std::endl;
+  }
   spill_dir_.clear();
   resident_budget_ = 0;
   // The spilled tiles existed only in that directory: forget them rather than
-  // leave `grids_` promising tiles nothing can load.
+  // leave `grids_` promising tiles nothing can load. Their recorded spread
+  // terms go with them -- keeping those would answer maxSpreadTerm() for a
+  // tile whose counts are gone, which is harmless only while nothing queries
+  // a grid after cleanup.
   for (auto it = grids_.begin(); it != grids_.end(); ) {
-    it = tiles_.count(*it) ? std::next(it) : grids_.erase(it);
+    if (tiles_.count(*it)) {
+      ++it;
+      continue;
+    }
+    max_spread_term_.erase(*it);
+    it = grids_.erase(it);
   }
 }
 
