@@ -232,6 +232,23 @@ in short:
   finer tiles in place, and a fine-LOD reader prefers them.
 - With the policy pinned to one level the depth-adaptive path is
   **byte-identical** to the fixed path (`test_mixed_level_import`).
+- The two-phase path is also exercised **end to end on a real bag**
+  (`test_real_bag_smoke`): the recon's reported numbers, byte-identity between
+  `import_bag --depth-adaptive` and `batch_regen_bag --level-plan` on real
+  soundings, and the three documented failure outcomes with a fault injected —
+  a truncated spill and a failed `finalize()` both abort through
+  `abortDirtyReplay` (exit 1, "NOT empty and NOT complete"), while an
+  unwritable `build_fingerprint.json` over a store that IS complete is exit 2
+  and says so. Every other test drives the library directly, so nothing else
+  reaches `import_bag`'s `main()` past argument validation. It runs against a
+  3,000-ping excerpt of the 2026-06-09 UNH pier M3 bag, which is **survey data
+  referenced by path**, not a committed fixture (18 MB); it lives beside its
+  source bag in the archive and `scripts/make_bag_excerpt.py` rebuilds it.
+  Point `CUBE_REAL_BAG_EXCERPT` elsewhere to override the path. Where the
+  excerpt is unreachable — a CI container, a host with no archive mount —
+  every case **SKIPS with the reason printed, and never passes**;
+  `.agents/ci_local_extra.sh` re-states that skip as its own CI line so a run
+  that never exercised the path cannot read as a green one.
 - `--bs-store` is **refused** on both mixed-level paths (`import_bag
   --depth-adaptive` and `batch_regen_bag --level-plan`) for now.
   `marine_mbes_backscatter_store` is single-level by construction ("All tiles

@@ -275,6 +275,7 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 # Empirical backscatter correction consumes.
 install(PROGRAMS
   scripts/derive_angular_response.py
+  scripts/make_bag_excerpt.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -515,6 +516,21 @@ if(BUILD_TESTING)
     IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
   )
   add_dependencies(test_mixed_level_import import_bag)
+
+  # End-to-end smoke test over a REAL sonar bag (#143/#162). Nothing else in
+  # the suite reaches import_bag's main() past argument validation, so the
+  # two-phase spill/replay and its abort paths were reviewed by inspection
+  # only. The 3,000-ping excerpt is survey data referenced by path (18 MB, not
+  # committed); where it is unreachable every case SKIPS with the reason
+  # printed -- see test/test_real_bag_smoke.cpp and .agents/ci_local_extra.sh,
+  # which surfaces that skip as a named CI line rather than a silent pass.
+  ament_add_gtest(test_real_bag_smoke test/test_real_bag_smoke.cpp TIMEOUT 600)
+  target_link_libraries(test_real_bag_smoke cube_bathymetry_level_plan)
+  target_compile_definitions(test_real_bag_smoke PRIVATE
+    IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
+    BATCH_REGEN_EXE="$<TARGET_FILE:batch_regen_bag>"
+  )
+  add_dependencies(test_real_bag_smoke import_bag batch_regen_bag)
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers
