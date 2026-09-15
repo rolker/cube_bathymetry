@@ -1126,8 +1126,8 @@ Not pushed (sub-agent contract; the host pushes).
 **Must-fix**: 2 | **Suggestions**: 0
 
 ### Findings
-- [ ] (must-fix) **Verify the achieved level** — https://github.com/rolker/cube_bathymetry/issues/161. The pier bag has 12.1 M soundings over 0.0085 km² (~1,400/m²): ~4.5 obs/node at level 14, ~18 at level 13, ~70 at level 12, yet every tile reports achieved 10–11. Instrument the level-of-aggregation on `rerun3/` (per-box LoA histogram for tile `10/17801/13988`; is the p95 population all boxes in the tile, occupied boxes, or covered ground? does the 3×3 neighbourhood or the blunder allowance dominate?). If the percentile runs over empty/edge boxes, change it to run over occupied boxes (or covered ground) and justify in ADR-0002 text + README; if the current answer is right, say why in the README's achieved-level paragraph with the pier numbers. Add a density test: a synthetic swath at 1,400 soundings/m² over a 54 m grid must achieve level 12–13 in its core. Re-run the dry run into `rerun4/` and record the achieved levels + deficit line — `src/level_plan.cpp` (achieved-level / LoA code), `src/count_grid.cpp`
-- [ ] (must-fix) **Real-bag smoke test** — https://github.com/rolker/cube_bathymetry/issues/162. Nothing in the suite reaches `main()`'s depth-adaptive path (this pass and the previous ones recorded three guards as inspection-only for that reason). Add: (1) a 3,000-ping excerpt of the pier bag written with `ros2 bag` tooling to the NAS archive next to the source (`/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/`, name it `..._m3_detections_3000ping_excerpt`; ~20 MB; referenced by path, not committed) — if writing to the NAS is not possible from this host, put it under `~/data/logs/fixtures/` and say so; (2) a gtest/ctest smoke test that runs `import_bag --depth-adaptive --level-plan-out` on it and asserts exit 0, no missing-range warning, surveyed ground within 10 % of 706 m², decision depths within −7…−20 m, recon seconds > 1, plan JSON at the current schema; then the fixed-level import on the same window and byte-identity of `batch_regen_bag --level-plan` against it; then the two abort paths with a fault injected (truncate the spill between phases; unwritable fingerprint dir) asserting the documented exit codes and the dirty-store message; (3) the test is **SKIPPED with a printed reason, never passed**, when the excerpt is unreachable (`GTEST_SKIP`), and `ci_local.sh`'s project hook (see `.agents/ci_local_upstream_extra.sh` conventions in the workspace) exposes the same skip semantics — `test/`, `CMakeLists.txt`
+- [x] (must-fix) **Verify the achieved level** — https://github.com/rolker/cube_bathymetry/issues/161. The pier bag has 12.1 M soundings over 0.0085 km² (~1,400/m²): ~4.5 obs/node at level 14, ~18 at level 13, ~70 at level 12, yet every tile reports achieved 10–11. Instrument the level-of-aggregation on `rerun3/` (per-box LoA histogram for tile `10/17801/13988`; is the p95 population all boxes in the tile, occupied boxes, or covered ground? does the 3×3 neighbourhood or the blunder allowance dominate?). If the percentile runs over empty/edge boxes, change it to run over occupied boxes (or covered ground) and justify in ADR-0002 text + README; if the current answer is right, say why in the README's achieved-level paragraph with the pier numbers. Add a density test: a synthetic swath at 1,400 soundings/m² over a 54 m grid must achieve level 12–13 in its core. Re-run the dry run into `rerun4/` and record the achieved levels + deficit line — `src/level_plan.cpp` (achieved-level / LoA code), `src/count_grid.cpp`
+- [x] (must-fix) **Real-bag smoke test** — https://github.com/rolker/cube_bathymetry/issues/162. Nothing in the suite reaches `main()`'s depth-adaptive path (this pass and the previous ones recorded three guards as inspection-only for that reason). Add: (1) a 3,000-ping excerpt of the pier bag written with `ros2 bag` tooling to the NAS archive next to the source (`/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/`, name it `..._m3_detections_3000ping_excerpt`; ~20 MB; referenced by path, not committed) — if writing to the NAS is not possible from this host, put it under `~/data/logs/fixtures/` and say so; (2) a gtest/ctest smoke test that runs `import_bag --depth-adaptive --level-plan-out` on it and asserts exit 0, no missing-range warning, surveyed ground within 10 % of 706 m², decision depths within −7…−20 m, recon seconds > 1, plan JSON at the current schema; then the fixed-level import on the same window and byte-identity of `batch_regen_bag --level-plan` against it; then the two abort paths with a fault injected (truncate the spill between phases; unwritable fingerprint dir) asserting the documented exit codes and the dirty-store message; (3) the test is **SKIPPED with a printed reason, never passed**, when the excerpt is unreachable (`GTEST_SKIP`), and `ci_local.sh`'s project hook (see `.agents/ci_local_upstream_extra.sh` conventions in the workspace) exposes the same skip semantics — `test/`, `CMakeLists.txt`
 
 ### Operator decisions (2026-09-15, host-recorded)
 Fold both into PR #159 now. After: clean build + FULL suite; the smoke test must run for real on this host (the bag is reachable) and be observed to SKIP when pointed at a missing path. Then the host pushes and closes #161/#162 with the commit SHAs.
@@ -1135,3 +1135,195 @@ Fold both into PR #159 now. After: clean build + FULL suite; the smoke test must
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Fable 5.1`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 14:00 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `976eab3`   <!-- PR #159 https://github.com/rolker/cube_bathymetry/pull/159; unpushed at the time of writing -->
+**Addressed**: the `## Integrated Review` of 2026-09-15 13:25 -04:00 (`4eabf3d`, 2 must-fix folding cube#161 and cube#162 back into this PR)
+**Commits**: `998a8e4` `9fc1449` `976eab3`
+
+Both must-fixes are done. Nothing is deferred.
+
+### Actions
+- [x] (must-fix) **Verify the achieved level** (cube#161) — instrumented, no code change needed; documented with the pier numbers and guarded by a density test — `src/count_grid.cpp` (`achievedLevelHistogram`/`achievedLevelPercentile`), `README.md`, `test/test_count_grid.cpp` (`998a8e4`)
+- [x] (must-fix) **Real-bag smoke test** (cube#162) — excerpt written to the archive; `test_real_bag_smoke` runs the real binaries and skips (never passes) without it — `test/test_real_bag_smoke.cpp`, `CMakeLists.txt`, `scripts/make_bag_excerpt.py`, `.agents/ci_local_extra.sh`, `README.md` (`9fc1449`)
+
+### What the achieved-level investigation found
+
+**The percentile's population is the OCCUPIED count cells** — `achievedLevelHistogram`
+walks `occupiedMask(tile)` and skips every empty cell, and `achievedLevelPercentile`
+sums those per-tile histograms over the count tiles inside the emitted tile. So
+neither empty boxes, nor tile footprint, nor unsurveyed ground votes; the
+question the review raised ("is it running over empty/edge boxes?") is answered
+**no**, and there is nothing to change there.
+
+Instrumented on `rerun3/count_grid` (n_req 6, the plan's own value), per-box
+level-of-aggregation over the two level-10 tiles:
+
+| | `10/17801/13988` | `10/17801/13989` |
+|---|---|---|
+| occupied level-14 cells | 764,453 | 1,891,837 |
+| soundings in them | 5,944,139 | 6,181,068 |
+| mean per occupied cell | 7.78 | 3.27 |
+| λ = 0 → level 14 | 284,350 (37.2 %) | 259,174 (13.7 %) |
+| λ = 1 → level 12 | 410,883 (cum 90.9 %) | 972,631 (cum 65.1 %) |
+| λ = 2 → level 11 | 46,892 (cum 98.4 %) | 535,956 (cum 93.4 %) |
+| tail | out to λ = 43 | out to λ = 106 (12.06 m) |
+| p50 / p75 / p90 | 12 / 12 / 12 | 12 / 11 / 11 |
+| **p95** | **11** | **10** |
+| p99 | 10 | 10 |
+
+Those p95 values **are** the achieved 11 and 10 the plan reports for those two
+tiles, so the plan is reading its own statistic correctly. The review's density
+arithmetic was right (~1,400 soundings/m², ~4.6 per level-14 cell) and so was
+its expectation that the *typical* node reaches level 12 — 91 % of the ground
+in the dense tile does. What it did not account for is that **p95 is a
+conservative tail by construction**: Calder's 0.95–0.99 range asks for the level
+95 % of the surveyed ground reaches *or beats*, and the last 5–7 % of a real
+swath is its thin fringe and the gaps between lines, where λ runs to 43 (2.4 m)
+and beyond. The thinner tile reaches only 93.4 % by level 11, just short of the
+rank, which is the whole of why its answer is one level coarser than its
+neighbour's.
+
+This is the intended semantics, so the fix is documentation plus a regression
+guard, not a change to the code:
+
+- README's `--achieved-percentile` bullet now states the population explicitly
+  (occupied cells, and why an unsurveyed cell must not vote while a gap between
+  lines does), that it is a tail statistic, and carries the pier numbers above —
+  including why raising the percentile toward 50 would report level 12 and store
+  a tile whose outer tenth has no estimator support.
+- `CountGridTest.PierDensityCoverageAchievesLevelTwelveInItsCore` fills a whole
+  level-14 grid (960 cells ≈ 54 m) at ~1,400 soundings/m² and asserts λ = 1 in
+  the core, > 99 % of cells at level 12, and p95 in {12, 13}. Under *uniform*
+  coverage at the pier's density the same code reads level 12, so a future
+  regression in the aggregation itself — as opposed to thin coverage at the
+  edges — is caught. ADR-0002 is untouched: nothing about the dirty-set
+  invariant changed.
+
+### The excerpt
+
+`/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections_3000ping_excerpt`
+— a **new** directory beside the source bag (18.2 MiB, mcap, 23,586 messages:
+3,000 `/bizzy/sensors/m3/detections`, 3,071 `/bizzy/odom`, 9,830 `/tf`, 5
+`/tf_static`, 7,680 sound-speed). Nothing existing on the NAS was read-modified
+or removed. It starts at the source bag's first message so the latched
+`/tf_static` comes with it, and carries 5 s of the other topics past the last
+ping so the projector's pending pings still find their transforms.
+`/bizzy/sensors/m3/soundings` is dropped — it is the same detections
+re-published as a PointCloud2 that the import does not read, and keeping it
+would have tripled the file. `scripts/make_bag_excerpt.py` (installed, and
+documented in the test) rebuilds it on any host that can read the source.
+
+The excerpt reproduces the `-l 3000` dry-run window: 3,000 pings projected,
+2,999 georeferenced, 613,018 soundings counted, 4 count tiles, surveyed ground
+705.91 m², decision depths −9.25 / −10.00 m, the same 4-tile plan.
+
+### The smoke test ran for real, and was observed to skip
+
+`test_real_bag_smoke`, 5 cases, all **run** under `colcon test` on this host
+(46.8 s; `test_real_bag_smoke.gtest.xml` records `status="run"` for all five):
+
+- `DepthAdaptiveReconReportsTheSurveyItActuallyCounted` — exit 0; no
+  missing-range warning; `ground_m2` within 10 % of 705.91; every decision depth
+  in −7…−20 m (water depth under the transducer, not the ≈ −37 m an ellipsoidal
+  height would give); plan JSON at schema 2 carrying `capture_spacing_scale`
+  0.71.
+- `ImportAndBatchRegenAgreeByteForByteOnTheRealBag` — all four tiles of
+  `import_bag --depth-adaptive --level-plan` compare byte-for-byte against
+  `batch_regen_bag --level-plan`, on real soundings rather than a synthetic
+  grid; the fixed-level import over the same window also runs clean (its tiles
+  are *not* expected to match — a different capture gate).
+- `ATruncatedSpillAbortsTheReplayAndDeclaresTheStoreDirty` — the harness reads
+  the child's stdout, waits for the `Phase two:` line, sleeps 500 ms (the replay
+  takes ~3 s) and truncates the spill 17 bytes short of a record boundary: exit
+  1, "truncated", the dirty-store warning, and no `build_fingerprint.json` left
+  behind. If the fault cannot be injected the case **skips** rather than
+  passing.
+- `AFinalizeFailureAbortsThroughTheSameDirtyStoreGuard` — a read-only layer
+  directory makes `finalize()` fail: exit 1, "could not be finalized", the
+  dirty-store warning, no `done!`, no fingerprint. This is the case the
+  finalize-inside-the-guard fix exists for, and it had no test until now.
+- `AnUnwritableFingerprintIsReportedAsCompleteButUnstampable` — a directory
+  where `build_fingerprint.json` goes: **exit 2**, "is complete, but …",
+  "FULL regen", and the dirty-store message explicitly **absent**.
+
+**Observed to skip**: with `CUBE_REAL_BAG_EXCERPT=/nonexistent/no_such_bag` the
+run reports `[  PASSED  ] 0 tests` and 5 `[  SKIPPED ]`, each printing
+`real-bag smoke test SKIPPED (NOT passed): no bag directory at …` plus how to
+point it at an excerpt. `.agents/ci_local_extra.sh` (the `ci_local.sh` per-repo
+hook, run inside the container after `colcon test`) was exercised both ways and
+prints either `real-bag smoke test SKIPPED (5 case(s), 0 ran) - NOT a pass` with
+the reason and `the depth-adaptive main() path was NOT exercised in this run`,
+or `real-bag smoke test RAN for real (5 case(s) against the excerpt)`.
+
+### Two deliberate deviations from the review's acceptance criteria
+
+Stated rather than quietly absorbed:
+
+- **`recon seconds > 1` → a two-sided bound instead.** The excerpt's recon pass
+  takes ~0.5 s (it is 1/18th of the bag and carries no PointCloud2 topic), so a
+  `> 1 s` assertion would fail on a correct build. The test asserts
+  `recon_secs > 0.1` *and* that it is within 50 % + 1 s of the projection time
+  the same run reports — which is the actual contract (the recon pass **is** the
+  interleaved projection pass) and still rejects the 2.6e-05 s the timer
+  reported before the fix, by four orders of magnitude.
+- **A third fault case was added.** The review asked for two; the
+  "unwritable fingerprint dir" turns out to exercise `writeFingerprint`'s own
+  handler (store complete, exit 2), not the finalize-inside-the-abort-guard
+  contract. Both are documented outcomes and both are now tested, plus the
+  read-only-layer-directory case that actually drives `finalize()` through
+  `abortDirtyReplay`.
+
+### Verification
+
+- **Full suite**: `788 tests, 0 errors, 0 failures, 88 skipped` (was 775/0/0/87
+  — the new cases plus the lint tests for the new script; the 88th skip is
+  unrelated to this pass, no new suppression was added). cpplint, uncrustify,
+  flake8, pep257, cppcheck and every gtest green.
+- **Dry run re-run into `rerun4/`** on the real M3 bag, the same command as
+  `recon.log`, plus the `-l 3000` window into `rerun4/small/`:
+  **`level_plan.json` is byte-identical to `rerun3/`**, the small window's
+  `plan.json` is byte-identical, all 20 count-grid files are byte-identical, and
+  the recon log diffs clean against `rerun3` apart from timings and paths.
+  Peak RSS 167,456 kB (was 167,384), 38.3 s wall (was 40.1 s).
+  **Achieved levels and deficit, `rerun4/`** — unchanged from `rerun3/`:
+
+  | tile | decision depth | required | achieved |
+  |---|---|---|---|
+  | `8/4450/3497`    | −6.50 m | 12 | 10 |
+  | `9/8900/6994`    | −6.50 m | 12 | 10 |
+  | `10/17801/13988` | −7.50 m | 12 | **11** |
+  | `10/17801/13989` | −6.50 m | 12 | 10 |
+  | `11/35602/27977` | −7.50 m | 12 | **11** |
+
+      coverage deficit (depth requires finer than the data achieves): 5 tiles, 0.0085 km2
+
+  The two tiles that read 11 are exactly the two the instrumentation put at p95
+  = level 11; surveyed ground 8,515.6 m², `capture_spacing_scale` 0.71.
+
+### Notes for the re-review
+
+- The achieved-level answer is a **documentation + regression-guard** outcome,
+  not a code fix: `count_grid.cpp` is unchanged. If the re-review disagrees with
+  the conclusion, the numbers to argue with are in the table above and the
+  instrumentation is reproducible from the saved `rerun3/count_grid`.
+- `.agents/ci_local_extra.sh` is this repo's **first** `ci_local` hook, so
+  `ci_local.sh` will now report `steps: template+extra-hook` for it. It only
+  reports; it never fails a run because the excerpt is absent (that is the whole
+  point), and it does fail if the binary is missing or the test genuinely fails.
+- The smoke test is the slowest in the suite where the excerpt is reachable
+  (~47 s of a 4 min 28 s package run) and free where it is not. `TIMEOUT 600`.
+- The excerpt is a new file on the NAS. Nothing existing there was modified or
+  removed.
+
+Not pushed (sub-agent contract; the host pushes). The host closes cube#161 and
+cube#162 with `998a8e4` and `9fc1449` — no closing keyword was put in any commit
+message.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
