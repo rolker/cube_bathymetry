@@ -217,7 +217,7 @@ TEST_F(DirtyTileQuery, ContributingPassesIncludeOldBags)
   std::set<std::string> bags;
   for (const auto & p : dt->passes) {
     bags.insert(p.bag_path);
-                                                             }
+  }
   EXPECT_EQ(bags.count("/data/bagNew"), 1u);
   EXPECT_EQ(bags.count("/data/bagOld"), 1u) << "old bag over the tile must contribute";
 }

@@ -178,7 +178,7 @@ TEST_F(CountGridTest, LevelOfAggregationIsTheSmallestSatisfyingBox)
   // Five soundings in one cell: lambda 0 already reaches n_req = 5.
   for (int i = 0; i < 5; ++i) {
     grid.add(cell(300, 300));
-                                                        }
+  }
   auto loa = grid.levelOfAggregation(cell(300, 300), 5);
   EXPECT_FALSE(loa.saturated);
   EXPECT_EQ(loa.lambda, 0u);
@@ -212,7 +212,7 @@ TEST_F(CountGridTest, OneFlierMovesOneCountByOne)
   // cannot by itself refine a cell that the other soundings do not support.
   for (int i = 0; i < 4; ++i) {
     grid.add(cell(50, 50));
-                                                      }
+  }
   auto before = grid.levelOfAggregation(cell(50, 50), 5);
   grid.add(cell(50, 50));  // "the flier" -- indistinguishable in a count grid
   auto after = grid.levelOfAggregation(cell(50, 50), 5);
@@ -302,7 +302,7 @@ TEST_F(CountGridTest, LevelHistogramPercentileMatchesTheSpacingPercentile)
   const CountGrid::LevelHistogram before = grid.achievedLevelHistogram(home, 5);
   for (int i = 0; i < 4; ++i) {
     grid.add(cell(700, 600));
-                                                        }  // 600 now holds 5: lambda 0 there
+  }  // 600 now holds 5: lambda 0 there
   const CountGrid::LevelHistogram after = grid.achievedLevelHistogram(home, 5);
   EXPECT_NE(before, after) << "histogram must be recomputed after an add";
   EXPECT_EQ(after[14], 17u);
@@ -331,7 +331,7 @@ TEST_F(CountGridTest, TileInsideFollowsTheQuadtree)
   gggs::GridIndex g = home;
   for (int i = 0; i < 6; ++i) {
     g = gggs::parent(g);
-                                                   }
+  }
   EXPECT_EQ(g.level(), 8);
   EXPECT_TRUE(CountGrid::tileInside(home, g));
   EXPECT_FALSE(CountGrid::tileInside(gggs::parent(home), home));  // coarser is never inside finer
@@ -369,7 +369,7 @@ TEST_F(CountGridTest, MergeIsAdditiveAndSaturating)
   CountGrid a(kLevel), b(kLevel);
   for (int i = 0; i < 40000; ++i) {
     a.add(cell(2, 2)); b.add(cell(2, 2));
-                                                                        }
+  }
   a.merge(b);
   EXPECT_EQ(a.countAt(cell(2, 2)), std::numeric_limits<CountGrid::Count>::max());
 }
