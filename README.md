@@ -114,7 +114,11 @@ fixed-level run at level 10 now gathers within 0.64 m instead of 0.5 m below
 applies the same gate at its fixed level and takes the same multiplier as the
 ROS parameter `capture_spacing_scale` (default 0.71), so a deployment can pin
 it — to `0.5 / cell_size` to reproduce the pre-#143 gate exactly, say — without
-rebuilding.
+rebuilding. That parameter is **`read_only`**: it is read once at `configure`
+and pushed into the map sheet there, so set it from the launch file or a YAML
+overrides file — a runtime `ros2 param set capture_spacing_scale` is rejected
+rather than silently ignored (a set that "succeeded" while the sheet kept the
+old gate would be worse than a refusal).
 
 ### Depth-adaptive multi-level stores (`--depth-adaptive`, #143)
 
