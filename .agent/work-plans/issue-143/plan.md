@@ -130,7 +130,8 @@ the ground supports is the coarser of two answers, both evaluated per candidate
 tile:
 
 - **Required** (depth): `depthAdaptiveLevel(shallowest decision depth in the
-  tile)` — the #369 ladder, unchanged in signature. Once uma#386 lands the
+  tile)` — the #369 ladder, unchanged in signature; the decision depth is water
+  depth under the transducer (see step 1). Once uma#386 lands the
   policy also floors the cell at the survey's horizontal positioning error.
 - **Achieved** (data): the level whose cell is no finer than the 95th-percentile
   level of aggregation of the count-grid cells inside the tile, i.e. the finest
@@ -152,7 +153,15 @@ Algorithm (`levelPlanFor(count_grid, decision_depth_by_grid, policy)`):
    0.25 m bins, width doubling if a grid's spread would exceed 1024 bins); its
    **decision depth** is the `max(1, ceil(0.02·N))`-th shallowest, read off the
    histogram as the shallow edge of the bin the rank falls in (flier guard,
-   kept from r2). A bounded "shallowest 64" reservoir stood here until the
+   kept from r2). What is histogrammed is the **water depth under the
+   transducer** (`-|sonar_relative_position.z|`, negative-down), *not* the
+   sounding's stored depth: stored depths are WGS84 ellipsoidal heights (uma
+   ADR-0002 §D4), the geoid sits ~28 m below the ellipsoid at the UNH pier, and
+   the ladder's argument is a footprint argument — a beam's footprint scales
+   with its range below the transducer. The first dry run fed the stored height
+   and every required level came out one to two levels too coarse (which is
+   also why it reported a zero coverage deficit). Transducer draft is ignored
+   deliberately: sub-metre, against a factor-of-two ladder. A bounded "shallowest 64" reservoir stood here until the
    dry-run review: at ~200 k soundings per grid it returned the 64th shallowest
    raw sounding, 9 m above the surface CUBE stored. No min-count guard: a grid too sparse for
    the percentile is also too sparse to *achieve* a fine level, and counts say so.
@@ -176,7 +185,7 @@ Algorithm (`levelPlanFor(count_grid, decision_depth_by_grid, policy)`):
 4. **Decision-depth rollup**: `decision_depth[g]` for a grid coarser than 14 is
    the **minimum over its *touched* children's decision depths** (the shoal-biased, safe
    direction: a shoal anywhere in `g` makes `g` at least as shallow). The
-   percentile is computed once, at level 14, from the reservoir; coarse grids
+   percentile is computed once, at level 14, from the histogram; coarse grids
    never pool soundings.
 5. **Descent from each touched grid at `coarsest_level`** (a tunable; 8 by
    default). At grid `g` at level `L`:
@@ -440,7 +449,7 @@ a CUBE constant, once it lands.
 | `cube_bathymetry/include/cube_bathymetry/build_fingerprint.h` / `src/build_fingerprint.cpp` | **New** — minimal ADR-0003 v2 read/write (`schema_version` + `tiling`). |
 | (same files) | Optional shared touch clock. |
 | `cube_bathymetry/include/cube_bathymetry/multi_level_accumulator.h` / `src/multi_level_accumulator.cpp` | **New** (sync) — `MultiLevelAccumulator` landed in its own pair of files rather than inside `store_import.*`: per-level sheets, shared touch clock, store-wide budget, global coldest-first eviction. |
-| `cube_bathymetry/include/cube_bathymetry/recon.h` / `src/recon.cpp` | **New** (sync) — `ReconCollector`: count grid + `ShallowReservoir` decision depths + the chronological sounding spill and its replay; free-space check. |
+| `cube_bathymetry/include/cube_bathymetry/recon.h` / `src/recon.cpp` | **New** (sync) — `ReconCollector`: count grid + `DepthHistogram` decision depths (water depth under the transducer) + the chronological sounding spill and its replay; free-space check. |
 | `cube_bathymetry/include/cube_bathymetry/map_sheet.h` | (sync) Admission predicate + touch-clock hooks on the sheet interface that `GeoMapSheet` implements. |
 | `cube_bathymetry/include/cube_bathymetry/store_import.h` / `src/store_import.cpp` | `MultiLevelAccumulator` (routing, shared budget, global eviction, single sidecar write); `ImportAccumulator::residentTiles()` / `persistAndDrop()`. |
 | `cube_bathymetry/src/import_bag_main.cpp` | Recon (count grid + per-cell max spread term + reservoir + one chronological spill under `--scratch-dir` with free-space check, `--count-resident-tiles`); `--depth-adaptive*`, `--count-level`, `--min-obs-per-node`, `--blunder-allowance`, `--level-plan[-out]`, `--count-grid-out`; validation incl. `finest <= 14`; multi-level path; fingerprint write; drop the `:1128-1130` single-resolution comment. |
@@ -790,8 +799,9 @@ operator's direction, none deferred; the last fix pass before publish):
 
 ### Dry-run review fixes (2026-09-15)
 
-The operator's recon-only dry run on a real M3 bag (Lake Massabesic 2026-06-09,
-98 min, 55,100 pings, 12.1 M soundings) found three must-fixes, all actioned:
+The operator's recon-only dry run on a real M3 bag (Piscataqua River off the
+UNH pier, New Castle NH, 2026-06-09, 98 min, 55,100 pings, 12.1 M soundings)
+found three must-fixes, all actioned:
 
 - **The decision depth is read from a per-grid depth histogram**, not a bounded
   "shallowest 64" reservoir. At ~200 k soundings per level-14 grid the reservoir
@@ -831,3 +841,29 @@ The operator's recon-only dry run on a real M3 bag (Lake Massabesic 2026-06-09,
   `LevelPlanTest.AreasAreSurveyedGroundNotTileFootprints` (ground vs the 16×
   larger footprint, parents-alive tiles storing no ground of their own, and the
   coarser-than-10 line reading zero where the native level is 11).
+
+### Dry-run review fixes, round 2 (2026-09-15)
+
+A follow-up look at the same dry run found one more must-fix, actioned here:
+
+- **The ladder is fed the water depth under the transducer, not the stored
+  depth.** Stored depths are WGS84 ellipsoidal heights by design (uma ADR-0002
+  §D4), and at the UNH pier the geoid sits ~28 m below the ellipsoid, so 8–13 m
+  of water arrived at the histogram as −36…−41 m. `depthAdaptiveLevel`'s
+  argument is a *footprint* argument (cell = `scale × |depth|`) and a beam's
+  footprint scales with its range below the transducer, so every required level
+  in the first dry run came out one to two levels too coarse — which is also
+  why that run reported a zero coverage deficit. The recon now histograms
+  `-|sonar_relative_position.z|` (the projector builds `z = range·cos(tx)·cos(rx)`,
+  positive-down, so the water depth is its negation; the absolute value guards a
+  driver reporting the other sign). Transducer draft is ignored deliberately:
+  sub-metre, against a factor-of-two ladder. `PlannedTile::decision_depth` and
+  the plan JSON's `d` are redefined accordingly — **schema 2 amended, not a
+  schema 3**, since schema 2 was minted the same morning and no plan file has
+  been released. README §depth-adaptive, the ADR-0002 amendment, `--help` and
+  this plan say which quantity it is.
+- **Test added**: `ReconCollector.DecidesOnWaterDepthNotTheStoredEllipsoidalHeight`
+  — a sounding stored at −40 m with 12 m of water under the sonar decides at
+  −12 m and asks for a strictly finer level than −40 m would have. The
+  single-level byte-identity guarantee is untouched (the policy pin bypasses
+  the decision); `test_mixed_level_import` stays green.
