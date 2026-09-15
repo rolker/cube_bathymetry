@@ -1403,6 +1403,71 @@ int reportFatalPassError(
     " ping(s); a full device is the usual cause.");
 }
 
+/// Fixed-level finish (cube#143: lifted out of main(), which is at the cpplint
+/// function-size limit): persist, report, fingerprint, close the tile-size CSV.
+/// Returns the process exit code; 0 means the caller prints "done!".
+int cube_fixed_level_finish(
+  cube::ImportAccumulator & accumulator, cube::GeoMapSheet & geo_map_sheet,
+  const std::string & store_dir, const std::string & bs_store_dir, double resolution,
+  const std::string & iho_order,
+  const marine_bathymetry_store::StoreMetadata & store_metadata,
+  const marine_mbes_backscatter_store::StoreMetadata & bs_metadata,
+  std::optional<TileSizeReporter> & tile_reporter,
+  const std::string & tile_size_report_path, double tile_refresh_interval_s,
+  int tile_refresh_tiles_per_cycle, double phase_secs)
+{
+  std::cout << "Building store tiles..." << std::endl;
+
+  // Persist the still-resident tiles and write the store-level metadata. Tiles
+  // evicted during the pass were already written to disk (bathy in the -o store,
+  // their backscatter to --bs-store); finalize() writes whatever is still in RAM,
+  // so the on-disk store is the union of evicted + resident — identical to an
+  // unbounded build (cube#92). The off-boat full-bag CUBE replay is the
+  // authoritative product, so it always writes the `survey` layer (uma#248
+  // collapsed draft/processed). Single fused grid per layer (uma#221).
+  const std::size_t resident_before_final = accumulator.residentTileCount();
+  const std::size_t evicted_count = accumulator.evictedIndices().size();
+  // The same guard as the depth-adaptive path's finalize (cube#143 triage: the
+  // class is swept at every site). Eviction has been writing into the real -o
+  // store since the first batch here too, so an I/O failure while persisting
+  // the resident tiles leaves a partial-coverage store -- reported, with any
+  // stale fingerprint cleared, rather than thrown out of main().
+  try {
+    accumulator.finalize(
+      store_metadata.empty() ? nullptr : &store_metadata,
+      (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
+  } catch (const std::exception & e) {
+    return abortDirtyReplay(
+      store_dir, std::string("the store could not be finalized: ") + e.what() +
+      ". Every ping was projected and accumulated, but the resident tiles (and "
+      "the store metadata) are not on disk.");
+  }
+  reportPersisted(
+    accumulator, store_dir, bs_store_dir, evicted_count,
+    resident_before_final, phase_secs);
+  // Build fingerprint (ADR-0003 schema 2, tiling only -- cube#143): a fixed-level
+  // store records its mode, the requested cell size and the capture policy.
+  const bool fingerprinted = writeFingerprint(
+    store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
+    iho_order, nullptr, {geo_map_sheet.gridLevel().level()});
+
+  // Exit codes rank by what is wrong with the DATA: 1 says the store may be
+  // incomplete, so a failed diagnostic CSV must not borrow it -- that run's
+  // store and fingerprint are both fine. A missing fingerprint (2) outranks a
+  // missing report (3).
+  const bool tile_report_written = finishTileReport(
+    tile_reporter, tile_size_report_path, tile_refresh_interval_s,
+    tile_refresh_tiles_per_cycle);
+  if (!fingerprinted) {
+    return 2;
+  }
+  if (!tile_report_written) {
+    return 3;
+  }
+
+  return 0;
+}
+
 /// Depth-adaptive finish (cube#143): plan, report, recon-only exit, phase-two
 /// replay into one accumulator per level, finalize, fingerprint. Returns the
 /// process exit code.
@@ -2392,55 +2457,8 @@ int main(int argc, char * argv[])
       backscatter_curve, store_metadata, bs_metadata, projection_secs);
   }
 
-  std::cout << "Building store tiles..." << std::endl;
-
-  // Persist the still-resident tiles and write the store-level metadata. Tiles
-  // evicted during the pass were already written to disk (bathy in the -o store,
-  // their backscatter to --bs-store); finalize() writes whatever is still in RAM,
-  // so the on-disk store is the union of evicted + resident — identical to an
-  // unbounded build (cube#92). The off-boat full-bag CUBE replay is the
-  // authoritative product, so it always writes the `survey` layer (uma#248
-  // collapsed draft/processed). Single fused grid per layer (uma#221).
-  const std::size_t resident_before_final = accumulator.residentTileCount();
-  const std::size_t evicted_count = accumulator.evictedIndices().size();
-  // The same guard as the depth-adaptive path's finalize (cube#143 triage: the
-  // class is swept at every site). Eviction has been writing into the real -o
-  // store since the first batch here too, so an I/O failure while persisting
-  // the resident tiles leaves a partial-coverage store -- reported, with any
-  // stale fingerprint cleared, rather than thrown out of main().
-  try {
-    accumulator.finalize(
-      store_metadata.empty() ? nullptr : &store_metadata,
-      (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
-  } catch (const std::exception & e) {
-    return abortDirtyReplay(
-      store_dir, std::string("the store could not be finalized: ") + e.what() +
-      ". Every ping was projected and accumulated, but the resident tiles (and "
-      "the store metadata) are not on disk.");
-  }
-  reportPersisted(
-    accumulator, store_dir, bs_store_dir, evicted_count,
-    resident_before_final, phase_secs());
-  // Build fingerprint (ADR-0003 schema 2, tiling only -- cube#143): a fixed-level
-  // store records its mode, the requested cell size and the capture policy.
-  const bool fingerprinted = writeFingerprint(
-    store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
-    iho_order, nullptr, {geo_map_sheet.gridLevel().level()});
-
-  // Exit codes rank by what is wrong with the DATA: 1 says the store may be
-  // incomplete, so a failed diagnostic CSV must not borrow it -- that run's
-  // store and fingerprint are both fine. A missing fingerprint (2) outranks a
-  // missing report (3).
-  const bool tile_report_written = finishTileReport(
-    tile_reporter, tile_size_report_path, tile_refresh_interval_s,
-    tile_refresh_tiles_per_cycle);
-  if (!fingerprinted) {
-    return 2;
-  }
-  if (!tile_report_written) {
-    return 3;
-  }
-
-  std::cout << "done!" << std::endl;
-  return 0;
+  return cube_fixed_level_finish(
+    accumulator, geo_map_sheet, store_dir, bs_store_dir, resolution, iho_order,
+    store_metadata, bs_metadata, tile_reporter, tile_size_report_path,
+    tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs());
 }

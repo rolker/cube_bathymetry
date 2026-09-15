@@ -320,7 +320,8 @@ std::string planJson(const std::vector<gggs::GridIndex> & tiles)
   return "{\"schema\":2,\"policy\":{\"capture_distance_scale\":0.05,\"coarsest_level\":8,"
          "\"finest_level\":14,\"count_level\":14,\"min_obs_per_node\":5,"
          "\"blunder_allowance\":0.2,\"decision_depth_percentile\":0.02,"
-         "\"achieved_percentile\":0.95},\"ground_m2\":1000,\"touched\":[" +
+         "\"achieved_percentile\":0.95},\"capture_spacing_scale\":0.71,"
+         "\"ground_m2\":1000,\"touched\":[" +
          touched + "],\"tiles\":[" + emitted + "]}";
 }
 

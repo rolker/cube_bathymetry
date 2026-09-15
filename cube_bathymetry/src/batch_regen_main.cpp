@@ -345,6 +345,88 @@ std::string jsonEscape(const std::string & s)
   return out;
 }
 
+/// Load and vet the `--level-plan` file (cube#143; lifted out of main(), which
+/// is at the cpplint function-size limit). Returns the plan, or nullptr with
+/// @p failed set when the run must stop -- an unreadable or empty plan, a
+/// capture-spacing scale that disagrees with the one the plan records, or
+/// `--bs-store` on this path. Adopts the plan's capture scale when the flag was
+/// not given. An empty @p level_plan_path is not a failure: it returns nullptr
+/// with @p failed false (a fixed-level rebuild).
+std::shared_ptr<const cube::LevelPlan> loadLevelPlan(
+  const std::string & level_plan_path, const std::string & bs_store_dir,
+  float & capture_spacing_scale, bool capture_spacing_scale_given, bool * failed)
+{
+  *failed = false;
+  if (level_plan_path.empty()) {
+    return nullptr;
+  }
+  std::shared_ptr<const cube::LevelPlan> level_plan;
+  {
+    std::ifstream in(level_plan_path);
+    if (!in) {
+      std::cerr << "error: cannot read --level-plan " << level_plan_path << "\n";
+      *failed = true;
+      return nullptr;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    try {
+      level_plan = std::make_shared<cube::LevelPlan>(cube::LevelPlan::fromJson(buffer.str()));
+    } catch (const std::exception & e) {
+      std::cerr << "error: --level-plan " << level_plan_path << ": " << e.what() << "\n";
+      *failed = true;
+      return nullptr;
+    }
+    if (level_plan->tiles().empty()) {
+      std::cerr << "error: --level-plan " << level_plan_path << " emits no tiles\n";
+      *failed = true;
+      return nullptr;
+    }
+    // The capture gate is `max(0.05 x |depth|, k x node spacing)`, so a rebuild
+    // at a different k gathers differently from the same soundings -- and
+    // README promises this rebuild is bit-exact against
+    // `import_bag --depth-adaptive`. The plan carries the k its import ran with
+    // (cube#143 triage): adopt it when no flag was given, refuse an explicit
+    // value that disagrees rather than silently rebuilding to a different gate.
+    if (capture_spacing_scale_given &&
+      level_plan->captureSpacingScale() != capture_spacing_scale)
+    {
+      std::cerr << "error: --capture-spacing-scale " << capture_spacing_scale
+                << " disagrees with the " << level_plan->captureSpacingScale()
+                << " recorded in " << level_plan_path
+                << ". A rebuild at a different capture gate is not the bit-exact "
+        "rebuild of that import. Drop the flag to use the plan's value.\n";
+      *failed = true;
+      return nullptr;
+    }
+    if (!capture_spacing_scale_given) {
+      capture_spacing_scale = level_plan->captureSpacingScale();
+      std::cout << "Capture spacing scale " << capture_spacing_scale
+                << ", from the level plan." << std::endl;
+    }
+    if (!bs_store_dir.empty()) {
+      // TEMPORARY, and the same refusal import_bag --depth-adaptive gives:
+      // marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level
+      // ("All tiles live at a single GGGS level", mbes_store.hpp; loadTile()
+      // rejects a tile written at another level), while every level of a
+      // plan-driven rebuild gathers into the SAME store root. The per-level
+      // layout is uma#383 and the PR that consumes it lifts this. Refusing
+      // beats writing a backscatter store nothing can load.
+      std::cerr << "error: --bs-store is not supported with --level-plan yet.\n"
+        "marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level, and a "
+        "mixed-level rebuild gathers every level into the same store root -- the result "
+        "is a backscatter store nothing can load. The per-level layout is\n"
+        "  https://github.com/rolker/unh_marine_autonomy/issues/383\n"
+        "and the PR that consumes it lifts this refusal. Until then, rebuild the "
+        "bathymetry from the plan and take backscatter from a separate fixed-level "
+        "rebuild.\n";
+      *failed = true;
+      return nullptr;
+    }
+  }
+  return level_plan;
+}
+
 // DRY-RUN dirty-tile query (cube#111, ADR-0002). Opens the survey index and
 // reports the store-level (L10) tiles a tile-scoped rebuild would touch for the
 // given bags (treated as newly-added), plus their contributing bags/intervals.
@@ -704,64 +786,12 @@ int main(int argc, char * argv[])
   // Level plan (cube#143): a depth-adaptive rebuild reads the plan import_bag
   // --level-plan-out wrote. Loaded before the dry run so the dirty-tile query
   // can roll up to the plan's levels.
-  std::shared_ptr<const cube::LevelPlan> level_plan;
-  if (!level_plan_path.empty()) {
-    std::ifstream in(level_plan_path);
-    if (!in) {
-      std::cerr << "error: cannot read --level-plan " << level_plan_path << "\n";
-      return 1;
-    }
-    std::stringstream buffer;
-    buffer << in.rdbuf();
-    try {
-      level_plan = std::make_shared<cube::LevelPlan>(cube::LevelPlan::fromJson(buffer.str()));
-    } catch (const std::exception & e) {
-      std::cerr << "error: --level-plan " << level_plan_path << ": " << e.what() << "\n";
-      return 1;
-    }
-    if (level_plan->tiles().empty()) {
-      std::cerr << "error: --level-plan " << level_plan_path << " emits no tiles\n";
-      return 1;
-    }
-    // The capture gate is `max(0.05 x |depth|, k x node spacing)`, so a rebuild
-    // at a different k gathers differently from the same soundings -- and
-    // README promises this rebuild is bit-exact against
-    // `import_bag --depth-adaptive`. The plan carries the k its import ran with
-    // (cube#143 triage): adopt it when no flag was given, refuse an explicit
-    // value that disagrees rather than silently rebuilding to a different gate.
-    if (capture_spacing_scale_given &&
-      level_plan->captureSpacingScale() != capture_spacing_scale)
-    {
-      std::cerr << "error: --capture-spacing-scale " << capture_spacing_scale
-                << " disagrees with the " << level_plan->captureSpacingScale()
-                << " recorded in " << level_plan_path
-                << ". A rebuild at a different capture gate is not the bit-exact "
-        "rebuild of that import. Drop the flag to use the plan's value.\n";
-      return 1;
-    }
-    if (!capture_spacing_scale_given) {
-      capture_spacing_scale = level_plan->captureSpacingScale();
-      std::cout << "Capture spacing scale " << capture_spacing_scale
-                << ", from the level plan." << std::endl;
-    }
-    if (!bs_store_dir.empty()) {
-      // TEMPORARY, and the same refusal import_bag --depth-adaptive gives:
-      // marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level
-      // ("All tiles live at a single GGGS level", mbes_store.hpp; loadTile()
-      // rejects a tile written at another level), while every level of a
-      // plan-driven rebuild gathers into the SAME store root. The per-level
-      // layout is uma#383 and the PR that consumes it lifts this. Refusing
-      // beats writing a backscatter store nothing can load.
-      std::cerr << "error: --bs-store is not supported with --level-plan yet.\n"
-        "marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level, and a "
-        "mixed-level rebuild gathers every level into the same store root -- the result "
-        "is a backscatter store nothing can load. The per-level layout is\n"
-        "  https://github.com/rolker/unh_marine_autonomy/issues/383\n"
-        "and the PR that consumes it lifts this refusal. Until then, rebuild the "
-        "bathymetry from the plan and take backscatter from a separate fixed-level "
-        "rebuild.\n";
-      return 1;
-    }
+  bool level_plan_failed = false;
+  const std::shared_ptr<const cube::LevelPlan> level_plan = loadLevelPlan(
+    level_plan_path, bs_store_dir, capture_spacing_scale, capture_spacing_scale_given,
+    &level_plan_failed);
+  if (level_plan_failed) {
+    return 1;
   }
 
   if (!index_db_path.empty()) {
