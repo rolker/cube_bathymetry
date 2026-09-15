@@ -494,8 +494,27 @@ int dirtyTileDryRun(
   std::ostringstream json;
   json.imbue(std::locale::classic());
   json << std::setprecision(17);
-  json << "{\"store_level\":" << static_cast<int>(store_level.level())
-       << ",\"dirty_tile_count\":" << dirty.size() << ",\"dirty_tiles\":[";
+  // With a plan in force there is no single store level: the dirty_tiles[]
+  // entries carry mixed per-tile "level"s, and the top-level field was still
+  // derived from -r, which a consumer keying on the documented field would
+  // rebuild at (cube#143 triage). The human-readable summary was made
+  // level-aware in this PR and the JSON was not. Emit the plan's level SET
+  // instead, so the key is present but cannot be read as one level; the
+  // fixed-level contract is unchanged.
+  json << "{";
+  if (plan) {
+    json << "\"store_levels\":[";
+    bool first_level = true;
+    for (const auto level : plan->levels()) {
+      if (!first_level) {json << ",";}
+      first_level = false;
+      json << static_cast<int>(level);
+    }
+    json << "]";
+  } else {
+    json << "\"store_level\":" << static_cast<int>(store_level.level());
+  }
+  json << ",\"dirty_tile_count\":" << dirty.size() << ",\"dirty_tiles\":[";
   bool first_tile = true;
   for (const auto & dt : dirty) {
     if (!first_tile) {json << ",";}

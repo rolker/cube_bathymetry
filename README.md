@@ -256,6 +256,12 @@ case prints a `note:` on stderr saying a real run falls back to full regen (the
 index is a **soft** dependency). Without `--index-db`, the full-regen path is
 unchanged.
 
+The JSON's top-level level field follows the mode: a fixed-level run emits
+`"store_level": <L>`, and a `--level-plan` run emits `"store_levels": [<L>, …]`,
+the plan's emitted level set. A plan-driven dirty set carries **mixed** per-tile
+`"level"`s, so there is no single store level to report, and emitting one
+derived from `-r` would have a consumer rebuild at the wrong level.
+
 ### Seed precedence (`--reference-store`)
 
 On the first touch of each tile, both tools seed it with a two-rung precedence:
