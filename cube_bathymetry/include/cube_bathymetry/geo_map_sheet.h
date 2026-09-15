@@ -23,9 +23,11 @@
 #ifndef CUBE_BATHYMETRY__GEO_MAP_SHEET_H_
 #define CUBE_BATHYMETRY__GEO_MAP_SHEET_H_
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -91,6 +93,47 @@ public:
       std::vector < std::pair < float, float >> curve,
       bool tl_removed = false,
       float absorption_db_per_m = 0.0f);
+
+  /// @brief Set the spacing term of the node capture distance
+  ///        (`Parameters::capture_spacing_scale`, cube_bathymetry#143).
+  ///
+  /// Writes into the sheet's private @c parameters_ like
+  /// setBackscatterCorrection, so it reaches every owned grid. The offline
+  /// tools expose it as `--capture-spacing-scale`; tests that must reproduce
+  /// the pre-#143 fixed 0.5 m gate pin it to `0.5 / distance_scale`. Note the
+  /// sheet's `distance_scale` is the **requested** cell size passed to the
+  /// constructor, not the GGGS-snapped cell the grids are laid out on.
+  /// @throws std::invalid_argument if @p scale is not finite and positive.
+    void setCaptureSpacingScale(float scale);
+
+  /// The node spacing the sheet's Parameters use (`distance_scale`, metres).
+    double distanceScale() const {return parameters_.distance_scale;}
+
+  /// The sheet's estimator parameters (read-only).
+    const Parameters & parameters() const {return parameters_;}
+
+  /// @brief Share one touch clock across sheets (cube_bathymetry#143).
+  ///
+  /// Last-touch values drive LRU eviction, and by default each sheet stamps
+  /// them from its own counter, so values from two sheets are not comparable.
+  /// A multi-level import owns one sheet per level and evicts the globally
+  /// coldest tile, so every sheet stamps from the same clock. Null restores the
+  /// per-sheet counter.
+    void setTouchClock(std::shared_ptr < std::atomic < uint64_t >> clock);
+
+  /// @brief Restrict which grids this sheet will create (cube_bathymetry#143).
+  ///
+  /// When set, `getOrCreateGridsIn` skips -- never creates, never touches --
+  /// any grid the predicate rejects, and `gridIndicesForSoundings` omits it,
+  /// so the creation and the enumeration paths see one set. A multi-level
+  /// import gives each level's sheet the level plan's emitted set at that
+  /// level: a swath clipping one planned fine tile must not build fine tiles
+  /// over the unplanned plain beside it (that ground has its estimate at the
+  /// parent level). Grids created explicitly through `getOrCreateGrid` (the
+  /// prime/reload path) are not filtered: they are only ever reached for
+  /// admitted grids. Empty restores "admit everything".
+    // NOLINTNEXTLINE(readability/casting) -- cpplint misreads the function type as a C cast
+    void setAdmission(std::function < bool(const gggs::GridIndex &) > admit);
 
   /// Return the grids within the bounds, creating new ones if necessary
     std::vector < std::shared_ptr <
@@ -212,6 +255,18 @@ private:
     gggs::Level grid_level_;
 
     std::map < gggs::GridIndex, std::shared_ptr < GeoGrid >> grids_;
+
+  /// Shared touch clock (#143); null = the per-sheet touch_counter_.
+    std::shared_ptr < std::atomic < uint64_t >> touch_clock_;
+
+  /// Admission predicate (#143); empty = admit every grid.
+    // NOLINTNEXTLINE(readability/casting) -- cpplint misreads the function type as a C cast
+    std::function < bool(const gggs::GridIndex &) > admit_;
+
+    uint64_t nextTouch()
+    {
+      return touch_clock_ ? ++(*touch_clock_) : ++touch_counter_;
+    }
 
   /// Grids that received data (insert() returned true) since the last
   /// clearDirtyGrids(). Drives the periodic incremental tile save (#21).

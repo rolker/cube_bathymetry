@@ -22,6 +22,7 @@
 #include "cube_bathymetry/survey_index_query.h"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -92,7 +93,7 @@ gggs::GridIndex ancestorAtLevel(gggs::GridIndex tile, std::uint8_t target_level)
 // — including a throw out of tileFromRowCol on a corrupt (level >= 21) index row
 // — must finalize the statement: an unfinalized statement makes the caller's
 // sqlite3_close(db) return SQLITE_BUSY and leak the db handle too. The dry-run
-// CLI is process-exit-bounded, but PR2 reuses dirtyL10Tiles from a long-lived
+// CLI is process-exit-bounded, but PR2 reuses dirtyTilesAtLevel from a long-lived
 // rebuild path, so the invariant is enforced structurally rather than by
 // remembering a finalize call at each throw site.
 class StmtGuard
@@ -243,11 +244,19 @@ std::vector<gggs::GridIndex> expandFootprint(const std::vector<gggs::GridIndex> 
 
 }  // namespace
 
-std::vector<DirtyTile> dirtyL10Tiles(
+namespace
+{
+// Shared body of the two dirty-tile queries: footprint + margin, roll each
+// expanded tile up through @p rollup (one or more dirty keys per tile), then
+// attach every contributing pass over the dirty tiles' full extent, grouped by
+// the same roll-up of the pass's own footprint tile.
+using Rollup = std::function<std::vector<gggs::GridIndex>(const gggs::GridIndex &)>;
+
+std::vector<DirtyTile> dirtyTilesBy(
   sqlite3 * db,
   const std::vector<std::string> & new_bag_paths,
-  const gggs::Level & store_level,
-  const std::string & sensor_filter)
+  const std::string & sensor_filter,
+  const Rollup & rollup)
 {
   // 1. Footprint of the new bags (index level, e.g. L14).
   const std::vector<gggs::GridIndex> footprint =
@@ -259,16 +268,18 @@ std::vector<DirtyTile> dirtyL10Tiles(
   // 2. Expand by one index-level tile (conservative margin, ADR-0002).
   const std::vector<gggs::GridIndex> expanded = expandFootprint(footprint);
 
-  // 3. Roll each expanded tile up to the store level and deduplicate -> dirty set.
-  //    Seed the map so a margin-only tile (no overlapping pass) still appears.
+  // 3. Roll each expanded tile up and deduplicate -> dirty set. Seed the map so a
+  //    margin-only tile (no overlapping pass) still appears.
   std::map<gggs::GridIndex, std::vector<marine_survey_index::PassRow>> dirty;
   for (const auto & tile : expanded) {
-    dirty[ancestorAtLevel(tile, store_level.level())];
+    for (const auto & key : rollup(tile)) {
+      dirty[key];
+    }
   }
 
-  // 4. Enumerate the COMPLETE index-level extent of every dirty store-level tile.
+  // 4. Enumerate the COMPLETE index-level extent of every dirty tile.
   //    `expanded` is only the new bags' footprint plus one-tile margin, so it
-  //    covers a boundary dirty tile only partially — querying passes over it
+  //    covers a boundary dirty tile only partially -- querying passes over it
   //    would omit contributing passes (typically old bags) that fall in the
   //    dirty tile's other index-level sub-tiles. That under-reports the
   //    contributing-bag set here and, more seriously, would break PR2 byte-
@@ -276,7 +287,7 @@ std::vector<DirtyTile> dirtyL10Tiles(
   //    So re-enumerate each dirty tile's full extent at each index level present
   //    in the footprint (queryPasses matches (level,row,col) exactly, so the
   //    query tiles must be at the passes' own level, not the store level) and
-  //    union — a conservative superset of the tiles' contributing passes.
+  //    union -- a conservative superset of the tiles' contributing passes.
   std::set<std::uint8_t> index_levels;
   for (const auto & tile : footprint) {
     index_levels.insert(tile.level());
@@ -294,7 +305,7 @@ std::vector<DirtyTile> dirtyL10Tiles(
   }
 
   // 5. Attach every contributing pass (all bags) over that full extent, grouped
-  //    by the store-level tile its own footprint tile rolls up to. A pass rolling
+  //    by the dirty tile(s) its own footprint tile rolls up to. A pass rolling
   //    up to a tile outside the dirty set (an edge neighbour the bounding-box
   //    enumeration picked up) has no map entry and is dropped.
   const std::vector<gggs::GridIndex> query_vec(query_tiles.begin(), query_tiles.end());
@@ -303,10 +314,11 @@ std::vector<DirtyTile> dirtyL10Tiles(
   for (const auto & pass : passes) {
     const gggs::GridIndex pass_tile =
       tileFromRowCol(pass.level, pass.tile_row, pass.tile_col);
-    const gggs::GridIndex rolled = ancestorAtLevel(pass_tile, store_level.level());
-    auto it = dirty.find(rolled);
-    if (it != dirty.end()) {
-      it->second.push_back(pass);
+    for (const auto & rolled : rollup(pass_tile)) {
+      auto it = dirty.find(rolled);
+      if (it != dirty.end()) {
+        it->second.push_back(pass);
+      }
     }
   }
 
@@ -318,14 +330,14 @@ std::vector<DirtyTile> dirtyL10Tiles(
   //    delete this as redundant with queryPasses.
   //
   //    The key is (bag_path, t_start_ns, topic, t_end_ns, tile_row, tile_col,
-  //    sensor_type, ping_count) — every PassRow field except `level`, which is
+  //    sensor_type, ping_count) -- every PassRow field except `level`, which is
   //    the fixed index level for all rows here. std::sort is NOT stable, so any
   //    tie left unbroken has a toolchain- and input-order-dependent relative
   //    order, and one bag can contribute several passes to the same store tile
   //    (multiple sonar topics, several index-level sub-tiles). Keying on the
   //    full field set means the only rows that can still tie are ones that
-  //    serialize identically, so the CLI's DIRTY_TILES_JSON bytes — which PR2's
-  //    byte-identity check leans on — are reproducible whatever order the index
+  //    serialize identically, so the CLI's DIRTY_TILES_JSON bytes -- which PR2's
+  //    byte-identity check leans on -- are reproducible whatever order the index
   //    hands the rows over in.
   std::vector<DirtyTile> result;
   result.reserve(dirty.size());
@@ -359,6 +371,60 @@ std::vector<DirtyTile> dirtyL10Tiles(
     result.push_back(DirtyTile{tile, std::move(tile_passes)});
   }
   return result;
+}
+}  // namespace
+
+std::vector<DirtyTile> dirtyTilesAtLevel(
+  sqlite3 * db,
+  const std::vector<std::string> & new_bag_paths,
+  const gggs::Level & store_level,
+  const std::string & sensor_filter)
+{
+  const std::uint8_t level = store_level.level();
+  return dirtyTilesBy(
+    db, new_bag_paths, sensor_filter,
+    [level](const gggs::GridIndex & tile) {
+      return std::vector<gggs::GridIndex>{ancestorAtLevel(tile, level)};
+    });
+}
+
+std::vector<DirtyTile> dirtyTiles(
+  sqlite3 * db,
+  const std::vector<std::string> & new_bag_paths,
+  const LevelPlan & plan,
+  const std::string & sensor_filter)
+{
+  const std::set<std::uint8_t> levels = plan.levels();
+  if (levels.empty()) {
+    throw std::invalid_argument("cube::dirtyTiles: the level plan emits no tiles");
+  }
+  const std::uint8_t coarsest = *levels.begin();
+  return dirtyTilesBy(
+    db, new_bag_paths, sensor_filter,
+    [&plan, levels, coarsest](const gggs::GridIndex & tile) {
+      // The emitted ancestor at every plan level over this footprint tile.
+      // ancestorAtLevel throws if the tile is coarser than the level -- the
+      // "footprint coarser than an emitted tile" case is never silently
+      // mis-levelled (the dry-run's catch falls back to full regen).
+      std::vector<gggs::GridIndex> keys;
+      for (const auto level : levels) {
+        const gggs::GridIndex a = ancestorAtLevel(tile, level);
+        if (plan.isEmitted(a)) {
+          keys.push_back(a);
+        }
+      }
+      if (keys.empty()) {
+        // Ground the plan never covered: the new bags reach somewhere the plan
+        // that built this store emits nothing (a plan computed from an earlier
+        // survey, or a footprint margin tile beyond its edge). Dropping it would
+        // silently narrow the dirty set, which ADR-0002 forbids -- the whole
+        // guarantee is that the set is a conservative SUPERSET. Name the ground
+        // at the plan's coarsest level instead: an extra tile costs a rebuild
+        // that emits nothing, a missing one loses soundings.
+        keys.push_back(ancestorAtLevel(tile, coarsest));
+      }
+      return keys;
+    });
 }
 
 }  // namespace cube

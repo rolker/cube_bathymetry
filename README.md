@@ -95,14 +95,180 @@ surface is modelled.
 
 Two offline tools replay a detections bag through CUBE and write a
 `marine_bathymetry_store` (and optional `marine_mbes_backscatter_store`). Both
-share `bag_to_geotiff`'s projection pipeline and write the **`survey`** layer
-(unh_marine_autonomy#248 collapsed the old `draft`/`processed`/`chart` layers into
-`survey` + `reference`; the off-boat re-run is authoritative).
+share `bag_to_geotiff`'s projection pipeline and write the **`processed`** layer
+(the store's on-disk layers are `processed/`, `draft/`, `reference/` and
+`chart/` — uma ADR-0010 D8 re-split the fused survey layer into `processed` +
+`draft`, and a legacy `survey/` auto-migrates to `processed/` on load; the
+off-boat re-run is authoritative).
 
 | Tool | RAM | Output | Use when |
 |---|---|---|---|
-| `import_bag` | bounded by `--max-resident-tiles` (persist-then-drop eviction, #92) | lossless, but a tile evicted mid-disambiguation has a slightly re-derived depth **uncertainty** (depth value faithful) | streaming / very large surveys where RAM is the constraint |
-| `batch_regen_bag` | bounded by one tile's soundings | **bit-exact** vs a whole-survey-in-RAM build (depth, uncertainty, and backscatter) | the authoritative off-boat product |
+| `import_bag` | bounded by `--max-resident-tiles` (persist-then-drop eviction, #92); with `--depth-adaptive` the budget is the **store-wide total across levels** (#143) | lossless, but a tile evicted mid-disambiguation has a slightly re-derived depth **uncertainty** (depth value faithful) | streaming / very large surveys where RAM is the constraint |
+| `batch_regen_bag` | bounded by one tile's soundings | **bit-exact** vs a whole-survey-in-RAM build (depth, uncertainty, and backscatter); with `--level-plan`, bit-exact vs `import_bag --depth-adaptive` | the authoritative off-boat product |
+
+Both tools take `--capture-spacing-scale <k>` (default 0.71): the node capture
+distance is `max(0.05 × |depth|, k × node spacing)`. CUBE's fixed 0.5 m floor
+(`Capture_Distance_Minimum`) is gone (#143) — the spacing term replaces it, so a
+fixed-level run at level 10 now gathers within 0.71 m instead of 0.5 m below
+~14 m of water, and deeper the depth term dominates as before. (0.71 m, not
+0.64 m: `Parameters::distance_scale` takes the **requested** cell size, which is
+`-r 1.0` by default, so `k × spacing` is 0.71 m on a default fixed-level run.
+The depth-adaptive sheets are built at each level's nominal cell
+(`requestedCellSizeFor`), so a level-10 sheet there gathers within
+0.71 × ~0.906 = 0.64 m.) The live node
+applies the same gate at its fixed level and takes the same multiplier as the
+ROS parameter `capture_spacing_scale` (default 0.71), so a deployment can pin
+it — to `0.5 / cell_size` to reproduce the pre-#143 gate exactly, say — without
+rebuilding. That parameter is **`read_only`**: it is read once at `configure`
+and pushed into the map sheet there, so set it from the launch file or a YAML
+overrides file — a runtime `ros2 param set capture_spacing_scale` is rejected
+rather than silently ignored (a set that "succeeded" while the sheet kept the
+old gate would be worse than a refusal).
+
+### Depth-adaptive multi-level stores (`--depth-adaptive`, #143)
+
+`import_bag --depth-adaptive` writes a store whose native tiles sit at
+different GGGS levels depending on the water: shallow ground gets fine tiles,
+deep ground coarse ones, and **coarse parent tiles stay estimated in full under
+their children** — the parent is the LOD level above them and the native tile
+for the unrefined remainder. The decisions are recorded in the
+[ADR-0002 amendment](cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md);
+in short:
+
+- A **recon pass** over the bags counts every sounding into a fine count grid
+  (`--count-level`, default = the ladder's finest level, 14) and spills the
+  projected soundings to scratch as **one chronological file** (`--scratch-dir`,
+  default beside the `-o` store, never `/tmp`; ~64 B per sounding). Free space
+  is checked before the pass starts, budgeting that spill plus an allowance of
+  the same size for the count-tile spill below — an allowance, not a bound: the
+  count term follows the ground covered, which nothing knows up front. The
+  count grid is bounded too: `--count-resident-tiles`
+  (default 256, ~460 MB of level-14 tiles) caps what stays in RAM and colder
+  tiles go to the same scratch directory as UInt16 GeoTIFFs, reloaded on demand;
+  the plan report states the resident peak. One recon structure is **not**
+  bounded by that budget: the per-level-14-grid decision-depth histograms, which
+  are all needed when the plan reads each grid's percentile and so are never
+  spilled. They are a small term beside the count tiles (≤ ~50 kB per grid
+  against a count tile's 1.8 MB — roughly 17 MB/km² against ~630 MB/km²) but
+  they grow with the ground covered, so the recon reports their resident size
+  next to the count grid's rather than letting the bounded-RAM claim cover them
+  silently.
+- Each tile's level is the **coarser** of what the depth *requires* (the
+  uma#369 ladder: cell = `--depth-adaptive-scale` × depth, clamped to
+  `--depth-adaptive-coarsest`..`--depth-adaptive-finest`, default 8..14, and
+  the finest level must be ≤ 14, the survey index's footprint level) and what
+  the data *achieves* (Calder's level of aggregation: the finest spacing at
+  which each node still gathers `--min-obs-per-node` soundings, inflated by
+  `--blunder-allowance`). Where the depth requires finer than the data achieves
+  the plan reports a **coverage deficit**.
+- Both decisions read a **percentile**, not an extremum, so one flier cannot
+  drive a tile's level:
+  - `--decision-depth-percentile <p>` (default 2) is the percentile of a
+    level-14 grid's *shallowest* soundings that sets its depth — the flier
+    guard on the depth side. What is measured is the **water depth under the
+    transducer** (`-|sonar_relative_position.z|`, negative-down), *not* the
+    sounding's stored depth: stored depths are WGS84 ellipsoidal heights
+    (uma ADR-0002 §D4) and the geoid runs tens of metres from the ellipsoid
+    (~28 m at the UNH pier), while the ladder's argument is a footprint
+    argument — a beam's footprint scales with its range below the transducer.
+    Feeding the ellipsoidal height would coarsen every tile by one to two
+    levels. Transducer draft is deliberately ignored: sub-metre, against a
+    ladder whose levels are a factor of two apart.
+    The recon holds a **depth histogram** per grid
+    (0.25 m bins, sparse), so the percentile is honoured at survey density —
+    a level-14 grid of a real survey line holds ~200 k soundings and its
+    water-column fliers run to many hundreds. The answer is the shallow edge
+    of the bin the rank falls in: under a bin-width shallower than the true
+    percentile, never deeper. Any **0 < p ≤ 100** is accepted; 0 is rejected
+    (it would make a single flier the decision depth).
+  - `--achieved-percentile <p>` (default 95) is the percentile of the level of
+    aggregation across a tile that sets its achieved level, so a few
+    under-covered nodes do not coarsen the whole tile. It votes over the
+    tile's **occupied** count cells only — a cell the survey never ensonified
+    says nothing about the resolution the surveyed part supports, whereas a
+    gap *between* lines does (the occupied cells around it see the gap in
+    their boxes). It is a **conservative tail** statistic, which is what
+    Calder's 0.95–0.99 range is for: the answer is the level that 95 % of the
+    surveyed ground reaches *or beats*, not the level the typical node
+    reaches.
+    That tail is why a dense survey still reports a coarse achieved level, and
+    the number is not a symptom. On the 2026-06-09 UNH pier bag (12.1 M
+    soundings over 0.0085 km², ~1,400 soundings/m², ~4.6 per level-14 cell)
+    the level-of-aggregation histogram over tile `10/17801/13988`'s 764 k
+    occupied cells is: 37 % reach level 14 outright (λ = 0), a further 54 %
+    reach level 12 (λ = 1) — 91 % of the ground at level 12 or finer — and the
+    remaining 9 % runs out to λ = 43 over the thin fringe of the swath and the
+    gaps between lines. p50/p75/p90 are all level 12; **p95 is level 11** and
+    p99 level 10. The neighbouring tile `10/17801/13989` is thinner (3.3
+    soundings per occupied cell against 7.8) and reaches 93.4 % at level 11,
+    just short of the rank, so its p95 lands at level 10. Raising
+    `--achieved-percentile` toward 50 would report the modal level 12 — and
+    would store a tile whose outer tenth has no estimator support. The default
+    stays conservative; what the report calls a coverage deficit here is
+    real thin coverage at the swath edges, not a mis-measurement.
+- `--level-plan-out <file>` is **recon only**: it writes the plan and prints
+  its report — per level, the tile count, the **surveyed ground** those tiles
+  cover and the surveyed ground for which they are the finest tile
+  (`native`), and the storage (dense and at the observed ~2.4 MB/tile fill);
+  then the estimate-count multiplier that parents-alive costs, the coverage
+  deficit, and the ground stored coarser than level 10 (resolution lost
+  against today's stores in >36 m water; inherent to the pinned ladder).
+  Every area is ground the survey ensonified, measured from the count grid's
+  occupied cells — not a tile footprint, which for a level-8 parent over one
+  survey line is three orders of magnitude larger — and the coarser-than-10
+  line counts only ground whose *finest* tile is coarser than 10, so
+  parents-alive tiles over ground that also has a level-10 tile do not
+  register as lost resolution. Then it exits, so the operator can approve before a multi-hour
+  import. `--level-plan <file>` reuses that plan for the import;
+  `--count-grid-out <dir>` persists the count grid (mergeable into a later run).
+- Phase two replays the spill front to back — arrival order, the order the
+  fixed-level path saw the pings, which is what makes the byte-identity below
+  hold — into **one CUBE accumulator per level**;
+  `--max-resident-tiles` is the store-wide total, evicted coldest-first across
+  levels. Every import writes `build_fingerprint.json`
+  ([ADR-0003 amendment](cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md)).
+- A later import at other levels is **additive**, like any other import: a
+  re-import over covered ground under a different policy leaves the earlier
+  finer tiles in place, and a fine-LOD reader prefers them.
+- With the policy pinned to one level the depth-adaptive path is
+  **byte-identical** to the fixed path (`test_mixed_level_import`).
+- The two-phase path is also exercised **end to end on a real bag**
+  (`test_real_bag_smoke`): the recon's reported numbers, byte-identity between
+  `import_bag --depth-adaptive` and `batch_regen_bag --level-plan` on real
+  soundings, and the three documented failure outcomes with a fault injected —
+  a truncated spill and a failed `finalize()` both abort through
+  `abortDirtyReplay` (exit 1, "NOT empty and NOT complete"), while an
+  unwritable `build_fingerprint.json` over a store that IS complete is exit 2
+  and says so. Every other test drives the library directly, so nothing else
+  reaches `import_bag`'s `main()` past argument validation. It runs against a
+  3,000-ping excerpt of the 2026-06-09 UNH pier M3 bag, which is **survey data
+  referenced by path**, not a committed fixture (18 MB); it lives beside its
+  source bag in the archive and `scripts/make_bag_excerpt.py` rebuilds it.
+  Point `CUBE_REAL_BAG_EXCERPT` elsewhere to override the path. Where the
+  excerpt is unreachable — a CI container, a host with no archive mount —
+  every case **SKIPS with the reason printed, and never passes**;
+  `.agents/ci_local_extra.sh` re-states that skip as its own CI line so a run
+  that never exercised the path cannot read as a green one.
+- `--bs-store` is **refused** on both mixed-level paths (`import_bag
+  --depth-adaptive` and `batch_regen_bag --level-plan`) for now.
+  `marine_mbes_backscatter_store` is single-level by construction ("All tiles
+  live at a single GGGS level"; `loadTile(path, level)` rejects a tile written
+  at another level), while every level is handed the same store root — so a
+  mixed-level run would write a backscatter store nothing can load. The
+  per-level layout is
+  [uma#383](https://github.com/rolker/unh_marine_autonomy/issues/383); the PR
+  that consumes it lifts the refusal. Mixed-level backscatter is gated on that
+  work, not abandoned: take backscatter from a separate fixed-level run
+  meanwhile.
+
+`batch_regen_bag --level-plan <file>` rebuilds a depth-adaptive store from the
+same plan (each tile gathered at its own level), and its `--index-db` dry run
+then rolls the dirty set up to the emitted tile at every plan level. The plan
+records the `--capture-spacing-scale` its import ran with, so the rebuild uses
+that gate by default and **refuses** an explicit value that disagrees —
+otherwise "bit-exact vs `import_bag --depth-adaptive`" would hold only when the
+two runs happened to share a CLI default. `import_bag --level-plan` applies the
+same rule.
 
 `batch_regen` scatters each projected sounding to a per-tile bucket on disk, then
 gathers each tile in a single unbounded pass (no eviction) — so no tile is ever
@@ -118,8 +284,9 @@ atomic swap land in PR2).
 
 Using the `marine_survey_index` sidecar (`survey_index.db`, unh_marine_autonomy#259),
 it takes the L14 tile footprint the new bags ensonified, expands it by a one-tile
-conservative margin, rolls it up to the store's L10 tiles via the GGGS parent
-hierarchy, and lists each dirty L10 tile with the bags + pass intervals that
+conservative margin, rolls it up to the store's tiles via the GGGS parent
+hierarchy (the fixed store level, or with `--level-plan` every emitted level of
+the plan), and lists each dirty tile with the bags + pass intervals that
 contribute to it (see [`cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md`](cube_bathymetry/docs/decisions/0002-dirty-tile-footprint-math.md)).
 Output is a human-readable summary plus a machine-parseable `DIRTY_TILES_JSON:`
 line. **Machine contract:** the `DIRTY_TILES_JSON:` line is authoritative and is
@@ -132,6 +299,12 @@ failure — so a consumer must key off the marker line, not the exit code. Each
 case prints a `note:` on stderr saying a real run falls back to full regen (the
 index is a **soft** dependency). Without `--index-db`, the full-regen path is
 unchanged.
+
+The JSON's top-level level field follows the mode: a fixed-level run emits
+`"store_level": <L>`, and a `--level-plan` run emits `"store_levels": [<L>, …]`,
+the plan's emitted level set. A plan-driven dirty set carries **mixed** per-tile
+`"level"`s, so there is no single store level to report, and emitting one
+derived from `-r` would have a consumer rebuild at the wrong level.
 
 ### Seed precedence (`--reference-store`)
 

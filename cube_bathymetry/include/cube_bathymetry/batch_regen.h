@@ -36,6 +36,7 @@
 
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
+#include "cube_bathymetry/level_plan.h"
 #include "cube_bathymetry/store_import.h"
 #include "marine_autonomy/gggs.h"
 #include "marine_bathymetry_store/registry.hpp"
@@ -85,13 +86,25 @@ public:
   /// The gather builds one sheet per tile from this factory, and one long-lived
   /// index sheet for tile routing, so every sheet shares identical CUBE parameters
   /// — the precondition for bit-exact output.
-    using SheetFactory = std::function < std::unique_ptr < GeoMapSheet > () >;
+  ///
+  /// The factory takes the GGGS @p level to build for (cube_bathymetry#143): a
+  /// fixed-level rebuild is only ever asked for its one level; a plan-driven
+  /// rebuild is asked for each level the plan emits, and every sheet MUST be
+  /// configured identically apart from its cell size.
+    using SheetFactory = std::function < std::unique_ptr < GeoMapSheet > (uint8_t level) >;
 
   /// @param factory Builds a fully-configured, empty GeoMapSheet (see @ref SheetFactory).
   /// @param config  Store paths + seed precedence. `max_resident_tiles` is ignored
   ///   (the gather is single-tile and never evicts); the rest (store_dir,
   ///   reference_store_dir, bs_store_dir, cell_size_m) drive persistence and seeding.
-    BatchRegen(SheetFactory factory, ImportAccumulatorConfig config);
+  /// @param plan    When given, a DEPTH-ADAPTIVE rebuild (cube_bathymetry#143):
+  ///   soundings scatter to every emitted tile at every level the plan holds over
+  ///   them (parents included), and each bucket is gathered with a sheet at that
+  ///   tile's own level. Null = the fixed-level rebuild at
+  ///   `Level::fromCellSize(config.cell_size_m)`.
+    BatchRegen(
+      SheetFactory factory, ImportAccumulatorConfig config,
+      std::shared_ptr < const LevelPlan > plan = nullptr);
 
   /// @brief Delete the scratch scatter dir (RAII safety net for @ref finalize).
     ~BatchRegen();
@@ -133,8 +146,10 @@ private:
 
     SheetFactory factory_;
     ImportAccumulatorConfig cfg_;
-  /// Tile routing only (no accumulation).
-    std::unique_ptr < GeoMapSheet > index_sheet_;
+    std::shared_ptr < const LevelPlan > plan_;
+  /// Tile routing only (no accumulation): one sheet per level -- the fixed
+  /// level, or each plan level with the plan's emitted set as its admission.
+    std::map < uint8_t, std::unique_ptr < GeoMapSheet >> index_sheets_;
 
   /// Lazily created on first scatter; "" = none.
     std::string scratch_dir_;

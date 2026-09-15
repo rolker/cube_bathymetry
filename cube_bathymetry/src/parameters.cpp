@@ -109,6 +109,17 @@ double Parameters::influenceRadius(const Sounding & sounding) const
   return radius;
 }
 
+double Parameters::maxSpreadRadius(const Sounding & sounding) const
+{
+  if(!std::isfinite(sounding.depth) ||
+    !std::isfinite(sounding.vertical_error) || sounding.vertical_error <= 0.0 ||
+    !std::isfinite(sounding.horizontal_error) || sounding.horizontal_error < 0.0)
+  {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  return CONF_99PC * std::sqrt(sounding.horizontal_error);
+}
+
 void Parameters::setGridResolution(CellSizes sizes)
 {
   /* Compute distance scale based on node spacing */

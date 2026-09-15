@@ -118,6 +118,15 @@ namespace cube
   /// sentinel callers skip on.
     double influenceRadius(const Sounding & sounding) const;
 
+  /// The farthest any node can be from @p sounding and still be offered it,
+  /// at ANY node spacing: `CONF_99PC * sqrt(horizontal_error)`, the cap
+  /// `influenceRadius` applies before its spacing floor. Level-independent, so
+  /// a recon pass can record it once and a level plan can expand occupied
+  /// count cells by `max(this, that level's cell)` -- a conservative superset
+  /// of the reach at every level (cube_bathymetry#143). NaN for the same
+  /// degenerate soundings `influenceRadius` rejects.
+    double maxSpreadRadius(const Sounding & sounding) const;
+
   /// Value used to indicate 'no data' (typ. FLT_MAX)
     float no_data_value = std::numeric_limits < float > ::quiet_NaN();
 
@@ -202,7 +211,37 @@ namespace cube
   /// to accept data.  (unitless; typically 0.05 for
   /// hydrography but can be greater for geological mapping
   /// in flat areas with sparse data)
+  ///
+  /// This is the depth term of the node's **capture distance** -- the second
+  /// of CUBE's two distance gates. The first, the spread radius
+  /// (`influenceRadius`), is sounding-centric and decides which nodes a
+  /// sounding is *offered* to; the capture distance is node-centric and
+  /// decides whether the node *accepts* it:
+  ///
+  ///   capture = max(capture_distance_scale * |depth|,
+  ///                 capture_spacing_scale * distance_scale)
+  ///
+  /// Calder's original floors the depth term at a hard-coded 0.5 m
+  /// (`cube_node.c:1831`, the CUBE User Manual's `Capture_Distance_Minimum`,
+  /// a shallow-water node-starvation guard that the manual itself advises
+  /// lowering to half the grid spacing for sub-metre grids). That constant is
+  /// gone (cube_bathymetry#143): a fixed floor in metres made every grid finer
+  /// than ~0.45 m average over the same 0.5 m disc, and left a grid coarser
+  /// than ~1.4x the depth term with cell corners no node captures. The floor
+  /// now follows the node spacing (below).
     float capture_distance_scale = 0.05;
+
+  /// Spacing term of the capture distance, as a multiple of `distance_scale`
+  /// (the node spacing). Default 0.71 ~= half the cell diagonal (1/sqrt(2)),
+  /// so every sounding in a cell is within capture of at least one node at
+  /// any level, including cell corners. The CUBE User Manual's advice is 0.5
+  /// (half the spacing), which is node-centric and lets corner soundings go
+  /// unused; 0.71 was chosen so no sounding is dropped (operator decision,
+  /// cube_bathymetry#143). At today's level-10 grid (0.906 m cells) the floor
+  /// is 0.64 m against the old 0.5 m, so estimates shallower than ~13 m
+  /// gather slightly wider than before; deeper, the depth term dominates and
+  /// nothing changes.
+    float capture_spacing_scale = 0.71;
 
   /// Per-beam backscatter angular-response correction mode (ADR-0007 D3).
   /// Default None = identity (corrected == raw). Set via

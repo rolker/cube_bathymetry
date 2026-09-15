@@ -1,0 +1,1375 @@
+---
+issue: 143
+---
+
+# Issue #143 — import_bag writes one resolution per run — depth-adaptive store levels (uma#369) need the estimation grid decoupled from the store tiling
+
+## Issue Review
+**Status**: complete
+**When**: 2026-09-10 14:46 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Issue**: #143
+**Comment**: (best-effort post follows this entry; not recorded inline)
+**Scope verdict**: needs-more-detail
+
+### Summary
+
+Verified against the live checkout: `import_bag_main.cpp:1027` constructs one
+`cube::GeoMapSheet geo_map_sheet(resolution, iho_order)` per run, and
+`import_bag_main.cpp:1129-1130` pins `accumulator_config.cell_size_m` to
+`geo_map_sheet.nominalCellSizeMeters()` — confirming the issue's premise that
+the estimation grid and the store's native level are the same single value
+today, with no call site of the not-yet-called `depthAdaptiveLevel` in this
+repo (grep returned nothing, as expected — that function lives in
+`unh_marine_autonomy`). The repo already has three project-level ADRs
+(`docs/decisions/0001`–`0003`) that assume a **single scalar cell size per
+store**, which is a real consequence this issue doesn't currently name (see
+below).
+
+### Scope Assessment
+
+**Well-scoped?** Not fully — the issue itself flags its central design
+question as open: "Decide the unit of the decision... `depthAdaptiveLevel`
+presumes a scalar depth per unit, so its signature may need to change when
+this lands." That's an architecture decision (per-tile vs. per-region vs.
+two-pass), not an implementation detail, and this repo has precedent for
+capturing exactly this class of decision in a local ADR (`0001` tile
+eviction, `0002` dirty-tile footprint math, `0003` staleness fingerprint —
+all written before their implementations landed). Recommend the unit-of-
+decision question be settled via a cube_bathymetry ADR either as a prerequisite
+to plan-task or as an early deliverable inside the same issue/PR, rather than
+left to be decided ad hoc during implementation.
+
+The issue's own scope section already lists four non-trivial deliverables
+(decide the unit, decouple sheet-vs-store-tiling, a storage estimate against
+real Shoals data, and verification against the existing mixed-level pyramid
+machinery). That's plausibly one PR if the decoupling approach stays additive
+(e.g., running multiple `GeoMapSheet`s per import rather than reworking the
+accumulator), but if the accumulator itself needs restructuring, splitting the
+design decision from the implementation is worth considering at plan-task
+time.
+
+**Right repo?** Yes — `import_bag` and `GeoMapSheet`/`ImportAccumulator` are
+owned by `cube_bathymetry`; the policy half correctly landed in
+`unh_marine_autonomy` (#369, already merged) since it's domain policy, not
+this repo's plumbing.
+
+**Dependencies**: None blocking. `unh_marine_autonomy#369` (policy) and
+`unh_marine_autonomy#331` (mixed-level native-wins pyramid) are both already
+merged per the issue body. `unh_marine_autonomy#371` (live-costmap read-side
+fan-out) and `#376` (unbounded store residency) are sibling follow-ups on the
+*read* side and don't gate this *write*-side, offline-only issue — confirmed
+the issue explicitly scopes to "Offline `import_bag` / `processed` only."
+`unh_marine_autonomy#366` (import ledger) correctly gates only the *retroactive
+reprocess* of existing level-10 stores, which this issue explicitly excludes.
+
+### Principle Alignment
+
+| Principle | Status | Notes |
+|---|---|---|
+| Capture decisions, not just implementations | Action needed | The unit-of-decision question (per-tile / per-region / two-pass) is an architecture decision this repo's own convention (ADR-0001/0002/0003) would normally capture as a local ADR before implementation lands, not decide inline in code. |
+| A change includes its consequences | Action needed | See ADR Applicability and Consequences below — `docs/decisions/0003-staleness-fingerprint.md`'s `build_fingerprint.json` schema has a scalar `cell_size_m` field, and `batch_regen_main.cpp:827` takes a single `regen_config.cell_size_m`. Neither is mentioned in the issue's scope, but a mixed-level store breaks the "one cell size describes this store" assumption both currently encode. |
+| Improve incrementally | Watch | Four listed deliverables in one issue; fine if the decoupling stays additive (multiple sheets), worth re-checking at plan-task if it turns into an accumulator rework. |
+| Only what's needed | OK | Issue explicitly declines to re-open policy questions already pinned at the #369 checkpoint, and explicitly excludes retroactive reprocessing — appropriately scoped down. |
+| Test what breaks | Watch | The "verify mixed-level output against existing machinery" bullet is the right instinct (the issue itself says this "needs demonstrating rather than assuming") — recommend this verification be a hard requirement of the same PR, not a follow-up, given it touches live survey stores (Shoals/Massabesic per the memory record). |
+| Human control and transparency | OK | Policy inputs (driver, no floor, clamp bounds) are traceable to a cited operator checkpoint in #369; the level-boundary table in the issue is a clear operator-facing artifact. |
+| Workspace vs. project separation | OK | Correctly split: domain policy in `unh_marine_autonomy`, writer plumbing here in `cube_bathymetry`. |
+
+### ADR Applicability
+
+| ADR | Triggered | Notes |
+|---|---|---|
+| workspace ADR-0001 (Adopt ADRs) | Yes | A genuine design decision (decoupling store tiling from the single `GeoMapSheet` resolution) is being made; recommend a cube_bathymetry-local ADR per this repo's established pattern. |
+| cube_bathymetry ADR-0002 (dirty-tile footprint math) | Yes (consequence) | Its L10-cell geometry reasoning (`batch_regen::addBatch`, `boundsForSoundings`) assumes tiles at one fixed level; a mixed-level store from this issue is a new input `batch_regen`'s dirty-tile math wasn't designed against. Not mentioned in the issue. |
+| cube_bathymetry ADR-0003 (staleness fingerprint) | Yes (consequence) | `build_fingerprint.json`'s `cell_size_m` field ("the `--resolution` value used; a different resolution invalidates the store entirely") is a single scalar per store. A mixed-level store needs this schema extended (per-tile or per-region cell size) or the incompatibility needs to be an explicit, documented limitation. Not mentioned in the issue. |
+| workspace ADR-0002 (worktree isolation) | Yes (routine) | Already satisfied — work is happening in the assigned worktree/branch. |
+
+### Consequences
+
+- `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md`'s
+  `build_fingerprint.json` schema (`cell_size_m` as a single float) needs
+  updating or an explicit compatibility note once a store can hold mixed
+  native levels from one import.
+- `batch_regen_main.cpp` takes a single `regen_config.cell_size_m` and (per
+  ADR-0002) reasons about dirty-tile overlap at one fixed L10 resolution.
+  Whether `batch_regen`'s incremental-regen path needs to become
+  level-aware, or is explicitly declared out of scope with a follow-up filed,
+  should be decided rather than left implicit — a store built by a
+  depth-adaptive `import_bag` run and then touched by `batch_regen` under the
+  current single-resolution assumption is a plausible silent-mismatch path.
+- These two items are not blocking for filing/starting the issue, but should
+  be either folded into this issue's scope or explicitly called out as
+  follow-up work in the issue body/plan, per "a change includes its
+  consequences."
+
+### Actions
+- [ ] Settle the unit-of-decision design question (per-tile / per-region /
+      two-pass) via a cube_bathymetry ADR, following this repo's ADR-0001/
+      0002/0003 precedent, before or as an early step of implementation.
+- [ ] Address or explicitly scope out the ADR-0003 `build_fingerprint.json`
+      scalar `cell_size_m` consequence for mixed-level stores.
+- [ ] Address or explicitly scope out the `batch_regen`/ADR-0002 single-
+      resolution dirty-tile-math consequence for mixed-level stores.
+- [ ] Keep the "verify mixed-level output against existing pyramid/store
+      machinery" bullet as a hard requirement of this PR, not a deferred
+      follow-up.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Sonnet`
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-09-10 14:59 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `6e45b3c`
+**Branch**: feature/issue-143 at `6e45b3c`
+**Phases**: single (a stacked-PR split point is named, but not preferred)
+
+### Summary
+
+The unit-of-decision question the Issue Review left open is **settled in the plan**
+per the operator's instruction (no separate ADR, no design issue): the unit is a
+**GGGS quadtree cut** — the emitted tile itself, resolved top-down from
+`coarsest_level` (8), descending wherever a grid's shallowest depth implies a finer
+level, terminating at `finest_level` (14). `depthAdaptiveLevel(double)` keeps its
+**current scalar signature** — the unit is answered by the caller's descent, and the
+scalar it is fed is the shallowest depth in the candidate tile, which is already the
+signature's documented contract. Per-region-at-a-fixed-decision-level was rejected
+because exact nesting forces the decision grid to level 8 (3.48 km), where one 2 m
+shoal would drag 3.48 km of ground to level 14 (256x the level-10 storage).
+
+Both consequences the review found are planned **in this PR**, not deferred:
+
+- **ADR-0003 fingerprint**: `schema_version` 1 -> 2, scalar `cell_size_m` replaced by
+  a `tiling` object carrying mode, policy and `level_plan_sha256`. Cheaper than the
+  review assumed — `build_fingerprint.h/cpp` **does not exist yet** (verified by grep;
+  `batch_regen_main.cpp` has no `--incremental` path), so this is an amendment before
+  first implementation, with no on-disk migration.
+- **ADR-0002 / batch_regen**: `BatchRegen::SheetFactory` becomes level-parameterised,
+  scatter/gather route through the plan, and `dirtyL10Tiles` gains a plan-aware
+  `dirtyTiles` overload that rolls up to plan leaves. The one-L14-tile margin survives
+  and is re-argued: `finest_level` (14) equals the survey index's footprint level, so
+  no leaf is ever finer than the index.
+
+Two consequences the review did **not** name were found and folded in: `SheetFactory`'s
+single-level signature, and a halo/persist-filter rule (route each batch to every level
+whose leaves its influence-expanded bounds touch; never persist a non-leaf grid) without
+which level seams would lose the neighbouring region's soundings.
+
+Mixed-level verification is a **hard requirement** of the PR, as the review asked: a
+single-level equivalence test (policy pinned to one level must produce a byte-identical
+store to today's path) is the load-bearing guard, plus a pyramid-composition test over
+`build_depth_overviews`.
+
+The storage estimate is grounded in the real Shoals `processed` layer
+(`~/data/world/depths/processed`: 69 native level-10 tiles, 167 MB, 2.42 MB/tile
+observed vs 14.7 MB dense) and expressed in uma#376's terms rather than a second
+accounting. The recon phase's report also surfaces the area that lands **coarser** than
+today's level 10 (the pinned ladder returns level 9 between ~36 m and ~72 m) so that
+resolution loss is visible to the operator before an import runs.
+
+### Open questions
+- [ ] Recon phase: flat sounding spill (~4.4 GB scratch for a 10 h M3 run) to avoid a
+      second projection pass, vs re-reading the bags. Plan defaults to the spill with a
+      `--recon-reproject` escape hatch.
+- [ ] Whether `--depth-adaptive` reaches
+      `unh_echoboats_project11/scripts/build_bathy_store.sh` here or in a follow-up
+      (plan assumes follow-up — other repo, and that script is already known-stale).
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 08:33 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `6e45b3c`
+**PR**: PR-less (`--issue` mode; branch `feature/issue-143`, plan not pushed)
+**Verdict**: changes-requested
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Needs work | 14 files, 2 new sources, 3 test files, 2 ADR amendments, plus an accumulator rework — the exact condition the Issue Review named as its split trigger ("worth re-checking at plan-task if it becomes an accumulator rework"). The plan names a stacked split but declines it. |
+| Issue alignment | Good | All four issue deliverables are addressed, including the unit-of-decision (settled in-plan per the operator's instruction) and the Shoals-grounded storage estimate. |
+| File targeting | Needs work | No `marine_mbes_backscatter_store` file appears, yet the plan asserts one backscatter store per level (finding 1). `test_tile_eviction_rss.cpp` is untouched despite the RAM-bound change (finding 5). `build_fingerprint.h/cpp` is absent yet a mitigation depends on it (finding 3). |
+| Consequences | Needs work | The table is thorough and finds two the Issue Review missed, but three real consequences are unlisted: the backscatter store's on-disk single-level contract, the multiplied resident-tile RAM budget, and `finest_level` escaping the survey index's footprint level. |
+| Documentation & instruction impact | Good | Section present, non-silent, names the stale README/ADR/comment sites, and frames the two instruction items (`.agents/README.md` absence, inert `tool_version`) as follow-up candidates rather than in-PR edits. |
+| Principle alignment | Needs work | "A change includes its consequences" — see above. "Human control and transparency" is well served by the recon report, including the resolution *lost* below level 10. "Capture decisions" — the decision currently lives only in a work-plan file (finding 7). |
+| ADR compliance | Needs work | 0002/0003 amendments are correctly scoped; the 0002 margin re-argument is sound *only* while `finest_level <= 14`, which the plan itself makes tunable (finding 2). The ADR-0007 row is asserted, not verified (finding 1). |
+| ROS conventions | N/A | Offline CLI tools and pure library code; no topics, QoS, parameters, or lifecycle. |
+
+### Findings
+- [ ] (must-fix) `MbesBackscatterStore` holds **all tiles at a single GGGS level fixed at construction** (`mbes_store.hpp:51,67-70`), and `load()` scans `<dir>/survey/` and **throws on level mismatch** (`tile_io.hpp:93-96`). Writing one accumulator per level into the single `bs_store_dir` therefore produces a backscatter store that cannot be read back. The plan's ADR-0007 row asserts cell-alignment but names no per-level directory scheme, no `marine_mbes_backscatter_store` change, and no uma-side consequence. Either give the backscatter store a per-level layout (a cross-repo change to scope), or explicitly exclude backscatter from `--depth-adaptive` and refuse the flag combination. — `plan.md:211`
+- [ ] (must-fix) `--depth-adaptive-finest` is exposed as a tunable, but GGGS has levels 0-20 (`level_spec.h:108-113`), so a `finest_level > 14` is constructible. ADR-0002's margin re-argument — and the whole dirty-set conservatism — rests on "no leaf is ever finer than the survey index's level-14 footprint". A leaf finer than the index silently breaks the conservative-superset guarantee (a missed tile is a correctness failure, per ADR-0002). Validate `finest_level <= 14` at startup alongside the other policy validation, and state the coupling in the ADR-0002 amendment. — `plan.md:131-135,146-149`
+- [ ] (must-fix) The orphan-tile mitigation (`--depth-adaptive` refuses to write into a store whose fingerprint records a different `level_plan_sha256`, unless `--replace-tiling`) depends on `build_fingerprint`, which the plan itself establishes **does not exist** and which this PR does not implement (step 8 amends the ADR only; no `build_fingerprint.h/cpp` in Files to Change). As written the mitigation is inoperative and the additive-merge hazard is unguarded. Either implement the minimal fingerprint read/write here, or drop the claimed mitigation and surface the hazard in the recon report and README instead. — `plan.md:225`
+- [ ] (must-fix) The recon phase keys the level decision on the **raw minimum sounding depth** per level-14 grid. The shallowest raw sounding is the single most blunder-prone statistic in the dataset (a flier, fish, or bubble), and CUBE's own blunder rejection has not run at recon time. One outlier drags its ~54 m grid to level 14 — 256x the level-10 storage for that ground. Add an outlier guard (a low percentile rather than the strict min, and/or a minimum sounding count per decision grid) and test it; a pure `min` over unvetted soundings is not a defensible decision input for a store-sizing policy. — `plan.md:56-62`
+- [ ] (must-fix) `max_resident_tiles` bounds RAM for **one** accumulator. `MultiLevelAccumulator` holds one per level present in the plan (up to 7), so the effective resident-tile ceiling becomes N x the operator-configured bound, with per-tile cost unchanged (tiles are 960x960 cells at every level). Bounded RAM is a headline property of ADR-0001 and the README comparison table, and `test/test_tile_eviction_rss.cpp` guards it. Specify how the budget is divided across levels and extend that test; neither appears in the plan. — `plan.md:116-124`
+- [ ] (suggestion) Scope: the Issue Review set an explicit split trigger ("fine if the decoupling stays additive; worth re-checking at plan-task if it becomes an accumulator rework"), and the plan *is* an accumulator rework plus a `batch_regen` rework. The plan's own named split (steps 1-6 + 8 + import-side tests as PR1; step 7 as stacked PR2) is viable by its own argument, and `--depth-adaptive` being off by default means PR1 alone leaves no degraded state for fixed-level stores. Recommend the split become the default with operator sign-off, rather than the fallback. — `plan.md:256-264`
+- [ ] (suggestion) The quadtree-cut decision, its three rejected alternatives, and the halo/persist-leaf rule currently live only in `.agent/work-plans/issue-143/plan.md`. The operator ruled out a new ADR, which makes it the **amendments'** job to carry the decision — but steps 7 and 8 describe only the mechanical changes. Say explicitly which shipped document (the ADR-0002/0003 amendment text, or the README depth-adaptive section) carries the decision and the rejected alternatives. — `plan.md:41-78,197`
+- [ ] (suggestion) `--replace-tiling` appears only inside a Consequences-table cell: it is absent from the Approach steps, the Files to Change table, and the Testing table, despite gating whether an import may overwrite a differently-tiled store. Promote it to a numbered step with a test. — `plan.md:225`
+- [ ] (suggestion) `level_plan_sha256` becomes a staleness key in the ADR-0003 v2 schema, so the canonical-JSON serialisation must be deterministic across runs and platforms (map iteration order, float formatting, key ordering). `test_level_plan` covers the cut, disjointness, NaN skip and policy throws, but not the JSON round-trip or sha stability. Add it. — `plan.md:98-99,186`
+- [ ] (suggestion) "byte-identical" is the load-bearing equivalence assertion but is undefined in scope. Say what is compared: tile raster bytes only, or the whole store directory including `registry.json` and GeoTIFF header metadata (GDAL can emit writer-version tags). `StoreMetadata::date` is operator-supplied acquisition date, not run time, so store-wide comparison is plausible — but it should be stated, not assumed. — `plan.md:187`
+- [ ] (suggestion) `dirtyL10Tiles` already takes a `store_level` parameter (`survey_index_query.h:106`, called at `batch_regen_main.cpp:394`), so its name is already a misnomer for any fixed-level store. Adding a parallel plan-aware `dirtyTiles` leaves two similarly named entry points with a stale name on the older one. Prefer renaming the existing one (e.g. `dirtyTilesAtLevel`) in the same PR. — `plan.md:141-147`
+- [ ] (suggestion) Terminology drift the plan's README edits should fix while in the area: `README.md:98-99` says uma#248 collapsed the layers into `survey` + `reference`, but uma's `marine_bathymetry_store/README.md:137-140` records the current on-disk names as `processed/`, `draft/`, `reference/`, `chart/`, with a legacy `survey/` **auto-migrating to `processed/`**. `store_import.cpp` writes `SourceLayer::Processed`. The plan's own prose uses `processed`/`draft` correctly; the repo README does not. — `plan.md:180`
+- [ ] (suggestion) Two small internal inconsistencies in the algorithm text: step 3 writes `implied <= L` where `depthAdaptiveLevel` returns a `gggs::Level` (needs `.level()`), and step 7's "for a footprint tile *coarser* than a leaf, descend to every leaf beneath it" branch is unreachable while footprints are level-14 and `finest_level == 14` — say whether it is defensive for a future finer index or drop it. — `plan.md:57-59,143-145`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 08:46 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `52b25dd` (revision 2)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-143`, plan not pushed)
+**Verdict**: changes-requested
+
+Round 2. All five r1 must-fix findings and all eight r1 suggestions are
+resolved or deliberately declined by the operator (the PR split); the split
+is not re-raised. The findings below are new consequences the revision
+introduced — three of them (2, 3, 4) are data-loss or data-refusal paths in
+the newly added `persist_leaves` / `--replace-tiling` / fingerprint-guard
+machinery.
+
+### r1 disposition (verified, not re-litigated)
+
+| r1 finding | Disposition |
+|---|---|
+| 1 backscatter single-level | Resolved as prerequisite — uma#383 verified filed and OPEN, with the same `mbes_store.hpp:51` / `tile_io.hpp:93-96` evidence. |
+| 2 `finest_level > 14` | Resolved — startup validation + ADR-0002 invariant (see new finding 6 on how it is enforced downstream). |
+| 3 fingerprint inoperative | Resolved — minimal `build_fingerprint.h/cpp` in scope, `--replace-tiling` promoted to step 6b with tests (see new findings 3, 4). |
+| 4 raw-min decision depth | Resolved — percentile + min-count guards, tested (see new finding 5 on the rollup spec). |
+| 5 N× RAM budget | Resolved in intent — one shared store-wide budget (see new finding 1 on implementability). |
+| 6 split (suggestion) | Declined by the operator. Not re-raised. |
+| 7-13 suggestions | All taken: decision's shipped home named (ADR-0002 amendment), canonical JSON + sha determinism test, `--replace-tiling` promoted, "byte-identical" defined, `dirtyL10Tiles` → `dirtyTilesAtLevel`, README layer-name drift, `.level()` fixed and the unreachable descend branch dropped. |
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good (operator-settled) | Unchanged size; the single-PR shape is the operator's decision and is out of review scope this round. uma#383 is correctly externalised. |
+| Issue alignment | Good | All four issue deliverables still covered; the recon report still carries the storage estimate and the below-L10 resolution loss. |
+| File targeting | Needs work | `test_survey_index_query.cpp` (named in the Consequences table for the rename) is missing from Files to Change, as is the new public `ImportAccumulator` eviction API that step 4 depends on (finding 1). |
+| Consequences | Needs work | Three new ones from r2's own additions: the leaf filter's effect on seam-tile coverage (2), the store-wide clear on an accumulate-across-surveys layer (3), and the store-wide fingerprint comparison refusing disjoint-area imports (4). |
+| Documentation & instruction impact | Good | Unchanged and still non-silent. |
+| Principle alignment | Needs work | "A change includes its consequences" — findings 2-4. "Never work around a bug we own" is respected. "Human control and transparency" improved further (guard + report). |
+| ADR compliance | Needs work | ADR-0001's lossless persist-then-drop and `evicted_` bookkeeping must survive MultiLevelAccumulator ownership of eviction (finding 1); ADR-0002's margin argument is now enforced by a runtime check whose form matters (finding 6). |
+| ROS conventions | N/A | Offline CLI tools and pure library code. |
+
+### Findings
+- [ ] (must-fix) Global-coldest eviction across per-level accumulators is not implementable from the existing last-touch data. `GeoMapSheet::touch_counter_` is a **per-sheet** monotonic counter (`geo_map_sheet.h:228-231`, incremented at `geo_map_sheet.cpp:165,200`), so `lastTouchOf` values from two sheets are incomparable — a level with fewer touches always has the smaller numbers and its tiles always look coldest. Specify a shared touch clock (one counter injected into every sheet, or a MultiLevelAccumulator-side touch sequence recorded per (level, grid)). Also: step 4's `persistAndDrop(grid)` and the resident-set/last-touch accessors are **new public API** on `ImportAccumulator` that the Files-to-Change row for `store_import.h` does not mention, and the primitive must preserve the two invariants `evictColdTiles` holds today — a persist that throws leaves the tile **resident** (`store_import.cpp:1069-1077`), and a dropped tile is recorded in `evicted_` so `addBatch`'s reload-before-add reloads it (`store_import.cpp:1103-1106`). — `plan.md:176-190`
+- [ ] (must-fix) The `persist_leaves` filter drops tiles today's path writes, which also makes the load-bearing single-level equivalence test unpassable as written. A grid with no soundings is "skipped, not emitted" (algorithm step 4), so the leaf set is keyed on sounding **positions** — but `GeoMapSheet::gridIndicesForSoundings` deliberately includes near-seam neighbour tiles and a sounding "can also spread into neighbour tiles" (`store_import.cpp:1089-1090,1126-1127`), and today's fixed-level import persists those tiles with their real influence-derived cells. Under step 5 they are non-leaves: never persisted, freely dropped. With `coarsest == finest == 10` the adaptive store would therefore be **missing seam tiles** the fixed path writes — not byte-identical, and a genuine coverage regression. Define the leaf set over the influence-expanded sounding bounds (the same window `gridIndicesForSoundings` uses), or state and document the coverage change explicitly. — `plan.md:73-76,191-197`
+- [ ] (must-fix) `--replace-tiling` "clears the `processed/` layer directory" is a destructive operation on a layer that **accumulates across surveys**. The bathy store's `processed/` layer is a single geodata collection that successive imports add to (`importTiles` merges; `save()` never deletes) — clearing it to re-tile one survey area deletes every other survey's tiles in that store, and the same applies to the backscatter `survey/` dir. Scope the clear to tiles overlapping the new plan's footprint, print the exact list of tiles it will delete (dry-run / report before the import starts), and require an explicit confirmation rather than a bare flag. — `plan.md:207-217`
+- [ ] (must-fix) The fingerprint guard's granularity refuses legitimate additive imports. `level_plan_sha256` is a **store-wide** hash of the whole cut, so importing a *new, disjoint* survey area into an existing depth-adaptive store always yields a different sha and is refused — with the only offered remedy being the destructive `--replace-tiling` of finding 3. The orphan hazard exists only on ground covered by **both** plans. Compare per-overlap (refuse only when the new plan assigns a different level to ground the store already holds), or record the tiling per leaf/region in the fingerprint so a disjoint-area import proceeds additively. — `plan.md:207-217,250-258`
+- [ ] (suggestion) The decision-depth rollup is internally inconsistent. Step 1 says a grid below `--depth-adaptive-min-count` "inherits its parent's decision" and "contributes its soundings to the parent's reservoir", but reservoirs are described as existing only at level 14 and step 2's rollup is a **min over children's decision depths**, not a pooled reservoir. Say which: coarse grids keep pooled reservoirs (percentile recomputed at each level), or the min-rollup simply skips undecided children. Also name the safety direction of the min-count rule — a genuinely shoal level-14 grid with fewer than 25 soundings is stored coarse, which is the shoal-biased policy's *unsafe* direction. — `plan.md:56-72`
+- [ ] (suggestion) Say that `dirtyTiles(plan)` **throws** rather than `assert`s the "no footprint tile coarser than a leaf" invariant. The footprint level is read per row from the survey-index DB and is explicitly allowed to be mixed (`survey_index_query.cpp:192-193` "an index that stores per-sensor native levels"), so a static `finest <= 14` check at import startup does not establish it for `batch_regen` against an arbitrary index; and `assert` is compiled out under `NDEBUG`. `ancestorAtLevel` already throws `std::runtime_error` on exactly this case (`survey_index_query.cpp:73-88`) and the dry-run's catch falls back to full regen — reuse that path and say so. — `plan.md:232-245`
+- [ ] (suggestion) The recon spill needs a home and a space check. The existing scratch dir is created under `std::filesystem::temp_directory_path()` (`store_import.cpp:449-451`), which on many hosts is a tmpfs — a ~4.4 GB sounding spill would land in RAM, defeating the bounded-RAM property, or hit ENOSPC hours into an import. Add an explicit `--scratch-dir` (defaulting beside the output store, not `/tmp`), and check free space against the projected spill size before phase 1 starts. — `plan.md:161-167`
+- [ ] (suggestion) Recon's own RAM is the one unbounded structure in a tool whose headline property is bounded RAM: the reservoir is bounded *per grid*, but the number of touched level-14 grids scales with surveyed area (~54 m grid ⇒ ~340 grids/km²). State the per-grid reservoir cap and the resulting bytes per km², so the operator can size a multi-day survey. — `plan.md:56-62,161-167`
+- [ ] (suggestion) Per-level `finalize` writes the store-level provenance sidecars (`registry.json`, backscatter metadata) once per accumulator (`store_import.cpp:1166-1180`). Say which accumulator owns that write — or have `MultiLevelAccumulator` do it once after finalising all levels — so the surviving sidecar is chosen, not whichever level finished last. — `plan.md:176-190`
+- [ ] (suggestion) Files to Change omits `test_survey_index_query.cpp`, which the Consequences table itself names as a caller of the renamed `dirtyL10Tiles`. — `plan.md:262-283,342`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 11:06 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `ee5af01` (revision 3)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-143`, plan not pushed)
+**Verdict**: changes-requested
+
+Round 3, after the operator-led design re-base. The six re-based points are
+treated as settled and are not re-litigated. The findings below are (a) two
+r2 items the revision does not actually resolve, and (b) new internal
+inconsistencies in the revision's own material — the count grid, the
+required-vs-achieved mapping, the quadtree prefix, and the equivalence test's
+pinned parameter.
+
+### r2 disposition (verified against the code, not re-litigated)
+
+| r2 finding | Disposition |
+|---|---|
+| 1 shared touch clock | **Resolved.** `touch_counter_` confirmed per-sheet (`geo_map_sheet.h:228-231`); the injected optional `shared_ptr<atomic<uint64_t>>`, the named `residentTiles()`/`persistAndDrop()` API on the `store_import.h` row, and the two preserved invariants (throwing persist leaves the tile resident; dropped tiles recorded in `evicted_`) all appear. |
+| 5 RAM budget | **Resolved.** One store-wide `max_resident_tiles` with `MultiLevelAccumulator`-owned global eviction; per-accumulator eviction disabled by `max_resident_tiles = 0`, which matches `store_import.cpp:1050`'s early return. `test_tile_eviction_rss` carries a mixed-level case. Recon RAM now quantified separately. |
+| 2 `persist_leaves` seam loss | **Not dissolved — inverted.** See finding 3. |
+| 3 `--replace-tiling` | Genuinely dissolved (the flag is gone). |
+| 4 store-wide plan hash | Dissolved (the hash is gone); one residual documentation gap, finding 13. |
+| 5 (sugg.) decision-depth rollup | **Not addressed.** See finding 4. |
+| 7, 9, 10 (sugg.) | Taken: `--scratch-dir` + free-space check, single sidecar owner, `dirtyTiles` throws. |
+| 8 (sugg.) recon RAM | Partly taken (count grid quantified; reservoir still unstated — finding 11). |
+
+uma#383 and uma#386 verified OPEN with the titles the plan cites.
+
+### Findings
+- [ ] (must-fix) The default `--count-level 13` violates the plan's own startup validation `count-level >= finest` (default `finest_level` 14). It is also a real cap, not just a validation clash: achieved spacing is `(2λ+1)·R` with `λ >= 0`, so with R = a level-13 cell (0.113 m) the data can never *achieve* level 14 and the fine end of the ladder is unreachable through the achieved path. Reconcile the default, the validation direction, and the ladder's fine clamp. — `plan.md:140,289`
+- [ ] (must-fix) `achieved = fromCellSize(p95 of achieved spacing over g).level()` rounds the wrong way. `gggs::Level::fromCellSize` returns "the coarsest Level whose cells are AT OR FINER than `cell_size`" (`marine_autonomy/gggs/level.h:59-74`, `ceil` of the log2), so an achieved spacing of 0.33 m maps to level 12 (0.227 m cells) — finer than the data supports, the unsafe direction, and the opposite of the plan's own rule ("the level whose cell is **no finer than** the 95th-percentile level of aggregation"). Take the coarser neighbour explicitly. The same level-ordering slip appears in the `LevelPlan` API: `coverageDeficit()` is described as "tiles where required < achieved level", but the decision section defines the deficit as required being *finer* than achieved, i.e. `required > achieved` in level numbers. — `plan.md:153,238`
+- [ ] (must-fix) Routing is per **level**, emission is per **tile**, and the plan states there is no filter at persist time ("every tile an accumulator builds is persisted"). A batch is one ping (`import_bag_main.cpp:1293-1296`), so any swath whose influence-expanded bounds clip an emitted level-14 tile is handed in full to the level-14 accumulator, which then builds and persists level-14 tiles over the neighbouring plain that the level plan never emitted. r2's must-fix 2 is therefore not dissolved — it is inverted from under-production (dropped seam tiles) into over-production (fine tiles outside the plan), which breaks the plan report's storage estimate, the coverage-deficit accounting, and `test_level_plan`'s guarantee about what the store contains. Specify a per-tile admission rule at persist time, and state explicitly how it still keeps the near-seam neighbour tiles that `gridIndicesForSoundings` deliberately includes (`store_import.cpp:1089-1090,1103`) so single-level equivalence survives. — `plan.md:33,260-265`
+- [ ] (must-fix) `decision_depth[g]` is defined only per **level-14** grid (recon step 1), but the descent evaluates `depthAdaptiveLevel(decision_depth[g])` at every level from the coarsest down (step 3). No rollup rule is given, so the algorithm is not implementable as written for any `g` coarser than level 14. This is r2 suggestion 5, unaddressed in r3; r3 makes it sharper by dropping the min-count guard that the old rollup text leaned on. Say whether coarse grids pool their descendants' soundings and recompute the percentile, or take the min over children's decision depths — and name the safety direction of the choice. — `plan.md:143,151-153`
+- [ ] (must-fix) The descent root and the prefix invariant are hard-coded at level 8 ("Descend from each touched **level-8** grid"; "every emitted tile's ancestors up to **level 8** are also emitted", repeated in the `test_level_plan` row) while `coarsest_level` is a tunable whose default is 8. The single-level equivalence test sets `coarsest_level == finest_level == 10`: under a literal level-8 root it would emit levels 8, 9 and 10 and could not be byte-identical to today's fixed-level store. Make the root `coarsest_level` throughout, and say separately that the per-level-8 spill partition is a scratch-file grouping independent of `coarsest_level`. — `plan.md:151,159,365`
+- [ ] (must-fix) The equivalence test's pinned parameter is numerically wrong. Level 10's nominal cell is **0.906 m** (uma `depth_adaptive_level.hpp:53` ladder; `gggs::Level::cellSize()`), so `capture_spacing_scale = 0.5 / 0.91` yields a gate of 0.4978 m, not today's 0.5 m — every tile would differ and the load-bearing test fails by construction. Pin `0.5 / gggs::Level(10).cellSize()`. Related: `capture_spacing_scale` is a `Parameters` field with no CLI flag and no ROS parameter in the plan (today's `capture_distance_scale` has neither — `parameters.h:205` is its only site), so also say how the test sets it. — `plan.md:366`
+- [ ] (suggestion) The spill size estimate is low by ~1.7x and the lossless-replay requirement is unstated. `GeoSounding` is `gz4d::PositionDegrees` plus `Sounding`, and `Sounding` carries seven floats **and** a `geometry_msgs::msg::Point sonar_relative_position` (`sounding.h`) — roughly 80 B, not 48 B, so a 10 h M3 day is ~7.4 GB, not 4.4 GB. The free-space check is sized from this number. A spilled subset would also have to keep `intensity`, `beam_angle`, `slant_range` and `sonar_relative_position` or the backscatter half of the byte-identical assertion cannot hold (the angular-response correction reads them). — `plan.md:250`
+- [ ] (suggestion) The compute consequence of parents-alive is not quantified anywhere. Storage is bounded and stated (the 4/3 geometric series), but over a shoal the full prefix is levels 8 through 14 — seven native levels — so that ground is CUBE-estimated up to seven times and every ping there routes into up to seven accumulators. "one extra estimate per level stacked over a point (two or three on a slope)" understates the shallow case, and the Consequences table has no import-runtime row. — `plan.md:169,399-411`
+- [ ] (suggestion) Fingerprint schema ambiguity for `mode: fixed`. The `tiling` object marks `cell_size_m` as "fixed only" but does not say whether `policy` — which now carries `capture_spacing_scale` — is written in fixed mode. The capture-gate change alters fixed-level output too, so a fixed-mode fingerprint that omits the capture policy would fail to mark existing fixed stores stale, which is exactly the job ADR-0003's `cell_size_m` row does today (`docs/decisions/0003-staleness-fingerprint.md:44,62-63`). — `plan.md:308-312`
+- [ ] (suggestion) The hole criterion contradicts the chosen `k`. The Context says a node at a cell coarser than `2 × 0.05·depth` has uncaptured corners — that is the mid-edge (`0.5·cell`) criterion, the one the plan elsewhere rejects as "node-centric". Under the adopted half-diagonal rule (`k = 0.71`) the threshold is `cell > capture / 0.71`, i.e. about 1.41x, not 2x. — `plan.md:81`
+- [ ] (suggestion) r2 suggestion 8 is only half carried: the count grid now has a per-km² figure, but the per-level-14-grid depth reservoir is still described only as "bounded" with no cap and no bytes/km², and it is the other structure that scales with surveyed area. — `plan.md:246`
+- [ ] (suggestion) The spill's claimed bound is close to vacuous. A level-8 grid spans 3478.7 m, so most single-day surveys fall inside one or two of them and "the replay is bounded by one coarse tile's soundings" bounds nothing useful. Either partition the spill finer or drop the claim and rest the residency argument on eviction alone. — `plan.md:251-253`
+- [ ] (suggestion) Removing the plan hash (r2 must-fix 4, correctly dissolved) leaves one case undocumented: a re-import over the **same** ground under a different count-level or policy leaves the earlier import's finer native tiles in place, and a fine-LOD reader prefers those stale partial tiles over the newer, coarser, complete estimate. Not asking to reinstate the guard — asking the README depth-adaptive section and the ADR-0002 amendment to state what a re-import over already-covered ground leaves behind. — `plan.md:33-36,402`
+- [ ] (suggestion) `--count-level` has a validated lower bound but no upper one (GGGS runs to level 20), and the Calder citation does not support the default as paired: "R of about a quarter of the finest spacing you expect" at level 13 (0.113 m) implies a finest expected spacing of ~0.45 m, i.e. level 11, not the `finest_level` 14 the plan also defaults to. Say which reading the default follows. — `plan.md:140,433-435`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Plan Review
+**Status**: complete
+**When**: 2026-09-14 11:16 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Plan**: `.agent/work-plans/issue-143/plan.md` at `9e7a8dd` (revision 4)
+**PR**: PR-less (`--issue` mode; branch `feature/issue-143`, plan not pushed)
+**Verdict**: changes-requested
+
+Round 4. The six operator-confirmed design points are settled and not
+re-litigated. All six r3 must-fixes are addressed; the two findings below are
+the residue of r3 must-fix 3's fix — the *newly added* admission-predicate and
+touched-set material, checked against `geo_map_sheet.cpp` and
+`store_import.cpp`, does not yet do what the plan claims for it. Everything
+else verified resolved.
+
+### r3 disposition (verified against the code, not re-litigated)
+
+| r3 finding | Disposition |
+|---|---|
+| 1 `--count-level` default vs validation | **Resolved.** Default = `finest_level`; `finest <= C <= 20`; the achieved-path reachability argument (`(2λ+1)·R`) and the deliberate departure from Calder's "quarter of the finest expected spacing" are both stated. |
+| 2 `levelNoFinerThan` rounding + deficit direction | **Resolved.** Matches `gggs/level.h:59-74` (`fromCellSize` = coarsest at-or-**finer**, `ceil` of the log2); the helper takes `fromCellSize(s).level() - 1` unless exact, and the test row pins 0.33 m → 11. `coverageDeficit()` is now `required > achieved` in both places. |
+| 3 per-tile admission / touched set | **Addressed in intent, incomplete in mechanism** — findings 1 and 2. |
+| 4 decision-depth rollup | **Resolved.** Min over children, percentile computed once at level 14, safety direction (shoal-biased) named; coarse grids never pool. |
+| 5 `coarsest_level` root | **Resolved** in the algorithm, the prefix invariant and the test row; the spill partition is explicitly independent (now level 10). One stale mention — finding 6. |
+| 6 equivalence pin | **Resolved** as far as the arithmetic goes (`0.5 / gggs::Level(10).cellSize()`, and `--capture-spacing-scale` now exists on both tools so the test can set it). One unstated precondition — finding 4. |
+| 7-14 (suggestions) | All carried: 80 B/7.4 GB spill with the full `GeoSounding` field list; the compute-multiplier section and Consequences row; `policy` written in both fingerprint modes; the 1.41x hole criterion; the reservoir's 256 B/grid and ~90 KB/km²; the level-10 spill partition replacing the vacuous level-8 bound; the re-import-over-covered-ground paragraph; the count-level upper bound and the R-reading. |
+
+uma#383 and uma#386 re-verified OPEN with the cited titles.
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good (operator-settled) | Unchanged; the single-PR shape is the operator's decision and out of review scope. |
+| Issue alignment | Good | All four deliverables still covered; the unit of decision is settled in-plan with its rejected alternatives. |
+| File targeting | Needs work | The `geo_map_sheet` row scopes the admission predicate to `gridIndicesForSoundings` alone, which is not the creation site (finding 1). |
+| Consequences | Good | Compute multiplier, re-import-over-covered-ground, and the fixed-mode `policy` key are all now carried. |
+| Documentation & instruction impact | Good | Unchanged, non-silent, candidates framed as proposals. |
+| Principle alignment | Needs work | "Test what breaks" — the load-bearing equivalence test is falsifiable only if the emitted set really reproduces today's persisted set at a single level (findings 1, 2). Elsewhere good. |
+| ADR compliance | Good | 0002/0003 amendments carry the decision; `finest <= 14` invariant re-argued; ADR-0001 persist-then-drop invariants named. |
+| ROS conventions | N/A | Offline CLI tools and pure library code. |
+
+### Findings
+- [ ] (must-fix) The admission predicate is scoped to the wrong function, so it cannot deliver "never created, never estimated, never persisted". `gridIndicesForSoundings` only *enumerates* (`geo_map_sheet.cpp:115-130`); creation happens in `addSoundings` → `getOrCreateGridsIn(boundsForSoundings(...))` (`geo_map_sheet.cpp:102,147-168`), and `ImportAccumulator::finalize` persists **every** grid in `sheet_.grids()` (`store_import.cpp:1157-1165`). Filtering only the enumerator leaves the level-14 accumulator creating and persisting exactly the off-plan tiles r3 finding 3 described, while *also* skipping their reload/seed pass (`store_import.cpp:1103-1120`) — a worse state than no predicate. The predicate must gate the shared `boundsForSoundings` consumers together; the source comment at `geo_map_sheet.cpp:41-43` exists precisely because those two paths must never drift. Say so in the Approach step and in the `geo_map_sheet.h/cpp` Files-to-Change row. — `plan.md:314-320,411`
+- [ ] (must-fix) The touched set is computed with one influence radius per count cell, but the influence radius is **level-dependent**: `Parameters::influenceRadius` floors at `distance_scale` (`parameters.cpp:100-107`), which `setGridResolution` sets to the sheet's node spacing (`parameters.cpp:112-115`) — 3.62 m at level 8 versus 0.057 m at level 14 — and `boundsForSoundings` adds a further one-**cell** floor at the sheet's own level (`geo_map_sheet.cpp:62-72`). A single recon-time radius therefore under-expands the touched set at every level coarser than the one it was computed at, so coarse tiles that a fixed-level import at that level would populate can be excluded from the emitted set — the same seam loss as r2 must-fix 2, re-entering through admission, and it breaks single-level equivalence for any `coarsest == finest == L` where the floor binds. Expand per level: `max(recorded radius, gggs::Level(L).cellSize())` plus one cell at L, or record the radius per level. — `plan.md:161-167,314-320`
+- [ ] (suggestion) The equivalence claim is stated against the wrong set. Today's import *creates* every grid in the batch's expanded **bounding rectangle** (`GridAreaIterator` over `boundsForSoundings`, `geo_map_sheet.cpp:122-125`), which is strictly larger than a union of per-sounding influence discs — but an all-no-data tile is never written (`store_import.cpp:505-509`), so what the emitted set must reproduce is the **persisted** set, not the created set. Restate the invariant as "the emitted set at a level is a superset of the grids today's import persists, and admitted-but-empty tiles write nothing", which is both true and sufficient for the byte-identical test. — `plan.md:165-167`
+- [ ] (suggestion) The equivalence pin carries an unstated precondition. `GeoMapSheet` builds `parameters_` from the **requested** cell size, not the GGGS-snapped nominal (`geo_map_sheet.cpp:76`), so `distance_scale` equals `--resolution`, while the pin `0.5 / gggs::Level(10).cellSize()` assumes it equals 0.906 m. A fixed-level baseline run with `--resolution 1.0` would give a 0.552 m gate and the test fails by construction again. Either pin `capture_spacing_scale = 0.5 / <the sheet's distance_scale>`, or state that both sides construct the sheet with `gggs::Level(10).cellSize()`. — `plan.md:465`
+- [ ] (suggestion) Two undefined edges in the new LoA material: (a) `levelNoFinerThan(s)` is `fromCellSize(s).level() - 1`, which underflows at level 0 and has no stated clamp to `coarsest_level`; (b) the summed-area table is built **per count-grid tile**, so a box near a tile edge is truncated and a sparse cell may never reach `n_req` for any λ inside the tile — say what λ saturation yields (presumably `coarsest_level`, reported as coverage deficit, which is the safe direction) and test it. — `plan.md:170-180`
+- [ ] (suggestion) The `import_bag_main.cpp` Files-to-Change row still says "per-L8 spill" while Approach step 4 (correctly, per r3 finding 5) partitions the spill per level-10 grid. — `plan.md:418`
+- [ ] (suggestion) The decision-depth min-rollup should say it is a min over **touched** children only (an untouched child has no decision depth) and what an entirely undecided grid yields — otherwise the descent's `depthAdaptiveLevel(decision_depth[g])` is undefined on the sparse edge tiles the touched set deliberately includes. — `plan.md:168-172`
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-14 14:03 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-143 at `2f93049`
+**Mode**: pre-push
+**Depth**: Deep (reason: ~6.9k lines, 39 implementation files, cross-module, two ADR amendments, on-disk format change)
+**Must-fix**: 6 | **Suggestions**: 10
+**Round**: 1 | **Ship**: continue — two headline guarantees (bit-exact rebuild, bounded RAM) are asserted in shipped docs but unsupported by the code, and the suite bypasses the path that breaks
+
+Specialists: Static Analysis (cpplint/uncrustify/lint_cmake clean; cppcheck rows are its C-vs-C++ header misdetection), Governance, Plan Drift, Claude Adversarial Lens A + Lens B. Copilot and Local off (default). Clean rebuild + full suite re-run independently: 752 tests, 0 errors, 0 failures, 87 skipped.
+
+All plan-review must-fixes from rounds 1-4 were traced to code and confirmed honored. The operator-settled design points were not re-litigated.
+
+### Findings
+- [x] (must-fix) Phase-two replays the spill in spatial (level-10 grid) order, not chronological; CUBE's sliding-median pre-filter is order-dependent, so tiles coarser than the spill level — the default levels 8 and 9 — differ from a chronological import. Puts README:107 "bit-exact vs import_bag --depth-adaptive" and ADR-0002:198 "byte-identical" in doubt; both equivalence tests bypass the spill. SpilledSounding carries no sequence number, so this is a design decision — `src/import_bag_main.cpp:1157`, `src/recon.cpp:174`
+- [x] (must-fix) The recon count grid is unbounded in RAM — no budget, no eviction, no reported peak — contrary to the plan's explicit commitment (plan.md:228-232) and README:106's bounded-RAM claim; ~630 MB/km² at the default --count-level 14. Undisclosed in Implementation sync — `src/recon.cpp:97`, `include/cube_bathymetry/count_grid.h:241`
+- [x] (must-fix) The recon spill opens one ofstream per level-10 grid with no cap; BatchRegen solves the same problem in this PR at kMaxOpenStreams=128 with LRU + flush check. fd exhaustion aborts a large survey mid-recon — `src/recon.cpp:140` (resolved by the single chronological spill of must-fix 1)
+- [x] (must-fix) The build fingerprint omits the inputs that decide the plan: --depth-adaptive-scale (LevelPlanPolicy::depth.capture_distance_scale), achieved_percentile, decision_depth_percentile, iho_order; the capture_distance_scale it does record has no CLI setter and can never change (false assurance) — `src/build_fingerprint.cpp:49`, `src/import_bag_main.cpp:1048`
+- [x] (must-fix) Plan-aware dirtyTiles silently drops a footprint tile with no emitted ancestor at any plan level (ground the plan never covered), contradicting ADR-0002's "conservative superset"; the empty-set guard only fires on a total miss — `src/survey_index_query.cpp:395`
+- [x] (must-fix) BuildFingerprint::write promises ADR-0003's fsync (and the comment says "flush it to disk") but calls only std::fflush — `src/build_fingerprint.cpp:186`
+- [x] (suggestion) recon.cleanup() deletes the spill before accumulator.finalize() persists resident tiles; reorder to narrow the crash window — `src/import_bag_main.cpp:1183`
+- [x] (suggestion) Spill files open ios::app with no empty-dir check; orphaned .recon_spill_<pid> dirs after a kill are never swept or warned about — `src/recon.cpp:142`
+- [x] (suggestion) A failed fingerprint write only warns; the run still prints "done!" and exits 0 — `src/import_bag_main.cpp:1061`
+- [x] (suggestion) The live node inherits the new capture gate with no ROS parameter, while both offline tools got --capture-spacing-scale (the floor removal itself is operator-settled) — `src/node.cpp:151`
+- [x] (suggestion) ShallowReservoir kCapacity=64 is sized for decision_depth_percentile ~0.02; validate() accepts any value in [0,1] and a larger one silently returns a far-too-shallow depth — `include/cube_bathymetry/recon.h:88`
+- [x] (suggestion) Plan bookkeeping: multi_level_accumulator.*, recon.*, map_sheet.h and three touched test files are in neither Files-to-Change nor Implementation sync — `.agent/work-plans/issue-143/plan.md:425`
+- [x] (suggestion) Orphaned `/// @brief Tiles currently resident in RAM.` now heads persistAndDrop, giving it two @brief lines — `include/cube_bathymetry/store_import.h:441`
+- [x] (suggestion) Six closing braces indented to ~column 56 in the new test files — `test/test_count_grid.cpp:178`
+- [x] (suggestion) test_mixed_level_import got TIMEOUT 300; test_import_eviction (~44 s against the 60 s default) did not — `CMakeLists.txt:466`
+- [x] (suggestion) batch_regen reads and writes no fingerprint at all though ADR-0003 names it the writer; nothing calls isStale() — `src/batch_regen_main.cpp` (deferred: out of scope by design -- plan step 9 and the ADR-0003 amendment's implementation-status note both state that this PR implements only the `import_bag` writer, and that `batch_regen --incremental`'s consumer stays unimplemented and is marked so)
+
+### Operator decisions for the fix pass (2026-09-14, host-recorded)
+
+- **Must-fix 1 (spill replay order)**: replace the per-level-10-grid spill files
+  with **one chronological spill file** replayed front to back — the order the
+  fixed path saw the pings — so byte-identity holds by construction. Extend the
+  single-level equivalence test to run through the recon spill (recon → plan →
+  replay), not only through direct `addBatch` calls. This also resolves must-fix
+  3 (one open file). Update `recon.h/cpp`, `import_bag_main.cpp`, the README and
+  the plan's Implementation-sync text (the level-10 partition is gone).
+- **Must-fix 2 (count-grid RAM)**: **directory-backed count tiles with an LRU**
+  in `CountGrid`: a resident budget (default a few hundred tiles), a cold tile
+  written to the scratch dir as a UInt16 GeoTIFF and reloaded on demand — during
+  recon and during plan computation, where the level of aggregation needs only a
+  3×3 neighbourhood at a time. The plan report prints the resident peak.
+- Must-fixes 4–6 as found: fingerprint records `capture_distance_scale`,
+  `achieved_percentile`, `decision_depth_percentile` and `iho_order`; the
+  plan-aware `dirtyTiles` must remain a conservative superset (off-plan ground is
+  never dropped — roll it up to the plan's coarsest level, or report it, never
+  silently omit); `BuildFingerprint::write` fsyncs.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 08:28 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `d4a6430`
+**Addressed**: `## Local Review (Pre-Push)` (2026-09-14 14:03 -04:00, round 1, verdict changes-requested, branch at `2f93049`) — all 6 must-fixes and all 10 suggestions
+**Commits**: `74a0d19`, `330c0f3`, `7f4fdfc`, `a924ec6`, `fca1f59`, `0fbdb1d`, `4798bb3`, `bbc38b8`, `5627f25`, `1c1261a`, `af45cd6`, `1a397e9`, `35fd054`, `d4a6430`
+
+An earlier pass of this skill committed `74a0d19`..`4798bb3` and then died before
+verifying, testing or reporting. This pass re-read each of those fixes against
+the committed code rather than redoing them, then completed the remaining
+suggestions, ran a clean rebuild and the full suite, and closed the entry.
+
+### Actions
+
+Must-fixes (the first seven commits above; verified against the code as committed):
+
+- [x] Spill replay order — the level-10 spill partition is gone; `ReconCollector`
+  writes **one chronological file** and `forEachSpilled` replays it front to back,
+  so phase two sees the arrival order the fixed path saw and the byte-identity
+  holds by construction. `test_mixed_level_import`'s single-level equivalence case
+  now runs the whole recon → plan → replay path instead of `addBatch` alone —
+  `src/recon.cpp:152`, `src/import_bag_main.cpp:1228`, `test/test_mixed_level_import.cpp:205` (`74a0d19`)
+- [x] Count-grid RAM — `CountGrid::setSpillDir` caps resident count tiles
+  (`--count-resident-tiles`, default 256 ≈ 460 MB of level-14 tiles) with an LRU,
+  writing colder tiles to the recon scratch dir as UInt16 GeoTIFFs and reloading
+  on demand; `tiles()` is replaced by `grids()` + `tileAt()`, and the plan report
+  prints the resident peak, the budget and the spilled count —
+  `include/cube_bathymetry/count_grid.h:95`, `src/count_grid.cpp`, `src/import_bag_main.cpp:1183` (`330c0f3`)
+- [x] Unbounded open spill streams — resolved by the single chronological spill
+  above: one `ofstream` for the whole recon — `src/recon.cpp:155` (`74a0d19`)
+- [x] Fingerprint inputs — `iho_order`, `depth_adaptive_scale` (the ladder scale
+  `--depth-adaptive-scale` actually sets), `decision_depth_percentile` and
+  `achieved_percentile` now join the schema-2 `tiling` object, `isStale` and the
+  JSON round-trip — `src/build_fingerprint.cpp:65`, `src/import_bag_main.cpp:1112` (`7f4fdfc`)
+- [x] Plan-aware `dirtyTiles` conservative superset — footprint ground the plan
+  emits nothing over is rolled up to the plan's coarsest level instead of being
+  dropped, and an empty plan throws — `src/survey_index_query.cpp:416` (`a924ec6`)
+- [x] Fingerprint fsync — `BuildFingerprint::write` now fsyncs the temp file and
+  the store directory after the rename (a rename is a directory operation), and
+  checks `fclose` — `src/build_fingerprint.cpp:203` (`fca1f59`)
+
+Suggestions:
+
+- [x] Spill kept until the tiles are persisted — `recon.cleanup()` moved after
+  `accumulator.finalize()` — `src/import_bag_main.cpp:1267` (`0fbdb1d`)
+- [x] Orphaned spill dirs — `ReconCollector` refuses a non-empty scratch dir, and
+  `import_bag` warns about leftover `.recon_spill_<pid>` directories without
+  deleting any (a concurrent import may own one) —
+  `src/recon.cpp:104`, `src/import_bag_main.cpp:1021` (`74a0d19`, `330c0f3`)
+- [x] Failed fingerprint write — no longer a warning that still prints "done!":
+  the run exits **2** ("the store is complete, the fingerprint is not — a later
+  incremental regen must do a FULL regen"), documented in `--help`, on both the
+  fixed and depth-adaptive paths — `src/import_bag_main.cpp:1085` (`0fbdb1d`)
+- [x] Live-node capture gate — `capture_spacing_scale` is a ROS parameter, so a
+  deployment can pin it (e.g. `0.5 / cell_size` for the pre-#143 gate) without a
+  rebuild — `src/cube_bathymetry_node.cpp`, README (`4798bb3`)
+- [x] ShallowReservoir capacity vs percentile — `LevelPlanPolicy::validate()` now
+  refuses a `decision_depth_percentile` outside `(0, kMaxDecisionDepthPercentile]`
+  (0.05), naming the 64-deep reservoir it is sized against; the usage text states
+  the range and `test_level_plan` covers the boundary. Reading shallower than the
+  true percentile is the safe direction (it asks for a finer tile), so the bound
+  targets the silently-wrong case — `include/cube_bathymetry/level_plan.h:96`,
+  `src/level_plan.cpp:104`, `include/cube_bathymetry/recon.h:95` (`af45cd6`)
+- [x] Plan bookkeeping — `multi_level_accumulator.*`, `recon.*`, `map_sheet.h`,
+  `test_recon.cpp` and the three follow-through test files are now in
+  Files-to-Change; the Implementation sync records the whole fix pass (chronological
+  spill superseding the level-10 partition, the count-grid LRU, the fingerprint
+  fields, the dirty-set rollup, exit code 2, the node parameter, the percentile
+  bound), and approach step 4 carries a "superseded during implementation" note —
+  `.agent/work-plans/issue-143/plan.md` (`35fd054`)
+- [x] Duplicate `@brief` — the orphaned line is gone from `persistAndDrop` —
+  `include/cube_bathymetry/store_import.h:441` (`bbc38b8`)
+- [x] Brace indentation — six stray closing braces dedented —
+  `test/test_count_grid.cpp`, `test/test_survey_index_query.cpp` (`5627f25`)
+- [x] Test timeout — `test_import_eviction` gets `TIMEOUT 300` like the
+  mixed-level test (~44 s against the 60 s default is too little headroom) —
+  `CMakeLists.txt:458` (`1c1261a`)
+- [x] `batch_regen` fingerprint (deferred: out of scope by design). Plan step 9
+  and the ADR-0003 amendment's implementation-status note both state that this PR
+  is ADR-0003's **first partial** implementation — `import_bag` is the writer, and
+  `batch_regen --incremental`'s consumer stays unimplemented and is marked so in
+  the ADR. Implementing it here would be scope the plan explicitly excluded —
+  `src/batch_regen_main.cpp`, `docs/decisions/0003-staleness-fingerprint.md:179`
+
+### Verification
+
+Clean rebuild of `cube_bathymetry` (build + install trees removed first) on this
+HEAD: success, no new warnings beyond the pre-existing GDAL `warn_unused_result`
+and one unused-variable warning in `test_tile_eviction_rss.cpp` (both predate this
+branch's fix pass). Full package suite on the same HEAD:
+
+**757 tests, 0 errors, 0 failures, 87 skipped** (the last full run, 752 tests,
+predated the seven fix commits). Pre-commit hooks ran on every commit; none
+bypassed.
+
+### Next step
+
+Lifecycle: **Implementation** → **review-code** (re-review the fixes)
+
+    .agent/scripts/dispatch_subagent.sh --mode in-process --issue 143 --skill review-code
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-15 09:12 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-143 at `8869bc1`
+**Mode**: pre-push
+**Depth**: Deep (reason: fix pass ~1.1k lines over 25 files, cross-module, on-disk format, two ADR amendments)
+**Must-fix**: 3 | **Suggestions**: 7
+**Round**: 2 | **Ship**: recommended — must-fix is down 6 -> 3, every one a precise file:line fix with an obvious correction and no design question left open; apply them and push rather than spend a third full round
+
+Reviewed the fix pass `2f93049..HEAD` (25 files, +1163 -225) with fresh eyes, against the
+round-1 entry and the `## Implementation` entry. Specialists: Static Analysis (cpplint,
+uncrustify, cppcheck, lint_cmake -- clean on every touched line), Governance, Plan Drift,
+Claude Adversarial Lens A + Lens B. Copilot and local off (default).
+
+**All six round-1 must-fixes verified resolved in code**, by the lead reviewer and
+independently by Lens A -- not cosmetically: the spill is one chronological file replayed
+front to back (`test_recon` now asserts exact replay order over interleaved level-10
+grids, and `test_mixed_level_import`'s byte-identity case runs recon -> plan -> replay
+instead of bypassing the spill); the count grid is bounded by a directory-backed LRU whose
+new test cross-checks a budget-16 spilled grid against an unbounded one on totals, per-cell
+counts, spread terms, a box query and an achieved-level query; every read path that scans a
+neighbourhood copies the band or mask out first, so an eviction mid-scan cannot dangle;
+`isStale` keys on all four new fingerprint fields; the dirty set rolls off-plan ground up to
+the plan's coarsest level; the fingerprint fsyncs the temp file, checks `fclose`, and fsyncs
+the store directory. Plan drift: none -- the claimed plan sync is real. Governance: both
+amended ADRs match the code field by field.
+
+The six test binaries covering the fix pass were re-run independently on this build tree:
+test_survey_index_query, test_count_grid, test_level_plan, test_build_fingerprint,
+test_recon, test_mixed_level_import -- 6/6 passed (67 s).
+
+### Findings
+- [x] (must-fix) `forEachSpilled` ignores the stream state after `flush()`/`close()` and the read loop ends silently on a short final record, while `import_bag` never compares `replayed` with `soundingsSpilled()` -- a disk-full at the last buffered flush drops the tail of the survey, writes the store, and fingerprints it as complete — `src/recon.cpp:196`, `src/import_bag_main.cpp:1252`
+- [x] (must-fix) The post-rename store-directory `open`/`fsync` swallows failure: `write()` returns success and the caller prints "Wrote build_fingerprint.json", so the durability the comment above it promises is unenforced on the one path where it cannot happen (cross-confirmed by both adversarial lenses; same class as round-1 must-fix 6) — `src/build_fingerprint.cpp:235`
+- [x] (must-fix) The new `capture_spacing_scale` parameter is declared with no `read_only` descriptor and read only in `on_configure`, so a runtime `ros2 param set` succeeds, reads back and is inert -- the "accepted, reads back, inert" trap this same file documents at lines 1120-1126 (the Appledore outage) and closes for `publish_dirty_subwindow` at 581-592 — `src/cube_bathymetry_node.cpp:115`
+- [x] (suggestion) The free-space preflight budgets only the sounding spill, not the count-tile spill now written to the same scratch dir (~630 MB/km2 of cold tiles), so a dense survey can still exhaust the disk mid-recon despite passing the check — `src/import_bag_main.cpp:1067`
+- [x] (suggestion) `--count-resident-tiles` parses as `int` and is cast to `size_t`; a negative value becomes SIZE_MAX and silently restores the unbounded count-grid budget must-fix 2 removed — `src/import_bag_main.cpp:1492`
+- [x] (suggestion) `cleanup()` discards the `error_code` from both `remove` calls, so a spill that cannot be deleted leaves gigabytes on disk with no warning on this run (only the next run's orphan sweep sees it) — `src/recon.cpp:237`
+- [x] (suggestion) `discardSpill()` leaves `max_spread_term_` entries for the grids it erases; harmless today because nothing queries after cleanup, latent if a grid is reused — `src/count_grid.cpp:115`
+- [x] (suggestion) The scratch dir is keyed on pid alone; a pid-reuse collision surfaces as a confusing "already exists" error attributable to an unrelated dead process. A start-time suffix removes the ambiguity — `src/import_bag_main.cpp:1065`
+- [x] (suggestion) Exit 1 from `finishTileReport` takes precedence over exit 2, so a run whose store and fingerprint are both fine but whose diagnostic CSV failed reports "the store may be incomplete" — `src/import_bag_main.cpp:1947`
+- [x] (suggestion) `--decision-depth-percentile` / `--achieved-percentile` and the new `0 < p <= 0.05` bound are in `--help` and ADR-0003 but not in README's depth-adaptive flag walkthrough — `README.md`
+
+### Next step
+
+Lifecycle: **Local Review (Pre-Push)** -> **address-findings** (3 mechanical must-fixes) -> push / open PR
+
+Ship is **recommended**: apply the three must-fixes and push rather than run a third full
+review round. The verdict is advisory -- the operator decides.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 09:23 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `9fee51d`
+**Addressed**: `## Local Review (Pre-Push)` round 2, 2026-09-15 09:12 -04:00, reviewing `8869bc1` (entry committed as `6966563`)
+**Commits**: `70a3e5b`, `12ad751`, `f43ce4f`, `14b42c8`, `f1d5440`, `a473234`, `2e27336`, `9832eb3`, `0c56deb`, `b639e39`, `9fee51d`
+
+All ten findings actioned (3 must-fix + 7 suggestions); none deferred, per the
+operator's decision to leave nothing for a third round.
+
+### Actions
+- [x] (must-fix) `forEachSpilled` now checks the stream after `flush()`/`close()`, throws on a partial trailing record, and returns the replayed count; `import_bag` compares it with `soundingsSpilled()` and fails before `finalize()`, so a truncated spill is never written and fingerprinted as a complete store — `src/recon.cpp:192`, `src/import_bag_main.cpp:1270`, `include/cube_bathymetry/recon.h:161` (`70a3e5b`)
+- [x] (must-fix) The post-rename store-directory `open`/`fsync` in `BuildFingerprint::write` now throws on either failure instead of returning success for a durability that did not happen — `src/build_fingerprint.cpp:235` (`12ad751`)
+- [x] (must-fix) `capture_spacing_scale` is declared with a `read_only` descriptor mirroring `publish_dirty_subwindow`, so a runtime `param set` is rejected rather than accepted-and-inert — `src/cube_bathymetry_node.cpp:115` (`f43ce4f`)
+- [x] (suggestion) The recon free-space preflight budgets the sounding spill plus an allowance of the same size for the count-tile spill sharing the scratch dir; `--help` and the shortfall message name it as an allowance, not a bound (the count term follows ground covered, which is not knowable before the pass) — `src/import_bag_main.cpp:1081`, `src/recon.cpp:255` (`14b42c8`)
+- [x] (suggestion) A negative `--count-resident-tiles` is rejected instead of becoming `SIZE_MAX` and restoring the unbounded count grid — `src/import_bag_main.cpp:1059` (`f1d5440`, helper extracted in `b639e39`)
+- [x] (suggestion) `ReconCollector::cleanup()` reports both failed removals (warnings: it runs from the destructor) — `src/recon.cpp:256` (`a473234`)
+- [x] (suggestion) `CountGrid::discardSpill()` erases the `max_spread_term_` entries of the grids it forgets, and reports a failed `remove_all`; the spill test asserts the terms are gone — `src/count_grid.cpp:104` (`2e27336`)
+- [x] (suggestion) The recon scratch dir is keyed on pid **and** start time, so a pid-reuse collision cannot present as an "already exists" refusal blamed on an unrelated dead process — `src/import_bag_main.cpp:1079` (`f1d5440`)
+- [x] (suggestion) A failed `--tile-size-report` CSV gets its own exit code 3 (ranked below the missing fingerprint, 2) instead of borrowing 1, "the store may be incomplete"; documented in `--help` — `src/import_bag_main.cpp:1965` (`9832eb3`)
+- [x] (suggestion) README documents `--decision-depth-percentile`, `--achieved-percentile`, the `0 < p <= 5` bound the 64-deep reservoir imposes, and what the free-space check budgets — `README.md:145` (`0c56deb`)
+
+### Tests added
+- `ReconCollector.ATruncatedSpillIsReportedRatherThanReplayedShort` — a partial
+  final record throws; a whole record lost at a record boundary leaves the
+  stream state clean and shows only in the returned count, which is what the
+  import compares against `soundingsSpilled()`.
+- `BuildFingerprint.ReportsAFailedDirectoryFsyncInsteadOfClaimingSuccess` — a
+  write-and-search-only store directory lets the temp write, fsync and rename
+  succeed and fails only the directory fsync; the assertion pins the thrown
+  message to `fsync`. Skipped when run as root.
+- A spread-term assertion in `CountGridTest.SpillBackedGridAnswersLikeAnUnboundedOne`.
+- No test for the `read_only` descriptor: this package has no ROS-node
+  parameter test harness (`test_node.cpp` covers the `cube::Node` algorithm
+  class), and the `publish_dirty_subwindow` precedent it mirrors has none either.
+
+### Verification
+Clean build (`build/` and `install/` for the package removed first) plus the
+full suite on HEAD `9fee51d`:
+
+- Build: 1 package finished, 1 min 38 s. The only `-Wall` warnings are
+  pre-existing ones in files this branch does not touch (`grid.cpp`,
+  `node.cpp`, `map_sheet.cpp`, `error_model.cpp`, `geo_map_sheet.cpp`,
+  `bag_to_geotiff.cpp`); no warning in any touched file.
+- Tests: **759 tests, 0 errors, 0 failures, 87 skipped** (2 min 45 s) — 72
+  ctest entries, all passed. 364 gtest cases across 28 binaries, plus the lint
+  suites (cpplint, uncrustify, cppcheck, copyright, flake8, lint_cmake,
+  pep257, xmllint) all clean.
+- Two lint regressions introduced by the fixes were themselves fixed before the
+  final run (`b639e39`): the `--count-resident-tiles` validation pushed `main()`
+  past cpplint's 500-line function limit (moved to a free function beside the
+  other option helpers) and `gcount()` was cast to `long` (now `int64_t`);
+  uncrustify re-indented the replay lambda after its first line grew.
+
+### Next step
+
+Lifecycle: **Implementation** -> **review-code** (third pre-push round, re-review the fixes)
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-09-15 09:32 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-143 at `968e8b8`
+**Mode**: pre-push
+**Depth**: Deep (reason: round-2 fix pass, ~460 lines over 13 files, on-disk format + exit-code contract + a data-integrity guarantee)
+**Must-fix**: 2 | **Suggestions**: 5
+**Round**: 3 | **Ship**: recommended — must-fix is down 3 -> 2, both are precise file:line corrections with an obvious fix (wrap one call in the try/catch its siblings already use; correct one error message), and no design question is re-opened
+
+Reviewed the round-2 fix pass `8869bc1..HEAD` (13 files, +456 -50) with fresh eyes against the
+round-2 review entry and the `## Implementation` entry. Specialists: Static Analysis
+(cpplint, uncrustify, cppcheck, lint_cmake, copyright, flake8, pep257, xmllint -- 8/8 pass,
+re-run independently), Governance, Plan Drift, Claude Adversarial Lens A + Lens B. Copilot
+and local off (default).
+
+**Eight of the ten round-2 findings verified resolved in code**, not cosmetically: the
+post-rename directory fsync throws instead of returning success (with a test that makes only
+that step fail); `capture_spacing_scale` carries a `read_only` descriptor mirroring
+`publish_dirty_subwindow`; `--count-resident-tiles` rejects a negative value; the scratch dir
+is keyed on pid AND start time; `cleanup()` and `discardSpill()` report what they could not
+delete; `discardSpill()` erases the spread terms of the grids it forgets (asserted in the
+spill test); the tile-size-report CSV has its own exit code 3, correctly ranked below 2 and
+unreachable on the depth-adaptive path (`--tile-size-report` is refused there); README
+documents both percentiles and the reservoir bound. Plan drift: none -- the round-2 sync is
+real and the two stale bullets were corrected. Eight test binaries re-run on this build tree:
+8/8 pass (94 s), lints 8/8 (17 s).
+
+The **spill-replay count check is where the round-2 fix is incomplete**, in two independent
+ways (each cross-confirmed by both adversarial lenses): its own throwing sibling paths escape
+`main()` uncaught, and the store is already being written when the check fires.
+
+Judgement calls examined and accepted: the free-space **allowance** (doubling the sounding
+spill to budget the count-tile spill) is honestly labelled an allowance and not a bound in the
+comment, `--help` and README -- the count term follows ground covered, which no ping count
+predicts; and exit code 3 is strictly additive, correctly ranked, and has no consumer in the
+tree or in `build_bathy_store.sh`.
+
+### Findings
+- [x] (must-fix) The new `forEachSpilled` throws (failed flush, failed close, partial trailing record) are uncaught: the call is the one fallible call in `cube_depth_adaptive_finish` with no try/catch, and `main` has none, so a disk-full at the tail -- the scenario the fix targets -- aborts via `std::terminate` (SIGABRT) instead of the documented `error: ...` + exit 1 that its silent-short-count sibling produces. Cross-confirmed by Lens A and Lens B — `src/import_bag_main.cpp:1269`, `src/recon.cpp:200`
+- [x] (must-fix) The count check fires after the replay, but `accumulator.addBatch` evicts tiles into the real `-o` store on every batch (`MultiLevelAccumulator::evictToBudget` -> `persistAndDrop`), so on a short spill the destination store already holds partial-coverage tiles when the error prints "Nothing is finalized and no build_fingerprint.json is written" and advises "free space ... and re-run". Re-running over those tiles double-counts soundings -- the hazard `build_bathy_store.sh` guards with `--fresh`. The message and the comment above it must say the store holds partial tiles from the aborted run and must be archived/removed first — `src/import_bag_main.cpp:1284`, `src/multi_level_accumulator.cpp:141`
+- [x] (suggestion) The post-rename directory fsync throws on any errno, `EINVAL`/`ENOTSUP`/`ENOSYS` included -- returned by mounts whose directory ops have no fsync -- so a store on such a mount would exit 2 on every run and force a FULL regen forever, while the message says the fingerprint "could not be written" although the rename put a valid one in place. Tolerate the not-supported errnos with a warning; keep the throw for `EIO`/`ENOSPC`/`EBADF` — `src/build_fingerprint.cpp:249`, `src/import_bag_main.cpp:1159`
+- [x] (suggestion) On the short-replay abort, a pre-existing `build_fingerprint.json` survives untouched while the aborted run has already mutated tiles under it, so a later `batch_regen --incremental` would trust it. Consider removing it (or marking the store dirty) on that path — `src/import_bag_main.cpp:1288`
+- [x] (suggestion) `requireNonNegative` reports "expects a count >= 0" but the effective minimum is `CountGrid::kMinResidentTiles` (16); 1-15 passes the option parser and is refused later by the `ReconCollector` ctor, after the orphan warning and the spill banner have printed. State the real range at parse time and in `--help` — `src/import_bag_main.cpp:1063`, `src/count_grid.cpp:88`
+- [x] (suggestion) Doubling the preflight requirement can now refuse a run whose spill would have fit, and the only advice offered is `--scratch-dir`; consider an explicit override, or say in `--help` that the check is satisfied by pointing `--scratch-dir` at a larger device — `src/import_bag_main.cpp:1101`
+- [x] (suggestion) README's `capture_spacing_scale` paragraph does not say the parameter is now `read_only` -- set it from launch/YAML, a runtime `ros2 param set` is rejected. That is the operator-facing half of the round-2 must-fix — `README.md:113`
+
+### Next step
+
+Lifecycle: **Local Review (Pre-Push)** -> **address-findings** (2 mechanical must-fixes) -> push / open PR
+
+Ship is **recommended**: apply the two must-fixes (and, if the operator wants the guarantee
+closed rather than merely stated honestly, suggestion 2 with it) and push, rather than run a
+fourth full review round. The verdict is advisory -- the operator decides.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 10:04 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `623f942`
+**Addressed**: `## Local Review (Pre-Push)` round 3, 2026-09-15 09:32 -04:00, reviewing `968e8b8` (entry committed as `b063999`)
+**Commits**: `945f9dc`, `3ed5f74`, `c5b03b8`, `774da62`, `623f942`
+
+All seven findings actioned (2 must-fix + 5 suggestions); none deferred, per the
+operator's decision that this is the last fix pass before publish.
+
+### Actions
+- [x] (must-fix) The `forEachSpilled` throws (failed flush, failed close, partial trailing record) are caught: the replay runs inside a try/catch that reports `error: ...` and returns 1, so the disk-full tail this check exists for no longer ends the run in `std::terminate` (SIGABRT) — `src/import_bag_main.cpp:1395` (`945f9dc`)
+- [x] (must-fix) Both abort paths go through `abortDirtyReplay()`, which says the `-o` store holds partial-coverage tiles evicted during the replay and must be archived or removed before a re-run (re-importing over them double-counts their soundings), instead of "Nothing is finalized … free space and re-run" — `src/import_bag_main.cpp:1257,1410,1424` (`945f9dc`)
+- [x] (suggestion) The post-rename directory fsync tolerates `EINVAL`/`ENOTSUP`/`ENOSYS` with a warning — a mount with no directory fsync had a valid fingerprint in place and would have been refused on every run, forcing a FULL regen forever — while `EIO`/`ENOSPC`/`EBADF` still throw — `src/build_fingerprint.cpp:256,270`, `include/cube_bathymetry/build_fingerprint.h:163` (`3ed5f74`)
+- [x] (suggestion) `abortDirtyReplay()` also removes a pre-existing `build_fingerprint.json`, so stale metadata never sits over tiles the aborted run mutated (a failed removal warns and names the file) — `src/import_bag_main.cpp:1275` (`945f9dc`)
+- [x] (suggestion) `--count-resident-tiles` is validated against the real floor (`CountGrid::kMinResidentTiles` = 16) at parse time rather than ">= 0", so 1–15 is refused before the orphan warning and the spill banner print; `--help` states the minimum — `src/import_bag_main.cpp:1076,1691`, `src/count_grid.cpp:88` (`c5b03b8`)
+- [x] (suggestion) The count-tile free-space allowance is `--count-spill-allowance <factor>` (default 1.0, 0 removes it), documented in `--help` and named in the shortfall message, so a dense survey over little ground is no longer refused a run that would have fit with no override — `src/import_bag_main.cpp:1088,1170,1682` (`c5b03b8`)
+- [x] (suggestion) README says `capture_spacing_scale` is `read_only` — set it from launch or a YAML overrides file; a runtime `ros2 param set` is rejected — `README.md:117` (`774da62`)
+
+### Tests added
+- `BuildFingerprint.TellsAnUnsupportedDirectoryFsyncFromAFailedOne` — pins which
+  errnos mean "this filesystem has no directory fsync" (EINVAL, ENOTSUP, ENOSYS)
+  against those that mean a sync was attempted and failed (EIO, ENOSPC, EBADF,
+  EACCES). The classifier is exposed as `cube::fsyncErrnoMeansUnsupported` so the
+  distinction is testable without a mount that behaves that way; the existing
+  unreadable-directory test still covers the throwing path end to end.
+- `ImportBagCli.RefusesACountResidentBudgetBelowTheRealMinimum` — `-1`, `0` and
+  `15` are refused with the true range, before anything about the pass is
+  printed; `16` is accepted.
+- `ImportBagCli.CountSpillAllowanceIsTunableAndValidated` — a negative factor is
+  refused, the flag without `--depth-adaptive` is refused, and `0` is a valid
+  value (it removes the allowance).
+- `ImportBagCli.UsageDocumentsTheDepthAdaptiveFlags` gained assertions for
+  `--count-spill-allowance` and for the stated `minimum 16`.
+- **No test for the two abort paths in `cube_depth_adaptive_finish`**: they sit
+  past a real bag read inside `main()`'s call tree, and this package has no bag
+  fixture — the `runImportBag` harness can only reach option validation. The
+  throws they now catch are themselves covered by
+  `ReconCollector.ATruncatedSpillIsReportedRatherThanReplayedShort`.
+
+### Verification
+Clean build (the package's `build/` and `install/` removed first) plus the full
+suite on HEAD `623f942`:
+
+- Build: 1 package finished, 1 min 41 s clean / 19–23 s incremental. The only
+  `-Wall` warnings are pre-existing ones in files this branch does not touch
+  (`grid.cpp`, `node.cpp`, `map_sheet.cpp`, `error_model.cpp`,
+  `geo_map_sheet.cpp`, `bag_to_geotiff.cpp`); no warning in any touched file.
+- Tests: **762 tests, 0 errors, 0 failures, 87 skipped** (3 min 45 s) — 36 ctest
+  entries including the eight lint suites (cpplint, uncrustify, cppcheck,
+  copyright, flake8, lint_cmake, pep257, xmllint), all clean.
+- Two lint regressions the fixes introduced were fixed before the final run
+  rather than left: the new option paths pushed `main()` past cpplint's 500-line
+  limit again (the bag time-span report, the tiling-choice report and the
+  finite-factor check moved to free functions beside the other helpers), and
+  uncrustify re-indented one continuation line in the new abort message.
+- A self-inflicted defect caught and fixed before committing: the first
+  extraction of `reportTilingChoice()` left the helper calling itself (infinite
+  recursion) and still compiled and tested green — nothing in the suite reaches
+  `main()`'s depth-adaptive banner. Fixed and re-verified; it is worth recording
+  that this path has no automated coverage at all.
+
+### Next step
+
+Lifecycle: **Implementation** -> push / open PR (the operator's decision: no
+fourth review round)
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 10:30 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `88831d5`
+**Source**: the operator-requested recon-only dry run on a real M3 bag (owed by the PR body), posted as https://github.com/rolker/cube_bathymetry/pull/159#issuecomment-5681929538. No other review comments or CI signals had landed on the PR at the time of this entry.
+**Must-fix**: 3 | **Suggestions**: 0
+
+Bag: NAS `gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (Lake Massabesic 2026-06-09, 98 min, 55,100 pings, 12.1 M soundings), run with the topics/frames `build_bathy_store.sh` uses. Recon + plan: 36.8 s wall, 167 MB RSS, count grid 20 level-14 tiles (35 MB peak), plan = 2 native level-10 tiles + level-9/8 parents, coverage deficit 0. Artifacts in `.agent/scratchpad/cube143-dryrun/` on the dev host (`recon.log`, `level_plan.json`, `count_grid/`, `small/` = the 3,000-ping comparison incl. a fixed-level import in `small/fixed`).
+
+### Findings
+- [x] (must-fix) **The shallow-reservoir flier guard does not hold at survey density.** `ShallowReservoir::kCapacity = 64` per level-14 grid means `decisionDepth(0.02)` at ~200 k soundings per grid returns the 64th-shallowest raw sounding, not the 2nd percentile (rank ~4,000). Real data: tile `10/17801/13988` got decision depth **−27.25 m** while the fixed-level path (`import_bag -r 1.0`, same 3,000-ping window, `small/fixed/processed/10_17801_13988.tif`) stores a CUBE surface of −40.9…−36.25 m — 9 m shallower than anything CUBE accepted; the neighbouring tile (−36.18 vs stored −35.60) shows the correct behaviour. M3 water-column fliers exceed 64 per grid. The percentile must be honoured at scale: a per-grid depth histogram (fixed bins over the ladder's depth range are enough — the decision only needs to resolve a level boundary) or a streaming quantile, with the reservoir's `kMaxDecisionDepthPercentile` coupling revisited accordingly. Add a test with ≥100 k soundings and >64 shallow fliers per grid that asserts the decision depth stays within the bathymetry. Sync README/plan text (the "shallowest 64" wording) — `include/cube_bathymetry/recon.h:98`, `src/recon.cpp:69`, `src/level_plan.cpp:109`
+- [x] (must-fix) **The plan report's area columns are tile footprints, not surveyed ground.** The count grid holds 2,656,290 occupied level-14 cells ≈ 0.0085 km² of surveyed ground, but the report prints `area(km2) 12.102` for the one level-8 tile and `ground stored coarser than level 10: 15.127 km2` — and that second line is wrong in kind: every square metre of this survey has a native level-10 tile; the level-8/9 tiles exist only as parents-alive. Measure ground from the count grid's occupied cells (per tile, intersected with the tile), and count "stored coarser than level 10" only over ground whose *finest* native level is coarser than 10. Keep the tile counts and MB columns as they are. Update the README's description of the report and the JSON if fields change — `src/level_plan.cpp:337-378`
+- [x] (must-fix) **The recon timer reports the wrong interval**: `Recon pass: … 20 count tile(s) in 2.6062e-05s` while projection + counting took ~10 s. Start the timer where the recon pass starts (the projection loop) and report the real elapsed time — `src/import_bag_main.cpp:1300`, the `recon_secs` argument's origin near `:1845`
+
+### Not a finding (recorded for the reviewer)
+This bag's depths are −36…−41 m in the `bizzy/map_tide` frame for a 9–17 m lake (sonar-relative z sampled from `/bizzy/sensors/m3/soundings`); the fixed-level path stores the same values, so it is the June bag's vertical datum, not this PR.
+
+### Operator decisions (2026-09-15, host-recorded)
+Fix all three in PR #159 now via `address-findings`, rerun the full suite **and the dry run** (`recon.log` command in `.agent/scratchpad/cube143-dryrun/`; confirm tile `10/17801/13988`'s decision depth lands within the CUBE surface range and the report's ground area is ~0.0085 km²), then the host pushes to the open PR.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 11:00 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `8088fae`   **PR**: #159
+**Addressed**: the `## Integrated Review` of 2026-09-15 10:30 -04:00 (PR #159 at `88831d5`) — 3 must-fix, 0 suggestions, all actioned, none deferred
+**Commits**: `ccff244` (histogram), `da1c382` (recon timer), `3f21512` (surveyed ground), `8088fae` (plan sync)
+
+### Actions
+- [x] (must-fix) Decision depth read from a per-grid **depth histogram** instead of the 64-deep `ShallowReservoir` — `include/cube_bathymetry/recon.h`, `src/recon.cpp`. `DepthHistogram` bins sparsely at 0.25 m (`floor(depth/width)` → count), doubling the width and merging pairs above 1024 bins so per-grid memory is bounded whatever the spread, and clamping depths to ±12000 m. `decisionDepth(p)` walks from the shallowest bin to rank `max(1, ceil(p·N))` and returns that bin's **shallow edge**: the answer lies in `(truth, truth + bin_width]` — at most one bin shallow, never deep, which is the finer-tile (safe) side. The `kMaxDecisionDepthPercentile = 0.05` cap existed only to keep the bounded reservoir from being asked for a rank it could not reach, so it is **removed**: `decision_depth_percentile` is now `(0, 1]`, refusing only 0 (a single flier would set the level) — `include/cube_bathymetry/level_plan.h`, `src/level_plan.cpp`. Tests: `DepthHistogram.HonoursThePercentileAtSurveyDensity` (102,000 soundings with 2,000 shallow fliers — 30× the old capacity — asserting the decision depth stays inside the bathymetry), `…ReadsThePercentileToWithinOneBin`, `…BoundsItsBinsByCoarseningTheWidth`, `…FlierGuardAtSmallCounts`. README, `--help` and plan.md wording synced off "shallowest 64".
+- [x] (must-fix) Report areas are **surveyed ground**, not tile footprints — `src/level_plan.cpp`, `include/cube_bathymetry/level_plan.h`. `levelPlanFor` counts each count tile's occupied cells in the pass that already reads every tile (the grid is spill-backed, so a second sweep would re-read the spill) and charges `occupied × cell²` to every ancestor; `PlannedTile::ground_m2` is the ground a tile covers and `LevelPlan::nativeGroundM2()` the ground it is the *finest* emitted tile for (own minus emitted children's). The report prints `covered(km2)` and `native(km2)` per level plus a `surveyed ground (occupied count cells)` line, the estimate-count multiplier divides by surveyed ground, and "ground stored coarser than level 10" sums **native** ground below level 10 only. Tile counts and the MB columns are unchanged; the now-unused `tileAreaM2` helper is gone. Plan JSON is **schema 2** (per-tile `"g"`, top-level `"ground_m2"`); a schema-1 plan is refused rather than reported against without areas. Tests: `LevelPlanTest.AreasAreSurveyedGroundNotTileFootprints` (ground vs the 16× larger footprint, parents-alive tiles storing no ground of their own, the coarser-than-10 line reading zero where the native level is 11), round-trip and report assertions extended; `test_survey_index_query`'s hand-built plan JSON moved to schema 2.
+- [x] (must-fix) The recon timer times the **recon pass** — `src/import_bag_main.cpp`. `phase_secs()` reads *and* restarts the clock, and the projection loop's reading was already consumed by the "projected N pings in Xs" line, so the recon summary timed the handful of statements in between. One reading now feeds both.
+
+### Verification (operator-requested)
+
+**Clean build + full suite on HEAD** — `sensors_ws/build/install/cube_bathymetry` removed and rebuilt (the `PlannedTile`/recon struct layouts changed, so an incremental build would have been unsafe), then `./sensors_ws/test.sh cube_bathymetry`:
+
+    Summary: 765 tests, 0 errors, 0 failures, 87 skipped
+
+The 87 skipped are the whole `cppcheck` linter suite (the tool is absent on this host) — unchanged from before this pass. `test_mixed_level_import` ran 10 tests, 0 failures, so **byte-identity with a fixed-level import still holds**. uncrustify and cpplint are green. (This repo carries no `.pre-commit-config.yaml` and no installed hook; the package's lint runs inside the test suite, which passed. No `--no-verify` anywhere.)
+
+**Dry run re-run** — same command as `recon.log`, outputs in a new `.agent/scratchpad/cube143-dryrun/rerun/` (originals untouched). Bag: NAS `gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections`. 33.8 s wall, 167 MB peak RSS, 20 count tiles (35 MB peak), exit 0.
+
+- **Recon timer**: `Recon pass: 12125207 soundings counted, 12125207 spilled, 20 count tile(s) in 9.34608s.` — seconds, and equal to the projection line's 9.34608 s, where the old run printed `2.6062e-05s`. ✅
+- **Surveyed ground**: `surveyed ground (occupied count cells): 0.0085 km2`, and every level's covered column reads `0.0085` (the ~12.1 km² level-8 footprint is gone). `ground stored coarser than level 10: 0.0000 km2` — correct in kind: every square metre of this survey has a native level-10 tile (the 15.127 km² the old report printed was parents-alive footprints). Multiplier 3.00× the surveyed ground over 4 tiles (1 at level 8, 1 at 9, 2 at 10) — same tiling as before. ✅
+- **Decision depth for `l=10, r=17801, c=13988`**: the review's comparison is against `small/fixed`, a **3,000-ping** fixed-level import, so the like-for-like check is a recon over that same window (`-l 3000`, written to `rerun/small/`): **d = −36.75 m**, inside the stored CUBE surface's −40.897…−36.255 m (band 1 of `small/fixed/processed/10_17801_13988.tif`, 2,315 valid cells, median −38.94). The old code answered **−27.25 m** on that window, 9 m above anything CUBE accepted. ✅ With the level now set from a real depth, that window's required level drops 10 → 9 — the ladder's answer at 36.75 m — and its report reads `ground stored coarser than level 10: 0.0007 km2`, which is genuine.
+- **Full-bag value for the same tile is −30.25 m**, not −36.75: the full 98-minute survey covers much more of that tile than the 3,000-ping window. That is bathymetry, not a residual flier tail — sweeping the percentile over the full bag moves it almost not at all (p2 → −30.25, p5 → −30.50, p15 → −31.25, p30 → −32.25), whereas a flier tail would collapse within a few percent. The neighbouring tile `…13989` reads −32.25 (was −26.35).
+
+### Notes for the re-review
+- The histogram's answer is quantised: within one 0.25 m bin, always on the shallow side. Level-ladder boundaries are metres apart (cell = 0.05 × depth), so this cannot move a level decision except within 0.25 m of a boundary, and then only toward the finer tile.
+- Plan JSON schema 1 → 2 is a hard break: an older plan file is refused by `--level-plan`. Nothing outside this branch has ever written one.
+- `nativeGroundM2` subtracts child ground from parent ground in floating point and clamps a negative residual to 0; the values are sums of the same per-count-tile terms, so the residual is at most a few ulp.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 11:42 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `00f3736`
+**Source**: follow-up analysis of the M3 dry run (PR comment https://github.com/rolker/cube_bathymetry/pull/159#issuecomment-5681929538, corrected in place). The bag is the Piscataqua River off the UNH pier, New Castle NH (43.072–43.075 N, 70.709–70.712 W), 2026-06-09 — not Lake Massabesic as the earlier entry says.
+**Must-fix**: 1 | **Suggestions**: 0
+
+### Findings
+- [x] (must-fix) **The level plan feeds the ladder an ellipsoidal height, not a water depth.** Stored depths are WGS84 ellipsoidal heights by design (unh_marine_autonomy ADR-0002 §D4; `registry.hpp:54` "Stored values are always ellipsoidal"), and the geoid at the pier is ~28 m below the ellipsoid, so 8–13 m of water under the sonar arrives at `ReconCollector` as `s.sounding.depth` ≈ −36…−41 m (`src/recon.cpp:152` feeds exactly that into the depth histogram). `marine_bathymetry_store::depthAdaptiveLevel(depth_m)`'s contract is water depth: `0.05 × |depth|` is a footprint argument, and footprint scales with range below the transducer. Every required level in the dry run was therefore computed from water depth + ~28 m — one to two levels coarser than the water asks for — which is also why the run reports zero coverage deficit. **Fix**: decide on the water depth under the transducer. The spill record already carries `sonar_relative_z` (`src/recon.cpp:50`, from `sounding.sonar_relative_position.z`); feed the histogram `-|sonar_relative_z|` (keep the histogram's negative-down, shallowest-is-largest convention — verify the sign of `sonar_relative_position.z` in `include/cube_bathymetry/sounding.h` and the projector before choosing the sign, and say which in a comment). Transducer draft is ignored deliberately (sub-metre against a factor-of-two level ladder) — state that. Rename/redefine `PlannedTile::decision_depth` and the plan JSON `d` as "water depth under the transducer, negative-down" (schema note; schema 2 was minted this morning and is unreleased, so amend it rather than mint 3), update README §depth-adaptive, ADR-0002 amendment text, `--help`, and plan.md. Add a test that a sounding with ellipsoidal depth −40 and sonar-relative 12 decides as 12 m water. The single-level byte-identity guarantee is unaffected (the policy pin bypasses the decision) — keep `test_mixed_level_import` green — `src/recon.cpp:152`, `src/level_plan.cpp:513-514`, `include/cube_bathymetry/level_plan.h:135`
+
+### Operator decisions (2026-09-15, host-recorded)
+Fix in PR #159 now. After the fix: clean build + FULL suite, then re-run the dry run into `.agent/scratchpad/cube143-dryrun/rerun2/` (same command as `recon.log`, and the `-l 3000` window into `rerun2/small/`). Expected: decision depths ≈ −7…−20 m, required levels 11–12, and — since the achieved level was 10–11 — a **non-zero coverage deficit**; record the actual numbers in the `## Implementation` entry rather than the expectation. Then the host pushes.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 12:10 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `44b9af3`   **PR**: #159
+**Addressed**: the `## Integrated Review` of 2026-09-15 11:42 -04:00 (PR #159 at `00f3736`) — 1 must-fix, 0 suggestions, actioned, none deferred
+**Commits**: `a6b9249` (decide on water depth), `1f0e372` (plan sync), `caf2332` (carry the sonar-frame position through + the missing-range guard), `44b9af3` (plan sync)
+
+### Actions
+- [x] (must-fix) The level plan decides on the **water depth under the transducer**, not the stored ellipsoidal height — `src/recon.cpp`, `include/cube_bathymetry/recon.h`, `include/cube_bathymetry/level_plan.h`, `src/level_plan.cpp`. `ReconCollector::add` histograms `-|sonar_relative_position.z|`. **Sign verified**: the projector builds `z = range · cos(tx) · cos(rx)` (`sounding.h:77`), i.e. positive-down — `DetectionsProjectorTest.MissingAttitudeYieldsNaNUncertainty` asserts `z == 15.0` for a nadir beam at 15 m range — so the negation is the histogram's negative-down water depth; the absolute value is belt-and-braces against a driver or frame reporting the other sign, and the comment says so. Transducer draft is ignored deliberately (sub-metre against a factor-of-two ladder), stated in the code, README, ADR and plan. `PlannedTile::decision_depth` and the plan JSON's `d` are redefined as water depth under the transducer, negative-down; **schema 2 amended, not a schema 3 minted** (schema 2 was introduced the same morning, unreleased). README §depth-adaptive, the ADR-0002 amendment, `--help` and plan.md updated. Test: `ReconCollector.DecidesOnWaterDepthNotTheStoredEllipsoidalHeight` — a sounding stored at −40 m with 12 m of water under the sonar decides at −12 m (to within a bin, shallow side) and asks for a strictly finer level than −40 m would have. `test_mixed_level_import` stays green.
+
+### A second defect the fix exposed (fixed here, `caf2332`)
+
+The review's premise — "the spill record already carries `sonar_relative_z`" — is true of the *record* but was not true of the *producer*. `georeferencePing` (`src/import_bag_main.cpp:880-911`) used the sonar-frame point for the ECEF transform and then copied only `vertical_error`, `horizontal_error`, `intensity`, `beam_angle` and `slant_range` into the `GeoSounding` it built. `sonar_relative_position` was left at its default, so **every spilled sounding carried z = 0**. The first re-run of the dry run on the real bag decided every tile at `d = 0.25` m (the histogram's shallow bin edge at zero) and asked for level 14 everywhere — a plausible-looking plan built from no depth measurement at all.
+
+- The field is now carried through. The estimator does not read it (`batch_regen.cpp:55`), so the fixed-level path and the byte-identity guarantee are untouched.
+- Silent recurrence is closed off: a sounding whose sonar-frame z is non-finite or exactly zero is counted but **not** histogrammed, `ReconCollector::soundingsWithoutRange()` reports how many there were, `import_bag` warns when any exist and **refuses to write a plan** when they account for every sounding. Test: `ReconCollector.SoundingsWithNoSonarFrameRangeDoNotDecideALevel`.
+- The hand-built fixtures in `test_mixed_level_import` and `test_batch_regen` now set the nadir z their depth always implied (they had constructed `GeoSounding`s with `slant_range = depth` and no sonar-frame position). Their six failures against the guard were the guard working, not a regression.
+
+### Verification (operator-requested)
+
+**Clean build + FULL suite on HEAD** — `sensors_ws/build/cube_bathymetry` and `install/cube_bathymetry` removed and rebuilt (the recon struct gained a field), then `./sensors_ws/test.sh cube_bathymetry`:
+
+    Summary: 767 tests, 0 errors, 0 failures, 87 skipped
+
+765 before this pass, +2 new tests. The 87 skipped are the whole `cppcheck` suite (the tool is absent on this host) — unchanged. uncrustify and cpplint green. `test_mixed_level_import` ran 10 tests, 0 failures: **byte-identity with a fixed-level import still holds**. (No `.pre-commit-config.yaml` in this repo; the package's lint runs inside the suite. No `--no-verify`.)
+
+**Dry run** — the exact `Command being timed:` line from `.agent/scratchpad/cube143-dryrun/recon.log`, output paths substituted to `.agent/scratchpad/cube143-dryrun/rerun2/`; the earlier directories were not touched. Bag: NAS `gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections` (Piscataqua River off the UNH pier, 98 min, 55,100 pings). **36.2 s wall**, 167 MB peak RSS, 20 count tiles (~35 MB peak), exit 0, recon pass 9.94 s. No missing-range warning (0 of 12,125,207 soundings).
+
+Full bag — `rerun2/level_plan.json`, surveyed ground 8,515.6 m² (0.0085 km²):
+
+| tile | decision depth | required | achieved | refined | ground (m²) |
+|---|---|---|---|---|---|
+| `8/4450/3497`   | **−6.50 m** | 12 | 10 | yes | 8515.6 |
+| `9/8900/6994`   | **−6.50 m** | 12 | 10 | yes | 8515.6 |
+| `10/17801/13988`| **−7.50 m** | 12 | 11 | yes | 2450.7 |
+| `10/17801/13989`| **−6.50 m** | 12 | 10 | no  | 6064.9 |
+| `11/35602/27977`| **−7.50 m** | 12 | 11 | no  | 2450.7 |
+
+    coverage deficit (depth requires finer than the data achieves): 5 tiles, 0.0085 km2
+
+The plan now emits a **level-11 tile** (it did not before), and the deficit is non-zero over the whole surveyed ground — the survey has not collected the density its water depth calls for, which the ellipsoidal-height version could not see. `ground stored coarser than level 10` reads 0.0000 km²; the estimate-count multiplier is 3.29×.
+
+3,000-ping window (`-l 3000`, `rerun2/small/`) — 2.6 s wall, 613,242 soundings, 4 count tiles, surveyed ground 706.0 m²:
+
+| tile | decision depth | required | achieved |
+|---|---|---|---|
+| `8/4450/3497`   | **−9.25 m** | 11 | 10 |
+| `9/8900/6994`   | **−9.25 m** | 11 | 10 |
+| `10/17801/13988`| **−10.00 m** | 11 | 10 |
+| `10/17801/13989`| **−9.25 m** | 11 | 10 |
+
+    coverage deficit: 4 tiles, 0.0007 km2
+
+**Cross-check against the stored surface.** In that same window the fixed-level path stores `10/17801/13988` as a CUBE surface of −40.897…−36.255 m (ellipsoidal). Against a measured water depth of −10.00 m for the same tile, the implied geoid/datum offset is ~26 m — the ~28 m the review derived for the pier, to within the tile's own relief. The two numbers are now different quantities, and both are the right one for their job: the store keeps ellipsoidal heights, the ladder is fed water depth.
+
+Against the operator's expectation (≈ −7…−20 m water, required 11–12, non-zero deficit): measured −6.50…−10.00 m, required 11–12, deficit non-zero in both runs. The full-bag depths land just shallower than the low end of the expected band.
+
+### Notes for the re-review
+- `sonar_relative_position` is now carried on every georeferenced sounding from `import_bag`. `batch_regen_main.cpp` builds `GeoSounding`s the same way and was **not** changed: it consumes a plan and runs no recon, so it has no reader for the field. If a recon is ever run from the regen path, that copy is the site to add.
+- The refusal is all-or-nothing by design: a *partial* absence warns and proceeds, because a survey can legitimately mix sources. If a mixed import ever puts a large share of undecidable soundings in one grid, the grid's percentile is taken over the remainder — the shallow bias is unchanged but the effective N is smaller.
+- The decision depth ignores transducer draft, so it is the range below the *transducer*, not below the waterline. At these depths that is a few percent and always on the shallow (finer-tile) side.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 12:19 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `79f438b`
+**Sources**: 3 — Copilot R1 @ `88831d5` (10 inline), Copilot R2 @ `00f3736` (6 inline + 9 suppressed), the local timeline (3 pre-push rounds + 2 dry-run Integrated Reviews)
+**Cross-source confirmations**: 0 at the current head (no local review has run against `79f438b`); 4 findings are RECURRENCES of classes an earlier round already fixed at one site — recorded below
+**CI**: all-pass — `ROS 2 Jazzy (industrial_ci)` completed / success on `79f438b`
+**Must-fix**: 5 | **Should-fix**: 6 | **Low**: 3 | **False positives**: 0 outright (2 partially-stale premises)
+
+Both Copilot reviews predate the current head: R1 predates the depth-histogram /
+surveyed-ground / recon-timer pass (`ccff244`..`8088fae`), R2 predates the
+water-depth fix and the sonar-frame plumbing (`a6b9249`..`caf2332`). Every
+comment was re-read against the code at `79f438b`. **Only one premise went
+stale** (the 64-sample reservoir, now a `DepthHistogram`); no finding was made
+moot by the interim commits, because those commits changed what the plan is
+decided FROM, and the comments are about the paths around it. The
+operator-settled points (parents-alive, k=0.71, water depth under the
+transducer as the decision depth, no datum dependency in cube) were not
+re-opened; nothing below touches them.
+
+### Findings
+
+- [x] (must-fix, Copilot R1) `recon->add()` throws (spill write / count-tile I/O) escape the bag loop: the enclosing handler catches only `tf2::TransformException` and `main()` has none, so a full scratch device during phase one ends the run in `std::terminate` (SIGABRT) instead of `error:` + exit 1 — and the `ReconCollector` destructor never runs, leaving the multi-GB spill dir behind for the next run's orphan warning. **Recurrence**: pre-push round 3 must-fix 1 fixed exactly this at the `forEachSpilled` site; this is the other site — `src/import_bag_main.cpp:1976`
+- [x] (must-fix, Copilot R1 ×2 — inline + suppressed) `accumulator.finalize()` sits outside the replay `try`, so an I/O failure while persisting resident tiles or the metadata sidecars unwinds past `abortDirtyReplay()`. By then `evictToBudget()` has been writing into the real `-o` store since the first batch, so the operator gets an uncaught throw over a partial-coverage store with any pre-existing `build_fingerprint.json` still describing the pre-run state. **Recurrence**: pre-push round 3 must-fix 2 established that exact contract for the short-replay path — `src/import_bag_main.cpp:1466`
+- [x] (must-fix, Copilot R1 + R2 — two sites) `--level-plan` reuse has no coverage check. Routing is `plan->levelsIntersecting(batchBounds)` and admission is `plan->isEmitted`, but `replayed` is incremented per spilled record regardless of whether any accumulator took it, so the `replayed == soundingsSpilled()` gate passes while soundings go nowhere. A plan from a different survey (or a re-run over changed bags) therefore produces a silently incomplete store that is then fingerprinted as a complete build. The recon HAS the evidence: require every occupied count tile to have an emitted ancestor before replay, or count routed soundings and abort via `abortDirtyReplay` on any unrouted — `src/import_bag_main.cpp:1425`, `src/multi_level_accumulator.cpp:135`
+- [x] (must-fix, Copilot R2 ×2 — two sites) `--bs-store` is silently accepted with `--depth-adaptive` (and with `batch_regen --level-plan`), but every level's `ImportAccumulator` gets the same flat `<bs_store>/survey/` root and `marine_mbes_backscatter_store` is single-level by construction ("All tiles live at a single GGGS level", `mbes_store.hpp:51`; `loadTile(path, level)` rejects a tile written at another level). A mixed-level run therefore writes a backscatter store nothing can load. `validateDepthAdaptiveOptions` already refuses `--tile-size-report` on this path — refuse `--bs-store` the same way, or add a per-level layout — `src/multi_level_accumulator.cpp:86`, `src/batch_regen.cpp:374`
+- [x] (must-fix, Copilot R1 ×2 — inline + suppressed) The fingerprint serialises the CLI/default `policy` even when `--level-plan` supplied the tiles, so a store built from a plan with custom ladder bounds or percentiles is stamped with inputs that did not choose its tiles, and `isStale()` later compares against the wrong ones. Pass `&plan->policy()` when a plan was loaded. **Recurrence**: pre-push round 1 must-fix 4 (the fingerprint must record the inputs the plan rests on) — `src/import_bag_main.cpp:1472`
+
+- [x] (should-fix, Copilot R1 ×4 — one family) CLI numeric options are narrowed or converted before they are range-checked: `--depth-adaptive-coarsest 256` / `--depth-adaptive-finest 270` wrap through `uint8_t` into levels `validate()` accepts (0 and 14), `--min-obs-per-node -1` becomes `UINT32_MAX` and passes `min_obs_per_node >= 1`, and both unbounded `double` factors (`--blunder-allowance`, `--count-spill-allowance`) can make a product infinite before a `uint64_t` conversion that is then undefined — in `requiredObservations()` (reached by `reportTilingChoice()` before a bag is opened) and in the spill free-space preflight, where a wrapped total defeats the check the operator is relying on. `requireAtLeast` already shows the shape for the fix — `src/import_bag_main.cpp:1680,1683,1690,1693,1179`, `src/level_plan.cpp:69`
+- [x] (should-fix, Copilot R2) The recon admits soundings the estimator will refuse: `ReconCollector::add` gates only on finite lat/lon/depth, while `GeoGrid::insert` (and `Parameters::influenceRadius`'s NaN sentinel) additionally reject non-finite `vertical_error`/`horizontal_error`, `vertical_error <= 0` and `horizontal_error < 0`. Those soundings inflate the count grid (so the achieved level reads finer than the data supports, and ground with no estimate counts as surveyed) and are spilled and replayed for nothing. A missing-attitude ping yields exactly this — `DetectionsProjectorTest.MissingAttitudeYieldsNaNUncertainty` — so it is a normal MRU-dropout condition, not a pathological input. Apply the same gate before counting/histogramming/spilling — `src/recon.cpp:175`
+- [x] (should-fix, Copilot R2) `LevelPlan::fromJson` calls `policy_.validate()` but validates no tile record against it: a plan file with `finest_level = 14` and a tile at level 15 is accepted, and `MultiLevelAccumulator` then builds a sheet finer than the survey index's footprint level — the ADR-0002 dirty-set invariant the policy check exists to protect. The plan file is an operator-facing artifact passed between runs, so it is an external input. Validate each tile's level against `[coarsest, finest]`, and `req`/`ach`/`g` for range — `src/level_plan.cpp:333`
+- [x] (should-fix, Copilot R1 + R2) `histograms_` is unbounded: one `DepthHistogram` per level-14 grid, never spilled or evicted, sitting beside the count grid that round 1 made LRU-bounded for the same reason. At `kMaxBins = 1024` (~50 kB) and the ~340 level-14 grids per km² the code's own comment cites, that is up to ~17 MB/km² worst case — ~3% of the count grid's 630 MB/km², and not the binding term at the dry run's scale (167 MB peak RSS total), but it still grows with ground covered while `--count-resident-tiles` bounds only the tiles. Either bound/spill it with the count tiles or report its peak alongside them, so the recon's bounded-RAM claim in README and plan.md stays true at survey scale — `include/cube_bathymetry/recon.h:193`, `src/recon.cpp:178`
+- [x] (should-fix, Copilot R2 suppressed) The level plan does not record `capture_spacing_scale`, so `batch_regen_bag --level-plan` applies whatever its own CLI default (0.71) gives while README promises "with `--level-plan`, bit-exact vs `import_bag --depth-adaptive`". An import run with a non-default `--capture-spacing-scale` rebuilds to a different gate, silently. Schema 2 is unreleased (minted this morning, amended once already), so add the field to it rather than minting 3, and have the rebuild refuse a mismatched explicit value. **Recurrence**: pre-push round 1 must-fix 4, the same "the artifact omits an input it rests on" class — `src/batch_regen_main.cpp:868`, `src/level_plan.cpp` (`toJson`/`fromJson`)
+- [x] (should-fix, Copilot R2 suppressed) The `DIRTY_TILES_JSON:` machine contract still carries a singular top-level `"store_level"` derived from `-r` in plan mode, while its `dirty_tiles[]` entries carry mixed per-tile `"level"`s. The human-readable summary was made level-aware in this PR ("Dirty tiles (every emitted level)") and the JSON was not, so a consumer keying on the documented top-level field rebuilds at the wrong level. Omit it (or emit the plan's level set) when a plan is in force — `src/batch_regen_main.cpp:414,495`
+
+- [x] (low, Copilot R2) The plan's tile-selection disc expands each occupied count cell by `max(spread, level cell)` from the cell's CENTRE, but the sounding that occupied the cell can sit up to half a count cell away, and the fixed path selects from the sounding's own position. The shortfall is one half count cell (~0.1 m at level 14) in each axis: a deposit landing in a seam-neighbour tile in that sliver reaches a tile the plan never emitted, and admission drops it — the #104 failure mode in miniature, and a hole in the single-level equivalence claim at tile seams. Add the count-cell offset to the radius — `src/level_plan.cpp:481`
+- [x] (low, Copilot R1) `CountGrid::saveTo()` writes into `--count-grid-out` without removing stale `*.tif` from an earlier, larger survey, and `mergeFrom()` reads the whole directory. Latent today (no production caller of `mergeFrom` — tests only), but the directory is an operator-facing artifact and `ReconCollector` already sets the precedent of refusing a non-empty scratch dir. Refuse a non-empty destination or clear it first — `src/count_grid.cpp:613`
+- [x] (low, Copilot R2 suppressed) README's "a fixed-level run at level 10 now gathers within 0.64 m" is the GGGS-snapped nominal (0.71 × ~0.906 m). `Parameters::distance_scale` takes the REQUESTED cell size, which defaults to `-r 1.0`, so the default gate is 0.71 m; 0.64 m is what the depth-adaptive sheets get (`requestedCellSizeFor` is the nominal). State both, or state the default — `README.md:113`
+
+### False positives
+
+- None outright. Two comments carry a premise that does not hold at `79f438b`; the concern under each survives and is recorded as a finding above:
+- (Copilot R1, `recon.h:193`) "keeps a 64-sample reservoir for every level-14 grid" — the `ShallowReservoir` was replaced by `DepthHistogram` in `ccff244` (dry-run review round 1), so the reservoir it describes no longer exists. Copilot re-raised the surviving half correctly at `00f3736` against `recon.cpp:178`; both are one finding.
+- (Copilot R2, `level_plan.cpp:481`) "Mirror the same one-tile selection margin" — the one-cell term is already dominated: `max(spread, level cell)` covers `influenceRadius`, whose own floor IS `distance_scale` (the cell), so the extra cell `boundsForSoundings` adds is selection slack, not deposit reach. Only the count-cell offset, the parenthetical half of the comment, is genuinely missing.
+
+### Notes
+
+- CI is green on the head; no CI-derived finding.
+- Nothing here re-opens an operator-settled decision. Findings 1, 2, 5 and 10 are second sites / repeat instances of classes closed in earlier rounds — the "fix every site, not the first one" pattern, and the reason the recurrence is called out rather than folded in silently.
+- Groupable into ~11 commits: the four CLI-range checks are one pass; the two `--bs-store` sites are one refusal; the two replay-coverage sites are one check.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+### Operator decisions (2026-09-15, host-recorded, after the triage above)
+- Fix **all 5 must-fix and all 6 should-fix** in this PR via `address-findings`. The 3 low items may be fixed if cheap; otherwise note them as deferred.
+- **`--bs-store` with `--depth-adaptive` / `--level-plan`: TEMPORARY refusal.** Refuse the combination with a message that names rolker/unh_marine_autonomy#383 as the prerequisite (per-level backscatter layout) and says the refusal is lifted by the PR that consumes it. This is not a reversal of the 2026-09-14 decision (mixed-level backscatter is gated on uma#383, not abandoned): it only avoids writing a store nothing can load today. README/`--help`/plan.md say the same; the gated mixed-level backscatter test stays as it is.
+- Recurrence classes (uncaught throws at a second site; finalize outside the abort guard; fingerprint from the wrong policy; capture_spacing_scale not carried): fix **every** site of the class, not the one Copilot pointed at, and say in the commit message that the class was swept.
+- After the fixes: clean build + FULL suite, then re-run the dry run (`rerun3/`, same command as `recon.log`, plus the `-l 3000` window) and confirm the plan/report numbers are unchanged from `rerun2/` (decision depths −6.5…−7.5 m, required 12, achieved 10–11, deficit 5 tiles / 0.0085 km²). Then the host pushes.
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 13:23 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `3ee2cfc`   <!-- PR #159, unpushed at the time of writing -->
+**Addressed**: the `## Integrated Review` of 2026-09-15 12:19 -04:00 (`79f438b`, 5 must-fix + 6 should-fix + 3 low), with the operator decisions appended to it
+**Commits**: `f503f77` `ae627bc` `ed36dee` `796a0ac` `bb8e478` `b128528` `b294f57` `570366f` `92d87aa` `6b3266e` `4a20a21` `21243a3` `95605af` `6eb2581` `62583ac` `df27849` `3ee2cfc`
+
+Every finding was fixed — all 5 must-fix, all 6 should-fix, and all 3 low
+(each was cheap). Nothing is deferred. Recurrence classes were swept at **every**
+site, as the operator directed, and each such commit says so.
+
+### Actions
+- [x] (must-fix) `recon->add()` throws escape the bag loop into `std::terminate` — the per-ping handler now catches `std::exception`, stops the pass and reports through the normal return path, so `~ReconCollector` still removes the spill. **Class swept**: the fixed-level `accumulator.addBatch` site too, which reports through `abortDirtyReplay` because eviction has been writing into the real `-o` store — `src/import_bag_main.cpp` (`f503f77`, `ed36dee`)
+- [x] (must-fix) `accumulator.finalize()` outside the replay guard — inside it now, on the depth-adaptive path **and** the fixed-level one — `src/import_bag_main.cpp` (`ae627bc`)
+- [x] (must-fix) `--level-plan` reuse has no coverage check — two checks: before the replay every occupied count tile must have an emitted ancestor (new `LevelPlan::covers`; refused for a reused plan, warned for a computed one, where the only cause is soundings with no range), and during it `MultiLevelAccumulator::unroutedSoundings()` counts what no level admitted and aborts through `abortDirtyReplay` — `src/import_bag_main.cpp`, `src/multi_level_accumulator.cpp`, `src/level_plan.cpp` (`796a0ac`)
+- [x] (must-fix) `--bs-store` silently accepted on the mixed-level paths — refused on both (`import_bag --depth-adaptive`, `batch_regen_bag --level-plan`), TEMPORARY, with a message naming rolker/unh_marine_autonomy#383 and saying the PR that consumes it lifts the refusal. README, both `--help` texts and plan.md say the same; the gated mixed-level backscatter test is untouched — `src/import_bag_main.cpp`, `src/batch_regen_main.cpp` (`bb8e478`)
+- [x] (must-fix) Fingerprint serialises the CLI policy even when a plan supplied the tiles — passes the plan's policy when `--level-plan` was used. The only other site of the class in the tree is `batch_regen`, which writes no fingerprint — `src/import_bag_main.cpp` (`b128528`)
+- [x] (should-fix) CLI numeric options narrowed before being range-checked — `requireLevel` for the three level options, `requireAtLeast` for `--min-obs-per-node`, an upper bound on both factors; and both conversion sites made safe independently of the CLI (a plan file's policy never passed through it): `requiredObservations()` clamps, `validate()` bounds the allowance, the spill preflight saturates toward "more than this device can hold" — `src/import_bag_main.cpp`, `src/level_plan.cpp` (`b294f57`, `95605af`)
+- [x] (should-fix) The recon admits soundings the estimator refuses — same door gate as `GeoGrid::insert`, with `soundingsRefused()` reported by the import (a missing-attitude ping is an MRU dropout, so the operator is told rather than just seeing a thinner survey) — `src/recon.cpp` (`570366f`)
+- [x] (should-fix) `LevelPlan::fromJson` validates no tile record against the policy — every tile level, `req`/`ach` and touched grid must lie in the recorded ladder; areas must be finite and non-negative — `src/level_plan.cpp` (`92d87aa`)
+- [x] (should-fix) `histograms_` is unbounded — reported, measured from the bins actually occupied, beside the count grid's resident peak; README and plan.md state that the budget does not cover it and why it cannot (every grid's histogram is read when the plan takes its percentile) — `src/recon.cpp`, `include/cube_bathymetry/recon.h` (`6b3266e`)
+- [x] (should-fix) The plan does not record `capture_spacing_scale` — added to schema 2 (unreleased) as a **required** key; **class swept at both readers**: `batch_regen_bag --level-plan` and `import_bag --level-plan` each adopt the plan's value when no flag is given and refuse an explicit one that disagrees — `src/level_plan.cpp`, `src/import_bag_main.cpp`, `src/batch_regen_main.cpp` (`4a20a21`)
+- [x] (should-fix) `DIRTY_TILES_JSON` carries a singular `store_level` in plan mode — with a plan in force the key is `store_levels`, the emitted level set; the fixed-level contract is unchanged, README states both — `src/batch_regen_main.cpp` (`21243a3`)
+- [x] (low) Tile-selection disc measured from the count cell's centre — gains the cell's half-diagonal (~0.04 m at level 14) — `src/level_plan.cpp` (`6eb2581`)
+- [x] (low) `CountGrid::saveTo()` writes into a non-empty destination — refused, since `mergeFrom()` reads the directory whole — `src/count_grid.cpp` (`62583ac`)
+- [x] (low) README's 0.64 m is the GGGS-snapped nominal — states both gates: 0.71 m for a default fixed-level run, 0.64 m for a depth-adaptive level-10 sheet — `README.md` (`62583ac`)
+
+### Tests
+
+Added: `LevelPlanTest.CoversAnswersWhetherGroundReachesThePlanAtAll`,
+`.RejectsTileRecordsThatContradictTheRecordedPolicy`,
+`.CarriesTheCaptureSpacingScaleThroughTheJson`, the allowance bound and the
+`requiredObservations()` clamp in `.ValidationNamesEachConstraint`;
+`MixedLevelImport.SoundingsNoLevelAdmitsAreCountedAsUnrouted`;
+`ImportBagCli.NumericOptionsAreCheckedBeforeTheyAreNarrowed`,
+`.RefusesBackscatterOnTheMixedLevelPathNamingThePrerequisite`;
+`ReconCollector.RefusesWhatTheEstimatorWouldRefuse`,
+`.ReportsWhatTheDepthHistogramsCost`; the dirty-destination case in
+`CountGridTest.SaveAndMergeFromRoundTripsAdditively`.
+
+Three changes have **no reachable test seam** and are covered by inspection plus
+the docs, stated here rather than papered over:
+
+- the two `main()`-only guards (per-ping I/O fault, finalize): this package has
+  no bag fixture, so `import_bag`'s replay paths cannot be driven from a test;
+  the CLI harness only reaches argument validation.
+- the one-line policy selection for the fingerprint: its consequence — every
+  plan-deciding key making a store stale — is already covered by
+  `test_build_fingerprint.StalenessRules`.
+- the `DIRTY_TILES_JSON` key: there is no `batch_regen_bag` CLI harness, and
+  adding one needs an on-disk survey-index fixture.
+
+Two commits are lint-driven, not findings: `ed36dee` and `3ee2cfc` lift blocks
+out of the two `main()`s, which were already at cpplint's function-size limit
+before this pass (`cube_fixed_level_finish`, `loadLevelPlan`, and the fatal-pass
+reporter). No behaviour change; same messages, same exit codes.
+
+### Verification
+
+- **Clean build** of `cube_bathymetry` (build + install trees removed first): OK.
+- **Full suite**: `775 tests, 0 errors, 0 failures, 87 skipped` — cpplint,
+  uncrustify and every gtest green.
+- **Dry run re-run** on the real M3 bag (NAS
+  `gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections`), same command as
+  `recon.log` with paths substituted, into
+  `.agent/scratchpad/cube143-dryrun/rerun3/`, plus the `-l 3000` window into
+  `rerun3/small/`. **Every plan and report number matches `rerun2/`**:
+  12,125,207 soundings counted and spilled, 20 count tiles, resident peak 20 of
+  256 (~35 MB), 5 emitted tiles at levels 8/9/10/10/11 with required 12 and
+  achieved 10–11, decision depths −6.5 / −7.5 m, surveyed ground 0.0085 km²,
+  coverage deficit 5 tiles / 0.0085 km², peak RSS 167 MB (was 167 MB), 40.1 s
+  wall (was 36.2 s — the extra is the dry-run machine, not the diff; user time
+  37.0 s vs 33.2 s). The small run: 613,242 soundings, 4 count tiles, 4 tiles,
+  0.0007 km², deficit 4 tiles.
+- The whole recon log diffs clean against `rerun2` apart from the progress
+  ticker (wall-clock dependent) and the **one new line**, the histogram report.
+  `level_plan.json` is identical apart from the new required
+  `capture_spacing_scale` key; all 22 count-grid files are **byte-identical**.
+- Zero soundings were refused by the new estimator-parity gate and zero lacked a
+  range on this bag, so neither new diagnostic fired — the numbers are
+  unchanged for the right reason.
+
+Not pushed (sub-agent contract; the host pushes).
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 13:25 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `4eabf3d`
+**Source**: operator decision 2026-09-15 — fold two follow-ups filed from the M3 dry run back into this PR instead of leaving them as issues (fix discovered defects where discovered). No new review comments; CI green on the previous head.
+**Must-fix**: 2 | **Suggestions**: 0
+
+### Findings
+- [x] (must-fix) **Verify the achieved level** — https://github.com/rolker/cube_bathymetry/issues/161. The pier bag has 12.1 M soundings over 0.0085 km² (~1,400/m²): ~4.5 obs/node at level 14, ~18 at level 13, ~70 at level 12, yet every tile reports achieved 10–11. Instrument the level-of-aggregation on `rerun3/` (per-box LoA histogram for tile `10/17801/13988`; is the p95 population all boxes in the tile, occupied boxes, or covered ground? does the 3×3 neighbourhood or the blunder allowance dominate?). If the percentile runs over empty/edge boxes, change it to run over occupied boxes (or covered ground) and justify in ADR-0002 text + README; if the current answer is right, say why in the README's achieved-level paragraph with the pier numbers. Add a density test: a synthetic swath at 1,400 soundings/m² over a 54 m grid must achieve level 12–13 in its core. Re-run the dry run into `rerun4/` and record the achieved levels + deficit line — `src/level_plan.cpp` (achieved-level / LoA code), `src/count_grid.cpp`
+- [x] (must-fix) **Real-bag smoke test** — https://github.com/rolker/cube_bathymetry/issues/162. Nothing in the suite reaches `main()`'s depth-adaptive path (this pass and the previous ones recorded three guards as inspection-only for that reason). Add: (1) a 3,000-ping excerpt of the pier bag written with `ros2 bag` tooling to the NAS archive next to the source (`/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/`, name it `..._m3_detections_3000ping_excerpt`; ~20 MB; referenced by path, not committed) — if writing to the NAS is not possible from this host, put it under `~/data/logs/fixtures/` and say so; (2) a gtest/ctest smoke test that runs `import_bag --depth-adaptive --level-plan-out` on it and asserts exit 0, no missing-range warning, surveyed ground within 10 % of 706 m², decision depths within −7…−20 m, recon seconds > 1, plan JSON at the current schema; then the fixed-level import on the same window and byte-identity of `batch_regen_bag --level-plan` against it; then the two abort paths with a fault injected (truncate the spill between phases; unwritable fingerprint dir) asserting the documented exit codes and the dirty-store message; (3) the test is **SKIPPED with a printed reason, never passed**, when the excerpt is unreachable (`GTEST_SKIP`), and `ci_local.sh`'s project hook (see `.agents/ci_local_upstream_extra.sh` conventions in the workspace) exposes the same skip semantics — `test/`, `CMakeLists.txt`
+
+### Operator decisions (2026-09-15, host-recorded)
+Fold both into PR #159 now. After: clean build + FULL suite; the smoke test must run for real on this host (the bag is reachable) and be observed to SKIP when pointed at a missing path. Then the host pushes and closes #161/#162 with the commit SHAs.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
+
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 14:00 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-143 at `976eab3`   <!-- PR #159 https://github.com/rolker/cube_bathymetry/pull/159; unpushed at the time of writing -->
+**Addressed**: the `## Integrated Review` of 2026-09-15 13:25 -04:00 (`4eabf3d`, 2 must-fix folding cube#161 and cube#162 back into this PR)
+**Commits**: `998a8e4` `9fc1449` `976eab3`
+
+Both must-fixes are done. Nothing is deferred.
+
+### Actions
+- [x] (must-fix) **Verify the achieved level** (cube#161) — instrumented, no code change needed; documented with the pier numbers and guarded by a density test — `src/count_grid.cpp` (`achievedLevelHistogram`/`achievedLevelPercentile`), `README.md`, `test/test_count_grid.cpp` (`998a8e4`)
+- [x] (must-fix) **Real-bag smoke test** (cube#162) — excerpt written to the archive; `test_real_bag_smoke` runs the real binaries and skips (never passes) without it — `test/test_real_bag_smoke.cpp`, `CMakeLists.txt`, `scripts/make_bag_excerpt.py`, `.agents/ci_local_extra.sh`, `README.md` (`9fc1449`)
+
+### What the achieved-level investigation found
+
+**The percentile's population is the OCCUPIED count cells** — `achievedLevelHistogram`
+walks `occupiedMask(tile)` and skips every empty cell, and `achievedLevelPercentile`
+sums those per-tile histograms over the count tiles inside the emitted tile. So
+neither empty boxes, nor tile footprint, nor unsurveyed ground votes; the
+question the review raised ("is it running over empty/edge boxes?") is answered
+**no**, and there is nothing to change there.
+
+Instrumented on `rerun3/count_grid` (n_req 6, the plan's own value), per-box
+level-of-aggregation over the two level-10 tiles:
+
+| | `10/17801/13988` | `10/17801/13989` |
+|---|---|---|
+| occupied level-14 cells | 764,453 | 1,891,837 |
+| soundings in them | 5,944,139 | 6,181,068 |
+| mean per occupied cell | 7.78 | 3.27 |
+| λ = 0 → level 14 | 284,350 (37.2 %) | 259,174 (13.7 %) |
+| λ = 1 → level 12 | 410,883 (cum 90.9 %) | 972,631 (cum 65.1 %) |
+| λ = 2 → level 11 | 46,892 (cum 98.4 %) | 535,956 (cum 93.4 %) |
+| tail | out to λ = 43 | out to λ = 106 (12.06 m) |
+| p50 / p75 / p90 | 12 / 12 / 12 | 12 / 11 / 11 |
+| **p95** | **11** | **10** |
+| p99 | 10 | 10 |
+
+Those p95 values **are** the achieved 11 and 10 the plan reports for those two
+tiles, so the plan is reading its own statistic correctly. The review's density
+arithmetic was right (~1,400 soundings/m², ~4.6 per level-14 cell) and so was
+its expectation that the *typical* node reaches level 12 — 91 % of the ground
+in the dense tile does. What it did not account for is that **p95 is a
+conservative tail by construction**: Calder's 0.95–0.99 range asks for the level
+95 % of the surveyed ground reaches *or beats*, and the last 5–7 % of a real
+swath is its thin fringe and the gaps between lines, where λ runs to 43 (2.4 m)
+and beyond. The thinner tile reaches only 93.4 % by level 11, just short of the
+rank, which is the whole of why its answer is one level coarser than its
+neighbour's.
+
+This is the intended semantics, so the fix is documentation plus a regression
+guard, not a change to the code:
+
+- README's `--achieved-percentile` bullet now states the population explicitly
+  (occupied cells, and why an unsurveyed cell must not vote while a gap between
+  lines does), that it is a tail statistic, and carries the pier numbers above —
+  including why raising the percentile toward 50 would report level 12 and store
+  a tile whose outer tenth has no estimator support.
+- `CountGridTest.PierDensityCoverageAchievesLevelTwelveInItsCore` fills a whole
+  level-14 grid (960 cells ≈ 54 m) at ~1,400 soundings/m² and asserts λ = 1 in
+  the core, > 99 % of cells at level 12, and p95 in {12, 13}. Under *uniform*
+  coverage at the pier's density the same code reads level 12, so a future
+  regression in the aggregation itself — as opposed to thin coverage at the
+  edges — is caught. ADR-0002 is untouched: nothing about the dirty-set
+  invariant changed.
+
+### The excerpt
+
+`/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections_3000ping_excerpt`
+— a **new** directory beside the source bag (18.2 MiB, mcap, 23,586 messages:
+3,000 `/bizzy/sensors/m3/detections`, 3,071 `/bizzy/odom`, 9,830 `/tf`, 5
+`/tf_static`, 7,680 sound-speed). Nothing existing on the NAS was read-modified
+or removed. It starts at the source bag's first message so the latched
+`/tf_static` comes with it, and carries 5 s of the other topics past the last
+ping so the projector's pending pings still find their transforms.
+`/bizzy/sensors/m3/soundings` is dropped — it is the same detections
+re-published as a PointCloud2 that the import does not read, and keeping it
+would have tripled the file. `scripts/make_bag_excerpt.py` (installed, and
+documented in the test) rebuilds it on any host that can read the source.
+
+The excerpt reproduces the `-l 3000` dry-run window: 3,000 pings projected,
+2,999 georeferenced, 613,018 soundings counted, 4 count tiles, surveyed ground
+705.91 m², decision depths −9.25 / −10.00 m, the same 4-tile plan.
+
+### The smoke test ran for real, and was observed to skip
+
+`test_real_bag_smoke`, 5 cases, all **run** under `colcon test` on this host
+(46.8 s; `test_real_bag_smoke.gtest.xml` records `status="run"` for all five):
+
+- `DepthAdaptiveReconReportsTheSurveyItActuallyCounted` — exit 0; no
+  missing-range warning; `ground_m2` within 10 % of 705.91; every decision depth
+  in −7…−20 m (water depth under the transducer, not the ≈ −37 m an ellipsoidal
+  height would give); plan JSON at schema 2 carrying `capture_spacing_scale`
+  0.71.
+- `ImportAndBatchRegenAgreeByteForByteOnTheRealBag` — all four tiles of
+  `import_bag --depth-adaptive --level-plan` compare byte-for-byte against
+  `batch_regen_bag --level-plan`, on real soundings rather than a synthetic
+  grid; the fixed-level import over the same window also runs clean (its tiles
+  are *not* expected to match — a different capture gate).
+- `ATruncatedSpillAbortsTheReplayAndDeclaresTheStoreDirty` — the harness reads
+  the child's stdout, waits for the `Phase two:` line, sleeps 500 ms (the replay
+  takes ~3 s) and truncates the spill 17 bytes short of a record boundary: exit
+  1, "truncated", the dirty-store warning, and no `build_fingerprint.json` left
+  behind. If the fault cannot be injected the case **skips** rather than
+  passing.
+- `AFinalizeFailureAbortsThroughTheSameDirtyStoreGuard` — a read-only layer
+  directory makes `finalize()` fail: exit 1, "could not be finalized", the
+  dirty-store warning, no `done!`, no fingerprint. This is the case the
+  finalize-inside-the-guard fix exists for, and it had no test until now.
+- `AnUnwritableFingerprintIsReportedAsCompleteButUnstampable` — a directory
+  where `build_fingerprint.json` goes: **exit 2**, "is complete, but …",
+  "FULL regen", and the dirty-store message explicitly **absent**.
+
+**Observed to skip**: with `CUBE_REAL_BAG_EXCERPT=/nonexistent/no_such_bag` the
+run reports `[  PASSED  ] 0 tests` and 5 `[  SKIPPED ]`, each printing
+`real-bag smoke test SKIPPED (NOT passed): no bag directory at …` plus how to
+point it at an excerpt. `.agents/ci_local_extra.sh` (the `ci_local.sh` per-repo
+hook, run inside the container after `colcon test`) was exercised both ways and
+prints either `real-bag smoke test SKIPPED (5 case(s), 0 ran) - NOT a pass` with
+the reason and `the depth-adaptive main() path was NOT exercised in this run`,
+or `real-bag smoke test RAN for real (5 case(s) against the excerpt)`.
+
+### Two deliberate deviations from the review's acceptance criteria
+
+Stated rather than quietly absorbed:
+
+- **`recon seconds > 1` → a two-sided bound instead.** The excerpt's recon pass
+  takes ~0.5 s (it is 1/18th of the bag and carries no PointCloud2 topic), so a
+  `> 1 s` assertion would fail on a correct build. The test asserts
+  `recon_secs > 0.1` *and* that it is within 50 % + 1 s of the projection time
+  the same run reports — which is the actual contract (the recon pass **is** the
+  interleaved projection pass) and still rejects the 2.6e-05 s the timer
+  reported before the fix, by four orders of magnitude.
+- **A third fault case was added.** The review asked for two; the
+  "unwritable fingerprint dir" turns out to exercise `writeFingerprint`'s own
+  handler (store complete, exit 2), not the finalize-inside-the-abort-guard
+  contract. Both are documented outcomes and both are now tested, plus the
+  read-only-layer-directory case that actually drives `finalize()` through
+  `abortDirtyReplay`.
+
+### Verification
+
+- **Full suite**: `788 tests, 0 errors, 0 failures, 88 skipped` (was 775/0/0/87
+  — the new cases plus the lint tests for the new script; the 88th skip is
+  unrelated to this pass, no new suppression was added). cpplint, uncrustify,
+  flake8, pep257, cppcheck and every gtest green.
+- **Dry run re-run into `rerun4/`** on the real M3 bag, the same command as
+  `recon.log`, plus the `-l 3000` window into `rerun4/small/`:
+  **`level_plan.json` is byte-identical to `rerun3/`**, the small window's
+  `plan.json` is byte-identical, all 20 count-grid files are byte-identical, and
+  the recon log diffs clean against `rerun3` apart from timings and paths.
+  Peak RSS 167,456 kB (was 167,384), 38.3 s wall (was 40.1 s).
+  **Achieved levels and deficit, `rerun4/`** — unchanged from `rerun3/`:
+
+  | tile | decision depth | required | achieved |
+  |---|---|---|---|
+  | `8/4450/3497`    | −6.50 m | 12 | 10 |
+  | `9/8900/6994`    | −6.50 m | 12 | 10 |
+  | `10/17801/13988` | −7.50 m | 12 | **11** |
+  | `10/17801/13989` | −6.50 m | 12 | 10 |
+  | `11/35602/27977` | −7.50 m | 12 | **11** |
+
+      coverage deficit (depth requires finer than the data achieves): 5 tiles, 0.0085 km2
+
+  The two tiles that read 11 are exactly the two the instrumentation put at p95
+  = level 11; surveyed ground 8,515.6 m², `capture_spacing_scale` 0.71.
+
+### Notes for the re-review
+
+- The achieved-level answer is a **documentation + regression-guard** outcome,
+  not a code fix: `count_grid.cpp` is unchanged. If the re-review disagrees with
+  the conclusion, the numbers to argue with are in the table above and the
+  instrumentation is reproducible from the saved `rerun3/count_grid`.
+- `.agents/ci_local_extra.sh` is this repo's **first** `ci_local` hook, so
+  `ci_local.sh` will now report `steps: template+extra-hook` for it. It only
+  reports; it never fails a run because the excerpt is absent (that is the whole
+  point), and it does fail if the binary is missing or the test genuinely fails.
+- The smoke test is the slowest in the suite where the excerpt is reachable
+  (~47 s of a 4 min 28 s package run) and free where it is not. `TIMEOUT 600`.
+- The excerpt is a new file on the NAS. Nothing existing there was modified or
+  removed.
+
+Not pushed (sub-agent contract; the host pushes). The host closes cube#161 and
+cube#162 with `998a8e4` and `9fc1449` — no closing keyword was put in any commit
+message.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 14:15 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `aa59734`
+**Source**: Copilot reviews 3 (`79f438b`, 16:15 UTC) and 4 (`4eabf3d`, 17:48 UTC), read by the host at the merge gate. CI: `ROS 2 Jazzy (industrial_ci)` SUCCESS on `aa59734`; mergeable, merge state CLEAN. Of 16 inline comments now attached to the three latest heads, 15 are the round-1/round-2 comments GitHub re-attached to later commits (all fixed in the 12:19 triage pass and verified there). **One is new.**
+**Must-fix**: 1 | **Suggestions**: 0
+
+### Findings
+- [x] (must-fix) **Fixed-level `batch_regen` path does not validate the sheet its factory returns.** In the plan-driven path the sheet from `factory_(level)` is checked for null and for having snapped to the requested level, throwing a clear `std::invalid_argument`; the fixed-level path (`src/batch_regen.cpp:122`) performs neither check, so a misbehaving factory can null-dereference later or silently gather at a different level. Apply the same invariant (shared helper, one message), add a test that a factory returning null / a wrong-level sheet is rejected on the fixed-level path, and sweep any other `factory_(…)` call site for the same gap — `src/batch_regen.cpp:122`
+
+### Operator decisions (2026-09-15, host-recorded)
+Fix in PR #159 (operator rule: fix discovered defects where discovered; "if the Copilot review is clean, merge it" — it is clean apart from this one). After the fix: clean build + FULL suite (the real-bag smoke test must run for real). Then the host pushes, waits for hosted CI, and merges.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
+## Implementation
+**Status**: complete
+**When**: 2026-09-15 14:25 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**PR**: #159 at `f4838bd`
+**Branch**: feature/issue-143
+**Addressed**: `## Integrated Review` (2026-09-15 14:15 -04:00) — its single must-fix
+**Commits**: f4838bd
+
+### Actions
+- [x] (must-fix) Fixed-level `batch_regen` path did not validate the sheet its factory returns — `cube_bathymetry/src/batch_regen.cpp:122`. All three `factory_(…)` call sites (plan routing, fixed-level routing, gather) now go through one file-local `makeSheetAtLevel()` helper that refuses a null sheet and a sheet that snapped to a level other than the one requested, with one message and `std::invalid_argument` on every path. The gather site previously threw `std::runtime_error` for the same condition; it is now the shared `invalid_argument` (both `main()`s catch `std::exception`, so operator-facing behaviour is unchanged apart from the clearer message).
+
+### Sweep
+- `MultiLevelAccumulator`'s optional `cfg_.sheet_factory` (`src/multi_level_accumulator.cpp:63`) had the *null* half of the same gap: it dereferenced the returned sheet on the next line to check its level. It now throws `std::invalid_argument` on null first. No other `factory_(…)`/`sheet_factory(…)` call sites exist in the package.
+
+### Tests
+- `BatchRegen.FixedLevelRefusesNullSheetFromFactory` and `BatchRegen.FixedLevelRefusesWrongLevelSheetFromFactory` — both assert `std::invalid_argument` at construction on the fixed-level path.
+
+### Verification
+- Clean rebuild of `cube_bathymetry` (build/install dirs removed first), then the FULL suite: **790 tests, 0 errors, 0 failures, 88 skipped**.
+- `test_real_bag_smoke` **RAN FOR REAL** — 5/5 tests, 0 failures, 0 skipped, 35.97 s against the NAS excerpt `/mnt/nadata/map2026asv/logs/gabby/logs/bizzy_m3/bag_2026-06-09T14.51.50_m3_detections_3000ping_excerpt` (`DepthAdaptiveReconReportsTheSurveyItActuallyCounted`, `ImportAndBatchRegenAgreeByteForByteOnTheRealBag`, the truncated-spill and finalize-failure dirty-store aborts, and the unwritable-fingerprint path).
+- Pre-commit hooks ran on both commits (no `--no-verify`).
+
+### Plan sync
+- `plan.md` item 8 (`batch_regen` level-awareness) states the `SheetFactory` contract, so it now also states the validation invariant: every returned sheet is checked on every path.

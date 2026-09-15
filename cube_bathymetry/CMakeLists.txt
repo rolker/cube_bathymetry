@@ -46,6 +46,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 
 find_package(GDAL CONFIG REQUIRED)
+find_package(nlohmann_json REQUIRED)  # level plan JSON (#143)
 
 add_library(cube_bathymetry
   src/angular_response_curve.cpp
@@ -88,6 +89,34 @@ install(TARGETS cube_bathymetry EXPORT export_${PROJECT_NAME}
 
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 
+# Depth-adaptive level planning (#143): the sounding count grid + Calder's
+# level-of-aggregation query, the level plan, and the build fingerprint. Pure
+# (no ROS, no CUBE estimator) so the plan can be computed, inspected and reused
+# without the estimator; its own target so the tiled-raster-store dependency
+# stays scoped to the offline tools that plan.
+add_library(cube_bathymetry_level_plan
+  src/count_grid.cpp
+  src/level_plan.cpp
+  src/build_fingerprint.cpp   # ADR-0003 schema v2, tiling only (#143)
+  src/recon.cpp               # recon pass: counts + decision depths + sounding spill
+)
+target_include_directories(cube_bathymetry_level_plan PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_level_plan
+  cube_bathymetry                    # GeoSounding + Parameters::maxSpreadRadius (recon)
+  marine_autonomy::marine_autonomy   # gggs (Level, GridIndex, CellIndex, parent)
+  marine_tiled_raster_store::marine_tiled_raster_store  # count-tile GeoTIFF io
+  marine_bathymetry_store::marine_bathymetry_store  # depthAdaptiveLevel (uma#369)
+  nlohmann_json::nlohmann_json
+)
+install(TARGETS cube_bathymetry_level_plan EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
 # GeoGrid -> bathymetry-store-tile conversion (#57, #21). Kept in its OWN target
 # so the store dependency does NOT leak into the core cube_bathymetry library
 # (and thus not into detections_to_pointcloud, which has no need for the data
@@ -97,9 +126,11 @@ install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 add_library(cube_bathymetry_store_import
   src/store_import.cpp
   src/batch_regen.cpp   # exact scatter/gather store rebuild (#96)
+  src/multi_level_accumulator.cpp   # one accumulator per plan level (#143)
 )
 target_link_libraries(cube_bathymetry_store_import
   cube_bathymetry
+  cube_bathymetry_level_plan  # LevelPlan drives the multi-level accumulator (#143)
   marine_bathymetry_store::marine_bathymetry_store
   marine_mbes_backscatter_store::marine_mbes_backscatter_store  # MbesCell (#80)
 )
@@ -121,6 +152,7 @@ target_include_directories(cube_bathymetry_survey_index_query PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(cube_bathymetry_survey_index_query
+  cube_bathymetry_level_plan         # LevelPlan-aware dirtyTiles (#143)
   marine_autonomy::marine_autonomy   # gggs (GridIndex, Level, parent, levels)
   marine_survey_index::marine_survey_index_core  # PassRow, queryPasses, tilesForBoundingBox
   SQLite::SQLite3
@@ -243,6 +275,7 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 # Empirical backscatter correction consumes.
 install(PROGRAMS
   scripts/derive_angular_response.py
+  scripts/make_bag_excerpt.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -423,7 +456,9 @@ if(BUILD_TESTING)
   # an eviction-forcing budget reproduces the unbounded bathy + backscatter store
   # exactly (lossless persist-then-drop + reload-on-revisit), and a persist
   # failure never drops a tile.
-  ament_add_gtest(test_import_eviction test/test_import_eviction.cpp)
+  # TIMEOUT 300: the eviction cases run ~44 s against the 60 s ament default,
+  # too little headroom on a loaded or slower machine (cube_bathymetry#143).
+  ament_add_gtest(test_import_eviction test/test_import_eviction.cpp TIMEOUT 300)
   target_link_libraries(test_import_eviction
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
@@ -434,6 +469,7 @@ if(BUILD_TESTING)
   # bathy + backscatter store vs a single-pass unbounded ImportAccumulator.
   ament_add_gtest(test_batch_regen test/test_batch_regen.cpp)
   target_link_libraries(test_batch_regen
+    cube_bathymetry_level_plan   # LevelPlan/ReconCollector for the mixed-level case (#143)
     cube_bathymetry_store_import
     marine_bathymetry_store::marine_bathymetry_store
     marine_mbes_backscatter_store::marine_mbes_backscatter_store
@@ -454,6 +490,47 @@ if(BUILD_TESTING)
     BATCH_REGEN_BAG_EXE="$<TARGET_FILE:batch_regen_bag>"
   )
   add_dependencies(test_survey_index_query batch_regen_bag)
+
+  # Depth-adaptive level planning (#143): count grid + level of aggregation.
+  ament_add_gtest(test_count_grid test/test_count_grid.cpp)
+  target_link_libraries(test_count_grid cube_bathymetry_level_plan)
+  ament_add_gtest(test_level_plan test/test_level_plan.cpp)
+  target_link_libraries(test_level_plan cube_bathymetry_level_plan)
+  ament_add_gtest(test_build_fingerprint test/test_build_fingerprint.cpp)
+  target_link_libraries(test_build_fingerprint cube_bathymetry_level_plan)
+  ament_add_gtest(test_recon test/test_recon.cpp)
+  target_link_libraries(test_recon cube_bathymetry_level_plan)
+
+  # Mixed-level import (#143): single-level equivalence against the fixed-level
+  # path, parents estimated under children, and one RAM budget across levels.
+  ament_add_gtest(test_mixed_level_import test/test_mixed_level_import.cpp TIMEOUT 300)
+  target_link_libraries(test_mixed_level_import
+    cube_bathymetry_store_import
+    cube_bathymetry_level_plan
+    marine_bathymetry_store::marine_bathymetry_store
+    marine_mbes_backscatter_store::marine_mbes_backscatter_store
+  )
+  # The CLI-contract cases run the built import_bag binary for its argument
+  # validation (a bad depth-adaptive policy must fail before any bag opens).
+  target_compile_definitions(test_mixed_level_import PRIVATE
+    IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
+  )
+  add_dependencies(test_mixed_level_import import_bag)
+
+  # End-to-end smoke test over a REAL sonar bag (#143/#162). Nothing else in
+  # the suite reaches import_bag's main() past argument validation, so the
+  # two-phase spill/replay and its abort paths were reviewed by inspection
+  # only. The 3,000-ping excerpt is survey data referenced by path (18 MB, not
+  # committed); where it is unreachable every case SKIPS with the reason
+  # printed -- see test/test_real_bag_smoke.cpp and .agents/ci_local_extra.sh,
+  # which surfaces that skip as a named CI line rather than a silent pass.
+  ament_add_gtest(test_real_bag_smoke test/test_real_bag_smoke.cpp TIMEOUT 600)
+  target_link_libraries(test_real_bag_smoke cube_bathymetry_level_plan)
+  target_compile_definitions(test_real_bag_smoke PRIVATE
+    IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
+    BATCH_REGEN_EXE="$<TARGET_FILE:batch_regen_bag>"
+  )
+  add_dependencies(test_real_bag_smoke import_bag batch_regen_bag)
 endif()
 
 # The installed public header store_import.h (#include'd by downstream consumers

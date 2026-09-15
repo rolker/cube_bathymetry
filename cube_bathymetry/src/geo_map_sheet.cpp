@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <utility>
 #include "marine_autonomy/gz4d_geo.h"
 
@@ -91,6 +92,25 @@ void GeoMapSheet::setBackscatterCorrection(
   parameters_.backscatter_absorption_db_per_m = absorption_db_per_m;
 }
 
+void GeoMapSheet::setCaptureSpacingScale(float scale)
+{
+  if (!std::isfinite(scale) || scale <= 0.0f) {
+    throw std::invalid_argument(
+            "GeoMapSheet::setCaptureSpacingScale: scale must be finite and positive");
+  }
+  parameters_.capture_spacing_scale = scale;
+}
+
+void GeoMapSheet::setTouchClock(std::shared_ptr<std::atomic<uint64_t>> clock)
+{
+  touch_clock_ = std::move(clock);
+}
+
+void GeoMapSheet::setAdmission(std::function<bool(const gggs::GridIndex &)> admit)
+{
+  admit_ = std::move(admit);
+}
+
 void GeoMapSheet::addSoundings(
   const std::vector<GeoSounding> & soundings,
   std::chrono::steady_clock::time_point time)
@@ -124,7 +144,9 @@ std::vector<gggs::GridIndex> GeoMapSheet::gridIndicesForSoundings(
     grid_level_.gridIndex(bounds.minimum().latitude, bounds.minimum().longitude),
     grid_level_.gridIndex(bounds.maximum().latitude, bounds.maximum().longitude));
   while(i.valid()) {
-    ret.push_back(*i);
+    if(!admit_ || admit_(*i)) {
+      ret.push_back(*i);
+    }
     i.next();
   }
   return ret;
@@ -156,13 +178,19 @@ std::vector<std::shared_ptr<GeoGrid>> GeoMapSheet::getOrCreateGridsIn(
     grid_level_.gridIndex(bounds.maximum().latitude, bounds.maximum().longitude));
 
   while(i.valid()) {
+    // Admission (#143): a grid the plan did not emit at this level is neither
+    // created nor touched -- its ground is estimated at the parent level.
+    if(admit_ && !admit_(*i)) {
+      i.next();
+      continue;
+    }
     if(!grids_[*i]) {
       grids_[*i] = std::make_shared<GeoGrid>(*i, parameters_);
     }
     // Every grid in the current sounding bounds is being actively surveyed, so
     // bump its last-touch recency -- this is the signal LRU eviction uses to keep
     // near-vessel tiles resident and evict cold far-away ones (ADR-0001).
-    last_touch_[*i] = ++touch_counter_;
+    last_touch_[*i] = nextTouch();
     ret.push_back(grids_[*i]);
     i.next();
   }
@@ -197,7 +225,7 @@ std::shared_ptr<GeoGrid> GeoMapSheet::getOrCreateGrid(const gggs::GridIndex & in
     // Seed a last-touch entry on first creation so every resident grid has one
     // (the prime/reload path lands here). Touched once at load -- relatively cold
     // versus actively-surveyed tiles, so primed-but-inactive tiles evict first.
-    last_touch_[index] = ++touch_counter_;
+    last_touch_[index] = nextTouch();
   }
   return grids_[index];
 }

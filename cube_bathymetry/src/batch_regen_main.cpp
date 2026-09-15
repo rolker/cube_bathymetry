@@ -61,6 +61,8 @@
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/store_import.h"
 #include "cube_bathymetry/survey_index_query.h"   // --index-db dirty-tile query (#111)
+#include "cube_bathymetry/level_plan.h"            // --level-plan multi-level rebuild (#143)
+#include "cube_bathymetry/multi_level_accumulator.h"  // requestedCellSizeFor (#143)
 #include "marine_survey_index/schema.hpp"          // openIndexDb (#111)
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -102,7 +104,9 @@
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store `survey` "
     "layer from the same CUBE pass (optional; surfaces the co-estimated "
     "intensity -- uncorrected by default, angle-corrected when "
-    "--backscatter-correction empirical is set, cube#81)\n";
+    "--backscatter-correction empirical is set, cube#81). NOT supported with "
+    "--level-plan yet: the backscatter store is single-level by construction "
+    "(per-level layout = uma#383; the PR that consumes it lifts the refusal).\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
     "topic to replay through CUBE (required)\n";
   std::cout << "  --odom-topic <topic>: nav_msgs/Odometry topic for per-ping "
@@ -129,6 +133,14 @@
     "'DIRTY_TILES_JSON:' line. Builds NOTHING and ignores -o. If the DB file is "
     "absent, reports that a real run falls back to full regen. Without --index-db "
     "the normal full-regen path is unchanged.\n";
+  std::cout << "  --level-plan <file>: rebuild a DEPTH-ADAPTIVE store (cube#143) from "
+    "the level plan import_bag --level-plan-out wrote: soundings scatter to every "
+    "emitted tile at every level the plan holds over them (parents included) and "
+    "each tile is gathered at its own level. With --index-db, the dirty set is "
+    "rolled up to the emitted tile at every plan level (ADR-0002 amendment). "
+    "Without it the fixed-level rebuild at -r is unchanged.\n";
+  std::cout << "  --capture-spacing-scale <k>: spacing term of the node capture distance "
+    "(default 0.71); must match the import for a bit-exact rebuild (cube#143).\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
@@ -333,6 +345,88 @@ std::string jsonEscape(const std::string & s)
   return out;
 }
 
+/// Load and vet the `--level-plan` file (cube#143; lifted out of main(), which
+/// is at the cpplint function-size limit). Returns the plan, or nullptr with
+/// @p failed set when the run must stop -- an unreadable or empty plan, a
+/// capture-spacing scale that disagrees with the one the plan records, or
+/// `--bs-store` on this path. Adopts the plan's capture scale when the flag was
+/// not given. An empty @p level_plan_path is not a failure: it returns nullptr
+/// with @p failed false (a fixed-level rebuild).
+std::shared_ptr<const cube::LevelPlan> loadLevelPlan(
+  const std::string & level_plan_path, const std::string & bs_store_dir,
+  float & capture_spacing_scale, bool capture_spacing_scale_given, bool * failed)
+{
+  *failed = false;
+  if (level_plan_path.empty()) {
+    return nullptr;
+  }
+  std::shared_ptr<const cube::LevelPlan> level_plan;
+  {
+    std::ifstream in(level_plan_path);
+    if (!in) {
+      std::cerr << "error: cannot read --level-plan " << level_plan_path << "\n";
+      *failed = true;
+      return nullptr;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    try {
+      level_plan = std::make_shared<cube::LevelPlan>(cube::LevelPlan::fromJson(buffer.str()));
+    } catch (const std::exception & e) {
+      std::cerr << "error: --level-plan " << level_plan_path << ": " << e.what() << "\n";
+      *failed = true;
+      return nullptr;
+    }
+    if (level_plan->tiles().empty()) {
+      std::cerr << "error: --level-plan " << level_plan_path << " emits no tiles\n";
+      *failed = true;
+      return nullptr;
+    }
+    // The capture gate is `max(0.05 x |depth|, k x node spacing)`, so a rebuild
+    // at a different k gathers differently from the same soundings -- and
+    // README promises this rebuild is bit-exact against
+    // `import_bag --depth-adaptive`. The plan carries the k its import ran with
+    // (cube#143 triage): adopt it when no flag was given, refuse an explicit
+    // value that disagrees rather than silently rebuilding to a different gate.
+    if (capture_spacing_scale_given &&
+      level_plan->captureSpacingScale() != capture_spacing_scale)
+    {
+      std::cerr << "error: --capture-spacing-scale " << capture_spacing_scale
+                << " disagrees with the " << level_plan->captureSpacingScale()
+                << " recorded in " << level_plan_path
+                << ". A rebuild at a different capture gate is not the bit-exact "
+        "rebuild of that import. Drop the flag to use the plan's value.\n";
+      *failed = true;
+      return nullptr;
+    }
+    if (!capture_spacing_scale_given) {
+      capture_spacing_scale = level_plan->captureSpacingScale();
+      std::cout << "Capture spacing scale " << capture_spacing_scale
+                << ", from the level plan." << std::endl;
+    }
+    if (!bs_store_dir.empty()) {
+      // TEMPORARY, and the same refusal import_bag --depth-adaptive gives:
+      // marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level
+      // ("All tiles live at a single GGGS level", mbes_store.hpp; loadTile()
+      // rejects a tile written at another level), while every level of a
+      // plan-driven rebuild gathers into the SAME store root. The per-level
+      // layout is uma#383 and the PR that consumes it lifts this. Refusing
+      // beats writing a backscatter store nothing can load.
+      std::cerr << "error: --bs-store is not supported with --level-plan yet.\n"
+        "marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level, and a "
+        "mixed-level rebuild gathers every level into the same store root -- the result "
+        "is a backscatter store nothing can load. The per-level layout is\n"
+        "  https://github.com/rolker/unh_marine_autonomy/issues/383\n"
+        "and the PR that consumes it lifts this refusal. Until then, rebuild the "
+        "bathymetry from the plan and take backscatter from a separate fixed-level "
+        "rebuild.\n";
+      *failed = true;
+      return nullptr;
+    }
+  }
+  return level_plan;
+}
+
 // DRY-RUN dirty-tile query (cube#111, ADR-0002). Opens the survey index and
 // reports the store-level (L10) tiles a tile-scoped rebuild would touch for the
 // given bags (treated as newly-added), plus their contributing bags/intervals.
@@ -352,7 +446,8 @@ int dirtyTileDryRun(
   const std::string & index_db_path,
   const std::vector<std::string> & bagfile_names,
   double resolution,
-  const std::string & iho_order)
+  const std::string & iho_order,
+  std::shared_ptr<const cube::LevelPlan> plan)
 {
   // Store GGGS level, derived exactly as the real build derives it: the sheet
   // snaps the requested resolution to a nominal cell size, and the store tiles
@@ -363,8 +458,16 @@ int dirtyTileDryRun(
 
   std::cout << "Dry-run dirty-tile query (--index-db " << index_db_path
             << "); nothing will be built." << std::endl;
-  std::cout << "Store level: L" << static_cast<int>(store_level.level())
-            << " (nominal cell " << sheet.nominalCellSizeMeters() << " m)" << std::endl;
+  if (plan) {
+    std::cout << "Level plan: " << plan->tiles().size() << " emitted tile(s) at levels";
+    for (const auto level : plan->levels()) {
+      std::cout << " L" << static_cast<int>(level);
+    }
+    std::cout << " (dirty set rolled up to every emitted level, cube#143)" << std::endl;
+  } else {
+    std::cout << "Store level: L" << static_cast<int>(store_level.level())
+              << " (nominal cell " << sheet.nominalCellSizeMeters() << " m)" << std::endl;
+  }
   std::cout << "New bags (" << bagfile_names.size() << "):" << std::endl;
   for (const auto & bag : bagfile_names) {
     std::cout << "  " << bag << std::endl;
@@ -391,7 +494,8 @@ int dirtyTileDryRun(
   try {
     sqlite3 * db = marine_survey_index::openIndexDb(index_db_path);
     try {
-      dirty = cube::dirtyL10Tiles(db, bagfile_names, store_level);
+      dirty = plan ? cube::dirtyTiles(db, bagfile_names, *plan) :
+        cube::dirtyTilesAtLevel(db, bagfile_names, store_level);
     } catch (...) {
       // close_v2 on the throw path: an exception can escape mid-query with a
       // statement still live, and plain sqlite3_close would then return
@@ -419,7 +523,7 @@ int dirtyTileDryRun(
 
   // Index-miss guard (cube#111). An EMPTY dirty set for a NON-EMPTY new-bag list
   // means the index answered with no footprint at all for the given bags.
-  // `dirtyL10Tiles` matches `bags.path` EXACTLY, so a bag that was never indexed
+  // `dirtyTilesAtLevel` matches `bags.path` EXACTLY, so a bag that was never indexed
   // -- or whose path is merely spelled differently than it was at index time
   // (relative vs absolute, a symlinked mount, a trailing slash) -- produces zero
   // rows, and is INDISTINGUISHABLE here from the legitimate "bag is indexed but
@@ -441,8 +545,12 @@ int dirtyTileDryRun(
 
   // Human-readable summary.
   std::set<std::string> contributing_bags;
-  std::cout << "\nDirty L" << static_cast<int>(store_level.level())
-            << " tiles: " << dirty.size() << std::endl;
+  if (plan) {
+    std::cout << "\nDirty tiles (every emitted level): " << dirty.size() << std::endl;
+  } else {
+    std::cout << "\nDirty L" << static_cast<int>(store_level.level())
+              << " tiles: " << dirty.size() << std::endl;
+  }
   for (const auto & dt : dirty) {
     std::cout << "  tile L" << static_cast<int>(dt.tile.level())
               << " row=" << dt.tile.row() << " col=" << dt.tile.column()
@@ -468,8 +576,27 @@ int dirtyTileDryRun(
   std::ostringstream json;
   json.imbue(std::locale::classic());
   json << std::setprecision(17);
-  json << "{\"store_level\":" << static_cast<int>(store_level.level())
-       << ",\"dirty_tile_count\":" << dirty.size() << ",\"dirty_tiles\":[";
+  // With a plan in force there is no single store level: the dirty_tiles[]
+  // entries carry mixed per-tile "level"s, and the top-level field was still
+  // derived from -r, which a consumer keying on the documented field would
+  // rebuild at (cube#143 triage). The human-readable summary was made
+  // level-aware in this PR and the JSON was not. Emit the plan's level SET
+  // instead, so the key is present but cannot be read as one level; the
+  // fixed-level contract is unchanged.
+  json << "{";
+  if (plan) {
+    json << "\"store_levels\":[";
+    bool first_level = true;
+    for (const auto level : plan->levels()) {
+      if (!first_level) {json << ",";}
+      first_level = false;
+      json << static_cast<int>(level);
+    }
+    json << "]";
+  } else {
+    json << "\"store_level\":" << static_cast<int>(store_level.level());
+  }
+  json << ",\"dirty_tile_count\":" << dirty.size() << ",\"dirty_tiles\":[";
   bool first_tile = true;
   for (const auto & dt : dirty) {
     if (!first_tile) {json << ",";}
@@ -521,6 +648,10 @@ int main(int argc, char * argv[])
   // Backscatter angular-response correction (cube#81). Default none = identity.
   std::string backscatter_correction_str = "none";
   std::string backscatter_curve_file;
+  // Depth-adaptive rebuild from a level plan (cube#143); empty = fixed level.
+  std::string level_plan_path;
+  float capture_spacing_scale = 0.71f;
+  bool capture_spacing_scale_given = false;
 
   // Store-level provenance (uma#248 StoreMetadata, written once at finalize).
   marine_bathymetry_store::StoreMetadata store_metadata;
@@ -601,6 +732,16 @@ int main(int argc, char * argv[])
       backscatter_correction_str = next_value("--backscatter-correction");
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
+    } else if (*arg == "--level-plan") {
+      level_plan_path = next_value("--level-plan");
+    } else if (*arg == "--capture-spacing-scale") {
+      capture_spacing_scale = static_cast<float>(
+        parse_double("--capture-spacing-scale", next_value("--capture-spacing-scale")));
+      if (!(capture_spacing_scale > 0.0f) || !std::isfinite(capture_spacing_scale)) {
+        std::cerr << "error: --capture-spacing-scale must be a positive number\n";
+        usage();
+      }
+      capture_spacing_scale_given = true;
     } else if (*arg == "-l") {
       ping_count_limit = parse_int("-l", next_value("-l"));
     } else if (*arg == "--platform") {
@@ -642,6 +783,17 @@ int main(int argc, char * argv[])
   // -o / -d are not required. Placed before the full-regen argument checks so the
   // query can run standalone. The full-regen path below is unchanged when
   // --index-db is absent.
+  // Level plan (cube#143): a depth-adaptive rebuild reads the plan import_bag
+  // --level-plan-out wrote. Loaded before the dry run so the dirty-tile query
+  // can roll up to the plan's levels.
+  bool level_plan_failed = false;
+  const std::shared_ptr<const cube::LevelPlan> level_plan = loadLevelPlan(
+    level_plan_path, bs_store_dir, capture_spacing_scale, capture_spacing_scale_given,
+    &level_plan_failed);
+  if (level_plan_failed) {
+    return 1;
+  }
+
   if (!index_db_path.empty()) {
     if (bagfile_names.empty()) {
       std::cerr << "error: --index-db requires at least one bag (the newly-added "
@@ -668,7 +820,7 @@ int main(int argc, char * argv[])
       std::cerr << "error: " << e.what() << "\n";
       usage();
     }
-    return dirtyTileDryRun(index_db_path, bagfile_names, resolution, iho_order);
+    return dirtyTileDryRun(index_db_path, bagfile_names, resolution, iho_order, level_plan);
   }
 
   if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
@@ -734,6 +886,7 @@ int main(int argc, char * argv[])
   tf2_ros::Buffer tfBuffer(clock, tf2::durationFromSec(kCacheWindowSec));
 
   cube::GeoMapSheet geo_map_sheet(resolution, iho_order);
+  geo_map_sheet.setCaptureSpacingScale(capture_spacing_scale);
   std::cout << "requested resolution: " << resolution << " nominal used: "
             << geo_map_sheet.nominalCellSizeMeters() << std::endl;
 
@@ -792,12 +945,19 @@ int main(int argc, char * argv[])
   // per tile, all of which MUST be configured identically to this projection sheet
   // (cell size, IHO order, backscatter correction) for the rebuild to be exact.
   // Capture the correction settings by value so the factory can build many sheets.
+  // With a level plan (#143) each level's sheet is built at that level's own
+  // cell size (requestedCellSizeFor snaps exactly there), matching import_bag's
+  // per-level sheets; without one, the single -r sheet as before.
+  const bool adaptive = static_cast<bool>(level_plan);
   cube::BatchRegen::SheetFactory make_sheet =
-    [resolution, iho_order, backscatter_mode,
+    [resolution, iho_order, backscatter_mode, adaptive, capture_spacing_scale,
       curve_points = backscatter_curve.points,
       tl_removed = backscatter_curve.tl_removed,
-      absorption = backscatter_curve.absorption_db_per_m]() {
-      auto sheet = std::make_unique<cube::GeoMapSheet>(resolution, iho_order);
+      absorption = backscatter_curve.absorption_db_per_m](uint8_t level) {
+      const float cell = adaptive ? cube::requestedCellSizeFor(level) :
+        static_cast<float>(resolution);
+      auto sheet = std::make_unique<cube::GeoMapSheet>(cell, iho_order);
+      sheet->setCaptureSpacingScale(capture_spacing_scale);
       sheet->setBackscatterCorrection(
         backscatter_mode, curve_points, tl_removed, absorption);
       return sheet;
@@ -827,7 +987,15 @@ int main(int argc, char * argv[])
   regen_config.cell_size_m =
     static_cast<float>(geo_map_sheet.nominalCellSizeMeters());
   regen_config.bs_store_dir = bs_store_dir;
-  cube::BatchRegen regen(make_sheet, regen_config);
+  cube::BatchRegen regen(make_sheet, regen_config, level_plan);
+  if (adaptive) {
+    std::cout << "Depth-adaptive rebuild from " << level_plan_path << ": "
+              << level_plan->tiles().size() << " tile(s) at levels";
+    for (const auto level : level_plan->levels()) {
+      std::cout << " L" << static_cast<int>(level);
+    }
+    std::cout << " (cube#143; the -r resolution is not used)." << std::endl;
+  }
 
   if (!reference_store_dir.empty()) {
     std::cout << "Reference-prior seeding from " << reference_store_dir

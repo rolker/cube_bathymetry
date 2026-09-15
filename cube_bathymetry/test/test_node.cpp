@@ -861,4 +861,77 @@ TEST_F(NodeTest, CorrectAtRecordMatchesCorrectAtExtract)
   EXPECT_NEAR(record.intensity_var, static_cast<float>(ref_var_of_mean), 1e-5);
 }
 
+// ---------------------------------------------------------------------------
+// Capture distance (cube_bathymetry#143): the node accepts a sounding within
+//   max(capture_distance_scale * |depth|, capture_spacing_scale * spacing)
+// with NO fixed floor in metres. Calder's hard-coded 0.5 m floor
+// (`cube_node.c:1831`) is gone; the spacing term replaces it. A node with no
+// predicted depth uses the sounding's own depth as the target, so these tests
+// steer the gate through the sounding depth alone. insert() returns false on
+// a capture rejection and true on acceptance.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+Sounding captureProbe(float depth)
+{
+  Sounding s(depth);
+  s.vertical_error = 0.01f;
+  s.horizontal_error = 0.0f;  // no horizontal term added to `distance`
+  return s;
+}
+}  // namespace
+
+// Shallow water, 1 m cells: the depth term is 0.05 m, so the spacing term
+// (0.71 * 1.0 m) is the gate. A sounding 0.70 cells away -- a cell corner is
+// 0.707 -- is accepted; 0.75 is not. Under the old 0.5 m floor 0.70 would
+// have been rejected: this is the "no holes at cell corners" property.
+TEST_F(NodeTest, CaptureSpacingTermAcceptsCellCornerInShallowWater)
+{
+  Parameters p{CellSizes(1.0f), "order1a"};
+  ASSERT_FLOAT_EQ(p.capture_spacing_scale, 0.71f);
+  Node accept;
+  EXPECT_TRUE(accept.insert(0.70, captureProbe(-1.0f), p));
+  Node reject;
+  EXPECT_FALSE(reject.insert(0.75, captureProbe(-1.0f), p));
+}
+
+// Fine grid, shallow water: 0.11 m cells at 1 m depth give a gate of
+// 0.71 * 0.11 = 0.078 m. A sounding 0.30 m away is REJECTED -- under the old
+// 0.5 m floor it was accepted, which is what made levels finer than ~0.45 m
+// average over the same disc regardless of spacing.
+TEST_F(NodeTest, CaptureHasNoFixedHalfMetreFloor)
+{
+  Parameters p{CellSizes(0.11f), "order1a"};
+  Node n;
+  EXPECT_FALSE(n.insert(0.30, captureProbe(-1.0f), p));
+  Node near;
+  EXPECT_TRUE(near.insert(0.07, captureProbe(-1.0f), p));
+}
+
+// Deep water: at 40 m the depth term is 2.0 m and dominates the spacing term
+// on a 1.81 m cell (0.71 * 1.81 = 1.29 m). 1.5 m is accepted, 2.1 m is not --
+// unchanged from Calder's gate.
+TEST_F(NodeTest, CaptureDepthTermDominatesInDeepWater)
+{
+  Parameters p{CellSizes(1.81f), "order1a"};
+  Node accept;
+  EXPECT_TRUE(accept.insert(1.5, captureProbe(-40.0f), p));
+  Node reject;
+  EXPECT_FALSE(reject.insert(2.1, captureProbe(-40.0f), p));
+}
+
+// The spacing term follows Parameters::distance_scale, which
+// setGridResolution() sets to the smaller cell side -- so an anisotropic grid
+// floors on its finer axis, and re-setting the resolution moves the gate.
+TEST_F(NodeTest, CaptureSpacingTermTracksGridResolution)
+{
+  Parameters p{CellSizes(2.0f), "order1a"};
+  Node wide;
+  EXPECT_TRUE(wide.insert(1.3, captureProbe(-1.0f), p));  // 0.71 * 2.0 = 1.42
+  p.setGridResolution(CellSizes(0.5f));
+  Node narrow;
+  EXPECT_FALSE(narrow.insert(1.3, captureProbe(-1.0f), p));  // 0.71 * 0.5 = 0.355
+}
+
 }  // namespace cube

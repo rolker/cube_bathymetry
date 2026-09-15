@@ -34,8 +34,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <deque>
+#include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -57,6 +60,10 @@
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry/quantize_tile.h"
+#include "cube_bathymetry/build_fingerprint.h"
+#include "cube_bathymetry/level_plan.h"
+#include "cube_bathymetry/multi_level_accumulator.h"
+#include "cube_bathymetry/recon.h"
 #include "cube_bathymetry/store_import.h"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "marine_autonomy/gz4d_geo.h"
@@ -163,7 +170,9 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "  --bs-store <dir>: Also write an MBES backscatter store `survey` "
     "layer from the same CUBE pass (optional; surfaces the co-estimated "
     "intensity -- uncorrected by default, angle-corrected when "
-    "--backscatter-correction empirical is set, cube#81)\n";
+    "--backscatter-correction empirical is set, cube#81). NOT supported with "
+    "--depth-adaptive yet: the backscatter store is single-level by construction "
+    "(per-level layout = uma#383; the PR that consumes it lifts the refusal).\n";
   std::cout << "  -d <detections_topic>: marine_acoustic_msgs/SonarDetections "
     "topic to replay through CUBE (required)\n";
   std::cout << "  --odom-topic <topic>: nav_msgs/Odometry topic for per-ping "
@@ -218,7 +227,62 @@ bool loadCurveFromBagSonarInfo(
     "(generous; disk is local/fast offline). 0 = unbounded (whole survey in RAM). "
     "NOTE: per-cell intensity memory is O(1) regardless of beam count (cube#93), so "
     "a small heavily-oversampled survey no longer OOMs even without eviction\n";
+  std::cout << "  --capture-spacing-scale <k>: spacing term of the node capture "
+    "distance, as a multiple of the node spacing (default 0.71 = half the cell "
+    "diagonal). The gate is max(0.05*|depth|, k*spacing); CUBE's old fixed 0.5 m "
+    "floor is gone (cube#143).\n";
+  std::cout << "  --depth-adaptive: write a MULTI-LEVEL store (cube#143). A recon pass "
+    "over the bags first counts every sounding into a fine count grid and spills "
+    "the projected soundings to scratch; the level plan then gives each tile the "
+    "COARSER of the level the depth ladder requires (uma#369: cell = scale*depth) "
+    "and the level the data achieves (Calder's level of aggregation: the finest "
+    "spacing at which each node still gathers --min-obs-per-node soundings); "
+    "phase two replays the spill into one CUBE accumulator per level. Parents "
+    "stay estimated under their children. Off by default; the live/draft path is "
+    "unaffected. --max-resident-tiles is the store-wide total across levels.\n";
+  std::cout << "    --depth-adaptive-scale <f> (0.05), --depth-adaptive-coarsest <L> (8), "
+    "--depth-adaptive-finest <L> (14; must be <= 14, the survey index's footprint "
+    "level -- ADR-0002), --count-level <L> (= finest; finest <= L <= 20), "
+    "--min-obs-per-node <N> (5), --blunder-allowance <f> (0.2), "
+    "--decision-depth-percentile <p> (2: percentile of a level-14 grid's shallowest "
+    "soundings that decides its depth, the flier guard; 0 < p <= 100, read from a "
+    "per-grid histogram of WATER DEPTH UNDER THE TRANSDUCER -- not the stored "
+    "ellipsoidal height, which the geoid offsets by tens of metres), "
+    "--achieved-percentile <p> "
+    "(95: percentile of the level of aggregation over a tile that decides its "
+    "achieved level).\n";
+  std::cout << "    --scratch-dir <dir>: where the recon spill goes (default: beside "
+    "the -o store, never /tmp -- it is often tmpfs). The count grid spills "
+    "there too, so the free-space check run before the pass starts budgets the "
+    "projected sounding spill plus an allowance for the count-tile spill (that "
+    "term scales with the ground covered, which is not knowable up front, so it "
+    "is an allowance and not a bound).\n";
+  std::cout << "    --count-spill-allowance <factor> (1.0): size of that count-tile "
+    "allowance, as a multiple of the projected sounding spill. The default "
+    "doubles what the preflight check demands, which can refuse a dense survey "
+    "over little ground whose spill would have fit; lower it (0 removes the "
+    "allowance) or raise it for a wide, sparse survey. Only the preflight check "
+    "is affected -- nothing about the pass itself changes.\n";
+  std::cout << "    --count-resident-tiles <N> (256, minimum 16): recon count tiles held "
+    "in RAM; colder ones are written to the scratch dir and reloaded on demand. "
+    "A level-14 count tile is 1.8 MB, so the default budget is ~460 MB. The "
+    "minimum is the 3x3 level-of-aggregation neighbourhood plus headroom -- a "
+    "smaller budget would thrash one tile per box evaluation. The plan report "
+    "states the resident peak.\n";
+  std::cout << "    --level-plan-out <file>: RECON ONLY -- write the level plan (JSON) "
+    "and print its report (tiles, area and storage per level, the coverage "
+    "deficit, the ground stored coarser than level 10), then exit without "
+    "estimating. Inspect and approve before committing a multi-hour import.\n";
+  std::cout << "    --level-plan <file>: reuse a plan written by --level-plan-out "
+    "instead of computing one (the recon pass still runs, for the spill).\n";
+  std::cout << "    --count-grid-out <dir>: also persist the recon count grid "
+    "(UInt16 GeoTIFF tiles), mergeable into a later run's counts.\n";
   std::cout << "  -l <count>: Stop after this many pings (debugging)\n";
+  std::cout << "  Exit codes: 0 = done; 1 = failed, the store may be incomplete; "
+    "2 = the store is complete but build_fingerprint.json could not be written, "
+    "so a later incremental regen must do a FULL regen (ADR-0003); "
+    "3 = the store and its fingerprint are both complete, only the "
+    "--tile-size-report CSV could not be written (a diagnostic, not the data).\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
     "to the survey/campaign id). Per-cell source interning was retired for the "
@@ -334,6 +398,20 @@ public:
       }
     }
     return end_time;
+  }
+
+  /// Messages recorded on @p topic across every bag (from the bag metadata).
+  uint64_t messageCount(const std::string & topic) const
+  {
+    uint64_t n = 0;
+    for (const auto & reader : readers_) {
+      for (const auto & t : reader.second.reader->get_metadata().topics_with_message_count) {
+        if (t.topic_metadata.name == topic) {
+          n += t.message_count;
+        }
+      }
+    }
+    return n;
   }
 
   Message::ConstPtr next()
@@ -763,6 +841,951 @@ bool finishTileReport(
   return true;
 }
 
+
+/// Georeference one projected ping into GeoSoundings (cube#63/#107 hot path).
+/// Extracted verbatim from main()'s per-ping lambda so main() stays within the
+/// cpplint function-size limit (cube#143); the arithmetic is unchanged.
+std::vector<cube::GeoSounding> georeferencePing(
+  const cube::ProjectionResult & projection,
+  const geometry_msgs::msg::TransformStamped & transform)
+{
+  const auto & origin = transform.transform.translation;
+  gz4d::GeoPointLatLongDegrees ref_ll(
+    gz4d::GeoPointECEF(origin.x, origin.y, origin.z));
+  gz4d::LocalENU enu(ref_ll);
+
+  const double ref_lat_deg = ref_ll.latitude();
+  const double ref_lon_deg = ref_ll.longitude();
+  const double ref_height = ref_ll.altitude();
+  constexpr double kDeg2Rad = M_PI / 180.0;
+  constexpr double kRad2Deg = 180.0 / M_PI;
+  constexpr double kA = 6378137.0;             // WGS84 semi-major axis
+  constexpr double kF = 1.0 / 298.257223563;   // WGS84 flattening
+  constexpr double kE2 = kF * (2.0 - kF);       // first eccentricity^2
+  const double lat0_rad = ref_lat_deg * kDeg2Rad;
+  const double sin_lat0 = std::sin(lat0_rad);
+  const double cos_lat0 = std::cos(lat0_rad);
+  const double w = std::sqrt(1.0 - kE2 * sin_lat0 * sin_lat0);
+  const double prime_vertical = kA / w;                     // N(lat0)
+  const double meridional = kA * (1.0 - kE2) / (w * w * w);  // M(lat0)
+
+  // Hoist the quaternion->matrix conversion out of the per-sounding loop:
+  // tf2::doTransform(PointStamped, ...) rebuilds the KDL::Frame (quaternion
+  // -> rotation matrix) from `transform` for EVERY sounding. Build it once
+  // per ping and apply the frame as a matvec. Bit-identical to the
+  // per-sounding doTransform -- the exact same KDL::Frame * KDL::Vector,
+  // just hoisted (cube#107). This MUST stay on the KDL path
+  // (tf2::gmTransformToKDL), NOT a tf2::Transform matvec: doTransform for a
+  // point is KDL-based, and a different rotation build would perturb the
+  // ECEF output in its low bits and shift boundary soundings between cells.
+  const KDL::Frame ping_frame = tf2::gmTransformToKDL(transform);
+
+  std::vector<cube::GeoSounding> soundings;
+  soundings.reserve(projection.soundings.size());
+  for (const auto & s : projection.soundings) {
+    const KDL::Vector sounding_ecef = ping_frame * KDL::Vector(
+      s.sonar_relative_position.x,
+      s.sonar_relative_position.y,
+      s.sonar_relative_position.z);
+
+    // ECEF -> local ENU (East, North, Up), then linearize ENU -> geodetic
+    // delta about the per-ping reference latitude.
+    const gz4d::Point<double> local = enu.toLocal(gz4d::GeoPointECEF(
+      sounding_ecef.x(), sounding_ecef.y(), sounding_ecef.z()));
+    const double lat_deg = ref_lat_deg + (local[1] / meridional) * kRad2Deg;
+    const double lon_deg =
+      ref_lon_deg + (local[0] / (prime_vertical * cos_lat0)) * kRad2Deg;
+    const double height = ref_height + local[2];
+
+    cube::GeoSounding gs(gz4d::GeoPointLatLongDegrees(lat_deg, lon_deg, height));
+    gs.sounding.vertical_error = s.vertical_error;
+    gs.sounding.horizontal_error = s.horizontal_error;
+    // Carry the {raw intensity, beam angle} sufficient-stats pair so the
+    // CUBE node co-estimates backscatter (#54) on the winning depth
+    // hypothesis -- without this every beam has NaN intensity and the
+    // backscatter store (--bs-store, #80) accumulates nothing. node.cpp
+    // emits the value UNCORRECTED; the angle correction is cube#81.
+    gs.sounding.intensity = s.intensity;
+    gs.sounding.beam_angle = s.beam_angle;
+    // Per-beam slant range R = twtt*c/2 (set in the Sounding detections
+    // ctor) for the tier-2 TL correction (cube#87).
+    gs.sounding.slant_range = s.slant_range;
+    // The sonar-frame position, carried through so the depth-adaptive recon
+    // can read the WATER DEPTH UNDER THE TRANSDUCER off `z` (cube#143): the
+    // georeferenced `depth` above is a WGS84 ellipsoidal height (uma ADR-0002
+    // D4) and the geoid offset would coarsen every tile by one to two levels.
+    // Left unread by the estimator itself (batch_regen.cpp:55).
+    gs.sounding.sonar_relative_position = s.sonar_relative_position;
+    soundings.push_back(gs);
+  }
+  return soundings;
+}
+
+
+/// Resolve the backscatter angular-response correction mode and curve
+/// (cube#81/#102): explicit file wins, else the bags' SonarInfo pre-pass.
+/// Returns false on an unparseable mode (the caller exits via usage()).
+/// Extracted from main() for cpplint's function-size limit (cube#143).
+bool resolveBackscatterCorrection(
+  const std::string & backscatter_correction_str, const std::string & backscatter_curve_file,
+  const std::string & sonar_info_topic, const std::string & detections_topic,
+  const std::vector<std::string> & bagfile_names,
+  cube::BackscatterAngleCorrection & backscatter_mode,
+  cube::AngularResponseCurve & backscatter_curve)
+{
+  if (!cube::parseBackscatterAngleCorrection(
+      backscatter_correction_str, backscatter_mode))
+  {
+    std::cerr << "error: --backscatter-correction must be 'none', 'empirical' "
+              << "or 'auto' (got '" << backscatter_correction_str << "')\n";
+    return false;
+  }
+  std::string backscatter_curve_source = backscatter_curve_file;
+  if (backscatter_mode == cube::BackscatterAngleCorrection::None) {
+    std::cout << "--backscatter-correction none: any SonarInfo "
+      "angular-response curve in the bag will be ignored." << std::endl;
+  } else if (!backscatter_curve_file.empty()) {
+    // Explicit file wins over SonarInfo (the reprocessing override, #102).
+    backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
+    if (backscatter_curve.points.empty()) {
+      // Loud in EVERY mode: the explicit file also suppresses the SonarInfo
+      // pre-pass (it stays the operator's chosen source), so a failed load
+      // must never vanish silently (#102 r1).
+      std::cerr << "warning: --backscatter-curve '" << backscatter_curve_file
+                << "' yielded an EMPTY curve (missing/unparseable) -- no "
+        "correction from it, and the bag's SonarInfo curves stay IGNORED "
+        "because an explicit file was given. Fix or drop the flag.\n";
+    }
+  } else {
+    // SonarInfo pre-pass (#102): scan the bags' sonar_info topic for the
+    // first valid curve (latch-first; heartbeats republish the same one).
+    const std::string topic = sonar_info_topic.empty() ?
+      deriveSonarInfoTopic(detections_topic) : sonar_info_topic;
+    std::string last_reject;
+    if (loadCurveFromBagSonarInfo(
+        bagfile_names, topic, backscatter_curve, last_reject))
+    {
+      backscatter_curve_source = "SonarInfo topic '" + topic + "'";
+    } else if (!last_reject.empty()) {
+      std::cerr << "warning: SonarInfo on '" << topic
+                << "' carried an angular-response curve, but it was rejected: "
+                << last_reject << "\n";
+    }
+  }
+  if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
+    backscatter_curve.points.empty())
+  {
+    // Loud, not silent: explicitly enabled but no curve loaded -> no-op.
+    // (auto with no curve is quiet by design: identity is its fallback.)
+    std::cerr << "warning: --backscatter-correction empirical but no curve was "
+      "loaded from --backscatter-curve '" << backscatter_curve_file
+              << "' or the bag's SonarInfo -- the correction is ENABLED but a "
+      "NO-OP (intensity emitted uncorrected). Provide a valid curve CSV.\n";
+  } else if (!backscatter_curve.points.empty()) {
+    std::cout << "Backscatter angular-response correction: "
+              << backscatter_curve.points.size() << "-point curve from "
+              << backscatter_curve_source;
+    if (backscatter_curve.tl_removed) {
+      // tier-2 (cube#87): the curve is a TL-removed residual; the estimator
+      // also removes 40*log10(R) + 2*alpha*R per beam.
+      std::cout << " [tier-2: TL-removed, alpha="
+                << backscatter_curve.absorption_db_per_m << " dB/m]";
+    }
+    std::cout << std::endl;
+  }
+  return true;
+}
+
+
+/// Refuse `--bs-store` on a mixed-level path, naming the prerequisite
+/// (cube#143). TEMPORARY: `marine_mbes_backscatter_store` is single-level by
+/// construction -- "All tiles live at a single GGGS level" (`mbes_store.hpp`),
+/// and `loadTile(path, level)` rejects a tile written at another level -- while
+/// every level's ImportAccumulator is handed the SAME flat `<bs_store>/survey/`
+/// root. A mixed-level run would therefore write a backscatter store nothing
+/// can load, silently. The per-level layout is uma#383; the PR that consumes it
+/// lifts this refusal. Mixed-level backscatter is gated on that work, not
+/// abandoned.
+[[noreturn]] void refuseMixedLevelBackscatter(const char * mode_flag)
+{
+  std::cerr << "error: --bs-store is not supported with " << mode_flag << " yet.\n"
+    "marine_mbes_backscatter_store holds all of its tiles at ONE GGGS level, and a "
+    "mixed-level run hands every level the same store root -- the result is a "
+    "backscatter store nothing can load. The per-level layout is\n"
+    "  https://github.com/rolker/unh_marine_autonomy/issues/383\n"
+    "and the PR that consumes it lifts this refusal. Until then, run the bathymetry "
+    "import mixed-level and take backscatter from a separate fixed-level run.\n";
+  usage();
+}
+
+/// Depth-adaptive option validation (cube#143), run ONCE before any bag is
+/// opened -- a policy throw is a misconfiguration identical for every tile, so
+/// it is fatal here rather than hours into the pass. Exits via usage() on error.
+void validateDepthAdaptiveOptions(
+  bool depth_adaptive, cube::LevelPlanPolicy & level_policy, bool count_level_given,
+  bool count_resident_tiles_given, bool count_spill_allowance_given,
+  const std::string & level_plan_out, const std::string & level_plan_in,
+  const std::string & count_grid_out, const std::string & scratch_dir,
+  const std::string & tile_size_report_path, const std::string & bs_store_dir)
+{
+  // The plan-side flags without --depth-adaptive are a contradiction worth
+  // refusing rather than ignoring.
+  if (!depth_adaptive &&
+    (!level_plan_out.empty() || !level_plan_in.empty() || !count_grid_out.empty() ||
+    !scratch_dir.empty() || count_level_given || count_resident_tiles_given ||
+    count_spill_allowance_given))
+  {
+    std::cerr << "error: --level-plan-out/--level-plan/--count-grid-out/--scratch-dir/"
+      "--count-level/--count-resident-tiles/--count-spill-allowance need "
+      "--depth-adaptive\n";
+    usage();
+  }
+  if (depth_adaptive) {
+    if (!count_level_given) {
+      level_policy.count_level = level_policy.depth.finest_level;
+    }
+    try {
+      level_policy.validate();
+    } catch (const std::invalid_argument & e) {
+      std::cerr << "error: " << e.what() << "\n";
+      usage();
+    }
+    if (!tile_size_report_path.empty()) {
+      std::cerr << "error: --tile-size-report models the live single-sheet coverage "
+        "stream and is not supported with --depth-adaptive\n";
+      usage();
+    }
+    if (!level_plan_out.empty() && !level_plan_in.empty()) {
+      std::cerr << "error: --level-plan-out (recon only) and --level-plan (reuse a "
+        "plan) are exclusive\n";
+      usage();
+    }
+    if (!bs_store_dir.empty()) {
+      refuseMixedLevelBackscatter("--depth-adaptive");
+    }
+  }
+}
+
+
+/// Warn about `.recon_spill_<pid>` directories a killed run left behind
+/// (cube#143). They are never swept automatically: a concurrent import may own
+/// one, and the spill of an aborted multi-hour run can be gigabytes the
+/// operator should see before anything deletes it.
+void warnAboutOrphanedSpills(const std::string & spill_root, const std::string & mine)
+{
+  std::error_code ec;
+  if (!std::filesystem::is_directory(spill_root, ec)) {
+    return;
+  }
+  std::vector<std::string> orphans;
+  for (std::filesystem::directory_iterator it(spill_root, ec), end; it != end && !ec;
+    it.increment(ec))
+  {
+    const std::string name = it->path().filename().string();
+    if (it->is_directory(ec) && name.rfind(".recon_spill_", 0) == 0 &&
+      it->path().string() != mine)
+    {
+      orphans.push_back(it->path().string());
+    }
+  }
+  if (orphans.empty()) {
+    return;
+  }
+  std::cerr << "warning: " << orphans.size() << " leftover recon spill director"
+            << (orphans.size() == 1 ? "y" : "ies") << " under " << spill_root
+            << " (an aborted run, or a concurrent import). Nothing is deleted "
+    "automatically; remove them by hand once no import is using them:"
+            << std::endl;
+  for (const auto & path : orphans) {
+    std::cerr << "  " << path << std::endl;
+  }
+}
+
+/// A count option with a real floor (cube#143). Negative is the dangerous case
+/// -- cast to std::size_t it becomes SIZE_MAX, which for --count-resident-tiles
+/// silently restores the unbounded count grid the resident LRU replaced -- but
+/// the floor is checked here too, so a value the ReconCollector constructor
+/// would refuse is refused at parse time rather than after the orphan warning
+/// and the spill banner have already printed. Reports the option error and
+/// exits, like every other option failure.
+std::size_t requireAtLeast(const char * flag, int value, std::size_t minimum)
+{
+  if (value < 0 || static_cast<std::size_t>(value) < minimum) {
+    std::cerr << "error: option '" << flag << "' expects a count >= " << minimum
+              << ", got '" << value << "'\n";
+    usage();
+  }
+  return static_cast<std::size_t>(value);
+}
+
+/// A factor option that must be finite and non-negative (cube#143). Reports the
+/// option error and exits, like every other option failure.
+///
+/// The upper bound is not cosmetic: both factors end up multiplying a count
+/// into a `uint64_t` -- `requiredObservations()` (reached by the tiling report
+/// before a bag is opened) and the spill free-space preflight -- and a product
+/// past 2^64 is an undefined conversion, which in the preflight silently
+/// defeats the very check the operator is relying on. kMaxFactor is far above
+/// any real value (the defaults are 0.2 and 1.0) and far below where any
+/// product of it can overflow.
+constexpr double kMaxFactor = 1e9;
+
+double requireFiniteFactor(const char * flag, double value)
+{
+  if (!(value >= 0.0) || !std::isfinite(value) || value > kMaxFactor) {
+    std::cerr << "error: option '" << flag << "' expects a finite factor >= 0 and no "
+      "greater than " << kMaxFactor << ", got '" << value << "'\n";
+    usage();
+  }
+  return value;
+}
+
+/// A GGGS level option (cube#143 triage). The narrowing to uint8_t is what made
+/// the range check ineffective: `--depth-adaptive-coarsest 256` wrapped to 0 and
+/// `--depth-adaptive-finest 270` to 14, both of which LevelPlanPolicy::validate()
+/// then accepts -- the operator asked for one thing and got another, silently.
+/// Checked BEFORE the cast.
+uint8_t requireLevel(const char * flag, int value)
+{
+  constexpr int kMaxGggsLevel = 20;
+  if (value < 0 || value > kMaxGggsLevel) {
+    std::cerr << "error: option '" << flag << "' expects a GGGS level in [0, "
+              << kMaxGggsLevel << "], got '" << value << "'\n";
+    usage();
+  }
+  return static_cast<uint8_t>(value);
+}
+
+/// Print the span the bags cover (cube#143: lifted out of main(), which is at
+/// the cpplint function-size limit).
+void reportBagTimeSpan(
+  const std::chrono::system_clock::time_point & begin_time,
+  const std::chrono::system_clock::time_point & end_time)
+{
+  auto start_time_t = std::chrono::system_clock::to_time_t(begin_time);
+  std::cout << "start time: "
+            << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+  auto end_time_t = std::chrono::system_clock::to_time_t(end_time);
+  std::cout << "end time: "
+            << std::put_time(std::gmtime(&end_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+  std::cout << "total time: "
+            << std::chrono::duration_cast<std::chrono::seconds>(end_time - begin_time).count()
+            << " seconds" << std::endl;
+}
+
+/// Report what tiling the run will use, before the pass starts (cube#143:
+/// lifted out of main(), which is at the cpplint function-size limit).
+void reportTilingChoice(
+  bool depth_adaptive, const cube::LevelPlanPolicy & level_policy,
+  const cube::GeoMapSheet & geo_map_sheet, double resolution, float capture_spacing_scale)
+{
+  if (depth_adaptive) {
+    std::cout << "Depth-adaptive multi-level store (cube#143): levels "
+              << static_cast<int>(level_policy.depth.coarsest_level) << ".."
+              << static_cast<int>(level_policy.depth.finest_level)
+              << ", count level " << static_cast<int>(level_policy.count_level)
+              << ", n_req " << level_policy.requiredObservations()
+              << "; the -r resolution is not used (each level's sheet is built at "
+      "its own cell size)." << std::endl;
+  } else {
+    std::cout << "requested resolution: " << resolution << " nominal used: "
+              << geo_map_sheet.nominalCellSizeMeters() << std::endl;
+  }
+  std::cout << "Capture distance: max(" << geo_map_sheet.parameters().capture_distance_scale
+            << " x |depth|, " << capture_spacing_scale << " x node spacing)" << std::endl;
+}
+
+/// Saturating helpers for the spill free-space preflight (cube#143 triage).
+/// Its terms are upper bounds multiplied together; on overflow the answer must
+/// be "more than this device can hold", never a small wrapped number that
+/// passes the check. A double whose value does not fit a uint64_t is an
+/// UNDEFINED conversion, so that case is clamped before the cast, not after.
+uint64_t saturatingProduct(uint64_t a, uint64_t b)
+{
+  if (a == 0 || b == 0) {
+    return 0;
+  }
+  return a > std::numeric_limits<uint64_t>::max() / b ?
+         std::numeric_limits<uint64_t>::max() : a * b;
+}
+
+uint64_t saturatingSum(uint64_t a, uint64_t b)
+{
+  return a > std::numeric_limits<uint64_t>::max() - b ?
+         std::numeric_limits<uint64_t>::max() : a + b;
+}
+
+uint64_t saturatingFromDouble(double value)
+{
+  constexpr double kMaxRepresentable = 1.8e19;  // < 2^64, safely convertible
+  if (!(value > 0.0)) {
+    return 0;
+  }
+  return value >= kMaxRepresentable ?
+         std::numeric_limits<uint64_t>::max() : static_cast<uint64_t>(value);
+}
+
+/// Build the recon collector (cube#143). Spill scratch beside the output store
+/// unless --scratch-dir says otherwise (never temp_directory_path(): it is often
+/// tmpfs, and a day's spill is gigabytes). The free-space check uses the bags'
+/// detections message count as the ping count and 256 beams per ping as an
+/// upper bound, plus @p count_spill_allowance times that for the count-tile
+/// spill. Null on a free-space shortfall (already reported).
+std::unique_ptr<cube::ReconCollector> makeRecon(
+  const cube::LevelPlanPolicy & level_policy, const std::string & scratch_dir,
+  const std::string & store_dir, uint64_t projected_pings, std::size_t count_resident_tiles,
+  double count_spill_allowance)
+{
+  const std::string spill_root = scratch_dir.empty() ? store_dir : scratch_dir;
+  // Keyed on pid AND start time: a pid-reuse collision with a dead run's
+  // orphaned directory would otherwise surface as an "already exists" refusal
+  // attributable to a process that has nothing to do with this one.
+  const auto started_at = std::chrono::system_clock::now().time_since_epoch();
+  const std::string spill_dir = spill_root + "/.recon_spill_" +
+    std::to_string(::getpid()) + "_" +
+    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(started_at).count());
+  warnAboutOrphanedSpills(spill_root, spill_dir);
+  // Saturating, not wrapping (cube#143 triage). Every term here is an upper
+  // bound fed into a free-space REFUSAL, so a product that wrapped past 2^64
+  // would report a small requirement and wave through exactly the run that
+  // cannot fit -- the failure this preflight exists to prevent. Saturation
+  // fails the check instead, which is the safe direction.
+  const uint64_t projected_bytes = saturatingProduct(
+    projected_pings, 256ull * cube::ReconCollector::kBytesPerSpilledSounding);
+  // The count grid spills its cold tiles into the same directory (1.8 MB per
+  // level-14 tile, ~630 MB per km^2 of ground), so budgeting the sounding
+  // spill alone under-counts what the pass will write. That term scales with
+  // the ground COVERED, which nothing knows before the pass -- the surveyed
+  // area cannot be inferred from a ping count -- so it is budgeted as an
+  // allowance of a share of the sounding spill rather than left out entirely.
+  // It is an allowance, not a bound, in BOTH directions: a wide, sparse survey
+  // covers more ground per sounding and can still exceed it, and a dense one
+  // over little ground can be refused a run that would have fit. Hence
+  // --count-spill-allowance: the operator who knows the survey can lower the
+  // share (0 removes it) or raise it, rather than being stuck with a doubling.
+  const uint64_t count_spill_bytes = saturatingFromDouble(
+    static_cast<double>(projected_bytes) * count_spill_allowance);
+  const uint64_t projected_total_bytes = saturatingSum(projected_bytes, count_spill_bytes);
+  std::cout << "Recon spill: " << spill_dir << " (~" << projected_bytes / (1024 * 1024)
+            << " MB projected for " << projected_pings << " pings at 256 beams, "
+            << cube::ReconCollector::kBytesPerSpilledSounding << " B/sounding, plus a ~"
+            << count_spill_bytes / (1024 * 1024)
+            << " MB allowance for the count-tile spill at --count-spill-allowance "
+            << count_spill_allowance << ")" << std::endl;
+  try {
+    cube::ReconCollector::requireFreeSpace(spill_root, projected_total_bytes);
+  } catch (const std::exception & e) {
+    std::cerr << "error: " << e.what() << std::endl;
+    std::cerr << "Both terms are upper bounds, not measurements: 256 beams per ping and a "
+      "count-tile allowance of " << count_spill_allowance << " x the sounding spill. If "
+      "this survey is denser than it is wide, lower the allowance with "
+      "--count-spill-allowance <factor> (0 removes it); otherwise point --scratch-dir at "
+      "a larger device." << std::endl;
+    return nullptr;
+  }
+  try {
+    return std::make_unique<cube::ReconCollector>(
+      level_policy, spill_dir, count_resident_tiles);
+  } catch (const std::exception & e) {
+    std::cerr << "error: " << e.what() << std::endl;
+    return nullptr;
+  }
+}
+
+/// Write the ADR-0003 fingerprint for a finished import (cube#143). The store
+/// itself is already written, so a failure here is not fatal to the data -- but
+/// it is not nothing either: a store with no fingerprint cannot be told stale,
+/// so the next `batch_regen --incremental` must fall back to a full regen and
+/// the operator has to know. Returns false on failure; the callers exit 2
+/// ("the store is complete, the fingerprint is not") rather than print "done!".
+bool writeFingerprint(
+  const std::string & store_dir, cube::BuildFingerprint::Mode mode, double cell_size_m,
+  const cube::Parameters & parameters, const std::string & iho_order,
+  const cube::LevelPlanPolicy * policy, const std::set<uint8_t> & levels_used)
+{
+  cube::BuildFingerprint f;
+  f.mode = mode;
+  if (mode == cube::BuildFingerprint::Mode::Fixed) {
+    f.cell_size_m = cell_size_m;
+  }
+  f.iho_order = iho_order;
+  f.policy.capture_distance_scale = parameters.capture_distance_scale;
+  f.policy.capture_spacing_scale = parameters.capture_spacing_scale;
+  if (policy) {
+    // Every input the level plan rests on: the ladder, its bounds, the count
+    // level, the observation requirement and both percentiles.
+    f.policy.depth_adaptive_scale = policy->depth.capture_distance_scale;
+    f.policy.coarsest_level = policy->depth.coarsest_level;
+    f.policy.finest_level = policy->depth.finest_level;
+    f.policy.count_level = policy->count_level;
+    f.policy.min_obs_per_node = policy->min_obs_per_node;
+    f.policy.blunder_allowance = policy->blunder_allowance;
+    f.policy.decision_depth_percentile = policy->decision_depth_percentile;
+    f.policy.achieved_percentile = policy->achieved_percentile;
+  }
+  f.levels_used = levels_used;
+  try {
+    f.write(store_dir);
+    std::cout << "Wrote " << cube::BuildFingerprint::kFilename << " (" << cube::toString(mode)
+              << ")." << std::endl;
+    return true;
+  } catch (const std::exception & e) {
+    std::cerr << "error: the store in " << store_dir << " is complete, but "
+              << cube::BuildFingerprint::kFilename << " could not be written (" << e.what()
+              << "). Without it the store cannot be told stale: a later "
+      "batch_regen --incremental must fall back to a FULL regen (ADR-0003)."
+              << std::endl;
+    return false;
+  }
+}
+
+/// Abort a run whose accumulation did not complete (cube#143) -- a failed or
+/// short spill replay, a finalize that threw, or an I/O fault mid-pass on the
+/// fixed-level path -- and report what that leaves on disk. The accumulator has
+/// been evicting tiles
+/// into the real `-o` store since the first batch
+/// (`MultiLevelAccumulator::evictToBudget` -> `persistAndDrop`), so by the time
+/// a short or failed replay is detected the destination already holds
+/// partial-coverage tiles: a re-run over them double-counts the soundings in
+/// every tile written twice -- the hazard `build_bathy_store.sh` guards with
+/// `--fresh`. Nothing is finalized and no fingerprint is written for THIS run,
+/// and a fingerprint left by an earlier complete build is deleted here rather
+/// than left describing tiles this run has since mutated (a later
+/// `batch_regen --incremental` would otherwise trust it). Returns the exit code.
+int abortDirtyReplay(const std::string & store_dir, const std::string & detail)
+{
+  std::cerr << "error: " << detail << std::endl;
+  std::cerr << "The store in " << store_dir
+            << " is NOT empty and NOT complete: every batch accumulated before the failure "
+    "was already evicted into it, so it holds partial-coverage tiles. Nothing is "
+    "finalized and no " << cube::BuildFingerprint::kFilename
+            << " is written for this run. Archive or remove that store (or re-import "
+    "with --fresh) before re-running -- importing again over these tiles "
+    "double-counts their soundings." << std::endl;
+  const std::filesystem::path fingerprint =
+    std::filesystem::path(store_dir) / cube::BuildFingerprint::kFilename;
+  std::error_code ec;
+  if (std::filesystem::exists(fingerprint, ec) && !ec) {
+    if (std::filesystem::remove(fingerprint, ec) && !ec) {
+      std::cerr << "Removed the pre-existing " << fingerprint.string()
+                << ": it described the store as it was BEFORE this aborted run mutated it."
+                << std::endl;
+    } else {
+      std::cerr << "warning: could not remove the pre-existing " << fingerprint.string()
+                << " (" << ec.message()
+                << "). Delete it by hand: it describes the store as it was BEFORE this "
+        "aborted run mutated it, and a later batch_regen --incremental would trust it."
+                << std::endl;
+    }
+  }
+  return 1;
+}
+
+/// Report an I/O fault raised inside the per-ping pass (cube#143) and return the
+/// exit code. Which store state it describes depends on the pass: the recon
+/// writes nothing to `-o` (the spill goes with ~ReconCollector as the run
+/// unwinds), while the fixed-level accumulator has been evicting tiles into the
+/// real store since the first batch.
+int reportFatalPassError(
+  const std::string & detail, bool during_recon, int64_t pings, const std::string & store_dir)
+{
+  if (during_recon) {
+    std::cerr << "error: the recon pass failed after " << pings << " ping(s): "
+              << detail << std::endl;
+    std::cerr << "Nothing was estimated and nothing was written to " << store_dir
+              << "; the recon spill is removed as this run unwinds. A full scratch "
+      "device is the usual cause -- free space (or pass --scratch-dir) before the "
+      "re-run." << std::endl;
+    return 1;
+  }
+  return abortDirtyReplay(
+    store_dir, detail + ". The import stopped after " + std::to_string(pings) +
+    " ping(s); a full device is the usual cause.");
+}
+
+/// Fixed-level finish (cube#143: lifted out of main(), which is at the cpplint
+/// function-size limit): persist, report, fingerprint, close the tile-size CSV.
+/// Returns the process exit code; 0 means the caller prints "done!".
+int cube_fixed_level_finish(
+  cube::ImportAccumulator & accumulator, cube::GeoMapSheet & geo_map_sheet,
+  const std::string & store_dir, const std::string & bs_store_dir, double resolution,
+  const std::string & iho_order,
+  const marine_bathymetry_store::StoreMetadata & store_metadata,
+  const marine_mbes_backscatter_store::StoreMetadata & bs_metadata,
+  std::optional<TileSizeReporter> & tile_reporter,
+  const std::string & tile_size_report_path, double tile_refresh_interval_s,
+  int tile_refresh_tiles_per_cycle, double phase_secs)
+{
+  std::cout << "Building store tiles..." << std::endl;
+
+  // Persist the still-resident tiles and write the store-level metadata. Tiles
+  // evicted during the pass were already written to disk (bathy in the -o store,
+  // their backscatter to --bs-store); finalize() writes whatever is still in RAM,
+  // so the on-disk store is the union of evicted + resident — identical to an
+  // unbounded build (cube#92). The off-boat full-bag CUBE replay is the
+  // authoritative product, so it always writes the `survey` layer (uma#248
+  // collapsed draft/processed). Single fused grid per layer (uma#221).
+  const std::size_t resident_before_final = accumulator.residentTileCount();
+  const std::size_t evicted_count = accumulator.evictedIndices().size();
+  // The same guard as the depth-adaptive path's finalize (cube#143 triage: the
+  // class is swept at every site). Eviction has been writing into the real -o
+  // store since the first batch here too, so an I/O failure while persisting
+  // the resident tiles leaves a partial-coverage store -- reported, with any
+  // stale fingerprint cleared, rather than thrown out of main().
+  try {
+    accumulator.finalize(
+      store_metadata.empty() ? nullptr : &store_metadata,
+      (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
+  } catch (const std::exception & e) {
+    return abortDirtyReplay(
+      store_dir, std::string("the store could not be finalized: ") + e.what() +
+      ". Every ping was projected and accumulated, but the resident tiles (and "
+      "the store metadata) are not on disk.");
+  }
+  reportPersisted(
+    accumulator, store_dir, bs_store_dir, evicted_count,
+    resident_before_final, phase_secs);
+  // Build fingerprint (ADR-0003 schema 2, tiling only -- cube#143): a fixed-level
+  // store records its mode, the requested cell size and the capture policy.
+  const bool fingerprinted = writeFingerprint(
+    store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
+    iho_order, nullptr, {geo_map_sheet.gridLevel().level()});
+
+  // Exit codes rank by what is wrong with the DATA: 1 says the store may be
+  // incomplete, so a failed diagnostic CSV must not borrow it -- that run's
+  // store and fingerprint are both fine. A missing fingerprint (2) outranks a
+  // missing report (3).
+  const bool tile_report_written = finishTileReport(
+    tile_reporter, tile_size_report_path, tile_refresh_interval_s,
+    tile_refresh_tiles_per_cycle);
+  if (!fingerprinted) {
+    return 2;
+  }
+  if (!tile_report_written) {
+    return 3;
+  }
+
+  return 0;
+}
+
+/// Depth-adaptive finish (cube#143): plan, report, recon-only exit, phase-two
+/// replay into one accumulator per level, finalize, fingerprint. Returns the
+/// process exit code.
+int cube_depth_adaptive_finish(
+  cube::ReconCollector & recon, const cube::LevelPlanPolicy & policy,
+  const std::string & level_plan_in, const std::string & level_plan_out,
+  const std::string & count_grid_out, const std::string & store_dir,
+  const std::string & reference_store_dir, const std::string & bs_store_dir,
+  std::size_t max_resident_tiles, const std::string & iho_order,
+  float capture_spacing_scale, bool capture_spacing_scale_given,
+  cube::BackscatterAngleCorrection backscatter_mode,
+  const cube::AngularResponseCurve & backscatter_curve,
+  const marine_bathymetry_store::StoreMetadata & store_metadata,
+  const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, double recon_secs)
+{
+  std::cout << "Recon pass: " << recon.soundingsSeen() << " soundings counted, "
+            << recon.soundingsSpilled() << " spilled, " << recon.counts().tileCount()
+            << " count tile(s) in " << recon_secs << "s." << std::endl;
+  if (recon.soundingsRefused() > 0) {
+    // Refused at the same door the estimator refuses them at, so they neither
+    // counted nor spilled. Surfaced because the usual cause is an MRU dropout
+    // (missing attitude -> NaN uncertainty), which the operator wants to know
+    // about rather than see only as a thinner survey.
+    std::cout << "  " << recon.soundingsRefused()
+              << " sounding(s) were refused by the estimator's own gate (non-finite "
+      "position/depth/uncertainty, or a non-positive vertical error) and are neither "
+      "counted nor spilled; a missing-attitude ping is the usual cause." << std::endl;
+  }
+
+  // The level decision needs the range below the transducer, not the stored
+  // (ellipsoidal) depth -- cube#143. A sounding with no usable sonar-frame z
+  // is counted but cannot decide a level; when that is ALL of them the plan
+  // would be built from nothing and would ask for the finest level everywhere,
+  // so it is refused rather than written.
+  if (recon.soundingsWithoutRange() > 0) {
+    std::cerr << "WARNING: " << recon.soundingsWithoutRange() << " of "
+              << recon.soundingsSeen() << " soundings carried no sonar-frame range "
+              << "(z non-finite or zero), so they did not decide a level." << std::endl;
+    if (recon.soundingsWithoutRange() >= recon.soundingsSeen()) {
+      std::cerr << "error: no sounding carried a range below the transducer, so no "
+                << "water depth could be measured and no level plan can be made."
+                << std::endl;
+      return 1;
+    }
+  }
+
+  if (!count_grid_out.empty()) {
+    try {
+      const std::size_t n = recon.counts().saveTo(count_grid_out);
+      std::cout << "Wrote " << n << " count tile(s) to " << count_grid_out << std::endl;
+    } catch (const std::exception & e) {
+      std::cerr << "error: could not write --count-grid-out: " << e.what() << std::endl;
+      return 1;
+    }
+  }
+
+  std::shared_ptr<cube::LevelPlan> plan;
+  if (!level_plan_in.empty()) {
+    std::ifstream in(level_plan_in);
+    if (!in) {
+      std::cerr << "error: cannot read --level-plan " << level_plan_in << std::endl;
+      return 1;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    try {
+      plan = std::make_shared<cube::LevelPlan>(cube::LevelPlan::fromJson(buffer.str()));
+    } catch (const std::exception & e) {
+      std::cerr << "error: --level-plan " << level_plan_in << ": " << e.what() << std::endl;
+      return 1;
+    }
+    std::cout << "Reusing level plan " << level_plan_in << " (" << plan->tiles().size()
+              << " tiles)." << std::endl;
+    // The capture gate the plan's import ran with, carried in the plan
+    // (cube#143 triage). Re-importing at a different k gathers differently from
+    // the same soundings, so an explicit disagreement is refused and silence
+    // adopts the plan's value rather than this run's default.
+    if (capture_spacing_scale_given &&
+      plan->captureSpacingScale() != capture_spacing_scale)
+    {
+      std::cerr << "error: --capture-spacing-scale " << capture_spacing_scale
+                << " disagrees with the " << plan->captureSpacingScale()
+                << " recorded in " << level_plan_in
+                << ". The capture gate is max(0.05 x |depth|, k x node spacing), so a "
+        "different k gathers differently from the same soundings. Drop the flag to use "
+        "the plan's value, or re-run the recon at the k you want." << std::endl;
+      return 1;
+    }
+    if (!capture_spacing_scale_given) {
+      capture_spacing_scale = plan->captureSpacingScale();
+      std::cout << "Capture spacing scale " << capture_spacing_scale
+                << ", from the plan." << std::endl;
+    }
+  } else {
+    std::cout << "Computing the level plan..." << std::endl;
+    plan = std::make_shared<cube::LevelPlan>(recon.plan());
+    // Record the gate THIS run used, so a later --level-plan reuse (here or in
+    // batch_regen_bag) rebuilds against the same one.
+    plan->setCaptureSpacingScale(capture_spacing_scale);
+  }
+  std::cout << plan->report();
+  std::cout << "Recon count grid: " << recon.counts().tileCount() << " tile(s), resident peak "
+            << recon.counts().residentPeak() << " of "
+            << (recon.counts().residentBudget() == 0 ?
+  std::string("unbounded") : std::to_string(recon.counts().residentBudget()))
+            << " (~" << (recon.counts().residentPeak() * 2ull * cube::CountGrid::kEdge *
+  cube::CountGrid::kEdge) / (1024 * 1024)
+            << " MB peak), " << recon.counts().spilledTileCount()
+            << " currently spilled to disk." << std::endl;
+  // Reported beside the count grid because it is the one recon structure the
+  // --count-resident-tiles budget does NOT bound: every grid's histogram is
+  // needed when the plan reads its percentile, so none is ever spilled and the
+  // total grows with the ground covered (cube#143 triage).
+  std::cout << "Recon decision-depth histograms: " << recon.histogramCount()
+            << " level-14 grid(s), ~" << recon.histogramBytes() / (1024 * 1024)
+            << " MB resident (NOT bounded by --count-resident-tiles -- they grow "
+    "with ground covered)." << std::endl;
+
+  if (!level_plan_out.empty()) {
+    std::ofstream out(level_plan_out);
+    out << plan->toJson() << "\n";
+    if (!out) {
+      std::cerr << "error: could not write --level-plan-out " << level_plan_out << std::endl;
+      return 1;
+    }
+    std::cout << "Wrote level plan to " << level_plan_out
+              << ". Recon only: nothing estimated, nothing written to " << store_dir
+              << ". Re-run with --level-plan " << level_plan_out << " to import." << std::endl;
+    return 0;
+  }
+  if (plan->tiles().empty()) {
+    std::cerr << "error: the level plan emits no tiles -- no ground with data; nothing "
+      "to import." << std::endl;
+    return 1;
+  }
+
+  // Plan coverage (cube#143 triage). Admission is `plan->isEmitted`, and the
+  // short-replay gate below counts records read back from the spill, not
+  // soundings any accumulator accepted -- so a plan that does not span this
+  // survey (another survey's plan, or a re-run over changed bags) replays every
+  // record, routes them nowhere and still passes the gate, leaving a
+  // silently-incomplete store that is then fingerprinted as a complete build.
+  // The recon holds the evidence: every occupied count tile must have an
+  // emitted ancestor. This runs BEFORE the replay, so nothing has been written
+  // to -o yet and the refusal costs the operator only the recon pass.
+  {
+    std::vector<gggs::GridIndex> uncovered;
+    for (const auto & count_tile : recon.counts().grids()) {
+      if (!plan->covers(count_tile)) {
+        uncovered.push_back(count_tile);
+      }
+    }
+    if (!uncovered.empty()) {
+      // Formatted into a buffer rather than with stream manipulators: std::fixed
+      // on std::cerr would stay set and reformat every later number.
+      char share[32];
+      std::snprintf(
+        share, sizeof(share), "%.1f", 100.0 * static_cast<double>(uncovered.size()) /
+        static_cast<double>(recon.counts().tileCount()));
+      std::cerr << (level_plan_in.empty() ? "WARNING: " : "error: ") << uncovered.size()
+                << " of " << recon.counts().tileCount()
+                << " occupied count tile(s) (" << share
+                << "% of them) lie under no emitted tile at any level, so every sounding "
+        "over them would be admitted by no accumulator and dropped." << std::endl;
+      std::cerr << "First uncovered count tile: L"
+                << static_cast<int>(uncovered.front().level()) << " row="
+                << uncovered.front().row() << " col=" << uncovered.front().column()
+                << "." << std::endl;
+      if (!level_plan_in.empty()) {
+        std::cerr << "The plan in " << level_plan_in << " does not span these bags. Re-run "
+          "the recon without --level-plan (or with --level-plan-out) to build a plan for "
+          "THIS survey; importing against a foreign plan would write a partial-coverage "
+          "store and fingerprint it as a complete build (ADR-0003)." << std::endl;
+        return 1;
+      }
+      // A freshly computed plan omits a count tile only where no sounding under
+      // it carried a range below the transducer (a grid with no depth is never
+      // emitted), so say so rather than refuse the run the recon just paid for.
+      std::cerr << "This plan was computed from THIS recon, so the cause is soundings with "
+        "no range below the transducer (" << recon.soundingsWithoutRange() << " of "
+                << recon.soundingsSeen() << "): a level-14 grid with no depth anywhere "
+        "beneath it is never emitted. That ground is counted but will not be estimated."
+                << std::endl;
+    }
+  }
+
+  std::cout << "Phase two: replaying the spill into " << plan->levels().size()
+            << " per-level accumulator(s)..." << std::endl;
+  cube::MultiLevelAccumulatorConfig cfg;
+  cfg.store_dir = store_dir;
+  cfg.reference_store_dir = reference_store_dir;
+  cfg.bs_store_dir = bs_store_dir;
+  cfg.max_resident_tiles = max_resident_tiles;
+  cfg.iho_order = iho_order;
+  cfg.capture_spacing_scale = capture_spacing_scale;
+  cfg.backscatter_mode = backscatter_mode;
+  cfg.backscatter_curve = backscatter_curve.points;
+  cfg.backscatter_tl_removed = backscatter_curve.tl_removed;
+  cfg.backscatter_absorption_db_per_m = backscatter_curve.absorption_db_per_m;
+  cube::MultiLevelAccumulator accumulator(plan, cfg);
+
+  auto phase_tp = std::chrono::steady_clock::now();
+  uint64_t replayed = 0;
+  // Replay the one spill file front to back, in ping-sized chunks: the file is
+  // in arrival order, so every accumulator sees the soundings in the order the
+  // fixed-level path saw them (CUBE's sliding-median pre-filter is
+  // order-dependent), and a 256-sounding chunk is one swath's worth, so routing
+  // and eviction run at the same granularity as the fixed path.
+  constexpr std::size_t kChunk = 256;
+  std::vector<cube::GeoSounding> chunk;
+  chunk.reserve(kChunk);
+  uint64_t read_back = 0;
+  // forEachSpilled throws on a failed flush or close of the spill file and on a
+  // partial trailing record -- the disk-full tail this whole check exists for.
+  // It is the one fallible call on this path, and main() has no catch of its
+  // own, so an escaping throw would end the run in std::terminate (SIGABRT)
+  // instead of the `error: ...` + exit 1 its silent-short-count sibling below
+  // produces for the very same condition.
+  try {
+    read_back = recon.forEachSpilled([&](const cube::GeoSounding & s) {
+          chunk.push_back(s);
+          if (chunk.size() >= kChunk) {
+            accumulator.addBatch(chunk);
+            replayed += chunk.size();
+            chunk.clear();
+          }
+      });
+    if (!chunk.empty()) {
+      accumulator.addBatch(chunk);
+      replayed += chunk.size();
+      chunk.clear();
+    }
+  } catch (const std::exception & e) {
+    return abortDirtyReplay(
+      store_dir, std::string(e.what()) + ". Replayed " + std::to_string(replayed) + " of " +
+      std::to_string(recon.soundingsSpilled()) + " spilled sounding(s) before the failure.");
+  }
+  const double replay_secs =
+    std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count();
+  // The spill is the only copy of the projected soundings, so a short replay is
+  // a truncated survey, not a detail: fail before finalize() rather than write
+  // the store and fingerprint it as a complete build (ADR-0003) -- a later
+  // `batch_regen --incremental` would then trust it and never rebuild it. What
+  // is already on disk is NOT nothing, though: addBatch evicts to the real -o
+  // store as it goes, so abortDirtyReplay() says so and clears any stale
+  // fingerprint sitting over the mutated tiles.
+  if (read_back != replayed || replayed != recon.soundingsSpilled()) {
+    return abortDirtyReplay(
+      store_dir, "phase one spilled " + std::to_string(recon.soundingsSpilled()) +
+      " soundings but phase two replayed only " + std::to_string(replayed) +
+      " (read back " + std::to_string(read_back) + ") from " + recon.spillPath() +
+      ". The spill is short -- a full scratch device is the usual cause; free space "
+      "(or pass --scratch-dir) before the re-run.");
+  }
+  // Replayed is not the same as routed: the gate above proves every spilled
+  // record was read back, not that any accumulator admitted it. A batch no
+  // emitted tile intersects is dropped, and the store would still be finalized
+  // and fingerprinted as complete (cube#143 triage).
+  if (accumulator.unroutedSoundings() > 0) {
+    return abortDirtyReplay(
+      store_dir, std::to_string(accumulator.unroutedSoundings()) + " of " +
+      std::to_string(replayed) + " replayed sounding(s) were admitted by no level of the "
+      "plan -- the plan does not span these bags. Re-run the recon without --level-plan "
+      "to build a plan for THIS survey.");
+  }
+  std::cout << "Replayed " << replayed << " soundings in " << replay_secs <<
+    "s; batches per level:";
+  for (const auto & [level, n] : accumulator.batchesPerLevel()) {
+    std::cout << " L" << static_cast<int>(level) << "=" << n;
+  }
+  std::cout << std::endl;
+
+  std::cout << "Building store tiles..." << std::endl;
+  const std::size_t resident_before_final = accumulator.residentTileCount();
+  const std::size_t evicted_count = accumulator.evictedTileCount();
+  // Inside the guard, like the replay above it: finalize() persists the
+  // still-resident tiles and the metadata sidecars, and an I/O failure there
+  // leaves exactly the state abortDirtyReplay() describes -- a store that has
+  // been evicted into since the first batch, with any pre-existing fingerprint
+  // still describing the pre-run state. Unwinding past the guard would hand the
+  // operator an uncaught throw over a partial-coverage store (cube#143 triage).
+  try {
+    accumulator.finalize(
+      store_metadata.empty() ? nullptr : &store_metadata,
+      (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
+  } catch (const std::exception & e) {
+    return abortDirtyReplay(
+      store_dir, std::string("the store could not be finalized: ") + e.what() +
+      ". The spill replay completed, so the soundings were all routed, but the "
+      "resident tiles (and the store metadata) are not on disk.");
+  }
+  reportPersisted(
+    accumulator, store_dir, bs_store_dir, evicted_count, resident_before_final,
+    std::chrono::duration<double>(std::chrono::steady_clock::now() - phase_tp).count());
+  // Only now is the spill expendable: until finalize() has persisted the
+  // resident tiles, it is the only copy of the projected soundings, and a
+  // crash in between would cost the whole (multi-hour) projection pass.
+  recon.cleanup();
+  // The policy that actually CHOSE these tiles (cube#143 triage). With
+  // --level-plan the tiles come from the plan file, which carries its own
+  // policy -- ladder bounds, count level, n_req, both percentiles -- and
+  // serialising the CLI/default policy instead would stamp the store with
+  // inputs that did not decide it, so BuildFingerprint::isStale() would later
+  // compare against the wrong ones. Same class as pre-push round 1 must-fix 4:
+  // the artifact records the inputs it rests on.
+  const cube::LevelPlanPolicy & effective_policy =
+    level_plan_in.empty() ? policy : plan->policy();
+  const bool fingerprinted = writeFingerprint(
+    store_dir, cube::BuildFingerprint::Mode::DepthAdaptive, 0.0,
+    accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &effective_policy,
+    plan->levels());
+  if (!fingerprinted) {
+    return 2;
+  }
+  std::cout << "done!" << std::endl;
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char * argv[])
@@ -809,6 +1832,24 @@ int main(int argc, char * argv[])
   std::string backscatter_correction_str = "auto";
   std::string backscatter_curve_file;
   std::string sonar_info_topic;  // default: derived from detections_topic
+  // Node capture distance, spacing term (cube#143): max(0.05*|depth|, k*spacing).
+  float capture_spacing_scale = 0.71f;
+  bool capture_spacing_scale_given = false;
+  // Depth-adaptive multi-level store (cube#143). Off by default.
+  bool depth_adaptive = false;
+  cube::LevelPlanPolicy level_policy;
+  bool count_level_given = false;
+  std::size_t count_resident_tiles = cube::CountGrid::kDefaultResidentTiles;
+  bool count_resident_tiles_given = false;
+  // Count-tile spill allowance, as a multiple of the projected sounding spill
+  // (cube#143). 1.0 doubles the preflight requirement; the operator who knows
+  // the survey can lower or raise it.
+  double count_spill_allowance = 1.0;
+  bool count_spill_allowance_given = false;
+  std::string scratch_dir;
+  std::string level_plan_out;
+  std::string level_plan_in;
+  std::string count_grid_out;
 
   // Store-level provenance (uma#248 StoreMetadata, written once at finalize).
   marine_bathymetry_store::StoreMetadata store_metadata;
@@ -925,6 +1966,67 @@ int main(int argc, char * argv[])
     } else if (*arg == "--tile-refresh-budget") {
       tile_refresh_tiles_per_cycle = parse_int(
         "--tile-refresh-budget", next_value("--tile-refresh-budget"));
+    } else if (*arg == "--capture-spacing-scale") {
+      capture_spacing_scale = static_cast<float>(
+        parse_double("--capture-spacing-scale", next_value("--capture-spacing-scale")));
+      if (!(capture_spacing_scale > 0.0f) || !std::isfinite(capture_spacing_scale)) {
+        std::cerr << "error: --capture-spacing-scale must be a positive number\n";
+        usage();
+      }
+      capture_spacing_scale_given = true;
+    } else if (*arg == "--depth-adaptive") {
+      depth_adaptive = true;
+    } else if (*arg == "--depth-adaptive-scale") {
+      level_policy.depth.capture_distance_scale =
+        parse_double("--depth-adaptive-scale", next_value("--depth-adaptive-scale"));
+    } else if (*arg == "--depth-adaptive-coarsest") {
+      level_policy.depth.coarsest_level = requireLevel(
+        "--depth-adaptive-coarsest",
+        parse_int("--depth-adaptive-coarsest", next_value("--depth-adaptive-coarsest")));
+    } else if (*arg == "--depth-adaptive-finest") {
+      level_policy.depth.finest_level = requireLevel(
+        "--depth-adaptive-finest",
+        parse_int("--depth-adaptive-finest", next_value("--depth-adaptive-finest")));
+    } else if (*arg == "--count-level") {
+      level_policy.count_level = requireLevel(
+        "--count-level", parse_int("--count-level", next_value("--count-level")));
+      count_level_given = true;
+    } else if (*arg == "--min-obs-per-node") {
+      // Checked before the cast: -1 became UINT32_MAX and sailed past
+      // validate()'s `min_obs_per_node >= 1` (cube#143 triage).
+      level_policy.min_obs_per_node = static_cast<uint32_t>(
+        requireAtLeast(
+          "--min-obs-per-node",
+          parse_int("--min-obs-per-node", next_value("--min-obs-per-node")), 1));
+    } else if (*arg == "--blunder-allowance") {
+      level_policy.blunder_allowance = requireFiniteFactor(
+        "--blunder-allowance",
+        parse_double("--blunder-allowance", next_value("--blunder-allowance")));
+    } else if (*arg == "--decision-depth-percentile") {
+      level_policy.decision_depth_percentile = parse_double(
+        "--decision-depth-percentile", next_value("--decision-depth-percentile")) / 100.0;
+    } else if (*arg == "--achieved-percentile") {
+      level_policy.achieved_percentile = parse_double(
+        "--achieved-percentile", next_value("--achieved-percentile")) / 100.0;
+    } else if (*arg == "--count-resident-tiles") {
+      count_resident_tiles = requireAtLeast(
+        "--count-resident-tiles",
+        parse_int("--count-resident-tiles", next_value("--count-resident-tiles")),
+        cube::CountGrid::kMinResidentTiles);
+      count_resident_tiles_given = true;
+    } else if (*arg == "--count-spill-allowance") {
+      count_spill_allowance = requireFiniteFactor(
+        "--count-spill-allowance",
+        parse_double("--count-spill-allowance", next_value("--count-spill-allowance")));
+      count_spill_allowance_given = true;
+    } else if (*arg == "--scratch-dir") {
+      scratch_dir = next_value("--scratch-dir");
+    } else if (*arg == "--level-plan-out") {
+      level_plan_out = next_value("--level-plan-out");
+    } else if (*arg == "--level-plan") {
+      level_plan_in = next_value("--level-plan");
+    } else if (*arg == "--count-grid-out") {
+      count_grid_out = next_value("--count-grid-out");
     } else if (*arg == "-l") {
       ping_count_limit = parse_int("-l", next_value("-l"));
     } else if (*arg == "--platform") {
@@ -967,6 +2069,11 @@ int main(int argc, char * argv[])
     usage();
   }
 
+  validateDepthAdaptiveOptions(
+    depth_adaptive, level_policy, count_level_given, count_resident_tiles_given,
+    count_spill_allowance_given, level_plan_out, level_plan_in, count_grid_out, scratch_dir,
+    tile_size_report_path, bs_store_dir);
+
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;
   std::cout << "Store dir: " << store_dir << std::endl;
@@ -992,17 +2099,7 @@ int main(int argc, char * argv[])
   std::cout << "calculating total time..." << std::endl;
   auto begin_time = bag_readers.start_time();
   auto end_time = bag_readers.end_time();
-  auto total_duration = end_time - begin_time;
-
-  auto start_time_t = std::chrono::system_clock::to_time_t(begin_time);
-  std::cout << "start time: "
-            << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
-  auto end_time_t = std::chrono::system_clock::to_time_t(end_time);
-  std::cout << "end time: "
-            << std::put_time(std::gmtime(&end_time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
-  std::cout << "total time: "
-            << std::chrono::duration_cast<std::chrono::seconds>(total_duration).count()
-            << " seconds" << std::endl;
+  reportBagTimeSpan(begin_time, end_time);
 
   // Single, deterministic per-cell timestamp: the bag's nominal start time in ns
   // since the Unix epoch. A single value per import keeps the epoch deterministic
@@ -1025,76 +2122,23 @@ int main(int argc, char * argv[])
   tf2_ros::Buffer tfBuffer(clock, tf2::durationFromSec(kCacheWindowSec));
 
   cube::GeoMapSheet geo_map_sheet(resolution, iho_order);
-  std::cout << "requested resolution: " << resolution << " nominal used: "
-            << geo_map_sheet.nominalCellSizeMeters() << std::endl;
+  geo_map_sheet.setCaptureSpacingScale(capture_spacing_scale);
+  reportTilingChoice(
+    depth_adaptive, level_policy, geo_map_sheet, resolution, capture_spacing_scale);
 
   // Backscatter angular-response correction (cube#81). The setter must run AFTER
   // the sheet is constructed (its grids hold a const ref to the sheet Parameters).
   cube::BackscatterAngleCorrection backscatter_mode =
     cube::BackscatterAngleCorrection::None;
-  if (!cube::parseBackscatterAngleCorrection(
-      backscatter_correction_str, backscatter_mode))
+  cube::AngularResponseCurve backscatter_curve;
+  if (!resolveBackscatterCorrection(
+      backscatter_correction_str, backscatter_curve_file, sonar_info_topic,
+      detections_topic, bagfile_names, backscatter_mode, backscatter_curve))
   {
-    std::cerr << "error: --backscatter-correction must be 'none', 'empirical' "
-              << "or 'auto' (got '" << backscatter_correction_str << "')\n";
     usage();
   }
-  cube::AngularResponseCurve backscatter_curve;
-  std::string backscatter_curve_source = backscatter_curve_file;
-  if (backscatter_mode == cube::BackscatterAngleCorrection::None) {
-    std::cout << "--backscatter-correction none: any SonarInfo "
-      "angular-response curve in the bag will be ignored." << std::endl;
-  } else if (!backscatter_curve_file.empty()) {
-    // Explicit file wins over SonarInfo (the reprocessing override, #102).
-    backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
-    if (backscatter_curve.points.empty()) {
-      // Loud in EVERY mode: the explicit file also suppresses the SonarInfo
-      // pre-pass (it stays the operator's chosen source), so a failed load
-      // must never vanish silently (#102 r1).
-      std::cerr << "warning: --backscatter-curve '" << backscatter_curve_file
-                << "' yielded an EMPTY curve (missing/unparseable) -- no "
-        "correction from it, and the bag's SonarInfo curves stay IGNORED "
-        "because an explicit file was given. Fix or drop the flag.\n";
-    }
-  } else {
-    // SonarInfo pre-pass (#102): scan the bags' sonar_info topic for the
-    // first valid curve (latch-first; heartbeats republish the same one).
-    const std::string topic = sonar_info_topic.empty() ?
-      deriveSonarInfoTopic(detections_topic) : sonar_info_topic;
-    std::string last_reject;
-    if (loadCurveFromBagSonarInfo(
-        bagfile_names, topic, backscatter_curve, last_reject))
-    {
-      backscatter_curve_source = "SonarInfo topic '" + topic + "'";
-    } else if (!last_reject.empty()) {
-      std::cerr << "warning: SonarInfo on '" << topic
-                << "' carried an angular-response curve, but it was rejected: "
-                << last_reject << "\n";
-    }
-  }
-  if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
-    backscatter_curve.points.empty())
-  {
-    // Loud, not silent: explicitly enabled but no curve loaded -> no-op.
-    // (auto with no curve is quiet by design: identity is its fallback.)
-    std::cerr << "warning: --backscatter-correction empirical but no curve was "
-      "loaded from --backscatter-curve '" << backscatter_curve_file
-              << "' or the bag's SonarInfo -- the correction is ENABLED but a "
-      "NO-OP (intensity emitted uncorrected). Provide a valid curve CSV.\n";
-  } else if (!backscatter_curve.points.empty()) {
-    std::cout << "Backscatter angular-response correction: "
-              << backscatter_curve.points.size() << "-point curve from "
-              << backscatter_curve_source;
-    if (backscatter_curve.tl_removed) {
-      // tier-2 (cube#87): the curve is a TL-removed residual; the estimator
-      // also removes 40*log10(R) + 2*alpha*R per beam.
-      std::cout << " [tier-2: TL-removed, alpha="
-                << backscatter_curve.absorption_db_per_m << " dB/m]";
-    }
-    std::cout << std::endl;
-  }
   geo_map_sheet.setBackscatterCorrection(
-    backscatter_mode, std::move(backscatter_curve.points),
+    backscatter_mode, backscatter_curve.points,
     backscatter_curve.tl_removed, backscatter_curve.absorption_db_per_m);
 
   // Reference-prior seeding (#89, #96) is now LAZY, per tile on first touch, driven
@@ -1132,6 +2176,16 @@ int main(int argc, char * argv[])
   accumulator_config.max_resident_tiles = max_resident_tiles;
   cube::ImportAccumulator accumulator(geo_map_sheet, accumulator_config);
 
+  std::unique_ptr<cube::ReconCollector> recon;
+  if (depth_adaptive) {
+    recon = makeRecon(level_policy, scratch_dir, store_dir,
+        bag_readers.messageCount(detections_topic), count_resident_tiles,
+        count_spill_allowance);
+    if (!recon) {
+      return 1;
+    }
+  }
+
   if (!reference_store_dir.empty()) {
     std::cout << "Reference-prior seeding from " << reference_store_dir
               << " (lazy per-tile; predicted-only blunder gate, #96)." << std::endl;
@@ -1168,7 +2222,7 @@ int main(int argc, char * argv[])
 
   const int64_t begin_ns = cell_timestamp_ns;
   const int64_t total_ns =
-    std::chrono::duration_cast<std::chrono::nanoseconds>(total_duration).count();
+    std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - begin_time).count();
 
   // Speed-over-ground samples, pruned to a rolling window as pings drain (see
   // drain_pending) so the map stays bounded across a long multi-bag run instead
@@ -1189,6 +2243,16 @@ int main(int argc, char * argv[])
   std::deque<std::pair<int64_t, marine_acoustic_msgs::msg::SonarDetections>> pending;
 
   bool limit_reached = false;
+  // A fatal I/O failure raised from inside the per-ping work (cube#143 triage):
+  // the recon's spill/count-tile writes and the accumulator's eviction writes
+  // both throw on a full device, and NEITHER main() nor the per-ping handler
+  // (which catches only tf2::TransformException) would have caught it -- the
+  // run would end in std::terminate (SIGABRT), skipping ~ReconCollector and
+  // leaving a multi-GB spill dir behind for the next run's orphan warning.
+  // Recorded here instead, which stops the pass and lets the normal return path
+  // report it and unwind every destructor. Swept at BOTH sites of the class:
+  // the recon path and the fixed-level accumulator path.
+  std::string fatal_error;
 
   auto tile_reporter = makeTileReporter(
     tile_size_report_path, tile_report_interval_s, tile_refresh_interval_s,
@@ -1226,74 +2290,18 @@ int main(int argc, char * argv[])
         // one per ping. At swath scale (tens of metres about the reference) the
         // linearization error is well under a millimetre -- far below the GGGS
         // cell size and the soundings' own TPU.
-        const auto & origin = transform.transform.translation;
-        gz4d::GeoPointLatLongDegrees ref_ll(
-          gz4d::GeoPointECEF(origin.x, origin.y, origin.z));
-        gz4d::LocalENU enu(ref_ll);
-
-        const double ref_lat_deg = ref_ll.latitude();
-        const double ref_lon_deg = ref_ll.longitude();
-        const double ref_height = ref_ll.altitude();
-        constexpr double kDeg2Rad = M_PI / 180.0;
-        constexpr double kRad2Deg = 180.0 / M_PI;
-        constexpr double kA = 6378137.0;             // WGS84 semi-major axis
-        constexpr double kF = 1.0 / 298.257223563;   // WGS84 flattening
-        constexpr double kE2 = kF * (2.0 - kF);       // first eccentricity^2
-        const double lat0_rad = ref_lat_deg * kDeg2Rad;
-        const double sin_lat0 = std::sin(lat0_rad);
-        const double cos_lat0 = std::cos(lat0_rad);
-        const double w = std::sqrt(1.0 - kE2 * sin_lat0 * sin_lat0);
-        const double prime_vertical = kA / w;                     // N(lat0)
-        const double meridional = kA * (1.0 - kE2) / (w * w * w);  // M(lat0)
-
-        // Hoist the quaternion->matrix conversion out of the per-sounding loop:
-        // tf2::doTransform(PointStamped, ...) rebuilds the KDL::Frame (quaternion
-        // -> rotation matrix) from `transform` for EVERY sounding. Build it once
-        // per ping and apply the frame as a matvec. Bit-identical to the
-        // per-sounding doTransform -- the exact same KDL::Frame * KDL::Vector,
-        // just hoisted (cube#107). This MUST stay on the KDL path
-        // (tf2::gmTransformToKDL), NOT a tf2::Transform matvec: doTransform for a
-        // point is KDL-based, and a different rotation build would perturb the
-        // ECEF output in its low bits and shift boundary soundings between cells.
-        const KDL::Frame ping_frame = tf2::gmTransformToKDL(transform);
-
-        std::vector<cube::GeoSounding> soundings;
-        soundings.reserve(projection.soundings.size());
-        for (const auto & s : projection.soundings) {
-          const KDL::Vector sounding_ecef = ping_frame * KDL::Vector(
-            s.sonar_relative_position.x,
-            s.sonar_relative_position.y,
-            s.sonar_relative_position.z);
-
-          // ECEF -> local ENU (East, North, Up), then linearize ENU -> geodetic
-          // delta about the per-ping reference latitude.
-          const gz4d::Point<double> local = enu.toLocal(gz4d::GeoPointECEF(
-            sounding_ecef.x(), sounding_ecef.y(), sounding_ecef.z()));
-          const double lat_deg = ref_lat_deg + (local[1] / meridional) * kRad2Deg;
-          const double lon_deg =
-            ref_lon_deg + (local[0] / (prime_vertical * cos_lat0)) * kRad2Deg;
-          const double height = ref_height + local[2];
-
-          cube::GeoSounding gs(gz4d::GeoPointLatLongDegrees(lat_deg, lon_deg, height));
-          gs.sounding.vertical_error = s.vertical_error;
-          gs.sounding.horizontal_error = s.horizontal_error;
-          // Carry the {raw intensity, beam angle} sufficient-stats pair so the
-          // CUBE node co-estimates backscatter (#54) on the winning depth
-          // hypothesis -- without this every beam has NaN intensity and the
-          // backscatter store (--bs-store, #80) accumulates nothing. node.cpp
-          // emits the value UNCORRECTED; the angle correction is cube#81.
-          gs.sounding.intensity = s.intensity;
-          gs.sounding.beam_angle = s.beam_angle;
-          // Per-beam slant range R = twtt*c/2 (set in the Sounding detections
-          // ctor) for the tier-2 TL correction (cube#87).
-          gs.sounding.slant_range = s.slant_range;
-          soundings.push_back(gs);
+        const std::vector<cube::GeoSounding> soundings =
+          georeferencePing(projection, transform);
+        if (recon) {
+          // Recon pass (cube#143): count, reservoir and spill; no estimation.
+          recon->add(soundings, geo_map_sheet.parameters());
+        } else {
+          // Accumulate through the bounded-RAM accumulator (cube#92): adds the
+          // batch, reloads any evicted tile this ping revisits, then evicts cold
+          // tiles back to the budget. With --max-resident-tiles 0 this is a plain
+          // addSoundings (no eviction).
+          accumulator.addBatch(soundings);
         }
-        // Accumulate through the bounded-RAM accumulator (cube#92): adds the
-        // batch, reloads any evicted tile this ping revisits, then evicts cold
-        // tiles back to the budget. With --max-resident-tiles 0 this is a plain
-        // addSoundings (no eviction).
-        accumulator.addBatch(soundings);
         ping_count++;
         if (tile_reporter) {
           tile_reporter->maybeReport(geo_map_sheet, ping_ns);
@@ -1307,6 +2315,16 @@ int main(int argc, char * argv[])
         if (proj_totals.dropped_georef <= 5) {
           std::cerr << "Transform Exception: " << e.what() << std::endl;
         }
+      } catch (const std::exception & e) {
+        // Everything else from the per-ping work is an I/O fault, not a
+        // per-ping condition: the recon's spill write or count-tile spill, or
+        // the accumulator's eviction write into the -o store. Both mean the
+        // device is full (or gone), so the next ping would fail the same way.
+        // Record and stop rather than let it escape to std::terminate; the
+        // caller reports it below and every destructor still runs.
+        // (tf2::TransformException derives from std::runtime_error, so this
+        // handler must stay BELOW the one above.)
+        fatal_error = e.what();
       }
     };
 
@@ -1315,7 +2333,7 @@ int main(int argc, char * argv[])
   // remains at end-of-stream against the available coverage.
   auto drain_pending = [&](bool flush) {
       int64_t last_drained_ns = std::numeric_limits<int64_t>::min();
-      while (!pending.empty() && !limit_reached) {
+      while (!pending.empty() && !limit_reached && fatal_error.empty()) {
         const int64_t ping_ns = pending.front().first;
         if (!flush && (tf_frontier_ns == std::numeric_limits<int64_t>::min() ||
           ping_ns > tf_frontier_ns - kGuardNs))
@@ -1340,7 +2358,7 @@ int main(int argc, char * argv[])
     };
 
   std::cout << "projecting detections (single interleaved pass)..." << std::endl;
-  for (auto message = bag_readers.next(); message && !limit_reached;
+  for (auto message = bag_readers.next(); message && !limit_reached && fatal_error.empty();
     message = bag_readers.next())
   {
     const bool is_tf = message->data_type == "tf2_msgs/msg/TFMessage";
@@ -1411,42 +2429,36 @@ int main(int argc, char * argv[])
   }
   // Flush detections still pending at end-of-stream against available coverage.
   drain_pending(true);
+  if (!fatal_error.empty()) {
+    return reportFatalPassError(fatal_error, recon != nullptr, ping_count, store_dir);
+  }
   if (limit_reached) {
     std::cout << "\nPing count limit of " << ping_count_limit << " reached" << std::endl;
   }
   std::cout << "\n  buffered " << tf_count << " transforms";
   if (!odom_topic.empty()) {std::cout << ", " << odom_samples_total << " odometry samples";}
-  std::cout << "; projected " << ping_count << " pings in " << phase_secs() << "s." << std::endl;
+  // One reading, used twice: this is the projection pass, which for a
+  // depth-adaptive run IS the recon pass. Calling phase_secs() again below
+  // would restart the clock and time the handful of statements in between
+  // (the dry run reported the recon as 2.6e-05 s, cube#143 review).
+  const double projection_secs = phase_secs();
+  std::cout << "; projected " << ping_count << " pings in " << projection_secs << "s."
+            << std::endl;
 
   std::cout << "\ndone." << std::endl;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
   cube::report_projection_summary(proj_totals, std::cout, std::cerr);
 
-  std::cout << "Building store tiles..." << std::endl;
-
-  // Persist the still-resident tiles and write the store-level metadata. Tiles
-  // evicted during the pass were already written to disk (bathy in the -o store,
-  // their backscatter to --bs-store); finalize() writes whatever is still in RAM,
-  // so the on-disk store is the union of evicted + resident — identical to an
-  // unbounded build (cube#92). The off-boat full-bag CUBE replay is the
-  // authoritative product, so it always writes the `survey` layer (uma#248
-  // collapsed draft/processed). Single fused grid per layer (uma#221).
-  const std::size_t resident_before_final = accumulator.residentTileCount();
-  const std::size_t evicted_count = accumulator.evictedIndices().size();
-  accumulator.finalize(
-    store_metadata.empty() ? nullptr : &store_metadata,
-    (bs_store_dir.empty() || bs_metadata.empty()) ? nullptr : &bs_metadata);
-  reportPersisted(
-    accumulator, store_dir, bs_store_dir, evicted_count,
-    resident_before_final, phase_secs());
-
-  if (!finishTileReport(
-      tile_reporter, tile_size_report_path, tile_refresh_interval_s,
-      tile_refresh_tiles_per_cycle))
-  {
-    return 1;
+  if (recon) {
+    return cube_depth_adaptive_finish(
+      *recon, level_policy, level_plan_in, level_plan_out, count_grid_out, store_dir,
+      reference_store_dir, bs_store_dir, max_resident_tiles, iho_order,
+      capture_spacing_scale, capture_spacing_scale_given, backscatter_mode,
+      backscatter_curve, store_metadata, bs_metadata, projection_secs);
   }
 
-  std::cout << "done!" << std::endl;
-  return 0;
+  return cube_fixed_level_finish(
+    accumulator, geo_map_sheet, store_dir, bs_store_dir, resolution, iho_order,
+    store_metadata, bs_metadata, tile_reporter, tile_size_report_path,
+    tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs());
 }

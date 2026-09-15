@@ -358,6 +358,19 @@ TEST(PublishEquivalence, GeoProjectionMatchesLegacyMapSheet)
   // Legacy Cartesian path at the SAME cell size as the GGGS cells.
   MapSheet map_sheet(CellCounts(25), CellSizes(static_cast<float>(cell_size)));
 
+  // The node capture gate is max(0.05*|depth|, k*distance_scale) (#143), and
+  // the two sheets carry DIFFERENT distance_scales: the geographic sheet's
+  // Parameters are built from the REQUESTED 1.0 m, the legacy sheet's from the
+  // snapped 0.906 m cell. Under the old fixed 0.5 m floor both gated alike; now
+  // the spacing term must be pinned to the same metres on both sides, or the
+  // paths differ in gathering rather than in projection, which is the only
+  // thing this test is meant to compare.
+  constexpr double kSharedCaptureFloorM = 0.5;
+  geo_sheet.setCaptureSpacingScale(static_cast<float>(kSharedCaptureFloorM /
+    geo_sheet.distanceScale()));
+  map_sheet.setCaptureSpacingScale(static_cast<float>(kSharedCaptureFloorM /
+    map_sheet.distanceScale()));
+
   for (const auto & s : soundings) {
     double x = 0.0;
     double y = 0.0;

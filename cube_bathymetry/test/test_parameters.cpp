@@ -125,6 +125,7 @@ TEST(ParametersTest, DefaultParameterValues)
   EXPECT_FLOAT_EQ(p.blunder_percent, 0.25f);
   EXPECT_FLOAT_EQ(p.blunder_scalar, 3.0f);
   EXPECT_FLOAT_EQ(p.capture_distance_scale, 0.05f);
+  EXPECT_FLOAT_EQ(p.capture_spacing_scale, 0.71f);
   EXPECT_EQ(p.extractor, CUBE_LHOOD);
 }
 

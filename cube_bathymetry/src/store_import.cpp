@@ -1064,19 +1064,48 @@ void ImportAccumulator::evictColdTiles()
   // resident (never dropped): RAM stays transiently over budget rather than losing
   // unsaved data; the next batch retries.
   for (const auto & index : sheet_.coldTiles(cfg_.max_resident_tiles)) {
-    try {
-      persistBathyTile(index);
-      persistBackscatterTile(index);
-      spillIntensitySamples(index);
-    } catch (const std::exception & e) {
-      std::cerr << "import_bag: failed to persist cold tile for eviction: "
-                << e.what() << " (keeping it resident to avoid data loss)"
-                << std::endl;
-      continue;  // do NOT drop -- lossless guarantee
-    }
-    sheet_.dropTile(index);
-    evicted_.insert(index);
+    persistAndDrop(index);
   }
+}
+
+bool ImportAccumulator::persistAndDrop(const gggs::GridIndex & index)
+{
+  if (cfg_.store_dir.empty()) {
+    return false;  // nowhere to persist -> never drop (dropping would lose data)
+  }
+  if (!sheet_.gridAt(index)) {
+    return false;
+  }
+  // Persist-then-drop: the tile is written to disk (bathy + backscatter summary)
+  // and its corrected-intensity Welford spilled to scratch BEFORE it is dropped,
+  // so eviction is lossless and the tile reloads (with its intensity sufficient
+  // statistic) on revisit. A tile whose persist/spill THROWS is left resident
+  // (never dropped): RAM stays transiently over budget rather than losing
+  // unsaved data; the next batch retries.
+  try {
+    persistBathyTile(index);
+    persistBackscatterTile(index);
+    spillIntensitySamples(index);
+  } catch (const std::exception & e) {
+    std::cerr << "import_bag: failed to persist cold tile for eviction: "
+              << e.what() << " (keeping it resident to avoid data loss)"
+              << std::endl;
+    return false;  // do NOT drop -- lossless guarantee
+  }
+  sheet_.dropTile(index);
+  evicted_.insert(index);
+  return true;
+}
+
+std::vector<std::pair<gggs::GridIndex, uint64_t>> ImportAccumulator::residentTiles() const
+{
+  std::vector<std::pair<gggs::GridIndex, uint64_t>> out;
+  for (const auto & grid : sheet_.grids()) {
+    if (grid) {
+      out.emplace_back(grid->index(), sheet_.lastTouchOf(grid->index()));
+    }
+  }
+  return out;
 }
 
 void ImportAccumulator::addBatch(

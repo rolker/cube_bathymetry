@@ -32,6 +32,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -105,6 +106,41 @@ public:
 
     geo_map_sheet_ =
       std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
+
+    // Node capture gate (cube_bathymetry#143). Calder's hard-coded 0.5 m floor
+    // is gone; the spacing term replaces it, so the live node's gate moved just
+    // as the offline tools' did. Both offline tools expose the multiplier as
+    // --capture-spacing-scale, so the live node exposes it too rather than
+    // inheriting a changed gate with no way to set it back.
+    rcl_interfaces::msg::ParameterDescriptor spacing_desc;
+    spacing_desc.description =
+      "Multiplier on the node spacing in the capture gate: a sounding is "
+      "captured within max(capture_distance_scale x |depth|, this x node "
+      "spacing) of a node. Calder's manual puts the floor at half the grid "
+      "spacing for sub-metre grids; 0.71 is that, widened to the cell "
+      "diagonal. Read at configure; read_only, so a runtime set is rejected "
+      "rather than silently ignored.";
+    // read_only enforces the "read at configure" promise: the value is pushed
+    // into the sheet here and nowhere else, so without it a runtime
+    // `ros2 param set capture_spacing_scale` SUCCEEDS, reads back the new
+    // value and changes no gate at all -- the accepted/reads-back/inert trap
+    // this file documents at the Appledore note below and closes for
+    // publish_dirty_subwindow. Launch/YAML overrides are unaffected:
+    // read_only only rejects a set after declaration.
+    spacing_desc.read_only = true;
+    declare_parameter("capture_spacing_scale", 0.71, spacing_desc);
+    const double capture_spacing_scale = get_parameter("capture_spacing_scale").as_double();
+    try {
+      geo_map_sheet_->setCaptureSpacingScale(static_cast<float>(capture_spacing_scale));
+    } catch (const std::invalid_argument & e) {
+      RCLCPP_ERROR(get_logger(), "capture_spacing_scale: %s", e.what());
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+    }
+    RCLCPP_INFO(
+      get_logger(), "Capture distance: max(%.3f x |depth|, %.3f x %.3f m node spacing)",
+      geo_map_sheet_->parameters().capture_distance_scale,
+      geo_map_sheet_->parameters().capture_spacing_scale,
+      geo_map_sheet_->distanceScale());
     // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
     // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
     evicted_indices_.clear();
