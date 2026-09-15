@@ -1327,3 +1327,23 @@ message.
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 14:15 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `aa59734`
+**Source**: Copilot reviews 3 (`79f438b`, 16:15 UTC) and 4 (`4eabf3d`, 17:48 UTC), read by the host at the merge gate. CI: `ROS 2 Jazzy (industrial_ci)` SUCCESS on `aa59734`; mergeable, merge state CLEAN. Of 16 inline comments now attached to the three latest heads, 15 are the round-1/round-2 comments GitHub re-attached to later commits (all fixed in the 12:19 triage pass and verified there). **One is new.**
+**Must-fix**: 1 | **Suggestions**: 0
+
+### Findings
+- [ ] (must-fix) **Fixed-level `batch_regen` path does not validate the sheet its factory returns.** In the plan-driven path the sheet from `factory_(level)` is checked for null and for having snapped to the requested level, throwing a clear `std::invalid_argument`; the fixed-level path (`src/batch_regen.cpp:122`) performs neither check, so a misbehaving factory can null-dereference later or silently gather at a different level. Apply the same invariant (shared helper, one message), add a test that a factory returning null / a wrong-level sheet is rejected on the fixed-level path, and sweep any other `factory_(…)` call site for the same gap — `src/batch_regen.cpp:122`
+
+### Operator decisions (2026-09-15, host-recorded)
+Fix in PR #159 (operator rule: fix discovered defects where discovered; "if the Copilot review is clean, merge it" — it is clean apart from this one). After the fix: clean build + FULL suite (the real-bag smoke test must run for real). Then the host pushes, waits for hosted CI, and merges.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
