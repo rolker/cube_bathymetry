@@ -21,8 +21,11 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 #include "cube_bathymetry/build_fingerprint.h"
@@ -206,6 +209,37 @@ TEST(BuildFingerprint, ReadWriteAtomically)
       "{\"schema_version\": 2, \"tiling\": {\"mode\": \"weird\", "
       "\"policy\": {}, \"levels_used\": []}}"),
     std::runtime_error);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(BuildFingerprint, ReportsAFailedDirectoryFsyncInsteadOfClaimingSuccess)
+{
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "root bypasses the directory permissions this test relies on";
+  }
+  const std::string dir = tempStore("nodirsync");
+  std::filesystem::create_directories(dir);
+  auto f = adaptive();
+  f.write(dir);
+  ASSERT_TRUE(BuildFingerprint::read(dir).has_value());
+
+  // Write-and-search but not readable: the temp file, the fsync of it and the
+  // rename all still succeed, and only the post-rename fsync of the DIRECTORY
+  // fails. Swallowed, that returns success for a durability that did not
+  // happen -- so write() must throw.
+  std::filesystem::permissions(
+    dir, std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec,
+    std::filesystem::perm_options::replace);
+  try {
+    f.write(dir);
+    ADD_FAILURE() << "write() reported success without syncing the directory";
+  } catch (const std::runtime_error & e) {
+    // Pin the failure to the directory fsync, not an earlier step.
+    EXPECT_NE(std::string(e.what()).find("fsync"), std::string::npos) << e.what();
+  }
+
+  std::filesystem::permissions(
+    dir, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
   std::filesystem::remove_all(dir);
 }
 

@@ -24,8 +24,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -232,10 +234,22 @@ void BuildFingerprint::write(const std::string & store_dir) const
   }
   // The rename itself is a directory operation: fsync the directory too, or the
   // new name can be lost while the (synced) file contents survive nameless.
+  // Reported, not swallowed: a silent failure here makes write() return success
+  // and the caller print "Wrote build_fingerprint.json" for a durability that
+  // did not happen -- the same standard the temp-file write above is held to.
   const int dir_fd = ::open(store_dir.c_str(), O_RDONLY | O_DIRECTORY);
-  if (dir_fd >= 0) {
-    ::fsync(dir_fd);
-    ::close(dir_fd);
+  if (dir_fd < 0) {
+    throw std::runtime_error(
+            "build_fingerprint: cannot open " + store_dir +
+            " to fsync the rename: " + std::strerror(errno));
+  }
+  const bool synced = ::fsync(dir_fd) == 0;
+  const int sync_errno = errno;
+  ::close(dir_fd);
+  if (!synced) {
+    throw std::runtime_error(
+            "build_fingerprint: fsync of " + store_dir + " failed: " +
+            std::strerror(sync_errno));
   }
 }
 

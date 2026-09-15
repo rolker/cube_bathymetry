@@ -140,8 +140,11 @@ namespace cube
     static std::optional < BuildFingerprint > read(const std::string & store_dir);
 
   /// @brief Atomically write `<store_dir>/build_fingerprint.json` (temp file,
-  ///        flush, rename), creating @p store_dir as needed (ADR-0003).
-  /// @throws std::runtime_error on any filesystem failure.
+  ///        fsync, rename, fsync of the directory), creating @p store_dir as
+  ///        needed (ADR-0003).
+  /// @throws std::runtime_error on any filesystem failure, the post-rename
+  ///         directory fsync included -- a return means the fingerprint is on
+  ///         disk under its final name, not merely renamed.
     void write(const std::string & store_dir) const;
   };
 
