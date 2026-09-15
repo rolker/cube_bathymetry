@@ -872,3 +872,23 @@ The 87 skipped are the whole `cppcheck` linter suite (the tool is absent on this
 ---
 **Authored-By**: `Claude Code Agent`
 **Model**: `Claude Opus`
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-09-15 11:42 -04:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**PR**: https://github.com/rolker/cube_bathymetry/pull/159 at `00f3736`
+**Source**: follow-up analysis of the M3 dry run (PR comment https://github.com/rolker/cube_bathymetry/pull/159#issuecomment-5681929538, corrected in place). The bag is the Piscataqua River off the UNH pier, New Castle NH (43.072–43.075 N, 70.709–70.712 W), 2026-06-09 — not Lake Massabesic as the earlier entry says.
+**Must-fix**: 1 | **Suggestions**: 0
+
+### Findings
+- [ ] (must-fix) **The level plan feeds the ladder an ellipsoidal height, not a water depth.** Stored depths are WGS84 ellipsoidal heights by design (unh_marine_autonomy ADR-0002 §D4; `registry.hpp:54` "Stored values are always ellipsoidal"), and the geoid at the pier is ~28 m below the ellipsoid, so 8–13 m of water under the sonar arrives at `ReconCollector` as `s.sounding.depth` ≈ −36…−41 m (`src/recon.cpp:152` feeds exactly that into the depth histogram). `marine_bathymetry_store::depthAdaptiveLevel(depth_m)`'s contract is water depth: `0.05 × |depth|` is a footprint argument, and footprint scales with range below the transducer. Every required level in the dry run was therefore computed from water depth + ~28 m — one to two levels coarser than the water asks for — which is also why the run reports zero coverage deficit. **Fix**: decide on the water depth under the transducer. The spill record already carries `sonar_relative_z` (`src/recon.cpp:50`, from `sounding.sonar_relative_position.z`); feed the histogram `-|sonar_relative_z|` (keep the histogram's negative-down, shallowest-is-largest convention — verify the sign of `sonar_relative_position.z` in `include/cube_bathymetry/sounding.h` and the projector before choosing the sign, and say which in a comment). Transducer draft is ignored deliberately (sub-metre against a factor-of-two level ladder) — state that. Rename/redefine `PlannedTile::decision_depth` and the plan JSON `d` as "water depth under the transducer, negative-down" (schema note; schema 2 was minted this morning and is unreleased, so amend it rather than mint 3), update README §depth-adaptive, ADR-0002 amendment text, `--help`, and plan.md. Add a test that a sounding with ellipsoidal depth −40 and sonar-relative 12 decides as 12 m water. The single-level byte-identity guarantee is unaffected (the policy pin bypasses the decision) — keep `test_mixed_level_import` green — `src/recon.cpp:152`, `src/level_plan.cpp:513-514`, `include/cube_bathymetry/level_plan.h:135`
+
+### Operator decisions (2026-09-15, host-recorded)
+Fix in PR #159 now. After the fix: clean build + FULL suite, then re-run the dry run into `.agent/scratchpad/cube143-dryrun/rerun2/` (same command as `recon.log`, and the `-l 3000` window into `rerun2/small/`). Expected: decision depths ≈ −7…−20 m, required levels 11–12, and — since the achieved level was 10–11 — a **non-zero coverage deficit**; record the actual numbers in the `## Implementation` entry rather than the expectation. Then the host pushes.
+
+---
+**Authored-By**: `Claude Code Agent`
+**Model**: `Claude Fable 5.1`
