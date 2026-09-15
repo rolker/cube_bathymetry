@@ -410,6 +410,42 @@ TEST_F(LevelPlanTest, SingleLevelPolicyEmitsExactlyTheTouchedSet)
   }
 }
 
+// The plan carries the capture gate its import ran with (cube#143 triage).
+// It decides no tile, so it is not policy -- but the gate is
+// max(0.05 x |depth|, k x node spacing), so a rebuild at a different k gathers
+// differently from the same soundings, and README promises `batch_regen_bag
+// --level-plan` is bit-exact against `import_bag --depth-adaptive`. Schema 2
+// was amended rather than a schema 3 minted (schema 2 is unreleased).
+TEST_F(LevelPlanTest, CarriesTheCaptureSpacingScaleThroughTheJson)
+{
+  fillGrid(l14(kLat, kLon), 6, -40.0f);
+  auto plan = levelPlanFor(counts, depths, policy);
+  // The default states the gate a plan that never set one implies.
+  EXPECT_FLOAT_EQ(plan.captureSpacingScale(), 0.71f);
+
+  plan.setCaptureSpacingScale(0.55f);
+  const std::string json = plan.toJson();
+  EXPECT_NE(json.find("\"capture_spacing_scale\":"), std::string::npos);
+  const auto back = LevelPlan::fromJson(json);
+  EXPECT_FLOAT_EQ(back.captureSpacingScale(), 0.55f);
+  EXPECT_EQ(back.toJson(), json) << "still canonical";
+
+  // Required, not defaulted: a plan that omits it would rebuild at the
+  // reader's own default, which is the defect this closes.
+  std::string without = json;
+  const std::size_t at = without.find(",\"capture_spacing_scale\":0.55000001192092896");
+  ASSERT_NE(at, std::string::npos) << without;
+  without.erase(at, std::string("\",capture_spacing_scale\":0.55000001192092896").size());
+  EXPECT_THROW(LevelPlan::fromJson(without), std::runtime_error);
+
+  // And validated: a zero or negative gate is not a gate.
+  EXPECT_THROW(plan.setCaptureSpacingScale(0.0f), std::invalid_argument);
+  EXPECT_THROW(plan.setCaptureSpacingScale(-1.0f), std::invalid_argument);
+  EXPECT_THROW(
+    plan.setCaptureSpacingScale(std::numeric_limits<float>::quiet_NaN()),
+    std::invalid_argument);
+}
+
 // A plan file is an operator-facing artifact passed between runs, so it is an
 // external input: fromJson validated the recorded POLICY but no tile record
 // against it, and a tile at level 15 under a finest_level of 14 was accepted --

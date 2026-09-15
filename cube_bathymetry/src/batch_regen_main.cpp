@@ -550,6 +550,7 @@ int main(int argc, char * argv[])
   // Depth-adaptive rebuild from a level plan (cube#143); empty = fixed level.
   std::string level_plan_path;
   float capture_spacing_scale = 0.71f;
+  bool capture_spacing_scale_given = false;
 
   // Store-level provenance (uma#248 StoreMetadata, written once at finalize).
   marine_bathymetry_store::StoreMetadata store_metadata;
@@ -639,6 +640,7 @@ int main(int argc, char * argv[])
         std::cerr << "error: --capture-spacing-scale must be a positive number\n";
         usage();
       }
+      capture_spacing_scale_given = true;
     } else if (*arg == "-l") {
       ping_count_limit = parse_int("-l", next_value("-l"));
     } else if (*arg == "--platform") {
@@ -701,6 +703,27 @@ int main(int argc, char * argv[])
     if (level_plan->tiles().empty()) {
       std::cerr << "error: --level-plan " << level_plan_path << " emits no tiles\n";
       return 1;
+    }
+    // The capture gate is `max(0.05 x |depth|, k x node spacing)`, so a rebuild
+    // at a different k gathers differently from the same soundings -- and
+    // README promises this rebuild is bit-exact against
+    // `import_bag --depth-adaptive`. The plan carries the k its import ran with
+    // (cube#143 triage): adopt it when no flag was given, refuse an explicit
+    // value that disagrees rather than silently rebuilding to a different gate.
+    if (capture_spacing_scale_given &&
+      level_plan->captureSpacingScale() != capture_spacing_scale)
+    {
+      std::cerr << "error: --capture-spacing-scale " << capture_spacing_scale
+                << " disagrees with the " << level_plan->captureSpacingScale()
+                << " recorded in " << level_plan_path
+                << ". A rebuild at a different capture gate is not the bit-exact "
+        "rebuild of that import. Drop the flag to use the plan's value.\n";
+      return 1;
+    }
+    if (!capture_spacing_scale_given) {
+      capture_spacing_scale = level_plan->captureSpacingScale();
+      std::cout << "Capture spacing scale " << capture_spacing_scale
+                << ", from the level plan." << std::endl;
     }
     if (!bs_store_dir.empty()) {
       // TEMPORARY, and the same refusal import_bag --depth-adaptive gives:

@@ -1412,7 +1412,8 @@ int cube_depth_adaptive_finish(
   const std::string & count_grid_out, const std::string & store_dir,
   const std::string & reference_store_dir, const std::string & bs_store_dir,
   std::size_t max_resident_tiles, const std::string & iho_order,
-  float capture_spacing_scale, cube::BackscatterAngleCorrection backscatter_mode,
+  float capture_spacing_scale, bool capture_spacing_scale_given,
+  cube::BackscatterAngleCorrection backscatter_mode,
   const cube::AngularResponseCurve & backscatter_curve,
   const marine_bathymetry_store::StoreMetadata & store_metadata,
   const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, double recon_secs)
@@ -1475,9 +1476,32 @@ int cube_depth_adaptive_finish(
     }
     std::cout << "Reusing level plan " << level_plan_in << " (" << plan->tiles().size()
               << " tiles)." << std::endl;
+    // The capture gate the plan's import ran with, carried in the plan
+    // (cube#143 triage). Re-importing at a different k gathers differently from
+    // the same soundings, so an explicit disagreement is refused and silence
+    // adopts the plan's value rather than this run's default.
+    if (capture_spacing_scale_given &&
+      plan->captureSpacingScale() != capture_spacing_scale)
+    {
+      std::cerr << "error: --capture-spacing-scale " << capture_spacing_scale
+                << " disagrees with the " << plan->captureSpacingScale()
+                << " recorded in " << level_plan_in
+                << ". The capture gate is max(0.05 x |depth|, k x node spacing), so a "
+        "different k gathers differently from the same soundings. Drop the flag to use "
+        "the plan's value, or re-run the recon at the k you want." << std::endl;
+      return 1;
+    }
+    if (!capture_spacing_scale_given) {
+      capture_spacing_scale = plan->captureSpacingScale();
+      std::cout << "Capture spacing scale " << capture_spacing_scale
+                << ", from the plan." << std::endl;
+    }
   } else {
     std::cout << "Computing the level plan..." << std::endl;
     plan = std::make_shared<cube::LevelPlan>(recon.plan());
+    // Record the gate THIS run used, so a later --level-plan reuse (here or in
+    // batch_regen_bag) rebuilds against the same one.
+    plan->setCaptureSpacingScale(capture_spacing_scale);
   }
   std::cout << plan->report();
   std::cout << "Recon count grid: " << recon.counts().tileCount() << " tile(s), resident peak "
@@ -1745,6 +1769,7 @@ int main(int argc, char * argv[])
   std::string sonar_info_topic;  // default: derived from detections_topic
   // Node capture distance, spacing term (cube#143): max(0.05*|depth|, k*spacing).
   float capture_spacing_scale = 0.71f;
+  bool capture_spacing_scale_given = false;
   // Depth-adaptive multi-level store (cube#143). Off by default.
   bool depth_adaptive = false;
   cube::LevelPlanPolicy level_policy;
@@ -1883,6 +1908,7 @@ int main(int argc, char * argv[])
         std::cerr << "error: --capture-spacing-scale must be a positive number\n";
         usage();
       }
+      capture_spacing_scale_given = true;
     } else if (*arg == "--depth-adaptive") {
       depth_adaptive = true;
     } else if (*arg == "--depth-adaptive-scale") {
@@ -2362,8 +2388,8 @@ int main(int argc, char * argv[])
     return cube_depth_adaptive_finish(
       *recon, level_policy, level_plan_in, level_plan_out, count_grid_out, store_dir,
       reference_store_dir, bs_store_dir, max_resident_tiles, iho_order,
-      capture_spacing_scale, backscatter_mode, backscatter_curve, store_metadata,
-      bs_metadata, projection_secs);
+      capture_spacing_scale, capture_spacing_scale_given, backscatter_mode,
+      backscatter_curve, store_metadata, bs_metadata, projection_secs);
   }
 
   std::cout << "Building store tiles..." << std::endl;

@@ -219,7 +219,12 @@ in short:
 
 `batch_regen_bag --level-plan <file>` rebuilds a depth-adaptive store from the
 same plan (each tile gathered at its own level), and its `--index-db` dry run
-then rolls the dirty set up to the emitted tile at every plan level.
+then rolls the dirty set up to the emitted tile at every plan level. The plan
+records the `--capture-spacing-scale` its import ran with, so the rebuild uses
+that gate by default and **refuses** an explicit value that disagrees —
+otherwise "bit-exact vs `import_bag --depth-adaptive`" would hold only when the
+two runs happened to share a CLI default. `import_bag --level-plan` applies the
+same rule.
 
 `batch_regen` scatters each projected sounding to a per-tile bucket on disk, then
 gathers each tile in a single unbounded pass (no eviction) — so no tile is ever

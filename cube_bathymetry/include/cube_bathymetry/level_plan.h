@@ -207,6 +207,23 @@ public:
   ///        report's storage multiplier, and what its area columns sum to.
     double surveyedGroundM2() const noexcept {return surveyed_ground_m2_;}
 
+  /// @brief The capture-spacing scale `k` the import that wrote this plan ran
+  ///        with (`--capture-spacing-scale`, default 0.71).
+  ///
+  /// It decides no tile, so it is not part of the policy -- but the node
+  /// capture gate is `max(0.05 x |depth|, k x node spacing)`, so a rebuild at a
+  /// different `k` produces different estimates from the same soundings. README
+  /// promises `batch_regen_bag --level-plan` is bit-exact against
+  /// `import_bag --depth-adaptive`; without carrying `k` the rebuild silently
+  /// applied its own CLI default instead (cube#143 triage). Recorded in the
+  /// plan so the rebuild can adopt it, and refuse an explicit value that
+  /// disagrees.
+    float captureSpacingScale() const noexcept {return capture_spacing_scale_;}
+
+  /// Record the scale the import ran with; see `captureSpacingScale()`.
+  /// @throws std::invalid_argument on a non-finite or non-positive value.
+    void setCaptureSpacingScale(float scale);
+
   /// @brief Ground, square metres, for which @p grid is the FINEST emitted
   ///        tile -- its own ground minus its emitted children's. This is the
   ///        ground the tile actually stores; a refined parent keeps whatever
@@ -238,6 +255,9 @@ private:
 
     LevelPlanPolicy policy_;
     double surveyed_ground_m2_ = 0.0;
+  /// Default matches import_bag's and batch_regen_bag's --capture-spacing-scale
+  /// default, so a plan that never set one still states the gate it implies.
+    float capture_spacing_scale_ = 0.71f;
     std::map < gggs::GridIndex, PlannedTile > tiles_;
     std::map < uint8_t, std::set < gggs::GridIndex >> touched_;
   };

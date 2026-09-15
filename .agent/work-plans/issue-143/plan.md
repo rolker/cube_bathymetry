@@ -689,6 +689,17 @@ per `plan-task`'s during-implementation rules):
   the budget and the spilled count. `tiles()` is gone from the public API;
   `grids()` + `tileAt()` replace it, and a returned `Tile *` is invalidated by
   the next access to a different tile.
+- **The level plan records `capture_spacing_scale`** (Copilot triage,
+  2026-09-15): it decides no tile, so it is not part of `LevelPlanPolicy`, but
+  the capture gate is `max(0.05 × |depth|, k × node spacing)` and a rebuild at a
+  different `k` gathers differently from the same soundings — while README
+  promises `batch_regen_bag --level-plan` is bit-exact against `import_bag
+  --depth-adaptive`. Added to schema 2 (unreleased, already amended once) as a
+  **required** key, since a plan that omits it would rebuild at the reader's own
+  default. Both readers (`batch_regen_bag --level-plan` and `import_bag
+  --level-plan`) adopt the plan's value when no flag is given and refuse an
+  explicit one that disagrees. Same "the artifact omits an input it rests on"
+  class as must-fix 4.
 - **The decision-depth histograms are the one recon structure that budget does
   NOT bound** (Copilot triage, 2026-09-15): every grid's histogram is read when
   the plan takes its percentile, so none can be spilled, and the total grows

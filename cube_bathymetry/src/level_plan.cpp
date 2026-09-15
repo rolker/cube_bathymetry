@@ -155,6 +155,15 @@ bool LevelPlan::isEmitted(const gggs::GridIndex & grid) const
   return tiles_.count(grid) > 0;
 }
 
+void LevelPlan::setCaptureSpacingScale(float scale)
+{
+  if (!(scale > 0.0f) || !std::isfinite(scale)) {
+    throw std::invalid_argument(
+            "LevelPlan: capture_spacing_scale must be finite and positive");
+  }
+  capture_spacing_scale_ = scale;
+}
+
 bool LevelPlan::covers(const gggs::GridIndex & grid) const
 {
   for (gggs::GridIndex g = grid; g.valid(); g = gggs::parent(g)) {
@@ -272,7 +281,8 @@ std::string LevelPlan::toJson() const
       << ",\"blunder_allowance\":" << formatScale(policy_.blunder_allowance)
       << ",\"decision_depth_percentile\":" << formatScale(policy_.decision_depth_percentile)
       << ",\"achieved_percentile\":" << formatScale(policy_.achieved_percentile)
-      << "},\"ground_m2\":" << formatScale(surveyed_ground_m2_)
+      << "},\"capture_spacing_scale\":" << formatScale(capture_spacing_scale_)
+      << ",\"ground_m2\":" << formatScale(surveyed_ground_m2_)
       << ",\"touched\":[";
   bool first = true;
   for (const auto & [level, grids] : touched_) {
@@ -349,6 +359,12 @@ LevelPlan LevelPlan::fromJson(const std::string & json)
         return grid;
       };
 
+    // Schema 2 is unreleased (minted this morning, amended once already), so
+    // the capture scale is added to it rather than a schema 3 being minted --
+    // and it is REQUIRED, not defaulted: a plan that did not state it would
+    // silently rebuild at the reader's own default, which is the defect
+    // (cube#143 triage).
+    plan.setCaptureSpacingScale(j.at("capture_spacing_scale").get<float>());
     plan.surveyed_ground_m2_ = j.at("ground_m2").get<double>();
     if (!(plan.surveyed_ground_m2_ >= 0.0) || !std::isfinite(plan.surveyed_ground_m2_)) {
       throw std::runtime_error("LevelPlan::fromJson: ground_m2 must be finite and >= 0");
