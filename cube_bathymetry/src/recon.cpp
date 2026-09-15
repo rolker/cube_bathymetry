@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -258,16 +259,32 @@ void ReconCollector::cleanup()
     spill_out_->close();
     spill_out_.reset();
   }
-  if (!scratch_dir_.empty()) {
-    std::error_code ec;
-    std::filesystem::remove(spillPath(), ec);
-    counts_.discardSpill();
+  if (scratch_dir_.empty()) {
+    return;
   }
-  if (!scratch_dir_.empty()) {
-    std::error_code ec;
-    if (std::filesystem::exists(scratch_dir_, ec) && std::filesystem::is_empty(scratch_dir_, ec)) {
-      std::filesystem::remove(scratch_dir_, ec);
+  // Report what could not be deleted: a spill that survives is gigabytes of
+  // scratch this run leaves behind, and silently it is only ever seen by the
+  // NEXT run's orphan sweep -- by which time the operator has no idea which
+  // run left it. cleanup() also runs from the destructor, so this warns rather
+  // than throws.
+  std::error_code ec;
+  std::filesystem::remove(spillPath(), ec);
+  if (ec) {
+    std::cerr << "warning: recon could not remove the spill file " << spillPath()
+              << ": " << ec.message() << " (remove it by hand; it is the size of the survey)"
+              << std::endl;
+  }
+  counts_.discardSpill();
+  ec.clear();
+  if (std::filesystem::exists(scratch_dir_, ec) && std::filesystem::is_empty(scratch_dir_, ec)) {
+    std::filesystem::remove(scratch_dir_, ec);
+    if (ec) {
+      std::cerr << "warning: recon could not remove the scratch dir " << scratch_dir_
+                << ": " << ec.message() << std::endl;
     }
+  } else if (ec) {
+    std::cerr << "warning: recon could not inspect the scratch dir " << scratch_dir_
+              << ": " << ec.message() << std::endl;
   }
 }
 
