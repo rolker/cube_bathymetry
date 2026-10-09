@@ -19,8 +19,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef CUBE_BATHYMETRY__CUBE_BATHYMETRY_NODE_H_
-#define CUBE_BATHYMETRY__CUBE_BATHYMETRY_NODE_H_
+#ifndef CUBE_BATHYMETRY_NODE_HPP_
+#define CUBE_BATHYMETRY_NODE_HPP_
 
 #include <sys/stat.h>
 
@@ -32,6 +32,7 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -645,7 +646,8 @@ public:
       "85.7 kB/s for the whole-tile stream this replaces. 0 disables the "
       "refresh entirely, which makes a lost patch permanent -- only safe "
       "against a consumer that tracks patch possession and re-requests.";
-    const double refresh_raw = declareOnce<double>("subwindow_refresh_interval", 60.0, refresh_desc);
+    const double refresh_raw = declareOnce<double>("subwindow_refresh_interval", 60.0,
+      refresh_desc);
     if (!std::isfinite(refresh_raw) || refresh_raw < 0.0) {
       RCLCPP_WARN(get_logger(),
         "subwindow_refresh_interval=%g is not a non-negative finite duration; "
@@ -2243,4 +2245,4 @@ private:
   }
 };
 
-#endif  // CUBE_BATHYMETRY__CUBE_BATHYMETRY_NODE_H_
+#endif  // CUBE_BATHYMETRY_NODE_HPP_

@@ -375,7 +375,7 @@ TEST(PublishEquivalence, ElevationIsEllipsoidHeightPositiveUp)
   for (const auto & c : cells) {
     EXPECT_NEAR(c.depth, seabed_height, 0.05)
       << "elevation must equal the ellipsoid height of the seabed (negative, "
-         "positive up), not its negation or a depth below the surface";
+      "positive up), not its negation or a depth below the surface";
     EXPECT_LT(c.depth, 0.0f);
   }
 
