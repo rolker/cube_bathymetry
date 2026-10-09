@@ -128,15 +128,23 @@ none of the previous window's cells (`test_node_lifecycle`).
   dirty tiles to `<draft_dir>/draft/`, and `configure` reloads everything saved
   there (and under `processed/`) into the new sheet. That is deliberate (the draft
   store is the product of record, ADR-0001), and it means the sheet is **not** fresh.
-  The script refuses to run when `draft_dir` is set; pass `--allow-persistence` to
-  reset anyway, or clear it first with `ros2 param set <node> draft_dir ''` (it is
-  writable, and the next `configure` reads it). Nothing on disk is ever deleted by
-  a reset. If the final flush fails (disk full, permissions), `cleanup` fails and
-  the node stays `inactive` with its sheet, rather than discard tiles that were
-  never written; fix the cause and run the script again.
+  The script refuses to run when `draft_dir` is set. For a fresh sheet that keeps
+  persistence and eviction on, point `draft_dir` at a NEW, empty directory
+  (`ros2 param set <node> draft_dir /path/to/new/empty/dir`; it is writable, and the
+  next `configure` reads it) and run the script with `--allow-persistence`: `cleanup`
+  flushes the old sheet to the old directory, and `configure` finds nothing to reload
+  in the new one. Do **not** set it to `''`. An empty `draft_dir` means no persistence
+  and no eviction, so the new sheet's RAM grows without bound on a long survey, and
+  `cleanup` flushes against the directory the node was *configured with*, not the
+  value set afterwards, so it can still write to (and be refused by) the old one.
+  Nothing on disk is ever deleted by a reset. If the final flush fails (disk full,
+  permissions), `cleanup` fails and the node stays `inactive` with its sheet, rather
+  than discard tiles that were never written; fix the cause and run the script again.
 - **Nothing is saved when `draft_dir` is empty.** That is what makes the sheet fresh,
   and it also means the reset **permanently discards the in-RAM survey**: the old
-  window exists nowhere afterwards. Save or export what you want to keep first.
+  window exists nowhere afterwards. Save or export what you want to keep first. With
+  an empty `draft_dir` the node also never evicts cold tiles, so RAM grows for as long
+  as the survey runs.
 - **`prior_store_dir`.** It seeds a predicted surface for the blunder gate, not
   coverage, and is reloaded on every configure. The script only prints a note.
 
@@ -152,7 +160,8 @@ the CUBE node: `bizzyboat_project11/config/bizzyboat.yaml` sets
 `bizzyboat_sim_core_launch.py` layers that file, so a launch that loads it will
 reload the saved tiles on every reset. A demo that wants a fresh sheet between runs
 must leave `draft_dir` empty for the CUBE nodes (the script's refusal tells you when
-it is not).
+it is not), which is fine for a short demo but never evicts, or give each run a new
+empty `draft_dir` as described above.
 
 ## Live coverage stream parameters (`cube_bathymetry_node`)
 

@@ -180,7 +180,7 @@ note_prior() {
 }
 
 refuse_draft() {
-  die "$1: draft_dir is '$2'; saved draft tiles reload on configure, so the sheet would not be fresh. Clear it (ros2 param set $1 draft_dir '') or pass --allow-persistence."
+  die "$1: draft_dir is '$2'; saved draft tiles reload on configure, so the sheet would not be fresh. Point it at a NEW empty directory (ros2 param set $1 draft_dir /path/to/new/empty/dir) and pass --allow-persistence. Do not set it to '': that turns persistence and eviction off, so RAM grows on a long survey, and cleanup still flushes against the directory the node was configured with."
 }
 
 # 0a. Every node and consumer must answer and be walkable, before anything moves:
