@@ -290,3 +290,27 @@ ASan: ran. A separate ASan build of a copy of the package (scratchpad, `-fsaniti
 
 ### Plan adherence and governance
 Plan and code agree; the plan's sync commit `a0c418d` records every round-1 change. ADR-0001 (never lose survey data) is honoured by the refusal path; the remaining gap is the unflushed shutdown above, pre-existing. Principles: no concerns beyond the must-fix (documentation consequence of an advised action). Doc impact: no new parameters; README updated. Gap noted: the repo has no `.agents/README.md` (the issue's own checklist item, deferred to PR (b)). Still owed before push: full-scope `ci_local.sh` (ADR-0018). Nothing pushed.
+
+
+## Implementation
+**Status**: complete
+**When**: 2026-10-09 16:20 -04:00
+**By**: Claude Sonnet
+
+**Branch**: feature/issue-164 at `eb9f515`
+**Addressed**: Local Review (Pre-Push), Round 2, 2026-10-09 15:32 -04:00 at `472a725` (1 must-fix, 7 suggestions; all 8 addressed, none deferred)
+**Commits**: 0ee9eb7 cfc7566 b67d3c0 1210351 3d447cd d6e8d21 (plan sync 8f9f4ae, box ticks eb9f515)
+
+### Actions
+- [x] (must-fix) README and the `refuse_draft` message no longer advise `draft_dir ''`; they say an empty `draft_dir` means no persistence and no eviction (RAM grows on a long survey) and that cleanup flushes against the directory the node was configured with, and advise a NEW empty directory plus `--allow-persistence` (the preflight reads the new value, so the flag is still needed; the old sheet flushes to the old directory, the new one reloads nothing) — `README.md`, `reset_cube_nodes.sh` (0ee9eb7)
+- [x] (suggestion) `timeout --foreground` in `ros2_get` and `transition`; a stub `timeout` on PATH records every call and the test requires `--foreground` on all 72 — `reset_cube_nodes.sh` (cfc7566)
+- [x] (suggestion) `trap '' HUP PIPE` plus a README line about tmux/nohup; tests send SIGHUP mid-reset and close the stdout pipe, both must still end all four nodes `active`; the final `print_states` returns 0 so a closed stdout does not become the exit status (found by the test: exit 1 before) — (cfc7566)
+- [x] (suggestion) a failing probe is no longer reported as a failed reset (a `probing` flag instead of `changed`; the message says no CUBE node was reset and names the probed node, which may be left `inactive`); the preflight warns for every CUBE node that is not `active` — (cfc7566)
+- [x] (suggestion) `FailedConfigureCanBeRetriedWhileTfIsPublished`: 300 failed configures at 2 ms with a helper node publishing `/tf` every 200 us; the comment says it only has teeth under ASan — `test_node_lifecycle.cpp` (3d447cd)
+- [x] (suggestion) did the `on_shutdown` flush (small, testable): `on_shutdown` calls `saveDirtyTiles()`, logs how many tiles it could not write and still completes (a shutdown cannot be refused); the "not lost on shutdown" comment now says what cleanup does and does not cover; README says tiles stay in RAM while a cleanup is refused and that a killed process loses what the periodic save has not written; `ShutdownFromActiveFlushesUnsavedTiles`, `ShutdownCompletesWhenTheFlushFails` — `cube_bathymetry_node.hpp`, `README.md`, `test_node_lifecycle.cpp` (1210351)
+- [x] (suggestion) case 6b now has the never-configured node FIRST and the `draft_dir` on the LAST node (an inline-probing script fails it); SC2116 fixed at both lines; the CMake comment lists the real case groups; both tests blank `ROS_DISCOVERY_SERVER`, `ROS_STATIC_PEERS`, `FASTRTPS_DEFAULT_PROFILES_FILE`, `CYCLONEDDS_URI` (one shared `CUBE_ISOLATED_TEST_ENV`, kept under the 140-column cmake lint) — `test_reset_cube_nodes.sh` (cfc7566), `CMakeLists.txt` (b67d3c0, d6e8d21)
+
+### Test results
+- Clean rebuild (build and install dirs for the package deleted), then `./sensors_ws/test.sh cube_bathymetry` at `d6e8d21`: **813 tests, 0 errors, 0 failures, 90 skipped** (the 90 are cppcheck cases); ctest 39 of 39. `test_node_lifecycle` has 12 cases (was 9), `test_reset_cube_nodes` 10 case groups (was 8). An earlier run with the CMake lines at 150 columns failed `lint_cmake` (2 failures); fixed in d6e8d21. shellcheck clean on both scripts.
+- Mutation checks: dropping `--foreground` fails case 9a; dropping `trap '' HUP PIPE` fails 9b and 9c (exit 129 and 141). ASan build of a copy of the package (scratchpad), `test_node_lifecycle`: all 12 cases pass with the fix; with the `tf_listener_.reset()` line commented out, `FailedConfigureCanBeRetriedWhileTfIsPublished` fails with AddressSanitizer heap-use-after-free in 3 of 3 runs (it passes without ASan, as the comment says). Mutant reverted.
+- Full-scope `ci_local.sh` is run on the head after this entry; its result is in `git notes --ref=ci-local show HEAD` and the host hand-back. Nothing pushed.
