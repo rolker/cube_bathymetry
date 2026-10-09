@@ -9,7 +9,7 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | Node | Subscribes | Publishes | Purpose |
 |---|---|---|---|
 | `detections_to_pointcloud` | `detections` (`marine_acoustic_msgs/SonarDetections`), `odom` (`nav_msgs/Odometry`) | `soundings` (`sensor_msgs/PointCloud2`) | Turns each beam detection into a sounding in the **sonar frame** (x/y/z from travel-time + beam angles) and attaches **per-sounding TPU** (`vertical_uncertainty`, `horizontal_uncertainty`) computed by `cube::ErrorModel`. Lifecycle node. |
-| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; note the OPPOSITE convention to `soundings` below — that layer is a confidence-scaled standard deviation in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
+| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; `elevation` is the seabed's **WGS84 ellipsoid height in metres, positive up** (seabed values are negative), see *The `grid` `elevation` convention* below; note the OPPOSITE convention to `soundings` below — `uncertainty` is a 95 % (1.96 sigma) confidence half-width in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
 `soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
@@ -37,6 +37,98 @@ own frame (`header.frame_id`); `cube_bathymetry_node` georeferences them with a 
 lookup `map_frame ← header.frame_id` at the ping stamp. Consumers read fields **by
 name** (`cube_bathymetry_node` and `bag_to_geotiff` both use named PointCloud2
 iterators), so the field order is not load-bearing.
+
+## The `grid` `elevation` convention
+
+`elevation` is the **WGS84 ellipsoid height of the seabed in metres, positive up**.
+It is not a depth below the water surface and it is not map-frame z (`map` is a
+tangent plane at the datum). A seabed is therefore **negative**, shifted by the
+geoid separation (tens of metres; about 28 m at the UNH pier). This is not a new convention, only
+newly stated for this message: the node takes each sounding's height from the
+ECEF -> geodetic conversion of its `earth`-frame position (`GeoSounding` keeps
+`point[2]`, `grid_projection.cpp` copies it into the layer unchanged), stored depths
+are WGS84 ellipsoidal heights (uma ADR-0002 §D4, see *Depth-adaptive multi-level
+stores* below), and `ssp_ray_tracer.h` documents the same quantity as "an
+elevation, positive up". `test_publish_equivalence` pins it
+(`ElevationIsEllipsoidHeightPositiveUp`).
+
+`uncertainty` is the 95 % confidence half-width, `1.96 sigma` in metres
+(`stddev_to_confidence_interval_scale` in `parameters.h`).
+
+**Depth below the water surface** is `h_surface - elevation`, where `h_surface` is
+the ellipsoid height of the water surface, positive for a seabed below it.
+`h_surface` must be an ellipsoid height too: do not subtract the `z` of a `map`
+frame. The `map -> map_tide` transform carries only a z translation, which is the
+boat's average odometry z, a tangent-plane coordinate at the boat's position. Read
+as an ellipsoid height it is low by about `d^2 / 2R`, with `d` the boat's horizontal
+distance from its map origin and `R` the earth radius: about 8 cm at 1 km, 0.3 m at
+2 km and 2 m at 5 km. Fine near the first fix, wrong at long range; a consumer that
+needs better must bound `d` or model the surface.
+
+## Starting a fresh sheet without restarting
+
+The sheet is rebuilt on every `configure`, so a node can start a new survey without
+being restarted by walking it through `deactivate` -> `cleanup` -> `configure` ->
+`activate`. `scripts/reset_cube_nodes.sh` (installed to `lib/cube_bathymetry`) does
+that for any number of nodes:
+
+```bash
+ros2 run cube_bathymetry reset_cube_nodes.sh \
+  /boat1/cube_bathymetry /boat2/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry
+
+# with a downstream node that accumulates state derived from `grid`
+# (for example the coverage assessor):
+ros2 run cube_bathymetry reset_cube_nodes.sh --consumer /coverage_assessment \
+  /boat1/cube_bathymetry /boat2/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry
+```
+
+or by hand, one node at a time (`ros2 lifecycle set <node> deactivate`, `cleanup`,
+`configure`, `activate`). The script:
+
+1. reads `draft_dir` and `prior_store_dir` from every node first and **refuses**,
+   before changing anything, if a `draft_dir` is set (see below);
+2. walks every CUBE node to `unconfigured` (an already-inactive node is fine);
+3. walks each `--consumer` node to `unconfigured` and back to `active`, while no
+   CUBE node is publishing, so a consumer cannot absorb a stale window from a node
+   that has not been reset yet;
+4. configures and activates every CUBE node, and prints the final states.
+
+It stops at the first failed transition and names the node and the transition;
+running it again is safe. A node that was never configured is configured once first
+so its parameters can be read (they are declared at configure).
+
+**What a fresh sheet is.** `configure` builds a new `GeoMapSheet` and resets the
+tile catalog, the sub-window refresh tracker, the evicted-tile markers, the
+disk-serve queue and the publish cursor (last publish time, cached `map <- earth`
+transform and vessel fix). `cleanup` also releases the publishers, subscriptions and
+the TF listener and buffer, so nothing of the old configuration keeps running. With
+`draft_dir` and `prior_store_dir` empty, the first `grid` after the reset contains
+none of the previous window's cells (`test_node_lifecycle`).
+
+**What is not cleared.**
+
+- **Saved tiles when `draft_dir` is set.** `deactivate` and `cleanup` flush the
+  dirty tiles to `<draft_dir>/draft/`, and `configure` reloads everything saved
+  there (and under `processed/`) into the new sheet. That is deliberate (the draft
+  store is the product of record, ADR-0001), and it means the sheet is **not** fresh.
+  The script refuses to run when `draft_dir` is set; pass `--allow-persistence` to
+  reset anyway, or clear it first with `ros2 param set <node> draft_dir ''` (it is
+  writable, and the next `configure` reads it). Nothing on disk is ever deleted by
+  a reset.
+- **`prior_store_dir`.** It seeds a predicted surface for the blunder gate, not
+  coverage, and is reloaded on every configure. The script only prints a note.
+
+**Parameters between cycles.** Parameters are declared once and survive `cleanup`,
+so the value a `configure` reads is the one set last, whether by launch file or by
+`ros2 param set` between cycles. `read_only` parameters keep refusing runtime sets.
+
+**Event and demo configurations.** Some project11 configurations set `draft_dir` for
+the CUBE node: `bizzyboat_project11/config/bizzyboat.yaml` sets
+`draft_dir: /home/field/data/world/depths` under `/**/cube_bathymetry`, and
+`bizzyboat_sim_core_launch.py` layers that file, so a launch that loads it will
+reload the saved tiles on every reset. A demo that wants a fresh sheet between runs
+must leave `draft_dir` empty for the CUBE nodes (the script's refusal tells you when
+it is not).
 
 ## Live coverage stream parameters (`cube_bathymetry_node`)
 
