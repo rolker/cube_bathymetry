@@ -1,0 +1,14 @@
+ci-local: pass
+repo: cube_bathymetry
+commit: 5f2dc84d45f61e9281328679d75b3ed4618aa7b7
+image: ros2-agent-workspace-agent:latest
+image-id: sha256:bc672806657b196dee938c994a7ab48aac5e22c35aceca64c9153ade99fb3cfe
+packages: cube_bathymetry
+scope: full
+upstream-repo: unh_marine_autonomy@5eb6316fac37824d6cebe4371b6cd622120e8440
+upstream-repo: mru_transform@d021de4414df7825e0a46ccca626d3861501b988
+upstream-repo: geographic_info@f70b81a438172cd7a066dc1b18314d70e0eb6389
+steps: template+upstream+upstream-hook+extra-hook
+date: 2026-10-09T20:32:57Z
+host: deadpool
+log-sha256: 71098a8fd1902e78e78f62e8b959b51f82e0a45929e3a7925c05964dc2a32894
