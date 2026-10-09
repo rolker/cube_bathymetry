@@ -98,18 +98,17 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_configure(const rclcpp_lifecycle::State & state)
   {
-    map_frame_ = this->declare_parameter("map_frame", "map");
+    map_frame_ = declareOnce<std::string>("map_frame", "map");
 
-    declare_parameter("cell_size", 1.0);
-    cell_size_ = get_parameter("cell_size").as_double();
+    cell_size_ = declareOnce<double>("cell_size", 1.0);
 
     // grid_cell_count governed the Cartesian MapSheet's per-grid extent. The
     // node now accumulates into a GeoMapSheet whose GGGS grids are a fixed
     // 960x960 cells, so this parameter is ignored post-migration (#21). Kept
     // declared (with a deprecation WARN) so existing launch files that set it
     // still configure cleanly.
-    declare_parameter("grid_cell_count", 25);
-    grid_cell_count_ = get_parameter("grid_cell_count").as_int();
+    grid_cell_count_ =
+      static_cast<int>(declareOnce<int64_t>("grid_cell_count", 25));
     if (grid_cell_count_ != 25) {
       RCLCPP_WARN(get_logger(),
         "grid_cell_count=%d is ignored: GeoMapSheet GGGS grids are fixed at "
@@ -140,8 +139,8 @@ public:
     // publish_dirty_subwindow. Launch/YAML overrides are unaffected:
     // read_only only rejects a set after declaration.
     spacing_desc.read_only = true;
-    declare_parameter("capture_spacing_scale", 0.71, spacing_desc);
-    const double capture_spacing_scale = get_parameter("capture_spacing_scale").as_double();
+    const double capture_spacing_scale =
+      declareOnce<double>("capture_spacing_scale", 0.71, spacing_desc);
     try {
       geo_map_sheet_->setCaptureSpacingScale(static_cast<float>(capture_spacing_scale));
     } catch (const std::invalid_argument & e) {
@@ -156,6 +155,16 @@ public:
     // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
     // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
     evicted_indices_.clear();
+    // Cursor/cache state that describes the PREVIOUS sheet's session (#164). A
+    // reconfigure is a fresh sheet, so none of it may leak: the publish throttle
+    // would suppress the first window, and a cached map<-earth transform or
+    // vessel fix would be reused as if it belonged to this cycle.
+    last_grid_publish_time_ = rclcpp::Time();
+    have_publish_tf_ = false;
+    last_publish_tf_ = geometry_msgs::msg::TransformStamped();
+    have_vessel_pos_ = false;
+    last_vessel_lat_ = 0.0;
+    last_vessel_lon_ = 0.0;
     // Same defense-in-depth for the disk-serve queue (#106 review r1):
     // deactivate/cleanup already clear it on the normal path, but a stale
     // queued index from a prior configure cycle must never survive into a
@@ -190,9 +199,9 @@ public:
     // override). The setter must run AFTER the sheet is constructed (grids
     // hold a const ref to the sheet's Parameters).
     const std::string bs_correction_str =
-      declare_parameter("backscatter_angle_correction", std::string("auto"));
+      declareOnce<std::string>("backscatter_angle_correction", "auto");
     const std::string bs_curve_file =
-      declare_parameter("backscatter_curve_file", std::string(""));
+      declareOnce<std::string>("backscatter_curve_file", "");
     bs_mode_ = cube::BackscatterAngleCorrection::None;
     if (!cube::parseBackscatterAngleCorrection(bs_correction_str, bs_mode_)) {
       RCLCPP_WARN(get_logger(),
@@ -260,9 +269,9 @@ public:
     //    whole-survey publish).
     //  - base_link_frame: vessel frame used to center the CA window.
     max_resident_tiles_ =
-      static_cast<std::size_t>(declare_parameter("max_resident_tiles", 64));
-    ca_window_radius_m_ = declare_parameter("ca_window_radius_m", 200.0);
-    base_link_frame_ = declare_parameter("base_link_frame", std::string("base_link"));
+      static_cast<std::size_t>(declareOnce<int64_t>("max_resident_tiles", 64));
+    ca_window_radius_m_ = declareOnce<double>("ca_window_radius_m", 200.0);
+    base_link_frame_ = declareOnce<std::string>("base_link_frame", "base_link");
 
     // Coherence WARN (ADR-0001): the resident budget must cover the CA window's
     // tile span, else a window tile could be evicted and render as a NaN/lethal
@@ -309,7 +318,7 @@ public:
     //
     // A lifecycle node WARNS and continues ungated on a missing/bad/empty
     // prior -- a misconfigured prior must never take down live perception.
-    prior_store_dir_ = declare_parameter("prior_store_dir", std::string(""));
+    prior_store_dir_ = declareOnce<std::string>("prior_store_dir", "");
     if (!prior_store_dir_.empty()) {
       try {
         marine_bathymetry_store::BathymetryStore prior =
@@ -354,7 +363,7 @@ public:
     // `draft/` GeoTIFFs (single fused grid, no per-day epochs,
     // unh_marine_autonomy#221) so the costmap layer (#164) and sim live loop
     // (#77) read exactly what CUBE writes.
-    draft_dir_ = declare_parameter("draft_dir", std::string(""));
+    draft_dir_ = declareOnce<std::string>("draft_dir", "");
 
     // save_interval is a disk-I/O-frequency / crash-durability knob -- it does
     // NOT affect the depth estimate. saveDirtyTiles() flushes the CUBE median
@@ -378,7 +387,7 @@ public:
       "(~6x the publish cadence) balances restart-loss against disk contention "
       "with bag recording. See #74.";
     save_interval_s_ =
-      declare_parameter("save_interval", 30.0, save_interval_desc);
+      declareOnce<double>("save_interval", 30.0, save_interval_desc);
 
     if (!draft_dir_.empty()) {
       // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
@@ -527,7 +536,7 @@ public:
     // periodic `~/coverage_catalog` (transient_local for late joiners) is the
     // COMPLETE snapshot that drives anti-entropy reconciliation, and
     // `~/coverage_requests` lets a consumer ask for tiles it is missing/stale on.
-    catalog_interval_s_ = declare_parameter("catalog_interval", 5.0);
+    catalog_interval_s_ = declareOnce<double>("catalog_interval", 5.0);
     // Disk-serve drain queue (#106): rate-limited from-disk catch-up of
     // evicted tiles requested by a consumer. interval x tiles_per_tick is the
     // catch-up throughput knob an operator tunes against the link budget
@@ -545,7 +554,7 @@ public:
     // wall timer fire continuously and starve the executor. A bad value falls
     // back to the default with a WARN -- field configs change under pressure.
     const std::int64_t per_tick_raw =
-      declare_parameter("disk_serve_tiles_per_tick", 4, per_tick_desc);
+      declareOnce<int64_t>("disk_serve_tiles_per_tick", 4, per_tick_desc);
     if (per_tick_raw < 1) {
       RCLCPP_WARN_STREAM(get_logger(),
         "disk_serve_tiles_per_tick=" << per_tick_raw <<
@@ -559,7 +568,7 @@ public:
       "consumer re-requests via the next catalog). Bounds boat-side memory "
       "against a buggy or hostile consumer.";
     const std::int64_t depth_raw =
-      declare_parameter("disk_serve_queue_max_depth", 64, depth_desc);
+      declareOnce<int64_t>("disk_serve_queue_max_depth", 64, depth_desc);
     if (depth_raw < 1) {
       RCLCPP_WARN_STREAM(get_logger(),
         "disk_serve_queue_max_depth=" << depth_raw <<
@@ -567,7 +576,7 @@ public:
     }
     disk_serve_queue_max_depth_ =
       depth_raw < 1 ? 64u : static_cast<std::size_t>(depth_raw);
-    const double interval_raw = declare_parameter("disk_serve_interval", 0.5);
+    const double interval_raw = declareOnce<double>("disk_serve_interval", 0.5);
     if (!(interval_raw > 0.0) || !std::isfinite(interval_raw)) {
       RCLCPP_WARN(get_logger(),
         "disk_serve_interval=%g is not a positive finite duration; "
@@ -617,7 +626,7 @@ public:
     // declaration.
     subwindow_desc.read_only = true;
     publish_dirty_subwindow_ =
-      declare_parameter("publish_dirty_subwindow", true, subwindow_desc);
+      declareOnce<bool>("publish_dirty_subwindow", true, subwindow_desc);
 
     rcl_interfaces::msg::ParameterDescriptor refresh_desc;
     refresh_desc.description =
@@ -636,7 +645,7 @@ public:
       "85.7 kB/s for the whole-tile stream this replaces. 0 disables the "
       "refresh entirely, which makes a lost patch permanent -- only safe "
       "against a consumer that tracks patch possession and re-requests.";
-    const double refresh_raw = declare_parameter("subwindow_refresh_interval", 60.0, refresh_desc);
+    const double refresh_raw = declareOnce<double>("subwindow_refresh_interval", 60.0, refresh_desc);
     if (!std::isfinite(refresh_raw) || refresh_raw < 0.0) {
       RCLCPP_WARN(get_logger(),
         "subwindow_refresh_interval=%g is not a non-negative finite duration; "
@@ -657,7 +666,7 @@ public:
       "whole tile and a 5 s tick, 8 is already ~293 kB/s of a 1.5 MB/s "
       "operator link, and more would make this heal the burst it exists to "
       "prevent.";
-    const int64_t refresh_budget = declare_parameter(
+    const int64_t refresh_budget = declareOnce<int64_t>(
       "subwindow_refresh_tiles_per_cycle", 2, refresh_budget_desc);
     if (refresh_budget < 0) {
       RCLCPP_WARN(get_logger(),
@@ -708,7 +717,7 @@ public:
     // delivers no sonar_info; reprocess bags with import_bag (whose pre-pass
     // reads the topic directly) or use a playback QoS override.
     const std::string sonar_info_topic =
-      declare_parameter("sonar_info_topic", std::string("sonar_info"));
+      declareOnce<std::string>("sonar_info_topic", "sonar_info");
     sonar_info_subscription_.reset();
     if (bs_mode != cube::BackscatterAngleCorrection::None) {
       sonar_info_subscription_ =
@@ -722,7 +731,7 @@ public:
         "angular-response curve will be ignored.");
     }
 
-    // REGISTERED LAST, after every declare_parameter above. rclcpp invokes an
+    // REGISTERED LAST, after every declareOnce above. rclcpp invokes an
     // OnSetParameters callback for declare_parameter() as well as
     // set_parameter(), so a callback registered earlier would also see every
     // YAML override on its way in -- and a rejection there throws
@@ -843,10 +852,49 @@ public:
     // (#102): its callback has no lifecycle-state gate, so it must not
     // outlive the configured state and touch the stale sheet.
     sonar_info_subscription_.reset();
+    // Everything on_configure creates is released here, so a reconfigure builds
+    // the node from scratch (#164) and no callback of the old configuration can
+    // run against the replaced sheet. The ping/request callbacks are state-gated
+    // already; resetting them removes the dependence on that gate.
+    ping_subscription_.reset();
+    tile_request_subscription_.reset();
+    grid_publisher_.reset();
+    tiles_publisher_.reset();
+    sonar_tile_publisher_.reset();
+    tile_catalog_publisher_.reset();
+    // The listener holds a reference to the buffer and feeds it from the node's
+    // /tf subscription: destroy it FIRST. Reassigning the buffer in the next
+    // on_configure while the old listener lived would let the listener's callback
+    // touch a destroyed buffer.
+    tf_listener_.reset();
+    tf_buffer_.reset();
     return LifecycleNode::on_cleanup(state);
   }
 
 private:
+  /// Declare a parameter the first time only and return its current value.
+  ///
+  /// Parameters outlive cleanup, so a second on_configure must not declare them
+  /// again: rclcpp throws ParameterAlreadyDeclaredException, and rclcpp_lifecycle
+  /// swallows exceptions out of transition callbacks, so the failure would only
+  /// show as a configure that does not reach INACTIVE (#164). Consequence: a value
+  /// set at runtime between cycles is the value the next configure reads, and the
+  /// descriptor of the first declaration stays in force. (This node does not enable
+  /// automatically_declare_parameters_from_overrides, so there is no earlier
+  /// writable declaration of a read_only parameter to upgrade; helm_manager needs
+  /// that extra step.) Same idiom as unh_marine_autonomy helm_manager (PR#401).
+  template<typename T>
+  T declareOnce(
+    const std::string & name, const T & default_value,
+    const rcl_interfaces::msg::ParameterDescriptor & descriptor =
+    rcl_interfaces::msg::ParameterDescriptor())
+  {
+    if (!has_parameter(name)) {
+      declare_parameter<T>(name, default_value, descriptor);
+    }
+    return get_parameter(name).get_value<T>();
+  }
+
   std::shared_ptr<cube::GeoMapSheet> geo_map_sheet_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;

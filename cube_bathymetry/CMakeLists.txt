@@ -378,6 +378,18 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_gtest REQUIRED)
 
+  # Lifecycle cycle of the live node (#164): second configure must succeed and
+  # an unpersisted reconfigure starts empty. Links the same INTERFACE target as
+  # the executable. Its own ROS_DOMAIN_ID and localhost-only discovery keep it
+  # from talking to live boats, parallel colcon tests or a CI container's other
+  # tests (jazzy: ROS_AUTOMATIC_DISCOVERY_RANGE replaces ROS_LOCALHOST_ONLY).
+  ament_add_gtest(test_node_lifecycle test/test_node_lifecycle.cpp TIMEOUT 120)
+  target_include_directories(test_node_lifecycle PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
+  set_tests_properties(test_node_lifecycle PROPERTIES
+    ENVIRONMENT "ROS_DOMAIN_ID=164;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
+
   ament_add_gtest(test_hypothesis test/test_hypothesis.cpp)
   target_link_libraries(test_hypothesis cube_bathymetry)
 
