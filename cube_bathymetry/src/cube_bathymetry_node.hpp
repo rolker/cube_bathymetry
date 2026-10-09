@@ -874,6 +874,12 @@ public:
       disk_serve_timer_->cancel();
       disk_serve_timer_.reset();
     }
+    // on_deactivate cancels this one too; the guard covers a cleanup reached by
+    // another path, like the other timers above.
+    if (refresh_timer_) {
+      refresh_timer_->cancel();
+      refresh_timer_.reset();
+    }
     disk_serve_queue_.clear();
     disk_serve_queued_.clear();
     // Symmetric teardown for the one conditionally-created subscription
@@ -1344,7 +1350,9 @@ private:
   /// gap cannot stall it either.
   void drainRefreshQueue()
   {
-    if (!publish_dirty_subwindow_ || !geo_map_sheet_) {
+    // The publisher is released in on_cleanup; a tick that races it must not
+    // dereference the empty pointer (#164).
+    if (!publish_dirty_subwindow_ || !geo_map_sheet_ || !sonar_tile_publisher_) {
       return;
     }
     const rclcpp::Time pub_time = now();
@@ -1540,6 +1548,10 @@ private:
   // "now" so the consumer's prune gate is well-defined.
   void publishCatalog()
   {
+    // Released in on_cleanup (#164): a tick after cleanup has nothing to publish on.
+    if (!tile_catalog_publisher_) {
+      return;
+    }
     const rclcpp::Time gen = now();
     marine_interfaces::msg::TileCatalog msg;
     msg.header.stamp = gen;
@@ -1666,7 +1678,9 @@ private:
   // the survey is actively updating.
   void drainDiskServeQueue()
   {
-    if (disk_serve_queue_.empty() || draft_dir_.empty()) {
+    if (disk_serve_queue_.empty() || draft_dir_.empty() || !geo_map_sheet_ ||
+      !sonar_tile_publisher_)
+    {
       return;
     }
     // The per-tick budget counts ATTEMPTS, not published tiles (#106 review
