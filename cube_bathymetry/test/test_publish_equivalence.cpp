@@ -332,6 +332,62 @@ TEST(PublishEquivalence, ProjectionPlacesCellCentersExactly)
   EXPECT_EQ(matched, reference.size());
 }
 
+// The `elevation` layer is WGS84-ELLIPSOID HEIGHT, POSITIVE UP (cube_bathymetry#164).
+// It is neither depth below the water surface nor map-frame z. Seabed values are
+// therefore NEGATIVE (and offset by the geoid separation), and "depth below the
+// surface" is `h_surface - elevation` with `h_surface` an ellipsoid height too.
+// This is the convention the README already states for stored depths (uma
+// ADR-0002 D4) and ssp_ray_tracer.h documents ("an elevation, positive up"); this
+// test pins that the `grid` layer carries the same quantity, with the same
+// ECEF -> geodetic conversion the live node applies to each sounding, so a sign
+// flip anywhere on the path (a negated depth, an altitude read as height above
+// the surface) fails here instead of in a downstream depth threshold.
+TEST(PublishEquivalence, ElevationIsEllipsoidHeightPositiveUp)
+{
+  const Eigen::Isometry3d map_from_earth = makeMapFromEarth();
+  const double seabed_height = -14.25;   // ellipsoid height of the seabed, m
+  const double lat = 43.07;
+  const double lon = -70.76;
+
+  // Same construction as the live node: a point at a known geodetic height, taken
+  // to ECEF, then back through GeoPointLatLongDegrees(ecef).
+  const gz4d::GeoPointLatLongDegrees truth(lat, lon, seabed_height);
+  const gz4d::GeoPointECEF ecef(truth);
+  const gz4d::GeoPointLatLongDegrees roundtrip(ecef);
+  ASSERT_NEAR(roundtrip[2], seabed_height, 1e-3)
+    << "ECEF -> geodetic must return the ellipsoid height unchanged";
+
+  GeoMapSheet geo_sheet(1.0f);
+  for (int rep = 0; rep < 25; ++rep) {
+    GeoSounding gs(roundtrip);
+    ASSERT_NEAR(gs.sounding.depth, roundtrip[2], 1e-4)   // stored as float
+      << "the sounding carries the geodetic height, not a negated depth";
+    gs.sounding.vertical_error = 0.5f;
+    gs.sounding.horizontal_error = 0.1f;
+    geo_sheet.addSoundings({gs});
+  }
+
+  const grid_map::GridMap projected = geoMapSheetToGridMap(
+    geo_sheet, "map", geo_sheet.nominalCellSizeMeters(), map_from_earth);
+  ASSERT_TRUE(projected.exists("elevation"));
+  const std::vector<Cell> cells = collectFiniteCells(projected);
+  ASSERT_FALSE(cells.empty()) << "no finite cells -- CUBE produced no estimate";
+  for (const auto & c : cells) {
+    EXPECT_NEAR(c.depth, seabed_height, 0.05)
+      << "elevation must equal the ellipsoid height of the seabed (negative, "
+         "positive up), not its negation or a depth below the surface";
+    EXPECT_LT(c.depth, 0.0f);
+  }
+
+  // Depth below a water surface at ellipsoid height h_surface is h_surface -
+  // elevation: positive for a seabed below the surface.
+  const double h_surface = -1.0;   // a surface 1 m below the ellipsoid
+  for (const auto & c : cells) {
+    EXPECT_NEAR(h_surface - c.depth, h_surface - seabed_height, 0.05);
+    EXPECT_GT(h_surface - c.depth, 0.0);
+  }
+}
+
 // The migrated geographic-accumulation + publish-projection path must produce a
 // map-frame elevation grid equivalent to the legacy Cartesian path: every finite
 // cell in one grid is matched 1:1 to a finite cell within HALF a cell of the
