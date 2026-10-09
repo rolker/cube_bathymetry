@@ -291,6 +291,12 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Operator tool: start a fresh CUBE sheet without restarting the nodes (#164).
+install(PROGRAMS
+  scripts/reset_cube_nodes.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 add_executable(detections_to_pointcloud src/detections_to_pointcloud.cpp)
 
 target_link_libraries(detections_to_pointcloud
@@ -389,6 +395,12 @@ if(BUILD_TESTING)
   target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
   set_tests_properties(test_node_lifecycle PROPERTIES
     ENVIRONMENT "ROS_DOMAIN_ID=164;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
+
+  # reset_cube_nodes.sh against a stub `ros2` (#164): consumer ordering, refusal
+  # on a non-empty draft_dir, fail-fast on a failing transition.
+  add_test(NAME test_reset_cube_nodes
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test/test_reset_cube_nodes.sh
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/reset_cube_nodes.sh)
 
   ament_add_gtest(test_hypothesis test/test_hypothesis.cpp)
   target_link_libraries(test_hypothesis cube_bathymetry)
