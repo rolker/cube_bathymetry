@@ -79,10 +79,20 @@
 class CubeBathymetry : public rclcpp_lifecycle::LifecycleNode
 {
 public:
-  CubeBathymetry()
-  :rclcpp_lifecycle::LifecycleNode("cube_bathymetry")
+  // NodeOptions lets a test supply parameter overrides before the first
+  // configure (the executable passes the default, so launch behaviour is
+  // unchanged).
+  explicit CubeBathymetry(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
+  :rclcpp_lifecycle::LifecycleNode("cube_bathymetry", options)
   {
   }
+
+  /// The current sheet. For diagnostics and tests; the node owns and replaces it
+  /// on every configure.
+  std::shared_ptr<cube::GeoMapSheet> sheet() const {return geo_map_sheet_;}
+
+  /// Tiles the catalog currently advertises. For diagnostics and tests.
+  std::size_t catalogSize() const {return catalog_builder_.size();}
 
 
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
