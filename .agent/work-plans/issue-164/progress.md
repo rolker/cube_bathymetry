@@ -36,3 +36,17 @@ issue: 164
 - [ ] Order the work core-first so it builds without the #406 messages; do not pin `upstream.repos` to a feature branch in the merged PR.
 - [ ] Create `.agents/README.md` from the workspace template (the repo has none) and add the new node's parameters to the README parameter table in the same PR.
 - [ ] Consider two PRs: (A) reconfigure fix / `clear` with tests, (B) `coverage_assessment`; they share no code.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-10-09 13:20 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-164/plan.md` at `6705d4f`
+**Branch**: feature/issue-164 at `6705d4f`
+**Phases**: 2 PRs: (a) fresh sheet, (b) coverage_assessment
+
+### Open questions
+- [ ] .agents/README.md: issue lists it, workspace AGENTS.md says dedicated task; default is not in these PRs
+- [ ] Depth reference: plan uses ellipsoid height of the map_tide origin (via earth) because elevation is ellipsoid height, not map z; confirm
+- [ ] Overlapping areas with different standards: one coverage_grid, cell is 1 only if it meets every containing area; acceptable?
