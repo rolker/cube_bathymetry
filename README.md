@@ -89,17 +89,30 @@ ros2 run cube_bathymetry reset_cube_nodes.sh --consumer /coverage_assessment \
 or by hand, one node at a time (`ros2 lifecycle set <node> deactivate`, `cleanup`,
 `configure`, `activate`). The script:
 
-1. reads `draft_dir` and `prior_store_dir` from every node first and **refuses**,
-   before changing anything, if a `draft_dir` is set (see below);
+1. checks everything first, changing nothing: every node and `--consumer` must
+   answer and be in a state the script can walk (`active`, `inactive` or
+   `unconfigured`; a mistyped name or a finalized node stops the run here), and it
+   **refuses** if any CUBE node has a `draft_dir` set (see below);
 2. walks every CUBE node to `unconfigured` (an already-inactive node is fine);
 3. walks each `--consumer` node to `unconfigured` and back to `active`, while no
    CUBE node is publishing, so a consumer cannot absorb a stale window from a node
    that has not been reset yet;
 4. configures and activates every CUBE node, and prints the final states.
 
-It stops at the first failed transition and names the node and the transition;
-running it again is safe. A node that was never configured is configured once first
-so its parameters can be read (they are declared at configure).
+It stops at the first failed transition and names the node and the transition.
+After the first change, a failure also prints every node's state and says to re-run;
+running it again is safe (a node that is already reset is simply cycled again). Every
+`ros2` call is bounded by `timeout` (`RESET_CUBE_GET_TIMEOUT`, default 30 s, for reads;
+`RESET_CUBE_SET_TIMEOUT`, default 300 s, for transitions), so an unresponsive node
+fails the script instead of hanging it with boats half reset. A node that was never
+configured has no readable `draft_dir` yet (parameters are declared at configure), so
+once every other check has passed the script configures it, reads the parameters and
+puts it back to `unconfigured`, one node at a time; a refusal at that point has still
+reset nothing.
+
+**Do not run it underway.** Between step 2 and step 4 the named boats publish no
+`grid`, which is the collision-avoidance grid, and each `ros2` call takes seconds, so
+the gap is not short.
 
 **What a fresh sheet is.** `configure` builds a new `GeoMapSheet` and resets the
 tile catalog, the sub-window refresh tracker, the evicted-tile markers, the
@@ -118,13 +131,20 @@ none of the previous window's cells (`test_node_lifecycle`).
   The script refuses to run when `draft_dir` is set; pass `--allow-persistence` to
   reset anyway, or clear it first with `ros2 param set <node> draft_dir ''` (it is
   writable, and the next `configure` reads it). Nothing on disk is ever deleted by
-  a reset.
+  a reset. If the final flush fails (disk full, permissions), `cleanup` fails and
+  the node stays `inactive` with its sheet, rather than discard tiles that were
+  never written; fix the cause and run the script again.
+- **Nothing is saved when `draft_dir` is empty.** That is what makes the sheet fresh,
+  and it also means the reset **permanently discards the in-RAM survey**: the old
+  window exists nowhere afterwards. Save or export what you want to keep first.
 - **`prior_store_dir`.** It seeds a predicted surface for the blunder gate, not
   coverage, and is reloaded on every configure. The script only prints a note.
 
 **Parameters between cycles.** Parameters are declared once and survive `cleanup`,
 so the value a `configure` reads is the one set last, whether by launch file or by
-`ros2 param set` between cycles. `read_only` parameters keep refusing runtime sets.
+`ros2 param set` between cycles. `read_only` parameters keep refusing runtime sets,
+so a wrong `capture_spacing_scale` or `publish_dirty_subwindow` cannot be corrected
+by a reset: it takes a restart of the node with the right launch value.
 
 **Event and demo configurations.** Some project11 configurations set `draft_dir` for
 the CUBE node: `bizzyboat_project11/config/bizzyboat.yaml` sets
