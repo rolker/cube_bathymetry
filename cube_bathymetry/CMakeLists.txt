@@ -392,12 +392,17 @@ if(BUILD_TESTING)
   # The domain id must be <= 101: above it the DDS port formula (7400 + 250 * id)
   # overlaps the ephemeral port range on Linux. Other tests in this workspace use 89
   # (mru_transform) and 101 (marine_web_view); 87 is not taken.
+  # Private domain, localhost-only discovery, and any discovery-server / static-peer
+  # setting inherited from the environment blanked (as in the mru_transform test).
+  set(CUBE_ISOLATED_TEST_ENV
+    "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+    "ROS_DISCOVERY_SERVER=;ROS_STATIC_PEERS=;FASTRTPS_DEFAULT_PROFILES_FILE=;CYCLONEDDS_URI=")
   ament_add_gtest(test_node_lifecycle test/test_node_lifecycle.cpp TIMEOUT 120)
   target_include_directories(test_node_lifecycle PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
   set_tests_properties(test_node_lifecycle PROPERTIES
-    ENVIRONMENT "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_DISCOVERY_SERVER=;ROS_STATIC_PEERS=;FASTRTPS_DEFAULT_PROFILES_FILE=;CYCLONEDDS_URI=")
+    ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
 
   # reset_cube_nodes.sh against a stub `ros2` on PATH (#164), 10 case groups:
   # consumer ordering, refusal on a non-empty draft_dir, fail-fast, preflight,
@@ -409,7 +414,7 @@ if(BUILD_TESTING)
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test/test_reset_cube_nodes.sh
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/reset_cube_nodes.sh)
   set_tests_properties(test_reset_cube_nodes PROPERTIES
-    ENVIRONMENT "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_DISCOVERY_SERVER=;ROS_STATIC_PEERS=;FASTRTPS_DEFAULT_PROFILES_FILE=;CYCLONEDDS_URI=")
+    ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
 
   ament_add_gtest(test_hypothesis test/test_hypothesis.cpp)
   target_link_libraries(test_hypothesis cube_bathymetry)
