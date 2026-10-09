@@ -16,6 +16,10 @@
 #      draft_dir found only by that probe refuses without resetting anything.
 #   7. an unresponsive node fails the script within the timeout, before any change.
 #   8. a stderr warning from `ros2` is not parsed as data.
+#   9. every `ros2` call goes through `timeout --foreground`; SIGHUP and SIGPIPE
+#      do not kill the script mid-reset.
+#  10. a failing probe is not reported as a failed reset; a CUBE node that is not
+#      active is warned about in the preflight.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -41,6 +45,7 @@ case "$1 $2" in
   "lifecycle set")
     node=$3 t=$4 f="$STUB_DIR/state/$(key "$3")"
     echo "$node $t" >> "$STUB_DIR/log"
+    [ -e "$STUB_DIR/slow" ] && sleep 0.4
     if [ -e "$STUB_DIR/fail_$(key "$node")_$t" ]; then
       echo "Transition failed"   # exit status 0, like the real verb can
       exit 0
@@ -70,14 +75,23 @@ case "$1 $2" in
 esac
 STUB
 chmod +x "$work/bin/ros2"
+# Records its arguments, then runs the real timeout, so the test can check that
+# every ros2 call is bounded by `timeout --foreground`.
+real_timeout=$(command -v timeout)
+cat > "$work/bin/timeout" <<TIMEOUT
+#!/usr/bin/env bash
+echo "\$*" >> "\$STUB_DIR/timeout_calls"
+exec $real_timeout "\$@"
+TIMEOUT
+chmod +x "$work/bin/timeout"
 export STUB_DIR="$work" PATH="$work/bin:$PATH"
 
 failures=0
 fail() { echo "FAIL: $*"; failures=$((failures + 1)); }
 
 setup_nodes() {
-  rm -f "$work"/log "$work"/fail_* "$work"/hang_* "$work"/noise "$work"/onconfigure_* \
-    "$work"/state/* "$work"/param/*
+  rm -f "$work"/log "$work"/fail_* "$work"/hang_* "$work"/noise "$work"/slow \
+    "$work"/timeout_calls "$work"/onconfigure_* "$work"/state/* "$work"/param/*
   for n in boat1 boat2 boat3 boat4; do
     echo active > "$work/state/_${n}_cube_bathymetry"
     printf '' > "$work/param/_${n}_cube_bathymetry_draft_dir"
@@ -93,7 +107,7 @@ echo inactive > "$work/state/_boat3_cube_bathymetry"
 out=$("$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 0 ] || fail "case 1: exit $rc: $out"
 for n in "${cubes[@]}" /coverage_assessment; do
-  [ "$(cat "$work/state/$(echo "${n//\//_}")")" = active ] || fail "case 1: $n not active at the end"
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 1: $n not active at the end"
 done
 line() { grep -n -m1 -x "$1" "$work/log" | cut -d: -f1; }
 last_cube_cleanup=0
@@ -109,6 +123,9 @@ first_cube_configure=$(grep -n -m1 'cube_bathymetry configure' "$work/log" | cut
 [ "$cons_cleanup" -gt "$last_cube_cleanup" ] || fail "case 1: consumer reset before every CUBE node was quiesced"
 [ "$first_cube_configure" -gt "$cons_activate" ] || fail "case 1: CUBE configured before the consumer was back up"
 [ -z "$(line "/boat3/cube_bathymetry deactivate")" ] || fail "case 1: already-inactive node was deactivated"
+case "$out" in *"warning: /boat3/cube_bathymetry is 'inactive'"*) ;; *) fail "case 1: no preflight warning for the inactive node: $out" ;; esac
+case "$out" in *"warning: /boat1/cube_bathymetry"*) fail "case 1: warned about an active node: $out" ;; esac
+case "$out" in *"warning: /coverage_assessment"*) fail "case 1: warned about a consumer: $out" ;; esac
 
 # --- 2. draft_dir set: refuse, change nothing --------------------------------
 setup_nodes
@@ -162,7 +179,7 @@ printf '' > "$work/onconfigure__boat4_cube_bathymetry_prior_store_dir"
 out=$("$script" "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 0 ] || fail "case 6a: exit $rc: $out"
 for n in "${cubes[@]}"; do
-  [ "$(cat "$work/state/$(echo "${n//\//_}")")" = active ] || fail "case 6a: $n not active at the end"
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 6a: $n not active at the end"
 done
 probe_configure=$(grep -n -m1 '^/boat4/cube_bathymetry configure' "$work/log" | cut -d: -f1)
 first_deactivate=$(grep -n -m1 ' deactivate$' "$work/log" | cut -d: -f1)
@@ -171,13 +188,17 @@ first_deactivate=$(grep -n -m1 ' deactivate$' "$work/log" | cut -d: -f1)
 [ "$(grep -c '^/boat4/cube_bathymetry configure' "$work/log")" -eq 2 ] ||
   fail "case 6a: expected the probe configure plus the real one"
 
-# another node's readable draft_dir refuses BEFORE the never-configured node is touched
+# another node's readable draft_dir refuses BEFORE the never-configured node is
+# touched. The never-configured node comes FIRST in the argument order and the node
+# with the draft_dir LAST, so a script that probed inline, in argument order, would
+# configure boat1 before it reached boat4's draft_dir and fail the log check.
 setup_nodes
-echo unconfigured > "$work/state/_boat4_cube_bathymetry"
-rm -f "$work/param/_boat4_cube_bathymetry_"*
-echo /data/draft > "$work/param/_boat1_cube_bathymetry_draft_dir"
+echo unconfigured > "$work/state/_boat1_cube_bathymetry"
+rm -f "$work/param/_boat1_cube_bathymetry_"*
+echo /data/draft > "$work/param/_boat4_cube_bathymetry_draft_dir"
 out=$("$script" "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 1 ] || fail "case 6b: expected exit 1, got $rc"
+case "$out" in *"/boat4/cube_bathymetry"*"draft_dir"*) ;; *) fail "case 6b: wrong message: $out" ;; esac
 [ ! -s "$work/log" ] || fail "case 6b: the never-configured node was touched before the refusal: $(cat "$work/log")"
 
 # draft_dir that only the probe can see: refuse, node put back, nobody reset
@@ -209,6 +230,48 @@ setup_nodes
 touch "$work/noise"
 out=$("$script" "${cubes[@]}" 2>/dev/null); rc=$?
 [ "$rc" -eq 0 ] || fail "case 8: stderr warning broke the run, exit $rc: $out"
+
+# --- 9. timeout --foreground on every call; HUP and PIPE do not kill the script --
+setup_nodes
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 9a: exit $rc: $out"
+[ -s "$work/timeout_calls" ] || fail "case 9a: no ros2 call went through timeout"
+bare=$(grep -vc '^--foreground ' "$work/timeout_calls")
+[ "$bare" -eq 0 ] || fail "case 9a: $bare timeout call(s) without --foreground: $(cat "$work/timeout_calls")"
+
+setup_nodes
+touch "$work/slow"
+"$script" "${cubes[@]}" > "$work/hup_out" 2>&1 &
+pid=$!
+sleep 0.6
+kill -HUP "$pid"
+wait "$pid"; rc=$?
+[ "$rc" -eq 0 ] || fail "case 9b: SIGHUP killed the script mid-reset (exit $rc): $(cat "$work/hup_out")"
+for n in "${cubes[@]}"; do
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 9b: $n not active after SIGHUP"
+done
+
+setup_nodes
+"$script" "${cubes[@]}" 2>&1 | head -n 1 > /dev/null
+rc=${PIPESTATUS[0]}
+[ "$rc" -eq 0 ] || fail "case 9c: a closed pipe killed the script (exit $rc)"
+for n in "${cubes[@]}"; do
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 9c: $n not active after the pipe closed"
+done
+
+# --- 10. a failing probe is not a failed reset; the preflight warns --------------
+setup_nodes
+echo unconfigured > "$work/state/_boat4_cube_bathymetry"
+rm -f "$work/param/_boat4_cube_bathymetry_"*
+printf '' > "$work/onconfigure__boat4_cube_bathymetry_draft_dir"
+printf '' > "$work/onconfigure__boat4_cube_bathymetry_prior_store_dir"
+touch "$work/fail__boat4_cube_bathymetry_cleanup"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 10a: expected exit 1, got $rc"
+case "$out" in *"the reset did not finish"*) fail "case 10a: a failed probe was reported as a failed reset: $out" ;; esac
+case "$out" in *"no CUBE node was reset"*"/boat4/cube_bathymetry"*) ;; *) fail "case 10a: no probe-specific message: $out" ;; esac
+case "$out" in *"warning: /boat4/cube_bathymetry is 'unconfigured'"*) ;; *) fail "case 10a: no preflight warning: $out" ;; esac
+[ "$(cat "$work/state/_boat1_cube_bathymetry")" = active ] || fail "case 10a: another node was reset"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

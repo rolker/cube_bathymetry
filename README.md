@@ -104,7 +104,14 @@ After the first change, a failure also prints every node's state and says to re-
 running it again is safe (a node that is already reset is simply cycled again). Every
 `ros2` call is bounded by `timeout` (`RESET_CUBE_GET_TIMEOUT`, default 30 s, for reads;
 `RESET_CUBE_SET_TIMEOUT`, default 300 s, for transitions), so an unresponsive node
-fails the script instead of hanging it with boats half reset. A node that was never
+fails the script instead of hanging it with boats half reset. The calls run under
+`timeout --foreground`, so Ctrl-C still reaches `ros2`. The script ignores SIGHUP and
+SIGPIPE so a dropped ssh session cannot kill it between the quiesce and the
+bring-up; run it under `tmux` or `nohup` anyway if the link is unreliable, because a
+script killed midway leaves boats without `grid` until it is run again. The preflight
+warns for every CUBE node that is not `active` (an earlier run may have stopped part
+way), and a failing probe of a never-configured node (below) is reported as a failed
+probe, not as a failed reset. A node that was never
 configured has no readable `draft_dir` yet (parameters are declared at configure), so
 once every other check has passed the script configures it, reads the parameters and
 puts it back to `unconfigured`, one node at a time; a refusal at that point has still

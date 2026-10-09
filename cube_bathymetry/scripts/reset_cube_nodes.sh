@@ -32,10 +32,15 @@
 # prints every node's state and tells you to re-run: a re-run is safe (an
 # already-inactive or already-unconfigured node is not an error), and a CUBE node
 # that is not `active` is NOT publishing `grid`. Every `ros2` call is bounded by
-# `timeout` (RESET_CUBE_GET_TIMEOUT, default 30 s, for reads;
+# `timeout --foreground` (so Ctrl-C still reaches `ros2`; plain `timeout` moves it
+# into its own process group) (RESET_CUBE_GET_TIMEOUT, default 30 s, for reads;
 # RESET_CUBE_SET_TIMEOUT, default 300 s, for transitions, because a configure with
 # `draft_dir` set loads the saved tiles), so an unresponsive node fails the script
 # instead of hanging it with boats half reset.
+#
+# SIGHUP and SIGPIPE are ignored: an ssh drop or a closed pipe must not kill the
+# script between the quiesce and the bring-up. Run it under tmux or nohup anyway if
+# the link is unreliable.
 #
 # Not for use underway: between steps 1 and 3 the named boats publish no `grid`.
 #
@@ -77,13 +82,20 @@ while [ $# -gt 0 ]; do
 done
 [ ${#nodes[@]} -gt 0 ] || { echo "$prog: no cube_bathymetry node given" >&2; usage; exit 2; }
 
-# Set once a node may have been changed; decides what `die` tells the operator.
+# A dropped ssh session (SIGHUP) or a closed pipe (SIGPIPE) would otherwise kill
+# the script mid-reset, leaving boats without `grid` and nothing printed.
+trap '' HUP PIPE
+
+# Set once a CUBE node of the reset may have been changed; decides what `die`
+# tells the operator. The probe of a never-configured node (0c) is not a reset: it
+# is tracked separately in `probing`, so a failing probe does not claim one.
 changed=0
+probing=""
 
 # Read-only `ros2` call: stdout only (a stderr warning must not be parsed as
 # data), bounded.
 ros2_get() {
-  timeout "$get_timeout" ros2 "$@" 2>/dev/null
+  timeout --foreground "$get_timeout" ros2 "$@" 2>/dev/null
 }
 
 # First word of `ros2 lifecycle get`, e.g. "active [3]" -> active.
@@ -102,6 +114,9 @@ print_states() {
   for node in "${nodes[@]}" "${consumers[@]}"; do
     echo "  $node: $(node_state "$node")"
   done
+  # A closed stdout (SIGPIPE is ignored) makes the last echo fail; the reset is
+  # done, and that must not become the script's exit status.
+  return 0
 }
 
 die() {
@@ -109,6 +124,9 @@ die() {
   if [ "$changed" -eq 1 ]; then
     print_states >&2
     echo "$prog: the reset did not finish. Re-run the same command to continue (a node that is already reset is simply cycled again); a CUBE node that is not 'active' is not publishing grid." >&2
+  elif [ -n "$probing" ]; then
+    print_states >&2
+    echo "$prog: no CUBE node was reset, but $probing was being probed and may have been left 'inactive' (configured). Re-run the same command; it is read normally then." >&2
   else
     echo "$prog: nothing was changed." >&2
   fi
@@ -126,8 +144,8 @@ trap on_signal INT TERM
 # and compared instead.
 transition() {
   local node=$1 name=$2 expected=$3 out rc state
-  changed=1
-  out=$(timeout "$set_timeout" ros2 lifecycle set "$node" "$name" 2>&1)
+  [ -n "$probing" ] || changed=1
+  out=$(timeout --foreground "$set_timeout" ros2 lifecycle set "$node" "$name" 2>&1)
   rc=$?
   state=$(node_state "$node")
   if [ "$rc" -ne 0 ] || [ "$state" != "$expected" ]; then
@@ -189,7 +207,16 @@ refuse_draft() {
 for node in "${nodes[@]}" "${consumers[@]}"; do
   state=$(node_state "$node")
   case "$state" in
-    active | inactive | unconfigured) ;;
+    active) ;;
+    inactive | unconfigured)
+      # A CUBE node that is not active is not publishing grid (an earlier run may
+      # have stopped part way); a refusal below says "nothing was changed", which
+      # is true of this run only.
+      case " ${nodes[*]} " in
+        *" $node "*)
+          echo "$prog: warning: $node is '$state', not 'active': it is not publishing grid" >&2 ;;
+      esac
+      ;;
     *) die "$node: cannot read or walk from state '$state' (is the name right and the node running?)" ;;
   esac
 done
@@ -218,13 +245,14 @@ done
 # is returned to the state it was found in, so a refusal here has not reset
 # anything.
 for node in "${probe[@]}"; do
+  probing=$node
   transition "$node" configure inactive
   draft_dir=$(string_param "$node" draft_dir)
   rc_draft=$?
   prior_dir=$(string_param "$node" prior_store_dir)
   rc_prior=$?
   transition "$node" cleanup unconfigured
-  changed=0
+  probing=""
   [ "$rc_draft" -eq 0 ] || die "$node: cannot read parameter draft_dir after configure"
   [ "$rc_prior" -eq 0 ] || die "$node: cannot read parameter prior_store_dir after configure"
   [ -z "$draft_dir" ] || refuse_draft "$node" "$draft_dir"
