@@ -642,8 +642,8 @@ TEST(ImportEviction, ReferenceOnlyTileEvictRevisitKeepsGate)
 // which is not unit-test-exposed -- it is a private member of the CubeBathymetry
 // class in src/cube_bathymetry_node.hpp, with no callable seam for the revisit
 // path -- so this exercises the SHARED reload logic instead): when the reload's
-// prior re-prime READ throws (corrupt/transient prior store) but the survey restore succeeds, reloadEvictedTile must NOT erase the
-// evicted_ marker. Before the fix it returned "did I prime" (false, swallowed) and
+// prior re-prime READ throws (corrupt/transient prior store) but the survey
+// restore succeeds, reloadEvictedTile must NOT erase the evicted_ marker. Before the fix it returned "did I prime" (false, swallowed) and
 // fell through to `return true`, so the caller erased the marker with no retry and
 // the tile's prior-only cells ran ungated for the rest of the run -- a false-deep
 // blunder settled. primePriorLayersForTile now reports read-success separately, so
