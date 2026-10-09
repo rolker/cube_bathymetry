@@ -242,11 +242,16 @@ install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
-add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
-target_include_directories(cube_bathymetry_node PUBLIC
+# The node's compile/link requirements live on an INTERFACE target so the
+# executable and test_node_lifecycle consume ONE list and cannot drift (#164).
+# The node class is src/cube_bathymetry_node.hpp -- deliberately not under
+# include/, so it is neither installed nor public API; consumers add src/ to
+# their own private include path.
+add_library(cube_bathymetry_node_link INTERFACE)
+target_include_directories(cube_bathymetry_node_link INTERFACE
   ${grid_map_ros_INCLUDE_DIRS}
 )
-target_link_libraries(cube_bathymetry_node
+target_link_libraries(cube_bathymetry_node_link INTERFACE
   cube_bathymetry
   cube_bathymetry_grid_projection
   cube_bathymetry_quantize_tile   # GeoGrid -> SonarVisualizationTile (#78)
@@ -258,11 +263,18 @@ target_link_libraries(cube_bathymetry_node
   ${geometry_msgs_TARGETS}
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
   ${sensor_msgs_TARGETS}
   tf2_eigen::tf2_eigen
   tf2_geometry_msgs::tf2_geometry_msgs
   tf2_sensor_msgs::tf2_sensor_msgs
 )
+
+add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
+target_include_directories(cube_bathymetry_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(cube_bathymetry_node cube_bathymetry_node_link)
 
 install(TARGETS cube_bathymetry_node
   DESTINATION lib/${PROJECT_NAME}
