@@ -146,7 +146,12 @@ none of the previous window's cells (`test_node_lifecycle`).
   value set afterwards, so it can still write to (and be refused by) the old one.
   Nothing on disk is ever deleted by a reset. If the final flush fails (disk full,
   permissions), `cleanup` fails and the node stays `inactive` with its sheet, rather
-  than discard tiles that were never written; fix the cause and run the script again.
+  than discard tiles that were never written; fix the cause and run the script again. While the cleanup
+  is refused the save timer is stopped and nothing retries the write: the tiles stay in
+  RAM until cleanup is requested again. A `shutdown` transition (from `unconfigured`,
+  `inactive` or `active`) makes one last attempt to write them and then completes
+  whether or not it succeeded; a process killed without either transition loses
+  whatever the periodic save has not written.
 - **Nothing is saved when `draft_dir` is empty.** That is what makes the sheet fresh,
   and it also means the reset **permanently discards the in-RAM survey**: the old
   window exists nowhere afterwards. Save or export what you want to keep first. With

@@ -846,8 +846,11 @@ public:
   on_cleanup(const rclcpp_lifecycle::State & state)
   {
     // Final flush so the last accumulation since the previous periodic save is
-    // not lost on shutdown. The save timer is normally cancelled on_deactivate,
-    // but guard here too in case cleanup is reached by another path.
+    // not stranded when the sheet is released below. (This is the cleanup path
+    // only: a shutdown requested from INACTIVE or ACTIVE goes through on_shutdown,
+    // and a process killed without either transition loses whatever the periodic
+    // save has not yet written.) The save timer is normally cancelled
+    // on_deactivate, but guard here too in case cleanup is reached by another path.
     saveDirtyTiles();
     // saveDirtyTiles() logs a write failure and KEEPS the dirty set so the next
     // save retries. Cleanup is the last chance: the next configure replaces the
@@ -917,6 +920,25 @@ public:
     geo_map_sheet_.reset();
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
     return LifecycleNode::on_cleanup(state);
+  }
+
+  /// Shutdown from UNCONFIGURED, INACTIVE or ACTIVE (`ros2 lifecycle set shutdown`).
+  /// Unlike cleanup it cannot be refused, so a failed flush is logged and the
+  /// transition still completes; the tiles that could not be written are lost with
+  /// the process, and the error says how many.
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
+  on_shutdown(const rclcpp_lifecycle::State & state)
+  {
+    saveDirtyTiles();
+    if (!draft_dir_.empty() && geo_map_sheet_) {
+      const std::size_t unsaved = geo_map_sheet_->dirtyGrids().size();
+      if (unsaved > 0) {
+        RCLCPP_ERROR(get_logger(),
+          "Shutting down with %zu tile(s) that could not be written to %s; they are "
+          "lost with the process.", unsaved, draft_dir_.c_str());
+      }
+    }
+    return LifecycleNode::on_shutdown(state);
   }
 
 private:

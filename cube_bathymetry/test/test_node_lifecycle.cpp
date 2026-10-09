@@ -379,6 +379,48 @@ TEST_F(NodeLifecycle, CleanupFailsWhenTheFinalFlushFails)
   std::filesystem::remove_all(dir);
 }
 
+// A shutdown requested from ACTIVE (or INACTIVE after a refused cleanup) goes
+// through on_shutdown, not on_cleanup, and must flush the unsaved tiles too.
+TEST_F(NodeLifecycle, ShutdownFromActiveFlushesUnsavedTiles)
+{
+  const auto dir = makeTempDir();
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    addPatch(node->sheet(), -12.5);
+    ASSERT_FALSE(node->sheet()->dirtyGrids().empty());
+    ASSERT_FALSE(std::filesystem::exists(dir / "draft")) << "test setup: nothing saved yet";
+
+    EXPECT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+    EXPECT_TRUE(std::filesystem::exists(dir / "draft") &&
+      !std::filesystem::is_empty(dir / "draft"))
+      << "shutdown must write the tiles accumulated since the last save";
+  }
+  std::filesystem::remove_all(dir);
+}
+
+// Shutdown cannot be refused: with the flush failing it still reaches FINALIZED
+// (the error is logged), instead of wedging the node in ERRORPROCESSING.
+TEST_F(NodeLifecycle, ShutdownCompletesWhenTheFlushFails)
+{
+  const auto dir = makeTempDir();
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    addPatch(node->sheet(), -12.5);
+    {
+      std::ofstream blocker(dir / "draft");
+      blocker << "not a directory";
+    }
+    EXPECT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+  }
+  std::filesystem::remove_all(dir);
+}
+
 // Cleanup releases the sheet and the catalog instead of holding them until the
 // next configure: a reset on a boat that has run for hours should not keep the
 // old survey in RAM while the new one is built.
