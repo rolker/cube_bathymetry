@@ -133,3 +133,48 @@ Revision after the plan review at `8fbc067` (changes-requested). All five must-f
 ### Open questions
 - [ ] .agents/README.md stays out of these PRs; the issue checklist item needs rewording (owner's yes) before (b) closes #164
 - [ ] Overlapping areas with different standards: one coverage_grid, a cell is 1 only if it meets every containing area (owner settled; revisit only if the scorer needs per-area rasters)
+
+## Implementation
+**Status**: complete (PR (a) only; PR (b) not started; not pushed, no PR opened)
+**When**: 2026-10-09 14:30 -04:00
+**By**: Claude Sonnet
+
+**Plan**: `.agent/work-plans/issue-164/plan.md` at `bc7ae4c`
+**Scope**: PR (a), the fresh-sheet fix (the issue body must say "Part of #164", not close it)
+
+### Commits
+- `db74bf8` move the node class to a private header (pure refactor; `src/cube_bathymetry_node.hpp`, `main()` stays in the `.cpp`, INTERFACE link target)
+- `dc9fdca` test seam: `sheet()`, `catalogSize()`, defaulted `NodeOptions` constructor argument
+- `dbf1927` `declareOnce` on every `declare_parameter` in `on_configure`, state resets, `on_cleanup` release order, `test_node_lifecycle`
+- `af5c179` `ElevationIsEllipsoidHeightPositiveUp` in `test_publish_equivalence`
+- `c782c9a` `scripts/reset_cube_nodes.sh`, its three-case stub test, `exec_depend` on `ros2lifecycle` and `ros2param`
+- `5c8b1c0` README: elevation convention, "Starting a fresh sheet without restarting"
+- `269dd90` cpplint/uncrustify fixes for the moved header and the new test
+- `bc7ae4c` plan kept in sync with what was built
+
+### Reproduction (red test)
+Run on `dc9fdca`, i.e. the pure refactor plus the seam, before the guard: **all four `test_node_lifecycle` cases failed**. The log line is `Caught exception in callback for transition 10 ... Original error: parameter 'map_frame' has already been declared`, then `Callback returned ERROR during the transition: configure`, and the node stays UNCONFIGURED. This confirms the reading in the issue review: rclcpp_lifecycle swallowed `ParameterAlreadyDeclaredException`, so a second configure never succeeded and "cleanup then configure starts empty" was unreachable. After `dbf1927` all four pass. The stop condition did not trigger: the empty-start assertions hold with the guard alone.
+
+### Test results (worktree, clean rebuild of the package after the header refactor, no incremental-build segfaults seen)
+- `./sensors_ws/build.sh cube_bathymetry` then `./sensors_ws/test.sh cube_bathymetry`: **805 tests, 0 errors, 0 failures, 90 skipped** (the 90 are the cppcheck cases, cppcheck is not run here). ctest level: 39 tests, all passed, including `test_node_lifecycle` (4 cases), `test_reset_cube_nodes` (3 cases) and `test_publish_equivalence` (4 cases, one new).
+- Mutation checks: negating the layer in `grid_projection.cpp` makes `ElevationIsEllipsoidHeightPositiveUp` fail; removing the quiesce loop from the script fails the consumer-ordering case.
+- Lint: the first full run flagged cpplint/uncrustify on the moved header and the new test; fixed in `269dd90`, the second run is clean.
+
+### Live verification (plan step 11)
+Two real `cube_bathymetry_node` processes (`/boat1`, `/boat2`) on a private `ROS_DOMAIN_ID` with localhost-only discovery, a throwaway publisher (not committed, in the workspace scratchpad) feeding `soundings` plus static `earth`/`map`/`sensor` TF.
+- The script ran from unconfigured, from active and from inactive states, with a `--consumer`, and exited 0 each time with all nodes `active`. With `draft_dir` set it refused (exit 1) and changed nothing.
+- Sheet freshness: a 30 m patch was fed and a `grid` of 450 finite cells at x about 14 m was received; after the script ran, a patch 120 m east produced a `grid` of 444 cells centred at x about 134 m, 30 m wide, i.e. none of the first patch's cells survived.
+- Sign check on the real node: a sounding 30 m below an ellipsoid-height-0 point gave `elevation` = -30.0, confirming positive-up ellipsoid height end to end. (A spurious +30 seen midway was a stale install left by the mutation check, not the code.)
+- Observed: each `ros2` CLI call took several seconds with no discovery daemon, so a four-node reset takes on the order of a minute or more; the README does not promise a time.
+
+### Deviations from the plan (all recorded in the plan)
+- Seam is two accessors plus a `NodeOptions` constructor argument, not one accessor (catalog emptiness and pre-configure parameter overrides need them).
+- `on_cleanup` also resets the ping and tile-request subscriptions and the four publishers, not only the tf listener and buffer. Side effect to know: the transient_local catalog publisher disappears during a reset, so a late joiner during the reset window gets no stale catalog.
+- The script configures a never-configured node first, because `draft_dir` is only declared at configure.
+- The stub test's first case uses four nodes with one already inactive (the case list is still three).
+
+### Not done / left
+- Full-scope `ci_local.sh` (owed before push, per ADR-0018); nothing pushed.
+- PR (b) entirely: starts with the B1 datum/frame/pinhole spike. Facts checked now that (b) will rely on: `bizzyboat_project11/config/bizzyboat.yaml` sets `draft_dir: /home/field/data/world/depths` under `/**/cube_bathymetry` (a CUBE node launched with that file will not be fresh after a reset); the README text for the elevation sign and the d^2/2R bound is in place.
+- The issue's `.agents/README.md` checklist item still needs rewording (owner's yes) before (b) closes #164.
+- A `kill` of cube_bathymetry processes during live testing may have hit processes of another worktree if any were running then (a `pkill -f`/comm match, not narrowed to my domain); nodes from the sim#88 worktree were running again afterwards.
