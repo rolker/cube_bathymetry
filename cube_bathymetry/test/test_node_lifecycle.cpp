@@ -56,6 +56,63 @@
 #include "cube_bathymetry_node.hpp"
 #include "marine_autonomy/gz4d_geo.h"
 
+// Friend of CubeBathymetry (declared in the node header): dirties the per-session
+// state a reconfigure must reset, and reads it back. Each field below is reset by
+// on_configure (or on_cleanup); without a way to set them first, "starts empty"
+// would be asserted against values that were never anything else.
+struct CubeBathymetryTestAccess
+{
+  static gggs::GridIndex probeIndex()
+  {
+    return gggs::Level::fromCellSize(1.0f).gridIndex(43.07, -70.76);
+  }
+
+  static void dirtySessionState(CubeBathymetry & n)
+  {
+    n.last_grid_publish_time_ = rclcpp::Time(1234, 0, RCL_SYSTEM_TIME);
+    n.have_publish_tf_ = true;
+    n.last_publish_tf_.header.frame_id = "stale_frame";
+    n.have_vessel_pos_ = true;
+    n.last_vessel_lat_ = 43.0;
+    n.last_vessel_lon_ = -70.0;
+    n.saving_report_last_s_ = 99.0;
+    n.report_window_cells_ = 7;
+    n.report_full_cells_ = 8;
+    n.report_refresh_cells_ = 9;
+    n.evicted_indices_.insert(probeIndex());
+    n.disk_serve_queue_.push_back(probeIndex());
+    n.disk_serve_queued_.insert(probeIndex());
+    // "went out whole": a fresh tracker would call this tile due (never sent).
+    n.refresh_tracker_.notePublished(probeIndex(), 1.0, true);
+    n.catalog_builder_.update(probeIndex(), 5);
+  }
+
+  /// Names of the fields that are NOT back at their fresh-node value.
+  static std::vector<std::string> staleFields(const CubeBathymetry & n)
+  {
+    std::vector<std::string> stale;
+    auto check = [&stale](bool is_fresh, const char * name) {
+        if (!is_fresh) {
+          stale.emplace_back(name);
+        }
+      };
+    check(n.last_grid_publish_time_.nanoseconds() == 0, "last_grid_publish_time_");
+    check(!n.have_publish_tf_, "have_publish_tf_");
+    check(n.last_publish_tf_.header.frame_id.empty(), "last_publish_tf_");
+    check(!n.have_vessel_pos_, "have_vessel_pos_");
+    check(n.last_vessel_lat_ == 0.0 && n.last_vessel_lon_ == 0.0, "last_vessel_lat/lon_");
+    check(n.saving_report_last_s_ == 0.0, "saving_report_last_s_");
+    check(
+      n.report_window_cells_ == 0 && n.report_full_cells_ == 0 &&
+      n.report_refresh_cells_ == 0, "report_*_cells_");
+    check(n.evicted_indices_.empty(), "evicted_indices_");
+    check(n.disk_serve_queue_.empty() && n.disk_serve_queued_.empty(), "disk_serve_queue_");
+    check(n.refresh_tracker_.refreshDue(probeIndex(), 2.0), "refresh_tracker_");
+    check(n.catalog_builder_.size() == 0, "catalog_builder_");
+    return stale;
+  }
+};
+
 namespace
 {
 
@@ -348,4 +405,70 @@ TEST_F(NodeLifecycle, CleanupReleasesTheSheetAndCatalog)
     EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   }
   std::filesystem::remove_all(dir);
+}
+
+// Everything that describes the previous sheet's session is reset by the next
+// configure: the publish throttle and cached transform/vessel fix (a stale one
+// would suppress or misplace the first window), the saving ledger, evicted-tile
+// markers, the disk-serve queue, the refresh tracker and the catalog. The state
+// is dirtied first through the test accessor, so each reset is what the
+// assertion observes rather than a default that was never changed.
+TEST_F(NodeLifecycle, ReconfigureResetsTheSessionState)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+
+  CubeBathymetryTestAccess::dirtySessionState(*node);
+  EXPECT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u)
+    << "test setup: every field should be dirty before the cycle";
+  EXPECT_EQ(node->catalogSize(), 1u);
+
+  ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(node->catalogSize(), 0u) << "cleanup releases the catalog";
+
+  // Dirty it again: cleanup does not reset the cursor fields, configure must.
+  CubeBathymetryTestAccess::dirtySessionState(*node);
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  const auto stale = CubeBathymetryTestAccess::staleFields(*node);
+  for (const auto & name : stale) {
+    ADD_FAILURE() << name << " survived the reconfigure";
+  }
+  EXPECT_TRUE(stale.empty());
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// read_only parameters (capture_spacing_scale, publish_dirty_subwindow) take their
+// launch/YAML override at the first configure, keep it across a cycle, are applied
+// to the NEW sheet, and keep refusing runtime sets before and after the cycle.
+TEST_F(NodeLifecycle, ReadOnlyOverridesSurviveACycle)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams(
+      {rclcpp::Parameter("capture_spacing_scale", 0.9),
+        rclcpp::Parameter("publish_dirty_subwindow", false)}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_FLOAT_EQ(node->sheet()->parameters().capture_spacing_scale, 0.9f);
+  EXPECT_FALSE(node->get_parameter("publish_dirty_subwindow").as_bool());
+  EXPECT_FALSE(
+    node->set_parameter(rclcpp::Parameter("capture_spacing_scale", 0.5)).successful);
+  EXPECT_FALSE(
+    node->set_parameter(rclcpp::Parameter("publish_dirty_subwindow", true)).successful);
+
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+
+  EXPECT_FLOAT_EQ(node->sheet()->parameters().capture_spacing_scale, 0.9f)
+    << "the override must reach the NEW sheet";
+  EXPECT_DOUBLE_EQ(node->get_parameter("capture_spacing_scale").as_double(), 0.9);
+  EXPECT_FALSE(node->get_parameter("publish_dirty_subwindow").as_bool());
+  EXPECT_FALSE(
+    node->set_parameter(rclcpp::Parameter("capture_spacing_scale", 0.5)).successful)
+    << "read_only must still refuse runtime sets after a cycle";
+  EXPECT_FALSE(
+    node->set_parameter(rclcpp::Parameter("publish_dirty_subwindow", true)).successful);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }

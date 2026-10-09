@@ -77,9 +77,16 @@
 #include "marine_interfaces/msg/tile_request.hpp"
 
 
+/// Test-only access to the node's private session state (defined in
+/// test_node_lifecycle.cpp). Lets a test dirty the state a reconfigure must reset
+/// and read it back, without widening the node's public interface.
+struct CubeBathymetryTestAccess;
+
 class CubeBathymetry : public rclcpp_lifecycle::LifecycleNode
 {
 public:
+  friend struct CubeBathymetryTestAccess;
+
   // NodeOptions lets a test supply parameter overrides before the first
   // configure (the executable passes the default, so launch behaviour is
   // unchanged).
