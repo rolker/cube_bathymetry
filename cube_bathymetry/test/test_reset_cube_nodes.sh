@@ -3,11 +3,19 @@
 # Hydrographic Center, University of New Hampshire. MIT licence (see LICENSE).
 #
 # Tests scripts/reset_cube_nodes.sh against a stub `ros2` on PATH that keeps one
-# lifecycle state per node (cube_bathymetry#164). Three cases:
+# lifecycle state per node (cube_bathymetry#164). Cases:
 #   1. consumer ordering: every CUBE node is quiesced before a consumer is touched,
 #      and the consumer is back up before any CUBE node is configured.
 #   2. a non-empty draft_dir is refused, and nothing is changed.
-#   3. a failing transition fails fast, naming the node and the transition.
+#   3. a failing transition fails fast, naming the node and the transition, and
+#      (after the first change) prints every node's state and a re-run hint.
+#   4. preflight: a mistyped consumer, or a finalized CUBE node, is found before
+#      any transition runs.
+#   5. `--consumer` does not swallow a following flag.
+#   6. a never-configured node is probed after all other checks and put back; a
+#      draft_dir found only by that probe refuses without resetting anything.
+#   7. an unresponsive node fails the script within the timeout, before any change.
+#   8. a stderr warning from `ros2` is not parsed as data.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -25,7 +33,9 @@ key() { echo "${1//\//_}"; }
 case "$1 $2" in
   "lifecycle get")
     s=$(cat "$STUB_DIR/state/$(key "$3")" 2>/dev/null) || { echo "Node not found"; exit 1; }
-    case "$s" in unconfigured) id=1 ;; inactive) id=2 ;; active) id=3 ;; esac
+    [ -e "$STUB_DIR/hang_$(key "$3")" ] && exec sleep 30
+    [ -e "$STUB_DIR/noise" ] && echo "[WARN] [rcl]: stub deprecation warning" >&2
+    case "$s" in unconfigured) id=1 ;; inactive) id=2 ;; active) id=3 ;; finalized) id=4 ;; esac
     echo "$s [$id]"
     ;;
   "lifecycle set")
@@ -39,7 +49,14 @@ case "$1 $2" in
     case "$s:$t" in
       active:deactivate) echo inactive > "$f" ;;
       inactive:cleanup) echo unconfigured > "$f" ;;
-      unconfigured:configure) echo inactive > "$f" ;;
+      unconfigured:configure)
+        echo inactive > "$f"
+        # parameters are declared at configure: publish the ones the test staged
+        for staged in "$STUB_DIR"/onconfigure_"$(key "$node")"_*; do
+          [ -e "$staged" ] || continue
+          cp "$staged" "$STUB_DIR/param/${staged##*/onconfigure_}"
+        done
+        ;;
       inactive:activate) echo active > "$f" ;;
       *) echo "Transition failed"; exit 0 ;;
     esac
@@ -59,7 +76,8 @@ failures=0
 fail() { echo "FAIL: $*"; failures=$((failures + 1)); }
 
 setup_nodes() {
-  rm -f "$work"/log "$work"/fail_* "$work"/state/* "$work"/param/*
+  rm -f "$work"/log "$work"/fail_* "$work"/hang_* "$work"/noise "$work"/onconfigure_* \
+    "$work"/state/* "$work"/param/*
   for n in boat1 boat2 boat3 boat4; do
     echo active > "$work/state/_${n}_cube_bathymetry"
     printf '' > "$work/param/_${n}_cube_bathymetry_draft_dir"
@@ -98,6 +116,7 @@ echo /data/draft > "$work/param/_boat2_cube_bathymetry_draft_dir"
 out=$("$script" "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 1 ] || fail "case 2: expected exit 1, got $rc"
 case "$out" in *"/boat2/cube_bathymetry"*"draft_dir"*) ;; *) fail "case 2: message does not name node and parameter: $out" ;; esac
+case "$out" in *"nothing was changed"*) ;; *) fail "case 2: message does not say nothing was changed: $out" ;; esac
 [ ! -s "$work/log" ] || fail "case 2: transitions ran despite the refusal: $(cat "$work/log")"
 # ...and --allow-persistence lets it through
 out=$("$script" --allow-persistence "${cubes[@]}" 2>&1); rc=$?
@@ -110,6 +129,86 @@ out=$("$script" "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 1 ] || fail "case 3: expected exit 1, got $rc"
 case "$out" in *"/boat2/cube_bathymetry"*"cleanup"*"failed"*) ;; *) fail "case 3: message does not name node and transition: $out" ;; esac
 grep -q "boat3/cube_bathymetry" "$work/log" && fail "case 3: kept going after the failure (touched boat3)"
+case "$out" in *"states:"*"/boat1/cube_bathymetry"*"/boat3/cube_bathymetry"*) ;; *) fail "case 3: no node states after the failure: $out" ;; esac
+case "$out" in *"Re-run"*) ;; *) fail "case 3: no re-run hint: $out" ;; esac
+
+# --- 4. preflight: nothing moves when a later node or consumer is unusable ----
+setup_nodes
+out=$("$script" --consumer /typo "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 4a: mistyped consumer: expected exit 1, got $rc"
+case "$out" in *"/typo"*) ;; *) fail "case 4a: message does not name the consumer: $out" ;; esac
+[ ! -s "$work/log" ] || fail "case 4a: transitions ran despite a mistyped consumer: $(cat "$work/log")"
+setup_nodes
+echo finalized > "$work/state/_boat4_cube_bathymetry"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 4b: finalized node: expected exit 1, got $rc"
+case "$out" in *"/boat4/cube_bathymetry"*"finalized"*) ;; *) fail "case 4b: message does not name node and state: $out" ;; esac
+[ ! -s "$work/log" ] || fail "case 4b: transitions ran despite a finalized node: $(cat "$work/log")"
+
+# --- 5. --consumer must not swallow a flag --------------------------------------
+setup_nodes
+out=$("$script" --consumer --allow-persistence "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 2 ] || fail "case 5: expected usage exit 2, got $rc: $out"
+[ ! -s "$work/log" ] || fail "case 5: transitions ran: $(cat "$work/log")"
+out=$("$script" "${cubes[@]}" --consumer 2>&1); rc=$?
+[ "$rc" -eq 2 ] || fail "case 5b: --consumer with no value: expected exit 2, got $rc"
+
+# --- 6. a never-configured node: probe after the other checks, put it back -----
+setup_nodes
+echo unconfigured > "$work/state/_boat4_cube_bathymetry"
+rm -f "$work/param/_boat4_cube_bathymetry_"*
+printf '' > "$work/onconfigure__boat4_cube_bathymetry_draft_dir"
+printf '' > "$work/onconfigure__boat4_cube_bathymetry_prior_store_dir"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 6a: exit $rc: $out"
+for n in "${cubes[@]}"; do
+  [ "$(cat "$work/state/$(echo "${n//\//_}")")" = active ] || fail "case 6a: $n not active at the end"
+done
+probe_configure=$(grep -n -m1 '^/boat4/cube_bathymetry configure' "$work/log" | cut -d: -f1)
+first_deactivate=$(grep -n -m1 ' deactivate$' "$work/log" | cut -d: -f1)
+[ -n "$probe_configure" ] && [ -n "$first_deactivate" ] && [ "$probe_configure" -lt "$first_deactivate" ] ||
+  fail "case 6a: the probe configure did not come before the first quiesce"
+[ "$(grep -c '^/boat4/cube_bathymetry configure' "$work/log")" -eq 2 ] ||
+  fail "case 6a: expected the probe configure plus the real one"
+
+# another node's readable draft_dir refuses BEFORE the never-configured node is touched
+setup_nodes
+echo unconfigured > "$work/state/_boat4_cube_bathymetry"
+rm -f "$work/param/_boat4_cube_bathymetry_"*
+echo /data/draft > "$work/param/_boat1_cube_bathymetry_draft_dir"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 6b: expected exit 1, got $rc"
+[ ! -s "$work/log" ] || fail "case 6b: the never-configured node was touched before the refusal: $(cat "$work/log")"
+
+# draft_dir that only the probe can see: refuse, node put back, nobody reset
+setup_nodes
+echo unconfigured > "$work/state/_boat4_cube_bathymetry"
+rm -f "$work/param/_boat4_cube_bathymetry_"*
+echo /data/draft > "$work/onconfigure__boat4_cube_bathymetry_draft_dir"
+printf '' > "$work/onconfigure__boat4_cube_bathymetry_prior_store_dir"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 6c: expected exit 1, got $rc"
+case "$out" in *"/boat4/cube_bathymetry"*"draft_dir"*"nothing was changed"*) ;; *) fail "case 6c: wrong message: $out" ;; esac
+[ "$(cat "$work/state/_boat4_cube_bathymetry")" = unconfigured ] || fail "case 6c: probed node not put back"
+[ "$(wc -l < "$work/log")" -eq 2 ] || fail "case 6c: expected only the probe's configure and cleanup: $(cat "$work/log")"
+[ "$(cat "$work/state/_boat1_cube_bathymetry")" = active ] || fail "case 6c: another node was reset"
+
+# --- 7. an unresponsive node fails within the timeout, before any change -------
+setup_nodes
+touch "$work/hang__boat2_cube_bathymetry"
+start=$SECONDS
+out=$(RESET_CUBE_GET_TIMEOUT=1 "$script" "${cubes[@]}" 2>&1); rc=$?
+elapsed=$((SECONDS - start))
+[ "$rc" -eq 1 ] || fail "case 7: expected exit 1, got $rc"
+[ "$elapsed" -lt 20 ] || fail "case 7: took ${elapsed}s, the timeout did not bound the call"
+case "$out" in *"/boat2/cube_bathymetry"*) ;; *) fail "case 7: message does not name the node: $out" ;; esac
+[ ! -s "$work/log" ] || fail "case 7: transitions ran: $(cat "$work/log")"
+
+# --- 8. stderr noise from ros2 is not parsed as data ----------------------------
+setup_nodes
+touch "$work/noise"
+out=$("$script" "${cubes[@]}" 2>/dev/null); rc=$?
+[ "$rc" -eq 0 ] || fail "case 8: stderr warning broke the run, exit $rc: $out"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

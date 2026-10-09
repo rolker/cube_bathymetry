@@ -20,11 +20,24 @@
 #                         Saved draft tiles are RELOADED on configure, so the sheet
 #                         is then NOT fresh; without this flag the script refuses.
 #
-# Order: (0) read every CUBE node's draft_dir / prior_store_dir and refuse if any
-# draft_dir is set; (1) every CUBE node to unconfigured; (2) every consumer to
-# unconfigured and back to active; (3) every CUBE node to active. Fails fast,
-# naming the node and the transition. An already-inactive or already-unconfigured
-# node is not an error, so re-running after a failure is safe.
+# Order: (0) preflight, changing nothing: every node and consumer must answer and
+# be in a state the script can walk (active, inactive or unconfigured), and no
+# CUBE node may have a `draft_dir` set (refused unless --allow-persistence); a
+# CUBE node that has never been configured has no readable `draft_dir`, so it is
+# configured, read and returned to unconfigured, one at a time, only after every
+# other check has passed; (1) every CUBE node to unconfigured; (2) every consumer
+# to unconfigured and back to active; (3) every CUBE node to active.
+#
+# Fails fast, naming the node and the transition. Once step 1 has begun a failure
+# prints every node's state and tells you to re-run: a re-run is safe (an
+# already-inactive or already-unconfigured node is not an error), and a CUBE node
+# that is not `active` is NOT publishing `grid`. Every `ros2` call is bounded by
+# `timeout` (RESET_CUBE_GET_TIMEOUT, default 30 s, for reads;
+# RESET_CUBE_SET_TIMEOUT, default 300 s, for transitions, because a configure with
+# `draft_dir` set loads the saved tiles), so an unresponsive node fails the script
+# instead of hanging it with boats half reset.
+#
+# Not for use underway: between steps 1 and 3 the named boats publish no `grid`.
 #
 # Exit status: 0 reset done; 1 a transition or read failed, or refused because of
 # draft_dir; 2 usage.
@@ -32,14 +45,11 @@
 set -u -o pipefail
 
 prog=$(basename "$0")
+get_timeout=${RESET_CUBE_GET_TIMEOUT:-30}
+set_timeout=${RESET_CUBE_SET_TIMEOUT:-300}
 
 usage() {
   sed -n '/^# Usage:/,/^# Exit status/p' "$0" | sed 's/^# \{0,1\}//' >&2
-}
-
-die() {
-  echo "$prog: $*" >&2
-  exit 1
 }
 
 allow_persistence=0
@@ -49,7 +59,13 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --allow-persistence) allow_persistence=1 ;;
     --consumer)
-      [ $# -ge 2 ] || { echo "$prog: --consumer needs a node name" >&2; usage; exit 2; }
+      # The value must be a node name: `--consumer --allow-persistence` would
+      # otherwise swallow the flag and reset a node called "--allow-persistence".
+      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#-}" != "$2" ]; then
+        echo "$prog: --consumer needs a node name, got '${2:-}'" >&2
+        usage
+        exit 2
+      fi
       consumers+=("$2")
       shift
       ;;
@@ -61,26 +77,62 @@ while [ $# -gt 0 ]; do
 done
 [ ${#nodes[@]} -gt 0 ] || { echo "$prog: no cube_bathymetry node given" >&2; usage; exit 2; }
 
+# Set once a node may have been changed; decides what `die` tells the operator.
+changed=0
+
+# Read-only `ros2` call: stdout only (a stderr warning must not be parsed as
+# data), bounded.
+ros2_get() {
+  timeout "$get_timeout" ros2 "$@" 2>/dev/null
+}
+
 # First word of `ros2 lifecycle get`, e.g. "active [3]" -> active.
 node_state() {
-  local out
-  out=$(ros2 lifecycle get "$1" 2>&1) || { echo "unreadable"; return 1; }
-  echo "${out%% *}"
+  local out first state
+  out=$(ros2_get lifecycle get "$1") || { echo "unreadable"; return 1; }
+  first=${out%%$'\n'*}
+  state=${first%% *}
+  [ -n "$state" ] || { echo "unreadable"; return 1; }
+  echo "$state"
 }
+
+print_states() {
+  local node
+  echo "$prog: states:"
+  for node in "${nodes[@]}" "${consumers[@]}"; do
+    echo "  $node: $(node_state "$node")"
+  done
+}
+
+die() {
+  echo "$prog: $*" >&2
+  if [ "$changed" -eq 1 ]; then
+    print_states >&2
+    echo "$prog: the reset did not finish. Re-run the same command to continue (a node that is already reset is simply cycled again); a CUBE node that is not 'active' is not publishing grid." >&2
+  else
+    echo "$prog: nothing was changed." >&2
+  fi
+  exit 1
+}
+
+on_signal() {
+  trap - INT TERM
+  die "interrupted"
+}
+trap on_signal INT TERM
 
 # transition NODE NAME EXPECTED_STATE: `ros2 lifecycle set` reports a refused
 # transition without a reliable exit status, so the resulting state is re-read
 # and compared instead.
 transition() {
-  local node=$1 name=$2 expected=$3 out state
-  out=$(ros2 lifecycle set "$node" "$name" 2>&1)
-  local rc=$?
+  local node=$1 name=$2 expected=$3 out rc state
+  changed=1
+  out=$(timeout "$set_timeout" ros2 lifecycle set "$node" "$name" 2>&1)
+  rc=$?
   state=$(node_state "$node")
   if [ "$rc" -ne 0 ] || [ "$state" != "$expected" ]; then
-    echo "$prog: $node: transition '$name' failed (state is '$state', expected '$expected')" >&2
     [ -n "$out" ] && echo "$prog: $node: ros2 said: $out" >&2
-    print_states >&2
-    exit 1
+    die "$node: transition '$name' failed (state is '$state', expected '$expected'; exit $rc)"
   fi
   echo "$node: $name -> $state"
 }
@@ -114,36 +166,69 @@ to_active() {
 # String parameter value of a node, or failure if it cannot be read.
 string_param() {
   local out
-  out=$(ros2 param get "$1" "$2" 2>&1) || return 1
+  out=$(ros2_get param get "$1" "$2") || return 1
   case "$out" in
     "String value is:"*) printf '%s\n' "${out#String value is:}" | sed 's/^ //' ;;
     *) return 1 ;;
   esac
 }
 
-print_states() {
-  local node
-  echo "$prog: states:"
-  for node in "${nodes[@]}" "${consumers[@]}"; do
-    echo "  $node: $(node_state "$node")"
-  done
+note_prior() {
+  [ -n "$2" ] &&
+    echo "$prog: note: $1 prior_store_dir='$2' seeds a predicted surface, not coverage; it is kept"
+  return 0
 }
 
-# 0. Refuse before changing anything if persistence would reload old tiles. The
-# parameters are declared at configure, so a never-configured node is configured
-# (harmless, it is about to be cycled) to make them readable.
+refuse_draft() {
+  die "$1: draft_dir is '$2'; saved draft tiles reload on configure, so the sheet would not be fresh. Clear it (ros2 param set $1 draft_dir '') or pass --allow-persistence."
+}
+
+# 0a. Every node and consumer must answer and be walkable, before anything moves:
+# a mistyped --consumer or a finalized node found after the CUBE nodes were
+# already unconfigured would leave the boats without a grid.
+for node in "${nodes[@]}" "${consumers[@]}"; do
+  state=$(node_state "$node")
+  case "$state" in
+    active | inactive | unconfigured) ;;
+    *) die "$node: cannot read or walk from state '$state' (is the name right and the node running?)" ;;
+  esac
+done
+
+# 0b. Refuse if persistence would reload old tiles. The parameters are declared
+# at configure, so a node that was never configured has none to read yet: those
+# are probed in 0c, after everything that can be checked without touching a node.
+probe=()
 for node in "${nodes[@]}"; do
-  [ "$(node_state "$node")" = "unconfigured" ] && transition "$node" configure inactive
-  draft_dir=$(string_param "$node" draft_dir) ||
+  if draft_dir=$(string_param "$node" draft_dir); then
+    prior_dir=$(string_param "$node" prior_store_dir) ||
+      die "$node: cannot read parameter prior_store_dir"
+    if [ -n "$draft_dir" ]; then
+      [ "$allow_persistence" -eq 1 ] || refuse_draft "$node" "$draft_dir"
+      echo "$prog: note: $node draft_dir='$draft_dir': saved tiles will reload (--allow-persistence)"
+    fi
+    note_prior "$node" "$prior_dir"
+  elif [ "$(node_state "$node")" = "unconfigured" ]; then
+    [ "$allow_persistence" -eq 1 ] || probe+=("$node")
+  else
     die "$node: cannot read parameter draft_dir (is the node running?)"
-  prior_dir=$(string_param "$node" prior_store_dir) ||
-    die "$node: cannot read parameter prior_store_dir"
-  if [ -n "$draft_dir" ] && [ "$allow_persistence" -eq 0 ]; then
-    die "$node: draft_dir is '$draft_dir'; saved draft tiles reload on configure, so the sheet would not be fresh. Nothing was reset. Clear it (ros2 param set $node draft_dir '') or pass --allow-persistence."
   fi
-  [ -n "$draft_dir" ] && echo "$prog: note: $node draft_dir='$draft_dir': saved tiles will reload (--allow-persistence)"
-  [ -n "$prior_dir" ] &&
-    echo "$prog: note: $node prior_store_dir='$prior_dir' seeds a predicted surface, not coverage; it is kept"
+done
+
+# 0c. Never-configured nodes: configure, read, put back, one at a time. The node
+# is returned to the state it was found in, so a refusal here has not reset
+# anything.
+for node in "${probe[@]}"; do
+  transition "$node" configure inactive
+  draft_dir=$(string_param "$node" draft_dir)
+  rc_draft=$?
+  prior_dir=$(string_param "$node" prior_store_dir)
+  rc_prior=$?
+  transition "$node" cleanup unconfigured
+  changed=0
+  [ "$rc_draft" -eq 0 ] || die "$node: cannot read parameter draft_dir after configure"
+  [ "$rc_prior" -eq 0 ] || die "$node: cannot read parameter prior_store_dir after configure"
+  [ -z "$draft_dir" ] || refuse_draft "$node" "$draft_dir"
+  note_prior "$node" "$prior_dir"
 done
 
 # 1. Quiesce every CUBE node first.
