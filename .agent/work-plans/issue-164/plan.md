@@ -54,8 +54,10 @@ either applied below or listed under "Review disposition" at the end.
    (`main()` only). The header lives in `src/`, **not** `include/`: it is not installed and is not public API; the test adds `src/` to its private
    include path. CMake: an INTERFACE target `cube_bathymetry_node_link` carrying the node's current link list, used by the
    executable and by the new test, so the two cannot drift. `git mv` keeps blame.
-2. **Test seam.** One public const accessor `std::shared_ptr<cube::GeoMapSheet> sheet() const` (documented "diagnostics and tests").
-   No other test hooks; the transitions are the public `configure()/activate()/deactivate()/cleanup()` of `LifecycleNode`.
+2. **Test seam.** Two public const accessors, `std::shared_ptr<cube::GeoMapSheet> sheet() const` and `std::size_t catalogSize() const` (documented "diagnostics and tests"; the
+   second is needed to assert that the tile catalog is empty after a fresh start), and a defaulted `rclcpp::NodeOptions` constructor argument so a test can supply parameter
+   overrides before the first configure (the executable passes the default). No other test hooks; the transitions are the public `configure()/activate()/deactivate()/cleanup()` of `LifecycleNode`.
+   *(As implemented, `db74bf8`..`dc9fdca`.)*
 3. **Red test first.** `test/test_node_lifecycle.cpp` (rclcpp initialised in `SetUpTestSuite`; `set_tests_properties ... ENVIRONMENT` gives this test its **own
    `ROS_DOMAIN_ID`** and `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` (jazzy; `ROS_LOCALHOST_ONLY` is deprecated) so parallel colcon tests, live boats and the CI container cannot
    cross-talk): configure -> activate -> deactivate -> cleanup -> configure, and assert the current state is INACTIVE after the second configure.
@@ -68,6 +70,7 @@ either applied below or listed under "Review disposition" at the end.
 5. **Reset leftover state on configure and release the listener safely in cleanup**, found by auditing the members: `last_grid_publish_time_`, `have_publish_tf_`/`last_publish_tf_`,
    `have_vessel_pos_`/`last_vessel_*`. In `on_cleanup`, release `tf_listener_` **before** `tf_buffer_` (the old listener holds a reference to the buffer and
    can touch it after destruction at `on_configure`'s reassignment, where the unique_ptr buffer is replaced before the shared_ptr listener) and the publishers/subscriptions that are recreated, symmetric with `sonar_info_subscription_`.
+   *(As implemented: `on_cleanup` resets the ping and tile-request subscriptions, the four publishers, then the listener, then the buffer.)*
 6. **Empty-start tests** (same file): with `draft_dir` and `prior_store_dir` empty, add soundings through `sheet()`, deactivate, cleanup, configure;
    assert a new `GeoMapSheet` object with no grids and an empty catalog. A characterization test with `draft_dir` set to a temp dir: after the same cycle
    the saved tiles reload (the sheet is NOT empty), pinning the behaviour the README will state. A test that a parameter set between cycles is honoured.
@@ -82,7 +85,7 @@ either applied below or listed under "Review disposition" at the end.
    then each `--consumer` node (anything accumulating state derived from `grid`, e.g. the assessor) is walked to unconfigured and back to active;
    then each CUBE node is configured and activated. Quiescing CUBE first means no stale window reaches a reset consumer. It reads `draft_dir` and `prior_store_dir`
    with `ros2 param get` and **refuses** if `draft_dir` is non-empty unless `--allow-persistence` (a non-empty `prior_store_dir` only prints a note: it seeds a predicted surface, not coverage).
-   Fails fast with the node and transition named, prints final states. `package.xml` gains `exec_depend` on `ros2lifecycle` and `ros2param` (the script shells out to both).
+   A node that was never configured is configured once first (its parameters are declared at configure, so they are unreadable before). Fails fast with the node and transition named, prints final states. `package.xml` gains `exec_depend` on `ros2lifecycle` and `ros2param` (the script shells out to both).
    `test/test_reset_cube_nodes.sh` runs it against a stub `ros2` on `PATH` holding per-node state, registered with `add_test`, **three cases only**: consumer ordering,
    refusal on non-empty `draft_dir`, failing transition naming the node. The "already inactive" and four-node permutations are covered by the live check (step 11), not by the stub.
    The script must not block PR (a): if it slips, (a) ships with the README command sequence and the script follows.
@@ -92,6 +95,7 @@ either applied below or listed under "Review disposition" at the end.
     "fresh sheet" false; the demo launch (unh_marine_simulation#88) must leave `draft_dir` empty, which the host has already told that implementer. The script refuses loudly if it is not.
 11. **Live verification** on a built node (no persistence): run the script against a real `cube_bathymetry_node` (own `ROS_DOMAIN_ID`, localhost discovery), confirm `ros2 lifecycle get` ends `active`
     and the first `grid` after the reset contains none of the previous window's cells; record in progress.md. Full-scope `ci_local.sh` before push.
+    *(Done 2026-10-09 with a throwaway publisher feeding two patches 120 m apart; recorded in progress.md `## Implementation`. `ci_local.sh` is still owed before push.)*
 12. **Follow-up named, not built:** a `clear` service (draft below under Follow-ups). Filing the issue needs the owner's yes.
 
 ### PR (b): the `coverage_assessment` package (core first, wrapper last; after #406 is on `jazzy`)
