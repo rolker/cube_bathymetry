@@ -9,7 +9,7 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | Node | Subscribes | Publishes | Purpose |
 |---|---|---|---|
 | `detections_to_pointcloud` | `detections` (`marine_acoustic_msgs/SonarDetections`), `odom` (`nav_msgs/Odometry`) | `soundings` (`sensor_msgs/PointCloud2`) | Turns each beam detection into a sounding in the **sonar frame** (x/y/z from travel-time + beam angles) and attaches **per-sounding TPU** (`vertical_uncertainty`, `horizontal_uncertainty`) computed by `cube::ErrorModel`. Lifecycle node. |
-| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; `elevation` is the seabed's **WGS84 ellipsoid height in metres, positive up** (seabed values are negative), see *The `grid` `elevation` convention* below; note the OPPOSITE convention to `soundings` below — `uncertainty` is a 95 % (1.96 sigma) confidence half-width in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
+| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; `elevation` is the seabed's **WGS84 ellipsoid height in metres, positive up** (a seabed lies below the water surface's ellipsoid height, so it is negative only where that surface is near or below the ellipsoid), see *The `grid` `elevation` convention* below; note the OPPOSITE convention to `soundings` below — `uncertainty` is a 95 % (1.96 sigma) confidence half-width in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
 `soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
@@ -42,9 +42,13 @@ iterators), so the field order is not load-bearing.
 
 `elevation` is the **WGS84 ellipsoid height of the seabed in metres, positive up**.
 It is not a depth below the water surface and it is not map-frame z (`map` is a
-tangent plane at the datum). A seabed is therefore **negative**, shifted by the
-geoid separation (tens of metres; about 28 m at the UNH pier). This is not a new convention, only
-newly stated for this message: the node takes each sounding's height from the
+tangent plane at the datum). A seabed is therefore **below the water surface's
+ellipsoid height**, and whether that makes `elevation` negative depends on where the
+surface sits relative to the ellipsoid. Near sea level it is negative, shifted by the
+geoid separation (tens of metres; about 28 m at the UNH pier). On a lake whose
+surface is above the ellipsoid it is positive: Lake Massabesic's full pool is
++48.88 m ellipsoidal, so a seabed 10 m deep is at about +38.9 m. Do not read the
+sign as "depth". This is not a new convention, only newly stated for this message: the node takes each sounding's height from the
 ECEF -> geodetic conversion of its `earth`-frame position (`GeoSounding` keeps
 `point[2]`, `grid_projection.cpp` copies it into the layer unchanged), stored depths
 are WGS84 ellipsoidal heights (uma ADR-0002 §D4, see *Depth-adaptive multi-level
