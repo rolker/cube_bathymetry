@@ -28,7 +28,9 @@
 //
 // KNOWN LIMITATION (plan-review S1, acknowledged): the changed node methods
 // (publishCatalog, tileRequestCallback, the startup prime, drainDiskServeQueue)
-// are private to cube_bathymetry_node.cpp with no test harness, so this test
+// are private to the CubeBathymetry class (src/cube_bathymetry_node.hpp). Its
+// lifecycle is tested (test_node_lifecycle drives configure/activate/cleanup), but
+// there is still no harness for the publish and request callbacks, so this test
 // guards the INVARIANTS via the same library primitives the node composes --
 // it cannot catch a regression in the node wiring itself (e.g. re-introducing
 // a grids()-based catalog). Node-wiring acceptance is the post-merge field
