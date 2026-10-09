@@ -389,12 +389,15 @@ if(BUILD_TESTING)
   # the executable. Its own ROS_DOMAIN_ID and localhost-only discovery keep it
   # from talking to live boats, parallel colcon tests or a CI container's other
   # tests (jazzy: ROS_AUTOMATIC_DISCOVERY_RANGE replaces ROS_LOCALHOST_ONLY).
+  # The domain id must be <= 101: above it the DDS port formula (7400 + 250 * id)
+  # overlaps the ephemeral port range on Linux. Other tests in this workspace use 89
+  # (mru_transform) and 101 (marine_web_view); 87 is not taken.
   ament_add_gtest(test_node_lifecycle test/test_node_lifecycle.cpp TIMEOUT 120)
   target_include_directories(test_node_lifecycle PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
   set_tests_properties(test_node_lifecycle PROPERTIES
-    ENVIRONMENT "ROS_DOMAIN_ID=164;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
+    ENVIRONMENT "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
 
   # reset_cube_nodes.sh against a stub `ros2` (#164): consumer ordering, refusal
   # on a non-empty draft_dir, fail-fast on a failing transition.
