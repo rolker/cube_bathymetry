@@ -110,3 +110,26 @@ Dispatched fresh-context sub-agent (handoff header present); not the plan author
 | Principle alignment | Needs work (silent clamp, documented-from-assumption curvature claim) |
 | ADR compliance | Good (project 0001 respected; workspace 0018 gate noted) |
 | ROS conventions | Needs work (frames per namespace, QoS unstated) |
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-10-09 14:30 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-164/plan.md` at `19eb599`
+**Branch**: feature/issue-164 at `19eb599`
+**Phases**: 2 PRs: (a) fresh sheet, (b) coverage_assessment (after unh_marine_autonomy#406 is on jazzy)
+
+Revision after the plan review at `8fbc067` (changes-requested). All five must-fix items and every suggestion are applied or listed under "Review disposition" in the plan.
+
+### Changes
+- Frames: assessor raster has its own `map_frame`; each source grid is transformed into it per message via TF (through `earth`); a source with no transform is skipped with a throttled WARN, never silently dropped.
+- Surface height: `h_surface` is low by d^2/2R (d = tide boat's distance from its map origin); documented, and scoring is refused (warn, skip) beyond `water_surface_max_boat_distance`; which boat's `map_tide`, and the withheld-tide behaviour, stated. Spatially varying surface is named later work.
+- Datum/frame/pinhole spike is B1, before any package code. Negative depths counted below about -1 m with a throttled WARN, not clamped silently.
+- #406 first; (b) stays one PR; wrapper developed against an uncommitted `upstream.repos` override.
+- Cuts: node header under `src/`; stub-ros2 test shrunk to three cases; step 5 kept (listener released before buffer); (b) custom set-guard replaced by `read_only` descriptors, `earth_frame` and `survey_area_queue_depth` dropped, B7 test matrix shrunk.
+- Suggestions folded in: per-field never-erases; `max_raster_cells` default 1,000,000; transient_local on both outputs; per-test `ROS_DOMAIN_ID` + `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`; Dockerfile `--from-paths`; exec_depends for `ros2lifecycle`/`ros2param`; explicit (b) deps; README cites existing ellipsoidal-heights statement and `ssp_ray_tracer.h`; cross-repo consequences (sim#88 demo launch must leave `draft_dir` empty) and the issue-checklist rewording before "Closes #164".
+
+### Open questions
+- [ ] .agents/README.md stays out of these PRs; the issue checklist item needs rewording (owner's yes) before (b) closes #164
+- [ ] Overlapping areas with different standards: one coverage_grid, a cell is 1 only if it meets every containing area (owner settled; revisit only if the scorer needs per-area rasters)
