@@ -842,6 +842,26 @@ public:
     // not lost on shutdown. The save timer is normally cancelled on_deactivate,
     // but guard here too in case cleanup is reached by another path.
     saveDirtyTiles();
+    // saveDirtyTiles() logs a write failure and KEEPS the dirty set so the next
+    // save retries. Cleanup is the last chance: the next configure replaces the
+    // sheet, and with it every tile that never reached disk. Refuse the
+    // transition (the node stays INACTIVE, sheet intact) rather than discard
+    // survey data (ADR-0001). The operator fixes the cause (disk full, permissions)
+    // and repeats the cleanup; nothing has been released yet. Reachable by a
+    // reset (reset_cube_nodes.sh --allow-persistence) and by a plain
+    // `ros2 lifecycle set ... cleanup`.
+    if (!draft_dir_.empty() && geo_map_sheet_) {
+      const std::size_t unsaved = geo_map_sheet_->dirtyGrids().size();
+      if (unsaved > 0) {
+        RCLCPP_ERROR(get_logger(),
+          "Refusing to clean up: %zu tile(s) could not be written to %s and would "
+          "be lost with the sheet. The node stays INACTIVE with its sheet intact; "
+          "fix the cause (disk full? permissions?) and request cleanup again.",
+          unsaved, draft_dir_.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
+               CallbackReturn::FAILURE;
+      }
+    }
     if (save_timer_) {
       save_timer_->cancel();
       save_timer_.reset();

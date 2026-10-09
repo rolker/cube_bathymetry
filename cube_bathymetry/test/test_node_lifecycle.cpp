@@ -44,6 +44,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -268,4 +269,55 @@ TEST_F(NodeLifecycle, FailedConfigureCanBeRetried)
   EXPECT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// ADR-0001 (never lose survey data): when the final flush in cleanup fails, the
+// transition must FAIL and leave the node INACTIVE with its sheet, rather than
+// succeed and let the next configure replace tiles that never reached disk.
+// The write failure is provoked by putting a regular file where the draft layer
+// directory belongs (works for root too, unlike a permission bit).
+TEST_F(NodeLifecycle, CleanupFailsWhenTheFinalFlushFails)
+{
+  const auto dir = makeTempDir();
+  const auto layer_dir = dir / marine_bathymetry_store::layerDirName(
+    marine_bathymetry_store::SourceLayer::Draft);
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    const auto sheet = node->sheet();
+    addPatch(sheet, -12.5);
+    ASSERT_TRUE(hasFiniteCell(sheet));
+    ASSERT_FALSE(sheet->dirtyGrids().empty());
+
+    std::filesystem::remove_all(layer_dir);
+    {
+      std::ofstream blocker(layer_dir);
+      blocker << "not a directory";
+    }
+    ASSERT_TRUE(std::filesystem::is_regular_file(layer_dir));
+
+    // Deactivate flushes too and fails to write; it still succeeds (it only
+    // cancels timers) and must keep the dirty set.
+    ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_FALSE(sheet->dirtyGrids().empty()) << "a failed save must keep the dirty set";
+
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_INACTIVE)
+      << "cleanup must fail, not discard tiles that were never written";
+    EXPECT_EQ(node->sheet().get(), sheet.get()) << "the sheet must survive a refused cleanup";
+    EXPECT_TRUE(hasFiniteCell(node->sheet()));
+    EXPECT_FALSE(node->sheet()->dirtyGrids().empty());
+
+    // Remove the cause: the retry writes the tiles and the cleanup goes through.
+    std::filesystem::remove(layer_dir);
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+    EXPECT_FALSE(std::filesystem::is_empty(dir / "draft"))
+      << "the retried flush must have written the tiles";
+
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_TRUE(hasFiniteCell(node->sheet())) << "the tiles must reload after the retry";
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  std::filesystem::remove_all(dir);
 }
