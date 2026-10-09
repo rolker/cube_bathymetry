@@ -321,3 +321,31 @@ TEST_F(NodeLifecycle, CleanupFailsWhenTheFinalFlushFails)
   }
   std::filesystem::remove_all(dir);
 }
+
+// Cleanup releases the sheet and the catalog instead of holding them until the
+// next configure: a reset on a boat that has run for hours should not keep the
+// old survey in RAM while the new one is built.
+TEST_F(NodeLifecycle, CleanupReleasesTheSheetAndCatalog)
+{
+  const auto dir = makeTempDir();
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    std::weak_ptr<cube::GeoMapSheet> weak = node->sheet();
+    addPatch(node->sheet(), -12.5);
+    ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+
+    EXPECT_FALSE(node->sheet()) << "cleanup must drop the sheet";
+    EXPECT_TRUE(weak.expired()) << "nothing else may keep the old sheet alive";
+    EXPECT_EQ(node->catalogSize(), 0u);
+
+    // The release must not cost the saved tiles: they reload on the next configure.
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_TRUE(hasFiniteCell(node->sheet()));
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  std::filesystem::remove_all(dir);
+}

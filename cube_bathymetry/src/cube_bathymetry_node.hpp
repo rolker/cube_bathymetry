@@ -902,6 +902,13 @@ public:
     // touch a destroyed buffer.
     tf_listener_.reset();
     tf_buffer_.reset();
+    // The sheet can hold up to max_resident_tiles 960x960 grids. The final flush
+    // above has succeeded (or there is no draft_dir, so nothing was ever going to
+    // be saved), so release it and the version registry now instead of holding
+    // them until the next configure replaces them (#164). Every reader of either
+    // is a subscription or timer released above.
+    geo_map_sheet_.reset();
+    catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
     return LifecycleNode::on_cleanup(state);
   }
 
