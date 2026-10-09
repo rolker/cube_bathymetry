@@ -397,13 +397,19 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
   set_tests_properties(test_node_lifecycle PROPERTIES
-    ENVIRONMENT "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
+    ENVIRONMENT "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_DISCOVERY_SERVER=;ROS_STATIC_PEERS=;FASTRTPS_DEFAULT_PROFILES_FILE=;CYCLONEDDS_URI=")
 
-  # reset_cube_nodes.sh against a stub `ros2` (#164): consumer ordering, refusal
-  # on a non-empty draft_dir, fail-fast on a failing transition.
+  # reset_cube_nodes.sh against a stub `ros2` on PATH (#164), 10 case groups:
+  # consumer ordering, refusal on a non-empty draft_dir, fail-fast, preflight,
+  # flag parsing, the never-configured probe, timeouts, stderr noise,
+  # `timeout --foreground` / SIGHUP / SIGPIPE, and probe-failure reporting. The
+  # stub never talks to DDS; the environment is blanked anyway so a future case
+  # that does cannot reach live boats (same variables as the mru_transform test).
   add_test(NAME test_reset_cube_nodes
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test/test_reset_cube_nodes.sh
       ${CMAKE_CURRENT_SOURCE_DIR}/scripts/reset_cube_nodes.sh)
+  set_tests_properties(test_reset_cube_nodes PROPERTIES
+    ENVIRONMENT "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;ROS_DISCOVERY_SERVER=;ROS_STATIC_PEERS=;FASTRTPS_DEFAULT_PROFILES_FILE=;CYCLONEDDS_URI=")
 
   ament_add_gtest(test_hypothesis test/test_hypothesis.cpp)
   target_link_libraries(test_hypothesis cube_bathymetry)
