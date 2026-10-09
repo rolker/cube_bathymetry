@@ -519,6 +519,12 @@ public:
         draft_dir_.c_str(), save_interval_s_);
     }
 
+    // A configure that threw after this point (an invalid sonar_info_topic, say)
+    // returns the node to UNCONFIGURED WITHOUT on_cleanup, so the listener of
+    // that attempt is still alive here. It owns a thread and a /tf subscription
+    // that feed the buffer: destroy it BEFORE the buffer it references is
+    // replaced, or its callback runs against a destroyed buffer (#164).
+    tf_listener_.reset();
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
 

@@ -243,3 +243,29 @@ TEST_F(NodeLifecycle, ParameterSetBetweenCyclesIsHonoured)
   }
   std::filesystem::remove_all(dir);
 }
+
+// A configure that THROWS partway (here: an invalid sonar_info_topic, rejected
+// when the subscription is created, after the TF listener exists) returns the
+// node to UNCONFIGURED without on_cleanup. Fixing the parameter and configuring
+// again must work, and the listener of the failed attempt must be released before
+// the new buffer replaces the one it references (use-after-free window, #164).
+TEST_F(NodeLifecycle, FailedConfigureCanBeRetried)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("sonar_info_topic", std::string("not a valid topic"))}));
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED)
+    << "an invalid sonar_info_topic must fail the configure";
+
+  // Retry without fixing anything: the failed attempt left a TF listener behind
+  // each time, and each retry must replace it cleanly.
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
+
+  const auto result =
+    node->set_parameter(rclcpp::Parameter("sonar_info_topic", std::string("sonar_info")));
+  ASSERT_TRUE(result.successful) << result.reason;
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE)
+    << "configure after a failed configure did not reach INACTIVE";
+  EXPECT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
