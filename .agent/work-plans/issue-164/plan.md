@@ -70,14 +70,20 @@ either applied below or listed under "Review disposition" at the end.
 5. **Reset leftover state on configure and release the listener safely in cleanup**, found by auditing the members: `last_grid_publish_time_`, `have_publish_tf_`/`last_publish_tf_`,
    `have_vessel_pos_`/`last_vessel_*`. In `on_cleanup`, release `tf_listener_` **before** `tf_buffer_` (the old listener holds a reference to the buffer and
    can touch it after destruction at `on_configure`'s reassignment, where the unique_ptr buffer is replaced before the shared_ptr listener) and the publishers/subscriptions that are recreated, symmetric with `sonar_info_subscription_`.
-   *(As implemented: `on_cleanup` resets the ping and tile-request subscriptions, the four publishers, then the listener, then the buffer.)*
+   *(As implemented: `on_cleanup` resets the ping and tile-request subscriptions, the four publishers, then the listener, then the buffer, then the sheet and the catalog
+   registry once the final flush has succeeded. After the pre-push review: `on_configure` also resets a leftover `tf_listener_` before assigning `tf_buffer_`, because a configure that throws
+   returns to UNCONFIGURED without `on_cleanup`; `on_cleanup` returns FAILURE, before releasing anything, when `draft_dir` is set and dirty grids remain after a failed
+   `saveDirtyTiles()` (ADR-0001: a refused cleanup, not lost tiles); `refresh_timer_` is cancelled there too, and `drainRefreshQueue`, `publishCatalog` and `drainDiskServeQueue` return early when the publisher or sheet is gone.)*
 6. **Empty-start tests** (same file): with `draft_dir` and `prior_store_dir` empty, add soundings through `sheet()`, deactivate, cleanup, configure;
    assert a new `GeoMapSheet` object with no grids and an empty catalog. A characterization test with `draft_dir` set to a temp dir: after the same cycle
    the saved tiles reload (the sheet is NOT empty), pinning the behaviour the README will state. A test that a parameter set between cycles is honoured.
+   *(After the pre-push review, also: `FailedConfigureCanBeRetried`, `CleanupFailsWhenTheFinalFlushFails`, `CleanupReleasesTheSheetAndCatalog`, `ReadOnlyOverridesSurviveACycle` and
+   `ReconfigureResetsTheSessionState`, which dirties the cursor/cache/queue/tracker/catalog state through a `friend struct CubeBathymetryTestAccess` and checks each is fresh after the next configure.
+   The test's `ROS_DOMAIN_ID` is 87, not 164: above 101 the DDS port formula overlaps the ephemeral range.)*
 7. **Stop condition.** If the empty-start assertion fails for a reason the guard does not fix, the plan stops here: record the cause in progress.md and
    hand it to the owner. No `clear` service is built before the event (owner decision); it stays a named follow-up.
 8. **Elevation sign test and docs.** In `test_publish_equivalence.cpp` add `ElevationIsEllipsoidHeightPositiveUp`: a sounding at known lat/lon/altitude
-   projects to an `elevation` equal to that altitude (negative for seabed). README: the `grid` message's `elevation` is ellipsoid height, positive up (cites the existing
+   projects to an `elevation` equal to that altitude (a seabed is *below the water surface's ellipsoid height*: negative near sea level, positive on a lake whose surface is above the ellipsoid, e.g. Lake Massabesic at +48.88 m, so the test has both cases). README: the `grid` message's `elevation` is ellipsoid height, positive up (cites the existing
    ellipsoidal-heights statement and `ssp_ray_tracer.h`), 95 % (1.96 sigma) uncertainty, how to get depth below the water surface (the surface's ellipsoid height minus `elevation`),
    and the d^2/2R caveat on the tide-derived surface height.
 9. **Reset command sequence as a script.** `scripts/reset_cube_nodes.sh [--allow-persistence] [--consumer NODE]... NODE...` (installed to `lib/cube_bathymetry`).
@@ -85,14 +91,19 @@ either applied below or listed under "Review disposition" at the end.
    then each `--consumer` node (anything accumulating state derived from `grid`, e.g. the assessor) is walked to unconfigured and back to active;
    then each CUBE node is configured and activated. Quiescing CUBE first means no stale window reaches a reset consumer. It reads `draft_dir` and `prior_store_dir`
    with `ros2 param get` and **refuses** if `draft_dir` is non-empty unless `--allow-persistence` (a non-empty `prior_store_dir` only prints a note: it seeds a predicted surface, not coverage).
-   A node that was never configured is configured once first (its parameters are declared at configure, so they are unreadable before). Fails fast with the node and transition named, prints final states. `package.xml` gains `exec_depend` on `ros2lifecycle` and `ros2param` (the script shells out to both).
-   `test/test_reset_cube_nodes.sh` runs it against a stub `ros2` on `PATH` holding per-node state, registered with `add_test`, **three cases only**: consumer ordering,
-   refusal on non-empty `draft_dir`, failing transition naming the node. The "already inactive" and four-node permutations are covered by the live check (step 11), not by the stub.
+   A node that was never configured has no readable `draft_dir` (declared at configure), so after every other check has passed it is configured, read and put back to unconfigured, one node at a time.
+   Fails fast with the node and transition named, prints final states. *(After the pre-push review: step 0 first checks that every node and consumer answers and is `active`/`inactive`/`unconfigured`, before any transition;
+   a failure after the first change, or SIGINT/SIGTERM, prints every node's state and a re-run hint; every `ros2` call is under `timeout` (`RESET_CUBE_GET_TIMEOUT` 30 s, `RESET_CUBE_SET_TIMEOUT` 300 s) and parsed output is stdout only; `--consumer` rejects a value starting with `-`.)* `package.xml` gains `exec_depend` on `ros2lifecycle` and `ros2param` (the script shells out to both).
+   `test/test_reset_cube_nodes.sh` runs it against a stub `ros2` on `PATH` holding per-node state, registered with `add_test`, **three cases at first, eight after the pre-push review**: consumer ordering,
+   refusal on non-empty `draft_dir`, failing transition naming the node (and the state/re-run output), preflight of a mistyped consumer and a finalized node, `--consumer` not swallowing a flag,
+   the never-configured-node probe (three variants), a hung node under the timeout, and stderr noise. The "already inactive" and four-node permutations are covered by the live check (step 11), not by the stub.
    The script must not block PR (a): if it slips, (a) ships with the README command sequence and the script follows.
 10. **Docs.** README section "Starting a fresh sheet without restarting": the exact command sequence for four namespaced nodes
     (`/boat1/cube_bathymetry` ... `/boat4/cube_bathymetry`), what is and is not cleared, the `draft_dir` caveat, ordering with consumers. It records the **event configuration
     consequence**: `bizzyboat.yaml` sets `draft_dir: /home/field/data/world/depths` for `/**/cube_bathymetry` and `bizzyboat_sim_core_launch.py` layers that file, so any launch that loads it makes a lifecycle cycle reload old tiles and
     "fresh sheet" false; the demo launch (unh_marine_simulation#88) must leave `draft_dir` empty, which the host has already told that implementer. The script refuses loudly if it is not.
+    *(The README also states, after the pre-push review: an empty-`draft_dir` reset permanently discards the in-RAM survey; the named boats publish no `grid` between the quiesce and the bring-up, so it is not for use underway;
+    a wrong `read_only` value (`capture_spacing_scale`, `publish_dirty_subwindow`) needs a restart; and a cleanup whose flush failed refuses.)*
 11. **Live verification** on a built node (no persistence): run the script against a real `cube_bathymetry_node` (own `ROS_DOMAIN_ID`, localhost discovery), confirm `ros2 lifecycle get` ends `active`
     and the first `grid` after the reset contains none of the previous window's cells; record in progress.md. Full-scope `ci_local.sh` before push.
     *(Done 2026-10-09 with a throwaway publisher feeding two patches 120 m apart; recorded in progress.md `## Implementation`. `ci_local.sh` is still owed before push.)*
