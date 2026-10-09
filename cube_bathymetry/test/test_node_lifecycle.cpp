@@ -40,6 +40,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -47,10 +48,12 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "lifecycle_msgs/msg/state.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "tf2_msgs/msg/tf_message.hpp"
 
 #include "cube_bathymetry/geo_sounding.h"
 #include "cube_bathymetry_node.hpp"
@@ -326,6 +329,52 @@ TEST_F(NodeLifecycle, FailedConfigureCanBeRetried)
   EXPECT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// The same retry with /tf traffic arriving from another node while the failed
+// attempts are replaced. FailedConfigureCanBeRetried above passes without the
+// `tf_listener_.reset()` before the buffer is replaced (the listener's thread has
+// nothing to deliver, so nothing touches the freed buffer). With a publisher
+// running, the old listener's subscription callback writes into the buffer that
+// the next configure is destroying: under AddressSanitizer this is a
+// heap-use-after-free on the unfixed code (confirmed in the pre-push review of
+// #164). WITHOUT a sanitizer it usually stays quiet, so this test only has teeth
+// in an ASan build (colcon build --cmake-args -DCMAKE_CXX_FLAGS="-fsanitize=address
+// -fno-omit-frame-pointer"); it still pins the behaviour (the node recovers).
+TEST_F(NodeLifecycle, FailedConfigureCanBeRetriedWhileTfIsPublished)
+{
+  auto helper = std::make_shared<rclcpp::Node>("tf_traffic_for_lifecycle_test");
+  auto pub = helper->create_publisher<tf2_msgs::msg::TFMessage>("/tf", rclcpp::QoS(100));
+  std::atomic<bool> stop{false};
+  std::thread publisher([&]() {
+      tf2_msgs::msg::TFMessage msg;
+      msg.transforms.resize(1);
+      msg.transforms[0].header.frame_id = "map";
+      msg.transforms[0].child_frame_id = "base_link";
+      msg.transforms[0].transform.rotation.w = 1.0;
+      while (!stop.load()) {
+        msg.transforms[0].header.stamp = helper->now();
+        pub->publish(msg);
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+      }
+    });
+
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("sonar_info_topic", std::string("not a valid topic"))}));
+  for (int attempt = 0; attempt < 300; ++attempt) {
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED)
+      << "attempt " << attempt;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+
+  const auto result =
+    node->set_parameter(rclcpp::Parameter("sonar_info_topic", std::string("sonar_info")));
+  ASSERT_TRUE(result.successful) << result.reason;
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+
+  stop = true;
+  publisher.join();
 }
 
 // ADR-0001 (never lose survey data): when the final flush in cleanup fails, the
