@@ -82,7 +82,8 @@ PolygonRasterResult rasterisePolygon(
   }
   if (largest > kMaxRasterCoordinate) {
     std::ostringstream os;
-    os << "polygon has a coordinate " << largest << " m from the raster origin, beyond the limit of "
+    os << "polygon has a coordinate " << largest <<
+      " m from the raster origin, beyond the limit of "
        << kMaxRasterCoordinate << " m (check the map frame and the vertices)";
     return fail(os.str());
   }

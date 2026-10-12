@@ -1129,7 +1129,8 @@ TEST_F(NodeTest, IncompatibleQosPublishersAreReportedByTopic)
     h.gridTopic("A"), rclcpp::QoS(10).best_effort());
   ASSERT_TRUE(h.spinUntil(
       [&]() {
-        return countLog("'" + h.prefix_ + "/survey_area': a publisher offers a QoS incompatible") >= 1 &&
+        return countLog("'" + h.prefix_ + "/survey_area': a publisher offers a QoS incompatible") >=
+               1 &&
                countLog("'" + h.gridTopic("A") + "': a publisher offers a QoS incompatible") >= 1;
       }, 20.0));
 }

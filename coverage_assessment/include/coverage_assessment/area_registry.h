@@ -65,7 +65,7 @@ namespace coverage_assessment
   /// rounded to float, the type `u` came in, before the comparison.
     bool meets(double u, double depth) const
     {
-      return static_cast<float>(u) <= static_cast<float>(allowed(depth));
+      return static_cast < float > (u) <= static_cast < float > (allowed(depth));
     }
   };
 

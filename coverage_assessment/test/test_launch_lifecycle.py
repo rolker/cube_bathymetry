@@ -19,8 +19,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-
-"""Launch-file test: the node is activated once, and a deactivate stays put.
+"""
+Launch-file test: the node is activated once, and a deactivate stays put.
 
 reset_cube_nodes.sh --consumer drives deactivate, cleanup, configure, activate.
 The launch file's own activation handler must not undo the first step (it used

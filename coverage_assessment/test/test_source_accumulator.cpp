@@ -482,10 +482,10 @@ TEST(SourceAccumulator, CircularBufferWithNonZeroStartIndexLandsCellForCell)
   ASSERT_NE(m.getStartIndex()(0), 0);
   ASSERT_NE(m.getStartIndex()(1), 0);
   for (grid_map::GridMapIterator it(m); !it.isPastEnd(); ++it) {
-    grid_map::Position p;
-    m.getPosition(*it, p);
-    m.at("elevation", *it) = static_cast<float>(std::floor(p.x()) * 1000.0 + std::floor(p.y()));
-    m.at("uncertainty", *it) = static_cast<float>(std::floor(p.x()) * 0.01);
+      grid_map::Position p;
+      m.getPosition(*it, p);
+      m.at("elevation", *it) = static_cast<float>(std::floor(p.x()) * 1000.0 + std::floor(p.y()));
+      m.at("uncertainty", *it) = static_cast<float>(std::floor(p.x()) * 0.01);
   }
   SourceAccumulator acc(1.0);
   const AddResult r = acc.add(m, Affine2());

@@ -65,7 +65,7 @@
 #define COVERAGE_LOG_THROTTLED(level, ...) \
   do { \
     if (throttle(__LINE__)) { \
-      RCLCPP_##level(get_logger(), __VA_ARGS__); \
+      RCLCPP_ ## level(get_logger(), __VA_ARGS__); \
     } \
   } while (0)
 
@@ -957,7 +957,8 @@ private:
       n(stats_.withheld_no_earth), n(stats_.withheld_map_moved),
       n(stats_.skipped_surface_unavailable),
       n(stats_.skipped_surface_stale), n(stats_.skipped_surface_too_far),
-      n(stats_.skipped_surface_misconfigured), stats_.cells_above_surface, n(stats_.callback_exceptions));
+      n(stats_.skipped_surface_misconfigured), stats_.cells_above_surface,
+        n(stats_.callback_exceptions));
   }
 
   void onTimer()
