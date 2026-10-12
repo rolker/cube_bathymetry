@@ -110,6 +110,15 @@ either applied below or listed under "Review disposition" at the end.
     and the first `grid` after the reset contains none of the previous window's cells; record in progress.md. Full-scope `ci_local.sh` before push.
     *(Done 2026-10-09 with a throwaway publisher feeding two patches 120 m apart; recorded in progress.md `## Implementation`. Full-scope `ci_local.sh` passed before push; the attestation is in `refs/notes/ci-local` and the run is recorded in progress.md.)*
 12. **Follow-up named, not built:** a `clear` service (draft below under Follow-ups). Filing the issue needs the owner's yes.
+13. **Stop path (added after the third Copilot pass, 2026-10-12, owner's decision to fix in this PR).** Live checks on the
+    PR build showed (i) SIGINT/SIGTERM, the way `ros2 launch` stops a node, shuts the context down with no lifecycle
+    transition, so `on_shutdown` never ran and every normal stop lost what the periodic save had not written (30 s on
+    BizzyBoat); (ii) a `shutdown` from ACTIVE flushed but left the timers, subscriptions and publishers running, so a
+    FINALIZED node kept publishing its catalog. Fix: `main()` runs `spinUntilStopped()` (flush after the executor
+    stops); `on_cleanup` and `on_shutdown` share `releaseConfiguredEntities()` and the stop paths share
+    `flushForStop()`. Same pass: `save_interval`/`catalog_interval` <= 0 fall back to defaults (as
+    `disk_serve_interval` already did), and `reset_cube_nodes.sh` refuses a node named twice or as both CUBE node and
+    consumer (case 11). Tests fail against the old code; live re-run in progress.md.
 
 ### PR (b): the `coverage_assessment` package (core first, wrapper last; after #406 is on `jazzy`)
 
@@ -192,7 +201,7 @@ either applied below or listed under "Review disposition" at the end.
 | File | Change |
 |---|---|
 | `cube_bathymetry/src/cube_bathymetry_node.hpp` | (a) class moved here (private to the package, not installed), `declareOnce`, state resets, release order, `sheet()` |
-| `cube_bathymetry/src/cube_bathymetry_node.cpp` | (a) thin `main()` |
+| `cube_bathymetry/src/cube_bathymetry_node.cpp` | (a) thin `main()`, running `spinUntilStopped()` (step 13) |
 | `cube_bathymetry/CMakeLists.txt` | (a) interface link target, `test_node_lifecycle` (own domain id), script test, install script |
 | `cube_bathymetry/package.xml` | (a) `exec_depend` `ros2lifecycle`, `ros2param` |
 | `cube_bathymetry/test/test_node_lifecycle.cpp` | (a) new: reconfigure, empty start, draft_dir characterization |
@@ -221,7 +230,7 @@ either applied below or listed under "Review disposition" at the end.
 | workspace 0008 (ROS 2 conventions) | Yes | Lifecycle node, parameters declared and validated, relative topic names, launch file |
 | workspace 0017 | Partly | Root `AGENTS.md` exists; `.agents/README.md` deferred (Open Questions) |
 | workspace 0018 (local-first CI) | Yes | Full-scope `ci_local` is the gate; for (b) it needs #406 on `jazzy`; no feature-branch pin committed |
-| project 0001 (eviction / never lose survey data) | Yes | Reset documented as not deleting disk data; flush happens in `on_deactivate`/`on_cleanup`; `draft_dir` reload semantics pinned by a test |
+| project 0001 (eviction / never lose survey data) | Yes | Reset documented as not deleting disk data; flush happens in `on_deactivate`/`on_cleanup`, on `shutdown` and on SIGINT/SIGTERM (step 13); `draft_dir` reload semantics pinned by a test |
 
 ## Consequences
 

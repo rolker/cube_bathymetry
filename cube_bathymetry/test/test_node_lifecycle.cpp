@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -551,25 +552,40 @@ TEST_F(NodeLifecycle, ContextShutdownFlushesUnsavedTiles)
   std::filesystem::remove_all(dir);
 }
 
-// A zero, negative or non-finite timer interval would make its wall timer fire
-// continuously and starve the executor; configure falls back to the default.
-TEST_F(NodeLifecycle, NonPositiveTimerIntervalsFallBackToDefaults)
+// A zero, negative, non-finite or sub-millisecond timer interval would make its
+// wall timer fire continuously and starve the executor, and a huge one makes
+// timer creation throw in on_activate; configure falls back to the default.
+class TimerIntervalFallback : public NodeLifecycle,
+  public ::testing::WithParamInterface<double>
+{
+};
+
+TEST_P(TimerIntervalFallback, UnusableIntervalsFallBackToDefaults)
 {
   const auto dir = makeTempDir();
   {
     auto node = std::make_shared<CubeBathymetry>(
       withParams({
       rclcpp::Parameter("draft_dir", dir.string()),
-      rclcpp::Parameter("catalog_interval", 0.0),
-      rclcpp::Parameter("save_interval", -1.0)}));
+      rclcpp::Parameter("catalog_interval", GetParam()),
+      rclcpp::Parameter("save_interval", GetParam())}));
     ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
     EXPECT_EQ(CubeBathymetryTestAccess::catalogInterval(*node), 5.0);
     EXPECT_EQ(CubeBathymetryTestAccess::saveInterval(*node), 30.0);
+    // The parameter store reports the value in use, not the rejected one.
+    EXPECT_EQ(node->get_parameter("catalog_interval").as_double(), 5.0);
+    EXPECT_EQ(node->get_parameter("save_interval").as_double(), 30.0);
     ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
     EXPECT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
   }
   std::filesystem::remove_all(dir);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+  NodeLifecycle, TimerIntervalFallback,
+  ::testing::Values(
+    0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+    std::numeric_limits<double>::infinity(), 1e300, 1e-10));
 
 // Cleanup releases the sheet and the catalog instead of holding them until the
 // next configure: a reset on a boat that has run for hours should not keep the

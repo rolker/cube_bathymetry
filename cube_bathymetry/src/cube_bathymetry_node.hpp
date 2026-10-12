@@ -396,14 +396,7 @@ public:
       "with bag recording. See #74.";
     save_interval_s_ =
       declareOnce<double>("save_interval", 30.0, save_interval_desc);
-    // A <= 0 or non-finite interval would make the save timer fire continuously
-    // and starve the executor (as for disk_serve_interval below).
-    if (!(save_interval_s_ > 0.0) || !std::isfinite(save_interval_s_)) {
-      RCLCPP_WARN(get_logger(),
-        "save_interval=%g is not a positive finite duration; "
-        "using default 30s", save_interval_s_);
-      save_interval_s_ = 30.0;
-    }
+    save_interval_s_ = usableIntervalOrDefault("save_interval", save_interval_s_, 30.0);
 
     if (!draft_dir_.empty()) {
       // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
@@ -559,14 +552,7 @@ public:
     // COMPLETE snapshot that drives anti-entropy reconciliation, and
     // `~/coverage_requests` lets a consumer ask for tiles it is missing/stale on.
     catalog_interval_s_ = declareOnce<double>("catalog_interval", 5.0);
-    // A <= 0 or non-finite interval would make the wall timer fire continuously
-    // and starve the executor (as for disk_serve_interval below).
-    if (!(catalog_interval_s_ > 0.0) || !std::isfinite(catalog_interval_s_)) {
-      RCLCPP_WARN(get_logger(),
-        "catalog_interval=%g is not a positive finite duration; "
-        "using default 5s", catalog_interval_s_);
-      catalog_interval_s_ = 5.0;
-    }
+    catalog_interval_s_ = usableIntervalOrDefault("catalog_interval", catalog_interval_s_, 5.0);
     // Disk-serve drain queue (#106): rate-limited from-disk catch-up of
     // evicted tiles requested by a consumer. interval x tiles_per_tick is the
     // catch-up throughput knob an operator tunes against the link budget
@@ -606,15 +592,8 @@ public:
     }
     disk_serve_queue_max_depth_ =
       depth_raw < 1 ? 64u : static_cast<std::size_t>(depth_raw);
-    const double interval_raw = declareOnce<double>("disk_serve_interval", 0.5);
-    if (!(interval_raw > 0.0) || !std::isfinite(interval_raw)) {
-      RCLCPP_WARN(get_logger(),
-        "disk_serve_interval=%g is not a positive finite duration; "
-        "using default 0.5s", interval_raw);
-      disk_serve_interval_s_ = 0.5;
-    } else {
-      disk_serve_interval_s_ = interval_raw;
-    }
+    disk_serve_interval_s_ = usableIntervalOrDefault(
+      "disk_serve_interval", declareOnce<double>("disk_serve_interval", 0.5), 0.5);
     // Dirty sub-window push (ADR-0001 section 4 sub-window addendum). ON by
     // default: the whole-tile refresh queue below removed the silent failure
     // mode that kept it opt-in, and the cost of leaving it off is measured, not
@@ -925,13 +904,45 @@ public:
         "lost with the process.", unsaved, draft_dir_.c_str());
     } else if (pending > 0) {
       // saveDirtyTiles' own report is throttled; the last flush must be visible.
+      // `pending` counts dirty grids, including any with no finite cell that
+      // saveDirtyTiles skips, so it is reported as pending, not as written.
       RCLCPP_INFO(get_logger(),
-        "Stopping: wrote the %zu tile(s) changed since the last save to %s.",
+        "Stopping: saved the changes since the last save (%zu tile(s) pending) to %s.",
         pending, draft_dir_.c_str());
     }
   }
 
 private:
+  /// Range of wall-timer intervals accepted from a parameter: 1 ms to one day.
+  static constexpr double kMinTimerIntervalSeconds = 0.001;
+  static constexpr double kMaxTimerIntervalSeconds = 86400.0;
+
+  /// A timer interval parameter is usable when it is finite and within
+  /// [kMinTimerIntervalSeconds, kMaxTimerIntervalSeconds]. Zero, negative, NaN or
+  /// sub-nanosecond values give a zero period, so the wall timer fires
+  /// continuously and starves the executor; a huge value overflows the nanosecond
+  /// period and makes timer creation throw in on_activate.
+  static bool isUsableTimerInterval(double seconds)
+  {
+    return std::isfinite(seconds) && seconds >= kMinTimerIntervalSeconds &&
+           seconds <= kMaxTimerIntervalSeconds;
+  }
+
+  /// Return @p value when it is a usable timer interval; otherwise warn, write
+  /// @p fallback back to the parameter so `ros2 param get` shows the interval
+  /// the timer really uses, and return @p fallback.
+  double usableIntervalOrDefault(const std::string & name, double value, double fallback)
+  {
+    if (isUsableTimerInterval(value)) {
+      return value;
+    }
+    RCLCPP_WARN(get_logger(),
+      "%s=%g is not a duration from %g s to %g s; using default %g s",
+      name.c_str(), value, kMinTimerIntervalSeconds, kMaxTimerIntervalSeconds, fallback);
+    set_parameter(rclcpp::Parameter(name, fallback));
+    return fallback;
+  }
+
   /// Release everything on_configure and on_activate created, so nothing of the
   /// old configuration can run afterwards. Shared by on_cleanup (after its final
   /// flush has succeeded) and on_shutdown (which cannot refuse). Safe to call
@@ -2373,11 +2384,22 @@ private:
 /// on_shutdown never runs; before this, every normal stop lost what the periodic
 /// save had not yet written (#164). The flush runs here, after the executor has
 /// stopped, so no callback can touch the sheet at the same time.
+///
+/// The executor must be single-threaded: spin() then returns only after the
+/// callback it is running has finished, which is what keeps the flush from
+/// racing a callback. If a callback throws out of spin(), the flush still runs
+/// (the executor has stopped by then) before the exception goes on.
 inline void spinUntilStopped(
-  const std::shared_ptr<CubeBathymetry> & node, rclcpp::Executor & executor)
+  const std::shared_ptr<CubeBathymetry> & node,
+  rclcpp::executors::SingleThreadedExecutor & executor)
 {
   executor.add_node(node->get_node_base_interface());
-  executor.spin();
+  try {
+    executor.spin();
+  } catch (...) {
+    node->flushForStop();
+    throw;
+  }
   node->flushForStop();
 }
 

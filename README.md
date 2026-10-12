@@ -87,7 +87,9 @@ ros2 run cube_bathymetry reset_cube_nodes.sh --consumer /coverage_assessment \
 ```
 
 or by hand, one node at a time (`ros2 lifecycle set <node> deactivate`, `cleanup`,
-`configure`, `activate`). The script:
+`configure`, `activate`). Name each node once: a node given twice, or as both a CUBE
+node and a `--consumer` (`/a/b`, `a/b` and `/a/b/` are the same node), is refused
+before anything is touched. The script:
 
 1. checks everything first: every node and `--consumer` must answer and be in a
    state the script can walk (`active`, `inactive` or `unconfigured`; a mistyped
@@ -162,6 +164,8 @@ none of the previous window's cells (`test_node_lifecycle`).
   were lost). Only a hard stop (SIGKILL, a crash, power loss) loses whatever the
   periodic save has not written; `ros2 launch` sends SIGKILL to a node that has not
   exited after its SIGINT and SIGTERM timeouts, so a flush slower than that is cut off.
+  Tile writes are not atomic yet: a stop that lands mid-write can leave that tile
+  file damaged, not just unsaved.
 - **Nothing is saved when `draft_dir` is empty.** That is what makes the sheet fresh,
   and it also means the reset **permanently discards the in-RAM survey**: the old
   window exists nowhere afterwards. Save or export what you want to keep first. With
