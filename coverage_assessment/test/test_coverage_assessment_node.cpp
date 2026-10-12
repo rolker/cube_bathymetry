@@ -585,7 +585,9 @@ TEST_F(NodeTest, SourceThatHasSentNothingScoresZeroAndKeepsItsSlot)
   EXPECT_DOUBLE_EQ(a.sources[1].area_meeting_standard, 0.0);
   EXPECT_DOUBLE_EQ(a.sources[1].area_unique, 0.0);
   EXPECT_DOUBLE_EQ(a.sources[0].area_unique, 100.0);
-  EXPECT_EQ(h.node_->stats().withheld_unplaced_source, 0u);
+  // The silent source was never flagged as unplaced (A may have been, briefly,
+  // before its transform reached the node).
+  EXPECT_EQ(countLog(h.gridTopic("D")), 0u);
 }
 
 // ---- (iv): the water surface is refused when stale or when the boat is far ----
