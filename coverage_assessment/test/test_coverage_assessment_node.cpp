@@ -716,6 +716,149 @@ TEST_F(NodeTest, ReconfigureEmptiesTheUnion)
       [&]() {h.publishGrid("A", grid);}));
 }
 
+// ---- the raster georeference is captured once ---------------------------------
+
+TEST_F(NodeTest, MapFrameMovingAfterTheCaptureWithholdsUntilReconfigured)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  auto send = [&]() {h.publishGrid("A", grid);};
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, send));
+  EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
+
+  // The map frame's origin jumps 5 m east (its sources' frames hang off it and move
+  // with it). Nothing may be re-projected silently: the node says so and withholds.
+  const Eigen::Isometry3d moved =
+    earthFromEnu(kLat0, kLon0, 0.0) * Eigen::Isometry3d(Eigen::Translation3d(5.0, 0.0, 0.0));
+  h.static_tf_->sendTransform(transformMsg("earth", "map", moved));
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().withheld_map_moved >= 1;}, 20.0, send));
+  EXPECT_GE(countLog("The map frame 'map' <- 'earth' moved by 5.000 m"), 1u);
+  h.spinFor(0.3, send);  // let anything already published drain
+  const std::size_t received = h.received_;
+  const uint64_t withheld = h.node_->stats().withheld_map_moved;
+  h.spinFor(1.5, send);
+  EXPECT_EQ(h.received_, received) << "an assessment was published after the map frame moved";
+  EXPECT_GE(h.node_->stats().withheld_map_moved, withheld + 5);
+
+  // A reconfigure recaptures. The area (latitude/longitude) now sits at map
+  // x in [-5, 5]; the grid, in a frame that moved with the map, covers x in [0, 10]:
+  // the overlap is 5 x 10 m.
+  ASSERT_EQ(h.node_->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.latest_.clear();
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 50.0;
+      }, 20.0, send));
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").area_total, 100.0);
+  EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
+}
+
+TEST_F(NodeTest, ASmallMotionOfTheMapFrameWithinTheToleranceIsNotMovement)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  auto send = [&]() {h.publishGrid("A", grid);};
+  ASSERT_TRUE(h.spinUntil([&]() {return h.received_ > 0;}, 20.0, send));
+  // 5 mm: inside the 1 cm tolerance.
+  h.static_tf_->sendTransform(transformMsg(
+      "earth", "map",
+      earthFromEnu(kLat0, kLon0, 0.0) * Eigen::Isometry3d(Eigen::Translation3d(0.005, 0.0, 0.0))));
+  const std::size_t received = h.received_;
+  h.spinFor(1.0, send);
+  EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
+  // ... still assessing: force a new assessment by changing the grid.
+  const auto bigger = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(14.0f, 0.25f));
+  EXPECT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > received;}, 20.0, [&]() {h.publishGrid("A", bigger);}));
+  EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
+}
+
+// ---- a source that went silent while unplaced does not halt scoring for ever -----
+
+TEST_F(NodeTest, SilentUnplacedSourceIsRetriedAndItsKeptGridIsFoldedIn)
+{
+  Harness::Options opt;
+  opt.sources = {"A", "C"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);  // c/map is not in TF
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid_a = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  const auto grid_c = makeGrid("c/map", {0, 0, 10, 5}, 1.0, flat(12.0f, 0.25f));
+  // C's grid is sent until the node has seen (and flagged) it, then C goes silent.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.node_->stats().grids_unplaced >= 1 && h.node_->stats().grids_placed >= 1;
+      }, 20.0, [&]() {
+        h.publishGrid("A", grid_a);
+        if (h.node_->stats().grids_unplaced == 0) {
+          h.publishGrid("C", grid_c);
+        }
+      }));
+  h.spinFor(0.5);
+  EXPECT_GT(h.node_->stats().withheld_unplaced_source, 0u);
+  EXPECT_EQ(h.received_, 0u);
+
+  // Its frame appears. Nothing more is sent by anybody: the retry finds the
+  // frame, folds in the grid it kept, and the first assessment credits C.
+  h.publishSourceFrame("c/map", 0.0, 0.0, 0.0);
+  ASSERT_TRUE(h.spinUntil([&]() {return h.received_ > 0;}, 20.0));
+  ASSERT_TRUE(h.first_.has_value());
+  EXPECT_DOUBLE_EQ(h.first_->sources[0].area_covered, 100.0);
+  EXPECT_EQ(h.first_->sources[1].source, "C");
+  EXPECT_DOUBLE_EQ(h.first_->sources[1].area_covered, 50.0);
+}
+
+// ---- a polygon beyond the coordinate bound is refused with a reason ----------------
+
+TEST_F(NodeTest, APolygonBeyondTheRasterCoordinateBoundIsRefusedWithAReason)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  // The raster frame's origin is 15000 km from the area (a map frame defined far
+  // off the survey: Earth's own geometry never gets a lat/lon this far in the
+  // tangent plane), so every vertex lands beyond the 1e7 m bound.
+  h.static_tf_->sendTransform(transformMsg(
+      "earth", "map",
+      earthFromEnu(kLat0, kLon0, 0.0) * Eigen::Isometry3d(Eigen::Translation3d(1.5e7, 0.0, 0.0))));
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  SurveyArea area = makeArea("far", {0, 0, 10, 10}, 0.5, 0.0, 1);
+  // makeArea places the rectangle through the unshifted frame; the shifted map
+  // frame therefore sees it 1.5e7 m away.
+  h.publishArea(area);
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().areas_rejected >= 1;}, 20.0));
+  EXPECT_GE(countLog("area 'far': polygon has a coordinate"), 1u);
+  EXPECT_GE(countLog("beyond the limit of"), 1u);
+  EXPECT_EQ(h.node_->stats().areas_rejected, 1u);
+  EXPECT_EQ(h.node_->stats().assessments_published, 0u);
+}
+
 // ---- survey areas: arrival ordering, unset standards, max_areas -------------------
 
 namespace

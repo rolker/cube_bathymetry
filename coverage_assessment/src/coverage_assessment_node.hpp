@@ -80,6 +80,8 @@ struct NodeStats
   /// timer ticks that did not assess, by reason
   uint64_t withheld_unplaced_source = 0;
   uint64_t withheld_no_earth = 0;
+  /// map_frame <- earth moved after the raster georeference was captured
+  uint64_t withheld_map_moved = 0;
   uint64_t skipped_surface_unavailable = 0;
   uint64_t skipped_surface_stale = 0;
   uint64_t skipped_surface_too_far = 0;
@@ -115,6 +117,11 @@ public:
   /// A change in the water-surface height smaller than this does not trigger a
   /// new assessment (metres).
   static constexpr double kSurfaceChangeThreshold = 0.01;
+
+  /// map_frame <- earth may differ from the captured raster georeference by this
+  /// much (metres, radians) before the node calls the map frame moved.
+  static constexpr double kGeorefTranslationTolerance = 0.01;
+  static constexpr double kGeorefRotationTolerance = 1.0e-6;
 
   /// Most definitions of one area id kept while the raster georeference is not
   /// available yet to project them (the oldest are dropped first).
@@ -208,6 +215,9 @@ private:
     bool placement_failed = false;
     /// The frame of the grid that could not be placed, for the log.
     std::string failed_frame;
+    /// That grid, kept so it can be folded in when its frame resolves (the
+    /// source may never send another one). Only the latest is kept.
+    std::optional<grid_map::GridMap> unplaced_grid;
     bool resolution_warned = false;
     bool uncertainty_warned = false;
     /// Last time each repeating warning was logged for this source: the throttle
@@ -413,7 +423,8 @@ private:
     areas_dirty_ = false;
     grids_changed_ = false;
     force_assessment_ = false;
-    have_map_from_earth_ = false;
+    have_georef_ = false;
+    georef_moved_ = false;
     have_last_surface_ = false;
     for (std::size_t i = 0; i < topics.size(); ++i) {
       sources_.push_back(std::make_unique<SourceState>(topics[i], resolved[i], cell_size_));
@@ -603,40 +614,55 @@ private:
     }
 
     const std::string frame = msg.header.frame_id;
-    Eigen::Isometry3d source_from_map;
-    try {
-      const auto t = tf_buffer_->lookupTransform(frame, map_frame_, tf2::TimePointZero);
-      source_from_map = tf2::transformToEigen(t);
-    } catch (const std::exception & e) {
+    Eigen::Isometry3d source_from_raster;
+    std::string why;
+    if (!sourceFromRaster(frame, &source_from_raster, &why)) {
       ++stats_.grids_unplaced;
       source.placement_failed = true;
       source.failed_frame = frame;
+      source.unplaced_grid = std::move(grid);
       if (mayWarn(&source.last_unplaced_warn)) {
         RCLCPP_WARN(get_logger(),
-          "Source '%s' (%s): cannot place its grid in frame '%s' (no transform from raster frame "
-          "'%s': %s). No assessment is published until one of its grids is placed; 'earth' is "
-          "absent from TF for about the first 10 s after a simulation starts, which is normal.",
-          source.name.c_str(), source.topic.c_str(), frame.c_str(), map_frame_.c_str(), e.what());
+          "Source '%s' (%s): cannot place its grid in frame '%s' (%s). No assessment is published "
+          "until a grid of that source is placed; 'earth' is absent from TF for about the first "
+          "10 s after a simulation starts, which is normal.",
+          source.name.c_str(), source.topic.c_str(), frame.c_str(), why.c_str());
       }
       return;
     }
+    foldGrid(source, grid, frame, source_from_raster);
+  }
 
-    const AddResult added = source.accumulator.add(grid, rasterToSourceAffine(source_from_map));
+  /// Fold a placed grid into its source's union. The source counts as placed from
+  /// here on, whether or not the grid itself turns out usable.
+  void foldGrid(
+    SourceState & source, const grid_map::GridMap & grid, const std::string & frame,
+    const Eigen::Isometry3d & source_from_raster)
+  {
+    source.placement_failed = false;
+    source.failed_frame.clear();
+    source.unplaced_grid.reset();
+
+    const AddResult added = source.accumulator.add(grid, rasterToSourceAffine(source_from_raster));
     if (added.status != AddStatus::kAdded) {
       ++stats_.grids_rejected;
       if (mayWarn(&source.last_rejected_warn)) {
-        RCLCPP_ERROR(get_logger(),
-          "Source '%s' (%s): grid in frame '%s' not used: %s", source.name.c_str(),
-          source.topic.c_str(), frame.c_str(),
-          added.status == AddStatus::kMissingElevationLayer ?
-          "it has no 'elevation' layer" : "its geometry or placement is unusable");
+        const std::string why = added.status == AddStatus::kMissingElevationLayer ?
+          "it has no 'elevation' layer" : added.reason;
+        // A footprint over the cap is a warning (it drops one message, the next
+        // may be fine); the rest are unusable input.
+        if (added.status == AddStatus::kFootprintTooLarge) {
+          RCLCPP_WARN(get_logger(), "Source '%s' (%s): grid in frame '%s' not used: %s",
+            source.name.c_str(), source.topic.c_str(), frame.c_str(), why.c_str());
+        } else {
+          RCLCPP_ERROR(get_logger(), "Source '%s' (%s): grid in frame '%s' not used: %s",
+            source.name.c_str(), source.topic.c_str(), frame.c_str(), why.c_str());
+        }
       }
       return;
     }
     ++stats_.grids_placed;
     source.have_grid = true;
-    source.placement_failed = false;
-    source.failed_frame.clear();
     grids_changed_ = true;
     if (!added.has_uncertainty_layer && !source.uncertainty_warned) {
       source.uncertainty_warned = true;
@@ -653,20 +679,114 @@ private:
     }
   }
 
-  // ---- assessment -----------------------------------------------------------
+  // ---- raster georeference ----------------------------------------------------
 
-  static bool sameTransform(const Eigen::Isometry3d & x, const Eigen::Isometry3d & y)
+  /// Capture the raster georeference, map_frame <- earth, at the first successful
+  /// lookup after configure. Polygons and sources are placed through this one
+  /// transform ever after, so the target and the accumulated history cannot drift
+  /// apart; the tick compares the live transform with it (checkGeorefMoved).
+  bool ensureGeoref(std::string * why)
   {
-    return (x.translation() - y.translation()).norm() < 1.0e-6 &&
-           (x.linear() - y.linear()).cwiseAbs().maxCoeff() < 1.0e-9;
+    if (have_georef_) {
+      return true;
+    }
+    try {
+      raster_from_earth_ = tf2::transformToEigen(
+        tf_buffer_->lookupTransform(map_frame_, "earth", tf2::TimePointZero));
+    } catch (const std::exception & e) {
+      *why = "no transform '" + map_frame_ + "' <- 'earth': " + e.what();
+      return false;
+    }
+    have_georef_ = true;
+    const Eigen::Vector3d o = raster_from_earth_.inverse().translation();
+    gz4d::GeoPointLatLongDegrees ll(gz4d::GeoPointECEF(o.x(), o.y(), o.z()));
+    RCLCPP_INFO(get_logger(),
+      "Raster georeference captured: '%s' <- earth, the frame origin at %.7f, %.7f (altitude "
+      "%.3f m). Survey areas and sources are placed through it until the node is reconfigured.",
+      map_frame_.c_str(), ll.latitude(), ll.longitude(), ll.altitude());
+    return true;
   }
+
+  /// source_from_raster for a grid frame: frame <- earth <- captured raster.
+  bool sourceFromRaster(
+    const std::string & frame, Eigen::Isometry3d * source_from_raster, std::string * why)
+  {
+    if (!ensureGeoref(why)) {
+      return false;
+    }
+    try {
+      const Eigen::Isometry3d source_from_earth = tf2::transformToEigen(
+        tf_buffer_->lookupTransform(frame, "earth", tf2::TimePointZero));
+      *source_from_raster = source_from_earth * raster_from_earth_.inverse();
+    } catch (const std::exception & e) {
+      *why = "no transform '" + frame + "' <- 'earth': " + e.what();
+      return false;
+    }
+    return true;
+  }
+
+  /// True while the map frame has moved since the capture. Latches: once moved,
+  /// nothing is published until a reconfigure recaptures. A live transform that
+  /// cannot be looked up is not evidence of movement; the captured one stays in use.
+  bool checkGeorefMoved()
+  {
+    if (!georef_moved_) {
+      Eigen::Isometry3d now;
+      try {
+        now = tf2::transformToEigen(
+          tf_buffer_->lookupTransform(map_frame_, "earth", tf2::TimePointZero));
+      } catch (const std::exception &) {
+        return false;
+      }
+      moved_shift_m_ = (now.translation() - raster_from_earth_.translation()).norm();
+      moved_angle_rad_ = std::fabs(
+        Eigen::AngleAxisd(raster_from_earth_.linear().transpose() * now.linear()).angle());
+      georef_moved_ = moved_shift_m_ > kGeorefTranslationTolerance ||
+        moved_angle_rad_ > kGeorefRotationTolerance;
+    }
+    if (georef_moved_) {
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
+        "The map frame '%s' <- 'earth' moved by %.3f m and %.2e rad since the raster georeference "
+        "was captured. The accumulated coverage and the survey areas are laid out in the captured "
+        "frame and no longer line up with the moved one, so nothing is published until the node "
+        "is reconfigured (deactivate, cleanup, configure, activate).",
+        map_frame_.c_str(), moved_shift_m_, moved_angle_rad_);
+    }
+    return georef_moved_;
+  }
+
+  /// Retry the lookup of every source whose latest grid could not be placed, so a
+  /// source that has gone silent does not hold the assessment for everyone for
+  /// ever: when its frame resolves, the kept grid is folded in and scoring resumes.
+  void retryUnplacedSources()
+  {
+    for (auto & source : sources_) {
+      if (!source->placement_failed) {
+        continue;
+      }
+      Eigen::Isometry3d source_from_raster;
+      std::string why;
+      if (!sourceFromRaster(source->failed_frame, &source_from_raster, &why)) {
+        continue;
+      }
+      if (source->unplaced_grid) {
+        const grid_map::GridMap grid = std::move(*source->unplaced_grid);
+        foldGrid(*source, grid, source->failed_frame, source_from_raster);
+      } else {
+        source->placement_failed = false;
+        source->failed_frame.clear();
+      }
+    }
+  }
+
+  // ---- assessment -----------------------------------------------------------
 
   /// Project the queued definitions with `map_from_earth` into the registry, in
   /// stamp order (arrival order within one stamp, so the last received wins), and
-  /// the accepted ones again when `reproject_all`. A definition the registry
-  /// refuses is reported and never displaces the accepted one; an id with no
-  /// accepted definition left is forgotten, which frees its max_areas slot.
-  void projectAreas(const Eigen::Isometry3d & map_from_earth, bool reproject_all)
+  /// A definition the registry refuses is reported and never displaces the
+  /// accepted one; an id with no accepted definition left is forgotten, which
+  /// frees its max_areas slot.
+  void projectAreas(const Eigen::Isometry3d & map_from_earth)
   {
     auto submit = [&](const RawArea & raw) {
         AreaDefinition def;
@@ -683,14 +803,6 @@ private:
     std::vector<std::string> dropped;
     for (const auto & id : area_order_) {
       AreaEntry & entry = areas_.at(id);
-      if (reproject_all && entry.accepted) {
-        const RegistryResult result = submit(*entry.accepted);
-        if (result.outcome == RegistryOutcome::kRejected) {
-          ++stats_.areas_rejected;
-          RCLCPP_ERROR(get_logger(), "Rejecting SurveyArea '%s' at the new origin: %s; the "
-            "previous projection is kept.", id.c_str(), result.reason.c_str());
-        }
-      }
       std::stable_sort(entry.pending.begin(), entry.pending.end(),
         [](const RawArea & x, const RawArea & y) {return x.stamp_ns < y.stamp_ns;});
       for (const RawArea & raw : entry.pending) {
@@ -796,10 +908,12 @@ private:
       registry_ ? registry_->areas().size() : static_cast<std::size_t>(0));
     RCLCPP_INFO(get_logger(),
       "Assessments: %lu published; ticks without one: %lu waiting for an unplaced source, %lu "
-      "without earth, %lu water surface unavailable, %lu stale, %lu tide boat too far; "
+      "without earth, %lu with the map frame moved, %lu water surface unavailable, %lu stale, "
+      "%lu tide boat too far; "
       "%zu cell(s) above the surface in the last assessment; %lu callback exception(s) caught.",
       n(stats_.assessments_published), n(stats_.withheld_unplaced_source),
-      n(stats_.withheld_no_earth), n(stats_.skipped_surface_unavailable),
+      n(stats_.withheld_no_earth), n(stats_.withheld_map_moved),
+      n(stats_.skipped_surface_unavailable),
       n(stats_.skipped_surface_stale), n(stats_.skipped_surface_too_far),
       stats_.cells_above_surface, n(stats_.callback_exceptions));
   }
@@ -811,6 +925,16 @@ private:
     }
     const rclcpp::Time now = get_clock()->now();
     logStatus(now);
+
+    std::string no_earth;
+    const bool have_georef = ensureGeoref(&no_earth);
+    if (have_georef) {
+      if (checkGeorefMoved()) {
+        ++stats_.withheld_map_moved;
+        return;
+      }
+      retryUnplacedSources();
+    }
 
     // A source whose latest grid could not be placed withholds everything: the
     // message cannot represent a failed source, and zeros would read as uncovered.
@@ -832,26 +956,16 @@ private:
     if (areas_.empty()) {
       return;
     }
-
-    Eigen::Isometry3d map_from_earth;
-    try {
-      map_from_earth = tf2::transformToEigen(
-        tf_buffer_->lookupTransform(map_frame_, "earth", tf2::TimePointZero));
-    } catch (const std::exception & e) {
+    if (!have_georef) {
       ++stats_.withheld_no_earth;
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
-        "Not assessing: cannot project the survey areas, no transform '%s' <- 'earth' (%s). "
-        "'earth' is absent from TF for about the first 10 s after a simulation starts, which is "
-        "normal.", map_frame_.c_str(), e.what());
+        "Not assessing: cannot project the survey areas, %s. 'earth' is absent from TF for about "
+        "the first 10 s after a simulation starts, which is normal.", no_earth.c_str());
       return;
     }
-    const bool origin_changed =
-      have_map_from_earth_ && !sameTransform(map_from_earth, map_from_earth_);
-    if (areas_dirty_ || !have_map_from_earth_ || origin_changed) {
-      map_from_earth_ = map_from_earth;
-      have_map_from_earth_ = true;
+    if (areas_dirty_) {
       areas_dirty_ = false;
-      projectAreas(map_from_earth, origin_changed);
+      projectAreas(raster_from_earth_);
       force_assessment_ = true;
     }
     if (registry_->areas().empty()) {
@@ -973,8 +1087,15 @@ private:
   bool areas_dirty_ = false;
   bool grids_changed_ = false;
   bool force_assessment_ = false;
-  Eigen::Isometry3d map_from_earth_ = Eigen::Isometry3d::Identity();
-  bool have_map_from_earth_ = false;
+  /// The raster georeference, map_frame <- earth, captured at the first
+  /// successful lookup after configure.
+  Eigen::Isometry3d raster_from_earth_ = Eigen::Isometry3d::Identity();
+  bool have_georef_ = false;
+  /// The live map_frame <- earth has moved off the captured one: latched until a
+  /// reconfigure.
+  bool georef_moved_ = false;
+  double moved_shift_m_ = 0.0;
+  double moved_angle_rad_ = 0.0;
   double last_surface_ = 0.0;
   bool have_last_surface_ = false;
   rclcpp::Time last_status_log_{0, 0, RCL_ROS_TIME};
