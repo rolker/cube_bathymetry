@@ -126,6 +126,15 @@ if(BUILD_TESTING)
   set_tests_properties(test_coverage_assessment_node PROPERTIES
     ENVIRONMENT "${COVERAGE_ISOLATED_TEST_ENV}")
 
+  # The launch file's activation handler: activate once after the first
+  # configure, and leave a later deactivate alone (reset_cube_nodes.sh --consumer).
+  find_package(launch_testing_ament_cmake REQUIRED)
+  add_launch_test(test/test_launch_lifecycle.py
+    TIMEOUT 120
+    ENV "ROS_DOMAIN_ID=85" "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+    "ROS_DISCOVERY_SERVER=" "ROS_STATIC_PEERS=" "FASTRTPS_DEFAULT_PROFILES_FILE="
+    "CYCLONEDDS_URI=")
+
   # The polygon and the grids must share one projection chain: pin the node's
   # vertex projection against cube_bathymetry's own (B8 (i)). Needs the built
   # cube_bathymetry package, which colcon builds first (test_depend).

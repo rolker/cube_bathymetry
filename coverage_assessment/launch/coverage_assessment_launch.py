@@ -72,11 +72,16 @@ def generate_launch_description():
             'params_file', default_value=default_params,
             description='YAML parameter file; grid_topics is required.'),
         node,
-        # Configure as soon as the process is up, activate once it is inactive.
+        # Configure as soon as the process is up, activate once that first
+        # configure has finished. start_state is what keeps this handler from
+        # firing again on a later transition into 'inactive': a deactivate
+        # (reset_cube_nodes.sh --consumer) must leave the node inactive, or the
+        # script's cleanup that follows it fails.
         RegisterEventHandler(OnProcessStart(
             target_action=node, on_start=[configure])),
         RegisterEventHandler(OnStateTransition(
-            target_lifecycle_node=node, goal_state='inactive',
+            target_lifecycle_node=node, start_state='configuring',
+            goal_state='inactive',
             entities=[LogInfo(msg='coverage_assessment configured, activating'),
                       activate])),
     ])
