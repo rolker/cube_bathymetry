@@ -159,4 +159,10 @@ if(BUILD_TESTING)
   endif()
 endif()
 
+# Downstream find_package(coverage_assessment) imports coverage_assessment_core:
+# register its export set and re-export the dependency its public interface
+# (grid_map_core headers/Eigen plugin) needs, as cube_bathymetry does.
+ament_export_dependencies(grid_map_core)
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+
 ament_package()
