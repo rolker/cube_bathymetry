@@ -24,7 +24,10 @@
 
 #include <Eigen/Geometry>
 
+#include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 #include "coverage_assessment/polygon_raster.h"
 #include "coverage_assessment/source_accumulator.h"
@@ -51,6 +54,42 @@ inline Point2 projectGeoPoint(
   const Eigen::Vector3d map_pt =
     map_from_earth * Eigen::Vector3d(ecef.x(), ecef.y(), ecef.z());
   return {map_pt.x(), map_pt.y()};
+}
+
+/// A geographic polygon (degrees) in local equirectangular metres about its mean
+/// latitude and first vertex, with no transform: east/north offsets from the first
+/// vertex, the longitude difference wrapped to +-180. NOT the assessment raster's
+/// frame (that needs map <- earth and is projectGeoPoint's job); it has the right
+/// size and shape to a fraction of a percent at survey scales, which is what the
+/// shape checks on arrival need (zero area, collinear, absurd extent).
+inline std::vector<Point2> localGeoPolygon(
+  const std::vector<std::pair<double, double>> & lat_lon_deg)
+{
+  constexpr double kEarthRadius = 6371008.8;
+  constexpr double kRadPerDeg = 3.14159265358979323846 / 180.0;
+  std::vector<Point2> out;
+  if (lat_lon_deg.empty()) {
+    return out;
+  }
+  double mean_lat = 0.0;
+  for (const auto & p : lat_lon_deg) {
+    mean_lat += p.first;
+  }
+  mean_lat /= static_cast<double>(lat_lon_deg.size());
+  const double cos_lat = std::max(std::cos(mean_lat * kRadPerDeg), 1.0e-3);
+  const double lat0 = lat_lon_deg.front().first;
+  const double lon0 = lat_lon_deg.front().second;
+  for (const auto & p : lat_lon_deg) {
+    double dlon = std::fmod(p.second - lon0, 360.0);
+    if (dlon > 180.0) {
+      dlon -= 360.0;
+    } else if (dlon < -180.0) {
+      dlon += 360.0;
+    }
+    out.push_back({dlon * kRadPerDeg * kEarthRadius * cos_lat,
+        (p.first - lat0) * kRadPerDeg * kEarthRadius});
+  }
+  return out;
 }
 
 /// The horizontal map of raster-frame metres into a source grid's frame, from

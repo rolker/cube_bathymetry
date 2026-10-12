@@ -56,6 +56,7 @@
 #include "coverage_assessment/area_registry.h"
 #include "coverage_assessment/assessment_raster.h"
 #include "coverage_assessment/coverage_assessor.h"
+#include "coverage_assessment/polygon_raster.h"
 #include "coverage_assessment/source_accumulator.h"
 #include "frame_chain.hpp"
 
@@ -136,7 +137,7 @@ public:
   static constexpr double kGeorefRotationTolerance = 1.0e-6;
 
   /// Most definitions of one area id kept while the raster georeference is not
-  /// available yet to project them (the oldest are dropped first).
+  /// available yet to project them (the lowest stamp is dropped first).
   static constexpr std::size_t kMaxPendingPerArea = 8;
 
   /// Upper bound of the max_areas parameter: the coverage_assessment publisher's
@@ -153,8 +154,11 @@ public:
   const NodeStats & stats() const {return stats_;}
 
   /// Test seam: called with the callback's name at the start of every guarded
-  /// callback ("grid callback", "survey_area callback", "assessment timer"); a
-  /// throw from it exercises the containment of an unexpected exception.
+  /// callback ("grid callback", "survey_area callback", "assessment timer") and
+  /// with "area registration" (a new id, between its two containers), "area
+  /// projection" (before the queued definitions are projected) and "grid fold"
+  /// (before a placed grid is added to its union); a throw from it
+  /// exercises the containment of an unexpected exception.
   void setFaultInjectorForTest(std::function<void(const char *)> injector)
   {
     fault_injector_ = std::move(injector);
@@ -536,14 +540,20 @@ private:
   void guarded(const char * what, F && body)
   {
     try {
-      if (fault_injector_) {
-        fault_injector_(what);
-      }
+      injectFault(what);
       body();
     } catch (const std::exception & e) {
       noteCallbackFailure(what, e.what());
     } catch (...) {
       noteCallbackFailure(what, "unknown exception");
+    }
+  }
+
+  /// Test seam: lets a test throw at a named point inside a callback.
+  void injectFault(const char * where)
+  {
+    if (fault_injector_) {
+      fault_injector_(where);
     }
   }
 
@@ -556,13 +566,16 @@ private:
 
   // ---- inputs ---------------------------------------------------------------
 
-  /// Checks what can be checked on arrival (vertex count, finite coordinates in
-  /// range) and queues the definition for projection. A definition that fails
-  /// them never touches what is held, and stamp ordering is judged against the
-  /// last definition the registry ACCEPTED, so neither a rejected update nor an
-  /// unvalidated one can displace or outrank a good one. The standard is not
-  /// checked: SurveyStandard.msg defines a negative, NaN or infinite a or b as
-  /// "not set", which is a state to score and publish, not to refuse.
+  /// Checks what can be checked on arrival with no transform and queues the
+  /// definition for projection: vertex count, finite coordinates in range, and the
+  /// SHAPE (zero area, collinear, absurd extent) on a local equirectangular
+  /// projection of the latitude/longitude ring. A definition that fails them never
+  /// touches what is held, and stamp ordering is judged against the last definition
+  /// the registry ACCEPTED, so neither a rejected update nor an unvalidated one can
+  /// displace or outrank a good one; only shape-valid definitions are queued, so a
+  /// burst of degenerate ones cannot push a valid one out of the queue. The
+  /// standard is not checked: SurveyStandard.msg defines a negative, NaN or infinite
+  /// a or b as "not set", which is a state to score and publish, not to refuse.
   void onArea(const marine_interfaces::msg::SurveyArea & msg)
   {
     ++stats_.areas_received;
@@ -571,6 +584,7 @@ private:
       reject(msg, "fewer than 3 vertices");
       return;
     }
+    std::vector<std::pair<double, double>> lat_lon;
     for (const auto & p : pts) {
       if (!std::isfinite(p.latitude) || !std::isfinite(p.longitude) ||
         std::fabs(p.latitude) > 90.0 || std::fabs(p.longitude) > 180.0)
@@ -578,6 +592,13 @@ private:
         reject(msg, "a vertex is not a finite latitude/longitude in range");
         return;
       }
+      lat_lon.emplace_back(p.latitude, p.longitude);
+    }
+    const PolygonRasterResult shape =
+      rasterisePolygon(localGeoPolygon(lat_lon), cell_size_, max_raster_cells_);
+    if (!shape.ok) {
+      reject(msg, "its shape is unusable (" + shape.error + ")");
+      return;
     }
     RawArea raw;
     raw.msg = msg;
@@ -588,17 +609,37 @@ private:
         reject(msg, "max_areas (" + std::to_string(max_areas_) + ") areas are already held");
         return;
       }
-      area_order_.push_back(msg.id);
+      // The entry first, the order list second: a throw between them must not
+      // leave an id in area_order_ that areas_.at() then fails on every tick.
       it = areas_.emplace(msg.id, AreaEntry{}).first;
+      try {
+        injectFault("area registration");
+        area_order_.push_back(msg.id);
+      } catch (...) {
+        areas_.erase(it);
+        throw;
+      }
     } else if (it->second.accepted && raw.stamp_ns < it->second.accepted->stamp_ns) {
-      RCLCPP_WARN(get_logger(),
-        "Ignoring SurveyArea '%s': its stamp is older than the definition held.", msg.id.c_str());
+      COVERAGE_LOG_THROTTLED(WARN,
+        "Ignoring SurveyArea '%s': its stamp is older than the definition held.",
+        msg.id.c_str());
       return;
     }
     auto & pending = it->second.pending;
     pending.push_back(std::move(raw));
     if (pending.size() > kMaxPendingPerArea) {
-      pending.erase(pending.begin());
+      // Over the bound: drop the definition with the LOWEST stamp (the earliest
+      // arrival among equals), the one stamp ordering would rank last anyway. The
+      // accepted definition is held apart and is never a candidate.
+      const auto lower_stamp =
+        [](const RawArea & x, const RawArea & y) {return x.stamp_ns < y.stamp_ns;};
+      const auto victim = std::min_element(pending.begin(), pending.end(), lower_stamp);
+      COVERAGE_LOG_THROTTLED(WARN,
+        "SurveyArea '%s': more than %zu definitions arrived before the georeference was "
+        "available; dropping the one with the lowest stamp (%lld ns).",
+        victim->msg.id.c_str(), kMaxPendingPerArea,
+        static_cast<long long>(victim->stamp_ns));  // NOLINT(runtime/int)
+      pending.erase(victim);
     }
     areas_dirty_ = true;
   }
@@ -637,15 +678,21 @@ private:
     Eigen::Isometry3d source_from_raster;
     std::string why;
     if (!sourceFromRaster(frame, &source_from_raster, &why)) {
-      ++stats_.grids_unplaced;
-      source.placement_failed = true;
+      // Kept either way: the source may never send another grid. Before the
+      // raster georeference is captured nothing can be placed at all, which is
+      // the startup wait for `earth`, reported by the timer: such a grid is
+      // neither counted as unplaced nor flagged, so it cannot shadow that notice.
       source.failed_frame = frame;
       source.unplaced_grid = std::move(grid);
+      if (!have_georef_) {
+        return;
+      }
+      ++stats_.grids_unplaced;
+      source.placement_failed = true;
       if (mayWarn(&source.last_unplaced_warn)) {
         RCLCPP_WARN(get_logger(),
           "Source '%s' (%s): cannot place its grid in frame '%s' (%s). No assessment is published "
-          "until a grid of that source is placed; 'earth' is absent from TF for about the first "
-          "10 s after a simulation starts, which is normal.",
+          "until a grid of that source is placed.",
           source.name.c_str(), source.topic.c_str(), frame.c_str(), why.c_str());
       }
       return;
@@ -654,16 +701,20 @@ private:
   }
 
   /// Fold a placed grid into its source's union. The source counts as placed from
-  /// here on, whether or not the grid itself turns out usable.
+  /// here on, whether or not the grid itself turns out usable; but only once the
+  /// accumulator has taken it: if add() throws, the kept grid and the unplaced
+  /// flag stay, and the next tick tries again. `grid` may be the kept grid
+  /// itself, so everything needed from it is read before it is released.
   void foldGrid(
-    SourceState & source, const grid_map::GridMap & grid, const std::string & frame,
+    SourceState & source, const grid_map::GridMap & grid, std::string frame,
     const Eigen::Isometry3d & source_from_raster)
   {
+    injectFault("grid fold");
+    const double resolution = grid.getResolution();
+    const AddResult added = source.accumulator.add(grid, rasterToSourceAffine(source_from_raster));
     source.placement_failed = false;
     source.failed_frame.clear();
-    source.unplaced_grid.reset();
-
-    const AddResult added = source.accumulator.add(grid, rasterToSourceAffine(source_from_raster));
+    source.unplaced_grid.reset();  // `grid` may refer into it: not used again below
     if (added.status != AddStatus::kAdded) {
       ++stats_.grids_rejected;
       if (mayWarn(&source.last_rejected_warn)) {
@@ -690,12 +741,12 @@ private:
         "Source '%s' (%s): its grids have no 'uncertainty' layer, so it can cover cells but "
         "never meet a standard.", source.name.c_str(), source.topic.c_str());
     }
-    if (!source.resolution_warned && std::fabs(grid.getResolution() - cell_size_) > 1.0e-6) {
+    if (!source.resolution_warned && std::fabs(resolution - cell_size_) > 1.0e-6) {
       source.resolution_warned = true;
       RCLCPP_WARN(get_logger(),
         "Source '%s' (%s): grid resolution %g m differs from cell_size %g m; cells are resampled "
         "onto the assessment lattice.", source.name.c_str(), source.topic.c_str(),
-        grid.getResolution(), cell_size_);
+        resolution, cell_size_);
     }
   }
 
@@ -773,23 +824,28 @@ private:
     return georef_moved_;
   }
 
-  /// Retry the lookup of every source whose latest grid could not be placed, so a
-  /// source that has gone silent does not hold the assessment for everyone for
+  /// Retry the placement of every source that holds a grid it could not place, so
+  /// a source that has gone silent does not hold the assessment for everyone for
   /// ever: when its frame resolves, the kept grid is folded in and scoring resumes.
+  /// A grid kept only because the georeference was missing becomes a genuinely
+  /// unplaced one here when the georeference is there but its frame is not.
   void retryUnplacedSources()
   {
     for (auto & source : sources_) {
-      if (!source->placement_failed) {
+      if (!source->placement_failed && !source->unplaced_grid) {
         continue;
       }
       Eigen::Isometry3d source_from_raster;
       std::string why;
       if (!sourceFromRaster(source->failed_frame, &source_from_raster, &why)) {
+        if (have_georef_ && !source->placement_failed) {
+          source->placement_failed = true;
+          ++stats_.grids_unplaced;
+        }
         continue;
       }
       if (source->unplaced_grid) {
-        const grid_map::GridMap grid = std::move(*source->unplaced_grid);
-        foldGrid(*source, grid, source->failed_frame, source_from_raster);
+        foldGrid(*source, *source->unplaced_grid, source->failed_frame, source_from_raster);
       } else {
         source->placement_failed = false;
         source->failed_frame.clear();
@@ -969,13 +1025,21 @@ private:
 
     std::string no_earth;
     const bool have_georef = ensureGeoref(&no_earth);
-    if (have_georef) {
-      if (checkGeorefMoved()) {
-        ++stats_.withheld_map_moved;
-        return;
-      }
-      retryUnplacedSources();
+    if (!have_georef) {
+      // Checked before anything about sources: until the georeference exists no
+      // grid can be placed, and "waiting for earth" is the whole story.
+      ++stats_.withheld_no_earth;
+      COVERAGE_LOG_THROTTLED(WARN,
+        "Not assessing: waiting for '%s' <- 'earth' (%s). Grids and survey areas are kept "
+        "meanwhile; 'earth' is absent from TF for about the first 10 s after a simulation "
+        "starts, which is normal.", map_frame_.c_str(), no_earth.c_str());
+      return;
     }
+    if (checkGeorefMoved()) {
+      ++stats_.withheld_map_moved;
+      return;
+    }
+    retryUnplacedSources();
 
     // A source whose latest grid could not be placed withholds everything: the
     // message cannot represent a failed source, and zeros would read as uncovered.
@@ -997,16 +1061,12 @@ private:
     if (areas_.empty()) {
       return;
     }
-    if (!have_georef) {
-      ++stats_.withheld_no_earth;
-      COVERAGE_LOG_THROTTLED(WARN,
-        "Not assessing: cannot project the survey areas, %s. 'earth' is absent from TF for about "
-        "the first 10 s after a simulation starts, which is normal.", no_earth.c_str());
-      return;
-    }
     if (areas_dirty_) {
-      areas_dirty_ = false;
+      // Cleared only once projected: a throw leaves the queued definitions
+      // flagged, so the next tick tries again instead of never projecting them.
+      injectFault("area projection");
       projectAreas(raster_from_earth_);
+      areas_dirty_ = false;
       force_assessment_ = true;
     }
     if (registry_->areas().empty()) {

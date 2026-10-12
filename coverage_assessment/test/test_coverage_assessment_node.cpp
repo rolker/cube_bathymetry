@@ -583,6 +583,93 @@ TEST_F(NodeTest, UnplacedSourceWithholdsEveryAssessmentUntilItIsPlaced)
   EXPECT_DOUBLE_EQ(h.first_->area_meeting_standard, 100.0);
 }
 
+// ---- startup: waiting for earth is reported as such ----------------------------------
+
+TEST_F(NodeTest, GridsBeforeEarthReportTheWaitNotAnUnplacedSource)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  // No TF at all: `earth` is absent, as for the first ~10 s of a simulation.
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().withheld_no_earth >= 3;}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  EXPECT_GE(h.node_->stats().grids_received, 1u);
+  EXPECT_EQ(h.node_->stats().grids_unplaced, 0u) << "waiting for earth is not an unplaced grid";
+  EXPECT_EQ(h.node_->stats().withheld_unplaced_source, 0u);
+  EXPECT_GE(countLog("waiting for 'map' <- 'earth'"), 1u);
+  EXPECT_EQ(countLog("cannot place its grid"), 0u);
+  EXPECT_EQ(h.received_, 0u);
+
+  // earth appears; the grid kept meanwhile is placed (one send is enough).
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0));
+  EXPECT_EQ(h.node_->stats().grids_unplaced, 0u);
+}
+
+TEST_F(NodeTest, ARejectedKeptGridIsLoggedWithItsFrame)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  grid.layers[0] = "not_elevation";  // kept while unplaced, then rejected when folded
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().withheld_no_earth >= 1;}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().grids_rejected >= 1;}, 20.0));
+  EXPECT_GE(countLog("grid in frame 'a/map' not used: it has no 'elevation' layer"), 1u);
+}
+
+TEST_F(NodeTest, AFailedFoldOfAKeptGridKeepsItForTheNextTick)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  int folds = 0;
+  h.node_->setFaultInjectorForTest([&folds](const char * what) {
+      if (std::string(what) == "grid fold" && folds++ == 0) {
+        throw std::runtime_error("injected grid fold");
+      }
+    });
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  // One send only, before earth exists: the node keeps it. The first fold, on
+  // the retry once earth is there, throws; the grid must survive that.
+  bool sent = false;
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().grids_received >= 1;}, 20.0,
+      [&]() {
+        if (!sent) {
+          sent = true;
+          h.publishGrid("A", grid);
+        }
+      }));
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0));
+  EXPECT_EQ(h.node_->stats().callback_exceptions, 1u);
+  EXPECT_GE(folds, 2);
+}
+
 // ---- (iii c): a source that has sent nothing scores zero ----------------------
 
 TEST_F(NodeTest, SourceThatHasSentNothingScoresZeroAndKeepsItsSlot)
@@ -1032,6 +1119,69 @@ TEST_F(NodeTest, ARejectedNewerAreaNeverDisplacesNorOutranksAValidOne)
   EXPECT_GE(countLog("older than the definition held"), 1u);
 }
 
+TEST_F(NodeTest, DegenerateAreasBeforeTfNeverEvictTheOnlyValidDefinition)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+
+  // No TF yet: one valid definition, then eight zero-area ones (three vertices
+  // each, valid coordinates, collinear) of the same id and newer stamps. The
+  // queue holds eight per id, so queuing them all evicted the valid one and every
+  // survivor then failed projection.
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  for (int k = 0; k < 8; ++k) {
+    SurveyArea flat_area = makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 10 + k);
+    flat_area.polygon.points.resize(3);
+    flat_area.polygon.points[1].latitude = flat_area.polygon.points[0].latitude;
+    flat_area.polygon.points[1].longitude = flat_area.polygon.points[0].longitude + 1.0e-4;
+    flat_area.polygon.points[2].latitude = flat_area.polygon.points[0].latitude;
+    flat_area.polygon.points[2].longitude = flat_area.polygon.points[0].longitude + 2.0e-4;
+    h.publishArea(flat_area);
+  }
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().areas_received == 9;}, 10.0));
+  EXPECT_EQ(h.node_->stats().areas_rejected, 8u);
+
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > 0;}, 20.0, [&]() {h.publishGrid("A", grid);}));
+  ASSERT_TRUE(h.first_.has_value());
+  EXPECT_DOUBLE_EQ(h.first_->area_total, 100.0);
+  EXPECT_EQ(h.first_->area.stamp.sec, 1);
+}
+
+TEST_F(NodeTest, QueueOverflowDropsTheLowestStampAndSaysSo)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+
+  // Before TF: the highest stamp (a 10 x 6 rectangle) arrives first, then eight
+  // more with lower stamps: nine in all, one over the queue bound. The lowest
+  // stamp goes (and is named); the arrival-order policy used to drop stamp 100.
+  h.publishArea(makeArea("area1", {0, 0, 10, 6}, 0.5, 0.0, 100));
+  for (int k = 1; k <= 8; ++k) {
+    h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, k));
+  }
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().areas_received == 9;}, 10.0));
+  EXPECT_GE(countLog("dropping the one with the lowest stamp (1000000000 ns)"), 1u);
+
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > 0;}, 20.0, [&]() {h.publishGrid("A", grid);}));
+  ASSERT_TRUE(h.first_.has_value());
+  EXPECT_EQ(h.first_->area.stamp.sec, 100);
+  EXPECT_DOUBLE_EQ(h.first_->area_total, 60.0);
+}
+
 TEST_F(NodeTest, AnUnsetStandardIsScoredAndPublishedNotRefused)
 {
   const double nan = std::numeric_limits<double>::quiet_NaN();
@@ -1137,6 +1287,62 @@ TEST_F(NodeTest, ExceptionsInCallbacksAreContainedCountedAndTheNodeKeepsWorking)
   EXPECT_GE(calls["assessment timer"], 2);
   EXPECT_GE(countLog("Unhandled exception"), 1u);
   EXPECT_GE(countLog("The node keeps running"), 1u);
+}
+
+TEST_F(NodeTest, AThrowWhileRegisteringANewAreaLeavesNoHalfRegisteredId)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  int registrations = 0;
+  h.node_->setFaultInjectorForTest([&registrations](const char * what) {
+      if (std::string(what) == "area registration" && registrations++ == 0) {
+        throw std::runtime_error("injected area registration");
+      }
+    });
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  const SurveyArea area = makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1);
+  // The first (transient_local) delivery throws in the middle of registering the
+  // id; the resend defines it. A half-registered id would make every later tick throw.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {
+        h.publishArea(area);
+        h.publishGrid("A", grid);
+      }));
+  EXPECT_EQ(h.node_->stats().callback_exceptions, 1u);
+}
+
+TEST_F(NodeTest, AThrowWhileProjectingAreasIsRetriedOnTheNextTick)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  int projections = 0;
+  h.node_->setFaultInjectorForTest([&projections](const char * what) {
+      if (std::string(what) == "area projection" && projections++ == 0) {
+        throw std::runtime_error("injected area projection");
+      }
+    });
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  // The area is sent once only: if the failed projection cleared the dirty flag
+  // the queued definition would never be projected and nothing would be scored.
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.node_->stats().callback_exceptions, 1u);
+  EXPECT_GE(projections, 2);
 }
 
 // ---- incompatible QoS is an ERROR naming the topic -------------------------------

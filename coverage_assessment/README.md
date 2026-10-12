@@ -151,8 +151,12 @@ the captured transform stays in use.
 
 **Startup wait for `earth`.** Nothing can be captured, projected or placed before
 `earth` is in TF, which is about the first 10 s after the simulation launches. Until then
-the node withholds with a throttled WARN that says this is normal; the latest grid of
-each source that arrives meanwhile is kept and placed once the frame resolves.
+the node withholds with a throttled WARN "waiting for `<map_frame>` <- `earth`" that says
+this is normal, counted as `withheld_no_earth` (checked before anything about the
+sources); the latest grid of each source that arrives meanwhile is kept and placed once the
+frame resolves. Such a grid is not counted as unplaced and does not raise the
+unplaced-source WARN below, which is for a grid whose own frame cannot be reached once the
+georeference exists.
 
 **A source that cannot be placed withholds the assessment.** `CoverageAssessment` cannot
 represent a failed source, and zeros would read as "uncovered", so:
@@ -260,7 +264,8 @@ A timer (`assessment_period`) assesses only when a grid was folded in, an area w
 added or changed, or the surface moved by more than 1 cm; so `coverage_grid` is
 published at most once per period. It does nothing, with a WARN, while any source is
 unplaced, while `map_frame <- earth` has not been captured, or while the water surface is
-refused; when `map_frame <- earth` has moved off the capture it does nothing, with an ERROR. The first tick after activation always assesses.
+refused; when `map_frame <- earth` has moved off the capture it does nothing, with an
+ERROR. The first tick after activation always assesses.
 
 ### Invalid input
 
@@ -272,11 +277,17 @@ than 1e7 m (in x or y, in the raster frame) from the raster origin, or a new id 
 or `b` means "not set" (above).
 
 Definitions are validated as they arrive and queued per id; the registry sees them in
-stamp order once `earth` is known. The node keeps, per id, the last **accepted**
-definition and its stamp: a rejected update never displaces it, and an update older than
-it is ignored with a WARN (on an equal stamp the last received wins). So a valid area
-followed by a newer invalid one, both arriving before the first assessment, still scores
-the valid one.
+stamp order once `earth` is known. The checks that need no transform run on arrival: the
+vertex count and ranges, and the shape (zero area, collinear vertices, a raster over
+`max_raster_cells`), measured on a local equirectangular projection of the latitude/longitude
+ring. So only shape-valid definitions are queued, and a burst of degenerate ones cannot push
+a valid one out; the checks that need the georeference (the 1e7 m bound) run when it is
+projected. The queue holds at most 8 definitions per id; beyond that the one with the lowest
+stamp is dropped with a throttled WARN naming the id and the stamp. The node keeps, per id,
+the last **accepted** definition and its stamp, apart from the queue (it is never evicted): a
+rejected update never displaces it, and an update older than it is ignored with a throttled
+WARN (on an equal stamp the last received wins). So a valid area followed by a newer invalid
+one, both arriving before the first assessment, still scores the valid one.
 
 A grid message that cannot be converted, has no `elevation` layer or has unusable geometry
 is dropped with a throttled ERROR, and so is one whose footprint reaches more than 1e7 m
@@ -316,7 +327,7 @@ runs the real node over a static TF broadcaster and synthetic grids on its own
 in different (one rotated) frames, withholding for an unplaced source, a silent source,
 a stale tide and a stale tide boat, a tide boat beyond the bound, a tide frame under
 `earth`, the reset, the map frame moving after the capture, the retry of a silent
-unplaced source, area arrival ordering, unset standards, `max_areas`, injected callback
+unplaced source, the startup wait for `earth`, area arrival ordering and queue overflow, unset standards, `max_areas`, injected callback
 exceptions, incompatible QoS, the configure refusals and the read-only parameters. The
 launch file has its own `launch_testing` test (`test_launch_lifecycle.py`, own
 `ROS_DOMAIN_ID` 85).

@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "coverage_assessment/source_accumulator.h"
@@ -206,8 +207,9 @@ TEST(FrameChain, ARotationBelowTheToleranceAboutTheMapOriginIsNotAMove)
   const Eigen::Isometry3d captured = makeEarthScaleMapFromEarth();
   const Eigen::Isometry3d earth_from_map = captured.inverse();
   Eigen::Isometry3d live_earth_from_map = earth_from_map;
-  live_earth_from_map.linear() =
-    earth_from_map.linear() * Eigen::AngleAxisd(1.6e-9, Eigen::Vector3d::UnitX()).toRotationMatrix();
+  const Eigen::Matrix3d tiny =
+    Eigen::AngleAxisd(1.6e-9, Eigen::Vector3d::UnitX()).toRotationMatrix();
+  live_earth_from_map.linear() = earth_from_map.linear() * tiny;
   const Eigen::Isometry3d live = live_earth_from_map.inverse();
   // The naive translation difference reads as a move of about a centimetre.
   EXPECT_GT((live.translation() - captured.translation()).norm(), 0.005);
@@ -240,12 +242,31 @@ TEST(FrameChain, ARotationAboveTheToleranceIsReportedInRadians)
   const Eigen::Isometry3d captured = makeEarthScaleMapFromEarth();
   const Eigen::Isometry3d earth_from_map = captured.inverse();
   Eigen::Isometry3d live_earth_from_map = earth_from_map;
-  live_earth_from_map.linear() =
-    earth_from_map.linear() * Eigen::AngleAxisd(2.0e-6, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  const Eigen::Matrix3d larger =
+    Eigen::AngleAxisd(2.0e-6, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  live_earth_from_map.linear() = earth_from_map.linear() * larger;
   double shift = -1.0;
   double angle = -1.0;
   coverage_assessment::mapFrameMovement(captured, live_earth_from_map.inverse(), &shift, &angle);
   EXPECT_NEAR(angle, 2.0e-6, 1e-12);
   EXPECT_GT(angle, 1.0e-6);
   EXPECT_LT(shift, 1e-6);
+}
+
+TEST(FrameChain, LocalGeoPolygonHasTheSizeAndShapeOfTheRing)
+{
+  // A 0.001 deg x 0.002 deg box at 43 N: about 111.2 m north-south and
+  // 2 * 111.2 * cos(43 deg) = 162.7 m east-west.
+  const std::vector<std::pair<double, double>> ring = {
+    {43.0, -70.0}, {43.0, -69.998}, {43.001, -69.998}, {43.001, -70.0}};
+  const auto local = coverage_assessment::localGeoPolygon(ring);
+  ASSERT_EQ(local.size(), 4u);
+  EXPECT_NEAR(local[0].x, 0.0, 1e-9);
+  EXPECT_NEAR(local[0].y, 0.0, 1e-9);
+  EXPECT_NEAR(local[1].x, 162.7, 0.5);
+  EXPECT_NEAR(local[2].y, 111.2, 0.2);
+  // The antimeridian: the difference of longitude is wrapped.
+  const auto wrapped = coverage_assessment::localGeoPolygon({{0.0, 179.999}, {0.0, -179.999}});
+  EXPECT_NEAR(wrapped[1].x, 222.4, 0.5);
+  EXPECT_TRUE(coverage_assessment::localGeoPolygon({}).empty());
 }
