@@ -541,3 +541,13 @@ Report-only run on the real four-boat sim (`demo_boats_launch.py enable_joystick
 Caveat: my own `drive.py` launch failed (bad path in my wrapper, no process ran), so the boats were not driven by the script. Coverage was still non-zero and grew on its own, so the sim boats move without the joystick feed; the reset checks do not depend on it.
 
 Everything started was stopped (process groups of my own launches, plus the domain-69 ros2 daemon).
+
+## Implementation
+
+**Copilot review fixes** (PR #166, all three findings valid)
+
+- 1dbbb26: the core target's export set was never registered. Added `ament_export_dependencies(grid_map_core)` and `ament_export_targets(... HAS_LIBRARY_TARGET)`. Proved with a throwaway downstream CMake project that does `find_package(coverage_assessment)`, includes `coverage_assessment/polygon_raster.h` and links `coverage_assessment::coverage_assessment_core` (builds and links).
+- f293ae6: the throttle used ROS time zero as "never logged". Now a `LogThrottle` (logged flag + steady_clock). New test holds the node clock at zero (`use_sim_time`, no /clock): 8 ticks give 1 log line (old code: 8).
+- edec637: new read_only `max_total_raster_cells` (default 4000000, >= 1), enforced in `AreaRegistry::update` on bounding-box cells (an update of a held id is judged with its old box removed); refusal is an ERROR naming the budget. Status line reports last pass duration and cells held. Tests: registry (accept to the budget, refuse beyond, update of a held id), node (refusal logged once), configure < 1 refused, read_only list, status line. README tables and plan updated.
+
+Tests: coverage_assessment 202 tests, 0 failures; cube_bathymetry 782 tests, 0 failures. Lint tests (uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257) part of those: clean.
