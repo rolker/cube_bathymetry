@@ -758,9 +758,7 @@ private:
       } catch (const std::exception &) {
         return false;
       }
-      moved_shift_m_ = (now.translation() - raster_from_earth_.translation()).norm();
-      moved_angle_rad_ = std::fabs(
-        Eigen::AngleAxisd(raster_from_earth_.linear().transpose() * now.linear()).angle());
+      mapFrameMovement(raster_from_earth_, now, &moved_shift_m_, &moved_angle_rad_);
       georef_moved_ = moved_shift_m_ > kGeorefTranslationTolerance ||
         moved_angle_rad_ > kGeorefRotationTolerance;
     }

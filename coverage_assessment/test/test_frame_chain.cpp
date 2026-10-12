@@ -170,3 +170,82 @@ TEST(FrameChain, GeodeticAltitudeRecoversTheHeightOfAnEcefPoint)
       1e-6);
   }
 }
+
+namespace
+{
+
+// A map <- earth at the Gulf of Maine: the translation is -R * origin, about the
+// Earth's radius long.
+Eigen::Isometry3d makeEarthScaleMapFromEarth()
+{
+  gz4d::GeoPointECEF origin(gz4d::GeoPointLatLongDegrees(43.07, -70.76, 0.0));
+  Eigen::Isometry3d earth_from_map = Eigen::Isometry3d::Identity();
+  earth_from_map.linear() =
+    (Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()) *
+    Eigen::AngleAxisd(-1.2, Eigen::Vector3d::UnitY())).toRotationMatrix();
+  earth_from_map.translation() = Eigen::Vector3d(origin.x(), origin.y(), origin.z());
+  return earth_from_map.inverse();
+}
+
+}  // namespace
+
+TEST(FrameChain, MapMovementIsZeroForTheSameTransform)
+{
+  const Eigen::Isometry3d t = makeEarthScaleMapFromEarth();
+  double shift = -1.0;
+  double angle = -1.0;
+  coverage_assessment::mapFrameMovement(t, t, &shift, &angle);
+  EXPECT_NEAR(shift, 0.0, 1e-9);
+  EXPECT_NEAR(angle, 0.0, 1e-12);
+}
+
+TEST(FrameChain, ARotationBelowTheToleranceAboutTheMapOriginIsNotAMove)
+{
+  // 1.6e-9 rad about the map's own origin turns the 6.4e6 m translation of
+  // map <- earth by 1 cm, but the frame is where it was.
+  const Eigen::Isometry3d captured = makeEarthScaleMapFromEarth();
+  const Eigen::Isometry3d earth_from_map = captured.inverse();
+  Eigen::Isometry3d live_earth_from_map = earth_from_map;
+  live_earth_from_map.linear() =
+    earth_from_map.linear() * Eigen::AngleAxisd(1.6e-9, Eigen::Vector3d::UnitX()).toRotationMatrix();
+  const Eigen::Isometry3d live = live_earth_from_map.inverse();
+  // The naive translation difference reads as a move of about a centimetre.
+  EXPECT_GT((live.translation() - captured.translation()).norm(), 0.005);
+
+  double shift = -1.0;
+  double angle = -1.0;
+  coverage_assessment::mapFrameMovement(captured, live, &shift, &angle);
+  EXPECT_LT(shift, 1e-6);
+  EXPECT_NEAR(angle, 1.6e-9, 1e-12);
+  EXPECT_LE(shift, 0.01);
+  EXPECT_LE(angle, 1.0e-6);
+}
+
+TEST(FrameChain, AFiveMetreOriginMoveIsReportedInMetres)
+{
+  const Eigen::Isometry3d captured = makeEarthScaleMapFromEarth();
+  const Eigen::Isometry3d earth_from_map = captured.inverse();
+  // 5 m along the map's own x axis.
+  const Eigen::Isometry3d live_earth_from_map =
+    earth_from_map * Eigen::Isometry3d(Eigen::Translation3d(5.0, 0.0, 0.0));
+  double shift = -1.0;
+  double angle = -1.0;
+  coverage_assessment::mapFrameMovement(captured, live_earth_from_map.inverse(), &shift, &angle);
+  EXPECT_NEAR(shift, 5.0, 1e-6);
+  EXPECT_NEAR(angle, 0.0, 1e-12);
+}
+
+TEST(FrameChain, ARotationAboveTheToleranceIsReportedInRadians)
+{
+  const Eigen::Isometry3d captured = makeEarthScaleMapFromEarth();
+  const Eigen::Isometry3d earth_from_map = captured.inverse();
+  Eigen::Isometry3d live_earth_from_map = earth_from_map;
+  live_earth_from_map.linear() =
+    earth_from_map.linear() * Eigen::AngleAxisd(2.0e-6, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  double shift = -1.0;
+  double angle = -1.0;
+  coverage_assessment::mapFrameMovement(captured, live_earth_from_map.inverse(), &shift, &angle);
+  EXPECT_NEAR(angle, 2.0e-6, 1e-12);
+  EXPECT_GT(angle, 1.0e-6);
+  EXPECT_LT(shift, 1e-6);
+}

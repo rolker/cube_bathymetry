@@ -138,7 +138,10 @@ to the `map_frame <- earth` transform to x, y (`src/frame_chain.hpp`, pinned aga
 **both** the polygon projection and the placement of every source (source frame to
 `earth` to the captured raster), so the target and the accumulated history are always in
 the same coordinates. Each timer tick compares the live `map_frame <- earth` with the
-captured one. If it moved by more than 1 cm or 1e-6 rad, the node logs an ERROR naming
+captured one: the distance between the two map origins (in earth coordinates, so a tiny
+rotation of the frame about its own origin is not read as a shift of the 6.4e6 m
+translation) against 1 cm, and the rotation between them against 1e-6 rad. If either is
+exceeded, the node logs an ERROR naming
 the frame and the shift and **withholds** everything (no `CoverageAssessment`, no
 `coverage_grid`, counted as `withheld_map_moved`) until it is reconfigured
 (deactivate, cleanup, configure, activate), which recaptures. Nothing is re-projected
@@ -256,8 +259,8 @@ cannot pose as a plausible verdict. The count is in the status line.
 A timer (`assessment_period`) assesses only when a grid was folded in, an area was
 added or changed, or the surface moved by more than 1 cm; so `coverage_grid` is
 published at most once per period. It does nothing, with a WARN, while any source is
-unplaced, while `map_frame <- earth` has not been captured (or has moved off the capture),
-or while the water surface is refused. The first tick after activation always assesses.
+unplaced, while `map_frame <- earth` has not been captured, or while the water surface is
+refused; when `map_frame <- earth` has moved off the capture it does nothing, with an ERROR. The first tick after activation always assesses.
 
 ### Invalid input
 

@@ -881,6 +881,34 @@ TEST_F(NodeTest, ASmallMotionOfTheMapFrameWithinTheToleranceIsNotMovement)
   EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
 }
 
+TEST_F(NodeTest, ATinyRotationOfTheMapFrameAboutItsOriginIsNotMovement)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  auto send = [&]() {h.publishGrid("A", grid);};
+  ASSERT_TRUE(h.spinUntil([&]() {return h.received_ > 0;}, 20.0, send));
+  // 1.6e-9 rad about the map's own origin: the frame stays where it is, but the
+  // translation of map <- earth (the Earth-radius vector, turned) changes by ~1 cm.
+  const Eigen::Isometry3d earth_from_map = earthFromEnu(kLat0, kLon0, 0.0) *
+    Eigen::Isometry3d(Eigen::AngleAxisd(1.6e-9, Eigen::Vector3d::UnitX()));
+  h.static_tf_->sendTransform(transformMsg("earth", "map", earth_from_map));
+  const std::size_t received = h.received_;
+  h.spinFor(2.0, send);
+  EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
+  // ... still assessing: a changed grid is scored.
+  const auto bigger = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(14.0f, 0.25f));
+  EXPECT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > received;}, 20.0, [&]() {h.publishGrid("A", bigger);}));
+  EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
+}
+
 // ---- a source that went silent while unplaced does not halt scoring for ever -----
 
 TEST_F(NodeTest, SilentUnplacedSourceIsRetriedAndItsKeptGridIsFoldedIn)

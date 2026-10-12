@@ -24,6 +24,8 @@
 
 #include <Eigen/Geometry>
 
+#include <cmath>
+
 #include "coverage_assessment/polygon_raster.h"
 #include "coverage_assessment/source_accumulator.h"
 #include "marine_autonomy/gz4d_geo.h"
@@ -66,6 +68,24 @@ inline Affine2 rasterToSourceAffine(const Eigen::Isometry3d & source_from_map)
   m.tx = source_from_map.translation().x();
   m.ty = source_from_map.translation().y();
   return m;
+}
+
+/// How far a live map <- earth transform has moved from a captured one.
+///
+/// `shift_m` is the distance between the two map ORIGINS in earth coordinates
+/// (the translations of the inverse transforms), and `angle_rad` the angle of the
+/// rotation between the two frames. The translation of map <- earth itself is
+/// the wrong thing to compare: it is -R * (origin in earth), so a rotation of
+/// 1.6e-9 rad turns the 6.4e6 m Earth-radius vector by 1 cm while the frame has
+/// not moved at all.
+inline void mapFrameMovement(
+  const Eigen::Isometry3d & captured_map_from_earth,
+  const Eigen::Isometry3d & live_map_from_earth, double * shift_m, double * angle_rad)
+{
+  *shift_m = (live_map_from_earth.inverse().translation() -
+    captured_map_from_earth.inverse().translation()).norm();
+  *angle_rad = std::fabs(Eigen::AngleAxisd(
+      captured_map_from_earth.linear().transpose() * live_map_from_earth.linear()).angle());
 }
 
 /// Geodetic (WGS84 ellipsoid) altitude, metres, of a point given in ECEF.
