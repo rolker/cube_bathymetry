@@ -100,6 +100,23 @@ if(BUILD_TESTING)
   ament_add_gtest(test_assessment_raster test/test_assessment_raster.cpp)
   target_link_libraries(test_assessment_raster coverage_assessment_core)
 
+  # The node, end to end over TF and synthetic grids (B8). Its own domain id and
+  # localhost-only discovery keep it from live boats and from parallel colcon tests
+  # (ROS_AUTOMATIC_DISCOVERY_RANGE replaces ROS_LOCALHOST_ONLY on jazzy; the id must
+  # be <= 101; cube_bathymetry's tests use 87, mru_transform 89, marine_web_view 101).
+  # Any discovery-server / static-peer setting inherited from the environment is
+  # blanked, as in cube_bathymetry's CUBE_ISOLATED_TEST_ENV.
+  set(COVERAGE_ISOLATED_TEST_ENV
+    "ROS_DOMAIN_ID=86;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+    "ROS_DISCOVERY_SERVER=;ROS_STATIC_PEERS=;FASTRTPS_DEFAULT_PROFILES_FILE=;CYCLONEDDS_URI=")
+  ament_add_gtest(test_coverage_assessment_node test/test_coverage_assessment_node.cpp
+    TIMEOUT 300)
+  target_include_directories(test_coverage_assessment_node PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(test_coverage_assessment_node coverage_assessment_node_link)
+  set_tests_properties(test_coverage_assessment_node PROPERTIES
+    ENVIRONMENT "${COVERAGE_ISOLATED_TEST_ENV}")
+
   # The polygon and the grids must share one projection chain: pin the node's
   # vertex projection against cube_bathymetry's own (B8 (i)). Needs the built
   # cube_bathymetry package, which colcon builds first (test_depend).
