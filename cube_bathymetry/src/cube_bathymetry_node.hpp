@@ -396,6 +396,14 @@ public:
       "with bag recording. See #74.";
     save_interval_s_ =
       declareOnce<double>("save_interval", 30.0, save_interval_desc);
+    // A <= 0 or non-finite interval would make the save timer fire continuously
+    // and starve the executor (as for disk_serve_interval below).
+    if (!(save_interval_s_ > 0.0) || !std::isfinite(save_interval_s_)) {
+      RCLCPP_WARN(get_logger(),
+        "save_interval=%g is not a positive finite duration; "
+        "using default 30s", save_interval_s_);
+      save_interval_s_ = 30.0;
+    }
 
     if (!draft_dir_.empty()) {
       // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
@@ -551,6 +559,14 @@ public:
     // COMPLETE snapshot that drives anti-entropy reconciliation, and
     // `~/coverage_requests` lets a consumer ask for tiles it is missing/stale on.
     catalog_interval_s_ = declareOnce<double>("catalog_interval", 5.0);
+    // A <= 0 or non-finite interval would make the wall timer fire continuously
+    // and starve the executor (as for disk_serve_interval below).
+    if (!(catalog_interval_s_ > 0.0) || !std::isfinite(catalog_interval_s_)) {
+      RCLCPP_WARN(get_logger(),
+        "catalog_interval=%g is not a positive finite duration; "
+        "using default 5s", catalog_interval_s_);
+      catalog_interval_s_ = 5.0;
+    }
     // Disk-serve drain queue (#106): rate-limited from-disk catch-up of
     // evicted tiles requested by a consumer. interval x tiles_per_tick is the
     // catch-up throughput knob an operator tunes against the link budget

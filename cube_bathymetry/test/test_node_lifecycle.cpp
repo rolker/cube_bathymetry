@@ -91,6 +91,9 @@ struct CubeBathymetryTestAccess
     n.catalog_builder_.update(probeIndex(), 5);
   }
 
+  static double catalogInterval(const CubeBathymetry & n) {return n.catalog_interval_s_;}
+  static double saveInterval(const CubeBathymetry & n) {return n.save_interval_s_;}
+
   /// Names of the fields that are NOT back at their fresh-node value.
   static std::vector<std::string> staleFields(const CubeBathymetry & n)
   {
@@ -544,6 +547,26 @@ TEST_F(NodeLifecycle, ContextShutdownFlushesUnsavedTiles)
       !std::filesystem::is_empty(dir / "draft"))
       << "stopping on a signal must write the tiles accumulated since the last save";
     EXPECT_TRUE(node->sheet()->dirtyGrids().empty());
+  }
+  std::filesystem::remove_all(dir);
+}
+
+// A zero, negative or non-finite timer interval would make its wall timer fire
+// continuously and starve the executor; configure falls back to the default.
+TEST_F(NodeLifecycle, NonPositiveTimerIntervalsFallBackToDefaults)
+{
+  const auto dir = makeTempDir();
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("draft_dir", dir.string()),
+      rclcpp::Parameter("catalog_interval", 0.0),
+      rclcpp::Parameter("save_interval", -1.0)}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(CubeBathymetryTestAccess::catalogInterval(*node), 5.0);
+    EXPECT_EQ(CubeBathymetryTestAccess::saveInterval(*node), 30.0);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    EXPECT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
   }
   std::filesystem::remove_all(dir);
 }
