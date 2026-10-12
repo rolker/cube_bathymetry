@@ -20,6 +20,7 @@ add_library(coverage_assessment_core
   src/source_accumulator.cpp
   src/area_registry.cpp
   src/coverage_assessor.cpp
+  src/assessment_raster.cpp
 )
 target_include_directories(coverage_assessment_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -50,6 +51,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_coverage_assessor test/test_coverage_assessor.cpp)
   target_link_libraries(test_coverage_assessor coverage_assessment_core)
+
+  ament_add_gtest(test_assessment_raster test/test_assessment_raster.cpp)
+  target_link_libraries(test_assessment_raster coverage_assessment_core)
 endif()
 
 ament_package()
