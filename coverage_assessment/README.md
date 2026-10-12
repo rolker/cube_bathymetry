@@ -278,11 +278,13 @@ or `b` means "not set" (above).
 
 Definitions are validated as they arrive and queued per id; the registry sees them in
 stamp order once `earth` is known. The checks that need no transform run on arrival: the
-vertex count and ranges, and the shape (zero area, collinear vertices, a raster over
-`max_raster_cells`), measured on a local equirectangular projection of the latitude/longitude
-ring. So only shape-valid definitions are queued, and a burst of degenerate ones cannot push
-a valid one out; the checks that need the georeference (the 1e7 m bound) run when it is
-projected. The queue holds at most 8 definitions per id; beyond that the one with the lowest
+vertex count and ranges, and the shape (zero area, collinear vertices), measured on a local
+equirectangular projection of the latitude/longitude ring (skipped within 5 degrees of a
+pole, where that projection collapses a ring into a line). So only shape-valid definitions
+are queued, and a burst of degenerate ones cannot push a valid one out. The checks that
+depend on the map frame run when the definition is projected: the 1e7 m bound and
+`max_raster_cells`, which bounds the raster in the map frame (an east/north bounding box can
+be far larger than the map-frame one when map is rotated, so it is not applied on arrival). The queue holds at most 8 definitions per id; beyond that the one with the lowest
 stamp is dropped with a throttled WARN naming the id and the stamp. The node keeps, per id,
 the last **accepted** definition and its stamp, apart from the queue (it is never evicted): a
 rejected update never displaces it, and an update older than it is ignored with a throttled

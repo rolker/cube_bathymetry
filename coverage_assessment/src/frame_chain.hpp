@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -90,6 +91,45 @@ inline std::vector<Point2> localGeoPolygon(
         (p.first - lat0) * kRadPerDeg * kEarthRadius});
   }
   return out;
+}
+
+/// Why a geographic polygon (degrees) cannot be a survey area, judged without TF,
+/// or an empty string when its shape is usable. Only true shape errors: zero area or
+/// collinear vertices, measured in localGeoPolygon's east/north metres. The cell cap
+/// (`max_raster_cells`) is deliberately NOT applied here: it bounds the raster in the
+/// map frame, and an east/north bounding box can be far larger than the map-frame one
+/// when map is rotated, so applying it on arrival would refuse valid areas. The real
+/// projection applies it. Near a pole the equirectangular approximation collapses a
+/// ring around the pole into a line, so the zero-area test is skipped there.
+inline std::string geoPolygonShapeError(
+  const std::vector<std::pair<double, double>> & lat_lon_deg)
+{
+  constexpr double kPolarLatitude = 85.0;
+  for (const auto & p : lat_lon_deg) {
+    if (std::fabs(p.first) > kPolarLatitude) {
+      return "";
+    }
+  }
+  const std::vector<Point2> pts = localGeoPolygon(lat_lon_deg);
+  double twice_area = 0.0;
+  double min_x = pts.front().x, max_x = pts.front().x;
+  double min_y = pts.front().y, max_y = pts.front().y;
+  for (std::size_t k = 0; k < pts.size(); ++k) {
+    const Point2 & a = pts[k];
+    const Point2 & b = pts[(k + 1) % pts.size()];
+    twice_area += a.x * b.y - b.x * a.y;
+    min_x = std::min(min_x, a.x);
+    max_x = std::max(max_x, a.x);
+    min_y = std::min(min_y, a.y);
+    max_y = std::max(max_y, a.y);
+  }
+  const double box = (max_x - min_x) * (max_y - min_y);
+  // Same relative test as rasterisePolygon, plus an absolute floor so a box of zero
+  // (all vertices on one line of latitude or longitude) is refused too.
+  if (!(std::fabs(twice_area) > 1e-12 * box) || !(std::fabs(twice_area) > 1e-9)) {
+    return "polygon has zero area";
+  }
+  return "";
 }
 
 /// The horizontal map of raster-frame metres into a source grid's frame, from

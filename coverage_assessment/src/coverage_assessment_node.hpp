@@ -594,10 +594,11 @@ private:
       }
       lat_lon.emplace_back(p.latitude, p.longitude);
     }
-    const PolygonRasterResult shape =
-      rasterisePolygon(localGeoPolygon(lat_lon), cell_size_, max_raster_cells_);
-    if (!shape.ok) {
-      reject(msg, "its shape is unusable (" + shape.error + ")");
+    // Shape only: the cell cap depends on the map frame, so the real projection
+    // applies it once the georeference is captured (see geoPolygonShapeError).
+    const std::string shape_error = geoPolygonShapeError(lat_lon);
+    if (!shape_error.empty()) {
+      reject(msg, "its shape is unusable (" + shape_error + ")");
       return;
     }
     RawArea raw;
@@ -635,8 +636,8 @@ private:
         [](const RawArea & x, const RawArea & y) {return x.stamp_ns < y.stamp_ns;};
       const auto victim = std::min_element(pending.begin(), pending.end(), lower_stamp);
       COVERAGE_LOG_THROTTLED(WARN,
-        "SurveyArea '%s': more than %zu definitions arrived before the georeference was "
-        "available; dropping the one with the lowest stamp (%lld ns).",
+        "SurveyArea '%s': more than %zu definitions arrived before they could be "
+        "projected; dropping the one with the lowest stamp (%lld ns).",
         victim->msg.id.c_str(), kMaxPendingPerArea,
         static_cast<long long>(victim->stamp_ns));  // NOLINT(runtime/int)
       pending.erase(victim);

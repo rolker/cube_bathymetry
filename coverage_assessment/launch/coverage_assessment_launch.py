@@ -43,7 +43,15 @@ from lifecycle_msgs.msg import Transition
 
 
 def _first_configure_matcher(node):
-    """Match the node's configuring -> inactive transition the first time only."""
+    """
+    Match the node's configuring -> inactive transition the first time only.
+
+    One-shot, so a later configure (reset_cube_nodes.sh --consumer runs cleanup and
+    configure itself) is not followed by an automatic activate that races the script.
+    The state lives in this closure, so it is per launch: a respawned process (the
+    node has no respawn today) would be configured by OnProcessStart but not
+    activated, because the matcher is spent.
+    """
     fired = []
 
     def matches(event):
