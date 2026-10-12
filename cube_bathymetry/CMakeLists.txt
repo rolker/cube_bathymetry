@@ -404,10 +404,11 @@ if(BUILD_TESTING)
   set_tests_properties(test_node_lifecycle PROPERTIES
     ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
 
-  # reset_cube_nodes.sh against a stub `ros2` on PATH (#164), 10 case groups:
+  # reset_cube_nodes.sh against a stub `ros2` on PATH (#164), 11 case groups:
   # consumer ordering, refusal on a non-empty draft_dir, fail-fast, preflight,
   # flag parsing, the never-configured probe, timeouts, stderr noise,
-  # `timeout --foreground` / SIGHUP / SIGPIPE, and probe-failure reporting. The
+  # `timeout --foreground` / SIGHUP / SIGPIPE, probe-failure reporting, and each
+  # node named once. The
   # stub never talks to DDS; the environment is blanked anyway so a future case
   # that does cannot reach live boats (same variables as the mru_transform test).
   add_test(NAME test_reset_cube_nodes

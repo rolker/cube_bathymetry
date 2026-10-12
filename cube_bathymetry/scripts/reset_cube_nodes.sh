@@ -16,6 +16,8 @@
 #                         while every CUBE node is quiesced, so it cannot absorb a
 #                         stale window from a node that has not been reset yet.
 #                         May be repeated.
+#   Each node is named once: a node given twice, or as both NODE and --consumer
+#   (`/a/b`, `a/b` and `/a/b/` are the same node), is a usage error.
 #   --allow-persistence   reset even though a node has a non-empty `draft_dir`.
 #                         Saved draft tiles are RELOADED on configure, so the sheet
 #                         is then NOT fresh; without this flag the script refuses.
@@ -81,6 +83,24 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ ${#nodes[@]} -gt 0 ] || { echo "$prog: no cube_bathymetry node given" >&2; usage; exit 2; }
+
+# Each node once. A CUBE node also given as a consumer would be reactivated in
+# step 2 and publish `grid` while the remaining consumers are still being reset,
+# which is exactly what the ordering exists to prevent; a node given twice would
+# be cycled twice. Compared fully qualified, as ROS names the node.
+qualified() { local n=${1%/}; [ "${n#/}" = "$n" ] && n="/$n"; echo "$n"; }
+declare -A listed_as=()
+list_once() {
+  local key
+  key=$(qualified "$1")
+  if [ -n "${listed_as[$key]:-}" ]; then
+    echo "$prog: $key is given twice (as ${listed_as[$key]} and as $2); name each node once. Nothing was changed." >&2
+    exit 2
+  fi
+  listed_as[$key]=$2
+}
+for node in "${nodes[@]}"; do list_once "$node" "a CUBE node"; done
+for node in "${consumers[@]}"; do list_once "$node" "a --consumer"; done
 
 # A dropped ssh session (SIGHUP) or a closed pipe (SIGPIPE) would otherwise kill
 # the script mid-reset, leaving boats without `grid` and nothing printed.

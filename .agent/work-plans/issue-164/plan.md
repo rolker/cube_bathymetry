@@ -197,7 +197,7 @@ either applied below or listed under "Review disposition" at the end.
 | `cube_bathymetry/package.xml` | (a) `exec_depend` `ros2lifecycle`, `ros2param` |
 | `cube_bathymetry/test/test_node_lifecycle.cpp` | (a) new: reconfigure, empty start, draft_dir characterization |
 | `cube_bathymetry/test/test_publish_equivalence.cpp` | (a) elevation sign test |
-| `cube_bathymetry/scripts/reset_cube_nodes.sh`, `cube_bathymetry/test/test_reset_cube_nodes.sh` | (a) new (stubbed-`ros2` test, ten cases) |
+| `cube_bathymetry/scripts/reset_cube_nodes.sh`, `cube_bathymetry/test/test_reset_cube_nodes.sh` | (a) new (stubbed-`ros2` test, eleven cases) |
 | `.agents/ci_local_upstream_extra.sh` | (a) new: `ci_local.sh` prune hook mirroring hosted CI's `AFTER_SETUP_UPSTREAM_WORKSPACE` (without it `ci_local.sh` cannot build the upstream monorepo; found when the attestation first ran, round 2) |
 | `README.md` | (a) elevation sign, reset section, event `draft_dir` note; (b) Nodes row, parameter table |
 | `coverage_assessment/**` | (b) new package: core, ROS wrapper, launch, tests, README |

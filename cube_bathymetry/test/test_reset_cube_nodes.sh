@@ -20,6 +20,8 @@
 #      do not kill the script mid-reset.
 #  10. a failing probe is not reported as a failed reset; a CUBE node that is not
 #      active is warned about in the preflight.
+#  11. a node given twice, or as both a CUBE node and a consumer (in any spelling
+#      of its name), is a usage error before anything is read or changed.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -272,6 +274,24 @@ case "$out" in *"the reset did not finish"*) fail "case 10a: a failed probe was 
 case "$out" in *"no CUBE node was reset"*"/boat4/cube_bathymetry"*) ;; *) fail "case 10a: no probe-specific message: $out" ;; esac
 case "$out" in *"warning: /boat4/cube_bathymetry is 'unconfigured'"*) ;; *) fail "case 10a: no preflight warning: $out" ;; esac
 [ "$(cat "$work/state/_boat1_cube_bathymetry")" = active ] || fail "case 10a: another node was reset"
+
+# --- 11. each node named once -----------------------------------------------------
+setup_nodes
+out=$("$script" --consumer /boat2/cube_bathymetry "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 2 ] || fail "case 11a: CUBE node also a consumer: expected exit 2, got $rc: $out"
+case "$out" in *"/boat2/cube_bathymetry"*"twice"*"Nothing was changed"*) ;; *) fail "case 11a: message: $out" ;; esac
+[ ! -s "$work/log" ] || fail "case 11a: transitions ran: $(cat "$work/log")"
+setup_nodes
+out=$("$script" --consumer boat2/cube_bathymetry/ "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 2 ] || fail "case 11b: same node in another spelling: expected exit 2, got $rc: $out"
+[ ! -s "$work/log" ] || fail "case 11b: transitions ran: $(cat "$work/log")"
+setup_nodes
+out=$("$script" "${cubes[@]}" /boat1/cube_bathymetry 2>&1); rc=$?
+[ "$rc" -eq 2 ] || fail "case 11c: CUBE node given twice: expected exit 2, got $rc: $out"
+setup_nodes
+out=$("$script" --consumer /coverage_assessment --consumer coverage_assessment "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 2 ] || fail "case 11d: consumer given twice: expected exit 2, got $rc: $out"
+[ ! -s "$work/log" ] || fail "case 11d: transitions ran: $(cat "$work/log")"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"
