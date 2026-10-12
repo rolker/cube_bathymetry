@@ -342,3 +342,49 @@ Context for the work (2026-10-12): live checks on the PR build, `.agent/scratchp
 - [x] (suggestion) stop log overcounted written tiles (Lens A) — flushForStop wording
 - [x] (suggestion) single-threaded executor is load-bearing for the no-race flush, undocumented (Lens B) — signature now takes SingleThreadedExecutor, comment added
 - [ ] (suggestion, OUT OF SCOPE) tile writes are not atomic, and one unreadable tile makes the configure-time load fail whole, after which saves overwrite earlier sessions' data in good tiles (Lens B; reproduced live, `.agent/scratchpad/cube164_live/corrupt_tile_probe.sh`: patch A's 260 cells gone after a session-2 write) — marine_tiled_raster_store saveTile (unh_marine_autonomy) + this node's load fallback; raised with the owner, needs its own issue
+
+## Implementation
+
+### Spike (B1)
+
+Throwaway scripts (not committed): `.agent/scratchpad/cube164b_spike/`. Run 2026-10-12 on the four-boat `demo_boats_launch.py enable_joysticks:=false`, ROS_DOMAIN_ID=61, driven with fake `sensor_msgs/Joy` on `<boat>/joy` (axes[1]=throttle, axes[3]=rudder; beluga left stationary). Grid topic is `<boat>/sensors/mbes/grid` (layers `elevation`, `uncertainty`). Two recordings of 60 s each, 11-12 grid messages per boat (slow 35 % throttle, then full speed).
+
+#### B0: merged #406 messages vs plan text (marine_interfaces on jazzy)
+- `CoverageAssessment`: header, `area` (SurveyArea), `cell_size`, `area_total`, `area_covered`, `area_meeting_standard` (plan prose and brief say "meets"; actual name `area_meeting_standard`), `sources[]` of `CoverageContribution{source, area_covered, area_meeting_standard, area_unique}`. All m^2, doubles. Per-source credit including `area_unique` is present.
+- `SurveyArea`: `id`, `stamp` (builtin_interfaces/Time, present), `polygon` (GeoPolygon, vertices in `polygon.points`, geographic_msgs/GeoPoint), `standard` (SurveyStandard{name,a,b}), `priority` (int16, not in plan). The polygon field is `polygon`, vertices at `area.polygon.points`.
+- Plan CONTRADICTED by message text (wrapper must follow the messages):
+  1. Covered = finite elevation (plan) vs finite **depth >= 0** (message). A cell above the surface is not covered. The plan's "negative depth evaluated at 0, counted and warned" (covered, evaluated at 0) conflicts: per #406 such a cell is uncovered. The warn count can stay as a diagnostic.
+  2. Competing sources for the standard: plan "smallest finite uncertainty across sources", message "only sources with finite depth >= 0 AND finite uncertainty >= 0 compete" (negative/infinite/nodata-sentinel excluded); ties go to the **shallower depth** (fail closed), plan says earlier configured source.
+  3. Covered but no competing source: does not meet (same as plan); but a per-source meeting needs that source's own finite depth >= 0 and uncertainty >= 0.
+  4. Standard fails closed: a=b=0, or a/b NaN/negative/infinite, means "not set", nothing meets (checked first). Plan only validates `SurveyArea` a/b at registry (reject negative/non-finite) and does not mention the all-zero default.
+  5. Frames: message says if ANY source frame has no georeference the whole assessment for that area fails (no CoverageAssessment, no coverage_grid for it); plan says a message without a transform is skipped with a WARN and the other sources are still scored. Reconcile (the plan's skip-and-count is per message from a source that has had transforms; a source never resolvable needs the "publish nothing" rule).
+  6. `sources[].source` = platform name if known else grid topic, unique within a message, stable order. Plan `source_names` falls back to topic: consistent.
+  7. `header.stamp` = assessment time; `cell_size` is a message field (plan has the parameter); area_total can be 0.
+- Invariants to test in B5: meeting <= covered <= total; per-source unique <= covered; sum of unique <= assessment covered; each source covered <= assessment covered.
+
+#### B1(a): h_surface - elevation
+`h_surface` = geodetic altitude (pyproj EPSG:4978 -> 4979) of the origin of `earth <- <boat>/map_tide`; `<boat>/map` origin altitude comes out -0.000 (altitude forced 0, as the plan says).
+- h_surface: -28.29..-28.36 m (the sim's tide, drifts ~0.05 m/min at tide_speed_factor 10). It is NOT the 48.88 m of bizzyboat.yaml (that is the Massabesic config); this is Portsmouth. The four boats' map_tide altitudes agree within 0.01 m.
+- Elevation of finite cells: -41 to -47.6 m (negative, ellipsoid height, below the surface at -28.3).
+- `h_surface - elevation` is POSITIVE everywhere: slow run last message min/p5/median/p95/max, bluefin 12.8/13.9/15.2/16.9/17.9, clownfish 12.7/15.0/16.4/17.6/19.3, urchin 13.0/14.1/15.5/17.2/18.9, beluga 14.6/15.9/16.7/17.2/17.6 m. Full-speed run (up to 33k cells per message): range 12.4..23.4 m. Cells with depth < 0: 0; < -1 m: 0 (all sources, both runs).
+- Against the ground-truth chart grid (US5NH02M.tiff via mbes_sim.bathy_grid, positive down) at the same cells (cell centre -> map -> earth -> lat/lon): (h_surface-elevation) minus chart depth has median +0.13..+0.19 m, p5..p95 about -0.7..+1.0 m; correlation 0.57-0.99 (lowest for beluga, which sits on a flat 1.5k-cell patch). So the sign is confirmed and the surface height is right to ~0.2 m (tide not removed from the chart, so the offset is not purely error).
+- Boat distance from its own map origin reached 247-323 m, so d^2/2R is about 5-8 mm here, consistent with the plan bound.
+
+#### B1(b): frames
+- Every grid `header.frame_id` = `<boat>/map` (bluefin/map, clownfish/map, urchin/map, beluga/map). `outer_start_index`/`inner_start_index` are 0 in every message. Layout: dim0 `column_index`, dim1 `row_index`, column-major; the grid centre is `info.pose.position`, cell (i,j) centre x = px + lx/2 - (i+0.5)*res.
+- `lookupTransform` among the four `<boat>/map` frames and `<boat>/map <- earth`: 20 of 20 succeed (latest time). Origins are 40.05, 80.14 and 120.22 m east of bluefin/map, relative rotation 0.0003..0.001 degrees, up offset < 1 mm. `earth` is not visible in the TF buffer for the first ~10 s after launch.
+
+#### B1(c): pinholes and the union
+- Pinhole share (NaN cell with finite neighbours on both sides in x or y, over finite+pinhole), per message: slow run 0.0-0.2 %; full speed 0.1-0.4 %. Looser definition (NaN with >=5 of 8 neighbours finite): 0.1-0.5 %. Real but tiny; no fill needed at this scale.
+- Stationary boat (beluga): the message geometry is identical every time (59x58, edge phase x 0.6265 y 0.4743 of the 1 m cell, in every one of 12 messages), so the same lattice repeats; its pinhole share is 0-0.4 %. Moving boats change phase every message (bluefin edge x phase 0.46..0.95).
+- Direct count (union of the finite 1 m cells painted on a 0.25 m lattice, in bluefin/map) vs pull-resampled latched 1 m union (my throwaway Python, lattice anchored in bluefin/map, every source taken through the real earth transforms), area in m^2 direct / pull: slow run bluefin 13362/13430, clownfish 14303/14280, urchin 13462/13491, beluga 1554/1554; full speed 31964/32012, 34093/33921, 33220/33220, 2691/2741. Ratio 0.995..1.019. Single message: pulled count equals the finite count exactly in every sampled message (ratio 1.000).
+- Caveat: the 200 m window never rolled during these runs (the boats stayed within ~330 m of start; each message contained essentially the whole survey), so the latched union was not exercised by a moving window here; the plan's B4 moving-window unit test remains the check.
+- Also seen: beluga (not driven) grew from 1554 to 2690 finite cells between runs; not investigated (its Joy axes were zero in both runs).
+
+#### Decisions touched by B1
+- Depth sign (`h_surface - elevation` positive down): CONFIRMED (0 negative cells; matches chart depth to ~0.2 m median).
+- Water surface read from `earth <- <ns>/map_tide` origin altitude: CONFIRMED (-28.3 m here, boats agree within 1 cm; one tide boat is enough in this sim).
+- Frame handling (per-source `<ns>/map`, one transform per message through earth): CONFIRMED (frame_ids are as predicted, all lookups work, relative rotations negligible, origins 40 m apart so the transform matters).
+- Pull resampling and union: CONFIRMED (within 2 % of a direct fine-lattice union).
+- Pinhole fill needed: CONTRADICTED for this sim (0.1-0.4 % at most): not needed for the event; a stationary boat repeats the same phase as predicted, but the share is too small to matter.
+- Covered = finite elevation, negative depth evaluated at 0: CONTRADICTED by #406 text (covered needs depth >= 0); see B0 items 1-2 for the plan edits before B2.
