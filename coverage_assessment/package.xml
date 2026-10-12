@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>coverage_assessment</name>
+  <version>0.0.0</version>
+  <description>Scores how much of a survey area one or more bathymetry grids cover and how much of that meets a survey standard (prototype under unh_marine_autonomy#403)</description>
+
+  <maintainer email="roland@ccom.unh.edu">Roland Arsenault</maintainer>
+
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake_ros</buildtool_depend>
+
+  <!-- The core library needs grid_map_core alone (plain C++, no ROS). The rest
+       belong to the ROS wrapper (lifecycle node, TF, message conversion) and are
+       declared with the package so the CI image bakes them (#164). -->
+  <depend>grid_map_core</depend>
+  <depend>grid_map_ros</depend>
+  <depend>grid_map_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_eigen</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>marine_autonomy</depend>
+  <depend>marine_interfaces</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
