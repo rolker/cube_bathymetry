@@ -17,6 +17,7 @@ find_package(grid_map_core REQUIRED)
 # structs, which keeps every judging rule unit-testable without a graph.
 add_library(coverage_assessment_core
   src/polygon_raster.cpp
+  src/source_accumulator.cpp
 )
 target_include_directories(coverage_assessment_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -41,6 +42,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_polygon_raster test/test_polygon_raster.cpp)
   target_link_libraries(test_polygon_raster coverage_assessment_core)
+
+  ament_add_gtest(test_source_accumulator test/test_source_accumulator.cpp)
+  target_link_libraries(test_source_accumulator coverage_assessment_core)
 endif()
 
 ament_package()
