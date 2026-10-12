@@ -232,6 +232,8 @@ public:
     bool dynamic_tide = false;
     double boat_x = 10.0;
     int64_t max_areas = 0;  // 0: the node's default
+    bool dynamic_boat = false;      // base_link comes from publishBoatNow(), stamped
+    bool tide_under_earth = false;  // map_tide hangs directly off earth
   };
 
   explicit Harness(const Options & opt)
@@ -288,8 +290,15 @@ public:
   {
     std::vector<geometry_msgs::msg::TransformStamped> statics;
     statics.push_back(transformMsg("earth", "map", earthFromEnu(kLat0, kLon0, 0.0)));
-    statics.push_back(transformMsg("map", "base_link", mapPose(opt_.boat_x, 0.0, 0.0)));
-    if (!opt_.dynamic_tide) {
+    if (!opt_.dynamic_boat) {
+      statics.push_back(transformMsg("map", "base_link", mapPose(opt_.boat_x, 0.0, 0.0)));
+    }
+    if (opt_.tide_under_earth) {
+      statics.push_back(transformMsg(
+          "earth", "map_tide",
+          earthFromEnu(kLat0, kLon0, 0.0) *
+          Eigen::Isometry3d(Eigen::Translation3d(0, 0, kSurface))));
+    } else if (!opt_.dynamic_tide) {
       statics.push_back(
         transformMsg("map", "map_tide", Eigen::Isometry3d(Eigen::Translation3d(0, 0, kSurface))));
     }
@@ -306,6 +315,14 @@ public:
   {
     geometry_msgs::msg::TransformStamped t = transformMsg(
       "map", "map_tide", Eigen::Isometry3d(Eigen::Translation3d(0, 0, kSurface)));
+    t.header.stamp = io_->now();
+    dynamic_tf_->sendTransform(t);
+  }
+
+  void publishBoatNow()
+  {
+    geometry_msgs::msg::TransformStamped t =
+      transformMsg("map", "base_link", mapPose(opt_.boat_x, 0.0, 0.0));
     t.header.stamp = io_->now();
     dynamic_tf_->sendTransform(t);
   }
@@ -672,6 +689,68 @@ TEST_F(NodeTest, TideBoatBeyondTheDistanceBoundSkipsScoring)
   ASSERT_TRUE(h.spinUntil(
       [&]() {return h.received_ > 0;}, 20.0, [&]() {h.publishGrid("A", grid);}));
   EXPECT_DOUBLE_EQ(h.latest_.at("area1").area_covered, 100.0);
+}
+
+TEST_F(NodeTest, StaleTideBoatTransformSkipsScoringToo)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.dynamic_boat = true;
+  opt.max_age = 4.0;
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  bool boat_alive = true;
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  auto each = [&]() {
+      if (boat_alive) {
+        h.publishBoatNow();
+      }
+      h.publishGrid("A", grid);
+    };
+  ASSERT_TRUE(h.spinUntil([&]() {return h.received_ > 0;}, 20.0, each));
+  EXPECT_EQ(h.node_->stats().skipped_surface_stale, 0u);
+
+  // The boat's transform stops: its distance from the tide frame's origin is
+  // unknown, which is refused like a stale tide.
+  boat_alive = false;
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().skipped_surface_stale >= 1;}, 30.0, each));
+  EXPECT_GE(countLog("the transform to the tide boat 'base_link'"), 1u);
+
+  // It returns: scoring resumes (a bigger grid forces a new assessment).
+  boat_alive = true;
+  const std::size_t received = h.received_;
+  const auto bigger = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(14.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > received;}, 20.0, [&]() {
+        h.publishBoatNow();
+        h.publishGrid("A", bigger);
+      }));
+}
+
+TEST_F(NodeTest, TideFrameDirectlyUnderEarthIsReportedAsMisconfigured)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.tide_under_earth = true;
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().skipped_surface_misconfigured >= 3;}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.node_->stats().skipped_surface_too_far, 0u) << "not the generic distance refusal";
+  EXPECT_EQ(h.received_, 0u);
+  EXPECT_GE(countLog("hangs directly off 'earth'"), 1u);
+  EXPECT_GE(countLog("map_tide"), 1u);
 }
 
 // ---- (v): deactivate -> cleanup -> configure empties the union ---------------

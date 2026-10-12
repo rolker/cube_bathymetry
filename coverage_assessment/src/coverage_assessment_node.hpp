@@ -85,6 +85,8 @@ struct NodeStats
   uint64_t skipped_surface_unavailable = 0;
   uint64_t skipped_surface_stale = 0;
   uint64_t skipped_surface_too_far = 0;
+  /// water_surface_frame's parent is `earth`: the distance bound cannot be measured
+  uint64_t skipped_surface_misconfigured = 0;
   /// exceptions caught at the top of a callback (the node kept running)
   uint64_t callback_exceptions = 0;
   /// cells with depth below -kNegativeDepthMargin in the last assessment, over
@@ -250,7 +252,8 @@ private:
     kOk,
     kUnavailable,
     kStale,
-    kTooFar
+    kTooFar,
+    kMisconfigured
   };
 
   void declareParameters()
@@ -830,6 +833,18 @@ private:
     }
   }
 
+  /// True when a transform is older than water_surface_max_age (`age` set). A
+  /// static transform carries stamp 0; there is no age to refuse.
+  bool tooOld(const geometry_msgs::msg::TransformStamped & t, double * age)
+  {
+    const rclcpp::Time stamp(t.header.stamp, get_clock()->get_clock_type());
+    if (stamp.nanoseconds() == 0) {
+      return false;
+    }
+    *age = (get_clock()->now() - stamp).seconds();
+    return *age > max_surface_age_s_;
+  }
+
   /// h_surface (geodetic altitude of the water-surface frame's origin) with the
   /// age and boat-distance refusals. `detail` carries the reason for the log.
   SurfaceStatus waterSurface(double * h_surface, std::string * detail)
@@ -842,15 +857,11 @@ private:
       *detail = std::string("no transform earth <- ") + water_surface_frame_ + ": " + e.what();
       return SurfaceStatus::kUnavailable;
     }
-    // A static transform carries stamp 0; there is no age to refuse.
-    const rclcpp::Time stamp(earth_from_surface.header.stamp, get_clock()->get_clock_type());
-    if (stamp.nanoseconds() != 0) {
-      const double age = (get_clock()->now() - stamp).seconds();
-      if (age > max_surface_age_s_) {
-        *detail = "the transform to '" + water_surface_frame_ + "' is " + std::to_string(age) +
-          " s old (water_surface_max_age " + std::to_string(max_surface_age_s_) + " s)";
-        return SurfaceStatus::kStale;
-      }
+    double age = 0.0;
+    if (tooOld(earth_from_surface, &age)) {
+      *detail = "the transform to '" + water_surface_frame_ + "' is " + std::to_string(age) +
+        " s old (water_surface_max_age " + std::to_string(max_surface_age_s_) + " s)";
+      return SurfaceStatus::kStale;
     }
     const Eigen::Isometry3d earth_from_frame = tf2::transformToEigen(earth_from_surface);
     const double h = geodeticAltitude(earth_from_frame.translation());
@@ -867,9 +878,23 @@ private:
         "' has no parent frame to measure the boat distance from";
       return SurfaceStatus::kUnavailable;
     }
+    if (parent == "earth") {
+      *detail = "'" + water_surface_frame_ + "' hangs directly off 'earth', so the boat distance "
+        "would be measured from the centre of the Earth (about 6.4e6 m) and always refused; "
+        "point water_surface_frame at a tide frame under a local frame (<boat>/map_tide under "
+        "<boat>/map) and water_surface_boat_frame at that boat's base_link";
+      return SurfaceStatus::kMisconfigured;
+    }
     double distance = 0.0;
     try {
       const auto t = tf_buffer_->lookupTransform(parent, boat_frame_, tf2::TimePointZero);
+      if (tooOld(t, &age)) {
+        *detail = "the transform to the tide boat '" + boat_frame_ + "' is " +
+          std::to_string(age) + " s old (water_surface_max_age " +
+          std::to_string(max_surface_age_s_) + " s), so its distance from '" + parent +
+          "' is unknown";
+        return SurfaceStatus::kStale;
+      }
       distance = std::hypot(t.transform.translation.x, t.transform.translation.y);
     } catch (const std::exception & e) {
       *detail = "cannot measure the distance of boat frame '" + boat_frame_ + "' from '" +
@@ -909,13 +934,13 @@ private:
     RCLCPP_INFO(get_logger(),
       "Assessments: %lu published; ticks without one: %lu waiting for an unplaced source, %lu "
       "without earth, %lu with the map frame moved, %lu water surface unavailable, %lu stale, "
-      "%lu tide boat too far; "
+      "%lu tide boat too far, %lu tide frame under earth; "
       "%zu cell(s) above the surface in the last assessment; %lu callback exception(s) caught.",
       n(stats_.assessments_published), n(stats_.withheld_unplaced_source),
       n(stats_.withheld_no_earth), n(stats_.withheld_map_moved),
       n(stats_.skipped_surface_unavailable),
       n(stats_.skipped_surface_stale), n(stats_.skipped_surface_too_far),
-      stats_.cells_above_surface, n(stats_.callback_exceptions));
+      n(stats_.skipped_surface_misconfigured), stats_.cells_above_surface, n(stats_.callback_exceptions));
   }
 
   void onTimer()
@@ -994,6 +1019,12 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
           "Not scoring: %s. Grids keep accumulating; the last assessment stays published.",
           detail.c_str());
+        return;
+      case SurfaceStatus::kMisconfigured:
+        ++stats_.skipped_surface_misconfigured;
+        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
+          "Not scoring: the water surface is misconfigured: %s. Grids keep accumulating; the last "
+          "assessment stays published.", detail.c_str());
         return;
     }
 
