@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.14.4)
 project(coverage_assessment)
 
+# colcon supplies no CMAKE_BUILD_TYPE by default, which builds at -O0: one
+# assessment pass over 1e6 cells x 4 sources took 0.9 s there against 0.1 s at
+# -O2. Default to an optimized build when the workspace didn't pick one (same
+# block as cube_bathymetry's).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Default optimized build" FORCE)
+  message(STATUS "coverage_assessment: defaulting CMAKE_BUILD_TYPE to RelWithDebInfo")
+endif()
+
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
