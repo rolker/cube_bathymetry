@@ -89,10 +89,13 @@ ros2 run cube_bathymetry reset_cube_nodes.sh --consumer /coverage_assessment \
 or by hand, one node at a time (`ros2 lifecycle set <node> deactivate`, `cleanup`,
 `configure`, `activate`). The script:
 
-1. checks everything first, changing nothing: every node and `--consumer` must
-   answer and be in a state the script can walk (`active`, `inactive` or
-   `unconfigured`; a mistyped name or a finalized node stops the run here), and it
-   **refuses** if any CUBE node has a `draft_dir` set (see below);
+1. checks everything first: every node and `--consumer` must answer and be in a
+   state the script can walk (`active`, `inactive` or `unconfigured`; a mistyped
+   name or a finalized node stops the run here), and it **refuses** if any CUBE
+   node has a `draft_dir` set (see below). These checks change nothing, with one
+   exception: a CUBE node that was never configured is configured and cleaned up
+   to read its `draft_dir` (described below), and if that probe fails part way the
+   node can be left `inactive`;
 2. walks every CUBE node to `unconfigured` (an already-inactive node is fine);
 3. walks each `--consumer` node to `unconfigured` and back to `active`, while no
    CUBE node is publishing, so a consumer cannot absorb a stale window from a node
@@ -115,7 +118,9 @@ probe, not as a failed reset. A node that was never
 configured has no readable `draft_dir` yet (parameters are declared at configure), so
 once every other check has passed the script configures it, reads the parameters and
 puts it back to `unconfigured`, one node at a time; a refusal at that point has still
-reset nothing.
+reset nothing. If a transition or a read fails during that probe, the node may be
+left `inactive` (configured); the script says so, and re-running the same command
+reads it normally.
 
 **Do not run it underway.** Between step 2 and step 4 the named boats publish no
 `grid`, which is the collision-avoidance grid, and each `ros2` call takes seconds, so
