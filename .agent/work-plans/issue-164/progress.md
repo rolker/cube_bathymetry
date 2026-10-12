@@ -415,3 +415,38 @@ Built `coverage_assessment/` (plain C++ over grid_map_core + std, no ROS, no mes
 - Message fields: `area_meeting_standard` (not "meets"); `CoverageContribution.area_unique`; `header.stamp` is assessment time. `cells_above_surface` is the count to log (throttled) with the surface height used.
 - Unit numbers are all doubles m^2 = cells x cell_size^2.
 - Core headers are `.h` under `include/coverage_assessment/` (installed); test fixtures in `test/message_fixtures.h`. Note ament_uncrustify here indents namespace contents (that is what cube_bathymetry's files look like too) and cpplint wants two spaces before trailing comments, so member docs go on the line above.
+
+## Implementation
+
+### PR (b) steps B7-B9: the ROS wrapper, its tests, the docs (2026-10-12 12:23 -04:00)
+
+Built on the B2-B6 core (unchanged). Seven commits on feature/issue-164, none pushed:
+
+- `5896ca7` lifecycle node (`src/coverage_assessment_node.hpp`, thin `main`), `src/frame_chain.hpp`, launch file, example YAML, install rules, exec depends
+- `94fc044` `test_frame_chain` (B8 i)
+- `ef40e62` per-source warning throttles (found by the withholding test)
+- `2c97c16` `test_coverage_assessment_node` (B8 ii-v + refusals + read_only + resolution warning)
+- `48f1524` status line carries skip reasons and above-surface count
+- `99ab44d` test race fix (startup)
+- `43aac99` docs: `coverage_assessment/README.md`, top-level Nodes row + parameter section, reset text
+
+**What was built.** Lifecycle node `coverage_assessment`: all 11 parameters `read_only`, declared once in the constructor (so no re-declare on a second configure; a wrong-typed override fails at construction, loudly, rather than being swallowed in a transition). Configure fails with a reason on empty/empty-entry/duplicate `grid_topics`, a `source_names` of a different length, duplicate resolved names, and non-usable numeric parameters; whatever was created before a failure is released. Placement state in the wrapper as the plan says (no grid yet = zero; latest grid unplaced = flag, withhold everything with a WARN naming every unplaced source and frame, resume when placed). Water surface = altitude of the origin of `earth <- water_surface_frame`; refusals: stale (static transforms, stamp 0, have no age), unavailable, boat beyond the bound (distance = horizontal distance of `water_surface_boat_frame` from the origin of the tide frame's TF parent via `BufferCore::_getParent`; fail closed when parent or boat frame is missing). Outputs, QoS and frame as the plan's Output decision. Release order: timer, subs, publishers, TF listener, TF buffer, sources, registry, areas. Counters (`stats()`) back the tests and the 10 s status line.
+
+**Tests.** `./sensors_ws/test.sh coverage_assessment`: `Summary: 173 tests, 0 errors, 0 failures, 20 skipped` (cppcheck cases skip themselves; uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257 pass). `./sensors_ws/test.sh cube_bathymetry`: `Summary: 994 tests, 0 errors, 0 failures, 115 skipped`. New gtest cases: 3 in `test_frame_chain`, 9 in `test_coverage_assessment_node` (own ROS_DOMAIN_ID 86, localhost-only). Exact numbers in the node test: area map [5,25]x[0,10] = 200 cells, standard a=0.5; source A (frame a/map, 10 m east) covers 150 / meets 50 / unique 100; source B (frame b/map, moved (30,5) and yawed 90 degrees) covers 100 / meets 100 / unique 50; union covered 200, meeting 150; coverage_grid 20x10 with 150 ones, 50 zeros, 0 NaN. Mutation checks (not committed): not withholding on an unplaced source, using an identity source transform, and skipping the age check each make the matching tests fail. The node test was run 8 times in a row after the last fix with no failure.
+
+**Deviations from the plan, and why.**
+1. `coverage_assessment` publisher depth is a fixed 100 (the same as `survey_area`), not "number of areas held": a publisher's depth cannot follow a changing count without recreating the publisher. A late consumer therefore receives up to the last 100 assessments, oldest first, possibly with older repeats of an area before the newest; documented in the README.
+2. `test_frame_chain` needs the built cube_bathymetry package: `package.xml` has `test_depend cube_bathymetry`, CMake uses `find_package(cube_bathymetry QUIET)` and, if it is missing, warns and registers a FAILING test (never a silent skip). `./sensors_ws/build.sh coverage_assessment` alone in a fresh worktree therefore needs `cube_bathymetry` built first (colcon `--packages-up-to` does it). Hosted CI builds the repo so the order is automatic; `.github/ci/Dockerfile` already carries both packages.
+3. Parameters are declared in the constructor (plan: "declared in the constructor"), not through `declareOnce` in configure as in `cube_bathymetry`; same effect, one declaration.
+4. Placement flag: only "transform unavailable" sets it. A grid with no elevation layer, unusable geometry or that cannot be converted is dropped with a throttled ERROR and counted, but does not withhold (the earlier union is still valid).
+5. Timer-WARN throttles are per source for per-message warnings; the withholding WARN is one call-site throttle (10 s) listing all unplaced sources.
+
+**For B10's live sim check.**
+- Launch with `config/coverage_assessment.yaml`: its topics (`/<boat>/sensors/mbes/grid`), frames (`bluefin/map`, `bluefin/map_tide`, `bluefin/base_link`) and boat names come from the B1 spike and the YAML header, NOT verified in this step. Check `ros2 topic list`, that `bluefin/base_link` exists (otherwise the node withholds with "cannot measure the distance"), and that `survey_area_topic` matches what the scorer publishes.
+- `earth` absent for ~10 s: expect the "not assessing" WARNs and no outputs for that long, then outputs.
+- Depth sign and plausibility across the four boats; the status line (every 10 s) must show `0 cell(s) above the surface`.
+- With all four boats driving: union cells and MB in the status line; time one assessment pass at event scale (not measured here; the `assessAll` cost is the per-area mask times sources).
+- Reset: `reset_cube_nodes.sh --consumer /coverage_assessment ...` then confirm areas return from the latched topic and coverage restarts at 0.
+- Late joiner: start the scoreboard after a few assessments and confirm it gets every area.
+- `ros2 launch` was smoke-tested for configure+activate only (domain 63, no sim); one SIGINT to `ros2 launch` did not stop it within 4 s, a second one did (not investigated; the node itself exits cleanly on SIGINT).
+- Not yet done in this PR: full-scope `ci_local.sh`, `git diff -- upstream.repos` check, the `.agents/README.md` checklist item, and marking the PR ready only after #406 is on `jazzy`.
