@@ -106,6 +106,9 @@ public:
   /// Interval of the status line (cells held, memory, counters).
   static constexpr double kStatusLogPeriodSeconds = 10.0;
 
+  /// Interval of a repeating warning (per source where it concerns one).
+  static constexpr double kWarnPeriodSeconds = 10.0;
+
   /// A change in the water-surface height smaller than this does not trigger a
   /// new assessment (metres).
   static constexpr double kSurfaceChangeThreshold = 0.01;
@@ -188,6 +191,11 @@ private:
     std::string failed_frame;
     bool resolution_warned = false;
     bool uncertainty_warned = false;
+    /// Last time each repeating warning was logged for this source: the throttle
+    /// is per source, so one noisy source cannot hide another's warning.
+    rclcpp::Time last_unplaced_warn{0, 0, RCL_ROS_TIME};
+    rclcpp::Time last_convert_warn{0, 0, RCL_ROS_TIME};
+    rclcpp::Time last_rejected_warn{0, 0, RCL_ROS_TIME};
     rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr subscription;
   };
 
@@ -261,6 +269,17 @@ private:
     declare_parameter<int64_t>(
       "max_raster_cells", 1000000,
       desc("Per-area raster cap, lattice cells (guards a swapped latitude/longitude)."));
+  }
+
+  /// True (and `last` updated) when the warning behind `last` may be logged now.
+  bool mayWarn(rclcpp::Time * last)
+  {
+    const rclcpp::Time now = get_clock()->now();
+    if (last->nanoseconds() != 0 && (now - *last).seconds() < kWarnPeriodSeconds) {
+      return false;
+    }
+    *last = now;
+    return true;
   }
 
   static bool isUsableDuration(double seconds)
@@ -486,9 +505,11 @@ private:
       }
     } catch (const std::exception & e) {
       ++stats_.grids_rejected;
-      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
-        "Source '%s' (%s): grid message could not be converted: %s",
-        source.name.c_str(), source.topic.c_str(), e.what());
+      if (mayWarn(&source.last_convert_warn)) {
+        RCLCPP_ERROR(get_logger(),
+          "Source '%s' (%s): grid message could not be converted: %s",
+          source.name.c_str(), source.topic.c_str(), e.what());
+      }
       return;
     }
 
@@ -501,22 +522,26 @@ private:
       ++stats_.grids_unplaced;
       source.placement_failed = true;
       source.failed_frame = frame;
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
-        "Source '%s' (%s): cannot place its grid in frame '%s' (no transform from raster frame "
-        "'%s': %s). No assessment is published until one of its grids is placed; 'earth' is "
-        "absent from TF for about the first 10 s after a simulation starts, which is normal.",
-        source.name.c_str(), source.topic.c_str(), frame.c_str(), map_frame_.c_str(), e.what());
+      if (mayWarn(&source.last_unplaced_warn)) {
+        RCLCPP_WARN(get_logger(),
+          "Source '%s' (%s): cannot place its grid in frame '%s' (no transform from raster frame "
+          "'%s': %s). No assessment is published until one of its grids is placed; 'earth' is "
+          "absent from TF for about the first 10 s after a simulation starts, which is normal.",
+          source.name.c_str(), source.topic.c_str(), frame.c_str(), map_frame_.c_str(), e.what());
+      }
       return;
     }
 
     const AddResult added = source.accumulator.add(grid, rasterToSourceAffine(source_from_map));
     if (added.status != AddStatus::kAdded) {
       ++stats_.grids_rejected;
-      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
-        "Source '%s' (%s): grid in frame '%s' not used: %s", source.name.c_str(),
-        source.topic.c_str(), frame.c_str(),
-        added.status == AddStatus::kMissingElevationLayer ?
-        "it has no 'elevation' layer" : "its geometry or placement is unusable");
+      if (mayWarn(&source.last_rejected_warn)) {
+        RCLCPP_ERROR(get_logger(),
+          "Source '%s' (%s): grid in frame '%s' not used: %s", source.name.c_str(),
+          source.topic.c_str(), frame.c_str(),
+          added.status == AddStatus::kMissingElevationLayer ?
+          "it has no 'elevation' layer" : "its geometry or placement is unusable");
+      }
       return;
     }
     ++stats_.grids_placed;
@@ -687,15 +712,19 @@ private:
     // A source whose latest grid could not be placed withholds everything: the
     // message cannot represent a failed source, and zeros would read as uncovered.
     // A source that has sent nothing yet is different: it scores zero, truthfully.
+    std::string unplaced;
     for (const auto & source : sources_) {
       if (source->placement_failed) {
-        ++stats_.withheld_unplaced_source;
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
-          "Not assessing: source '%s' (%s) has a grid in frame '%s' that could not be placed. "
-          "Assessment resumes once one of its grids is placed.",
-          source->name.c_str(), source->topic.c_str(), source->failed_frame.c_str());
-        return;
+        unplaced += (unplaced.empty() ? "" : ", ") + std::string("source '") + source->name +
+          "' (" + source->topic + ", frame '" + source->failed_frame + "')";
       }
+    }
+    if (!unplaced.empty()) {
+      ++stats_.withheld_unplaced_source;
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
+        "Not assessing: the latest grid of %s could not be placed. Assessment resumes once "
+        "each of them has a grid that is placed.", unplaced.c_str());
+      return;
     }
     if (areas_.empty()) {
       return;
