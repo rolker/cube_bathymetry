@@ -498,3 +498,25 @@ Plan: PR (b) section gained a "Review fixes" note (items 7 and 14 as owner decis
 Results: coverage_assessment 181 xunit tests, 0 failures, 0 errors (20 cppcheck skipped, cppcheck not installed); cube_bathymetry 782, 0 failures. Lint (uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257) all pass.
 
 Open: the pre-existing uncommitted edits to `.agent/work-plans/issue-164/review-*` files were left alone. B10-style live re-check of the fixes (launch with reset_cube_nodes.sh --consumer on the real sim) was not run; the launch behaviour is covered by the launch_testing test only.
+
+## Implementation
+
+Fix round 3 for PR (b), the `coverage_assessment` package, plus one fix in the merged reset script. Owner-approved; nothing pushed. Each test below was run against the previous code (or a temporary revert of the line) and failed there.
+
+| # | Item | Result | Commit | Test evidence |
+|---|---|---|---|---|
+| 1 | Launch activation not one-shot | done: the `OnStateTransition` matcher (configuring -> inactive) fires once, then never | f3b18aa | `test_launch_lifecycle.py` now runs deactivate, cleanup, configure, asserts `inactive` for 5 s, then activate; failed on the old handler |
+| 2 | Map-move check | done: `mapFrameMovement()` compares map origins in earth coordinates (inverse translations) for the 1 cm test and the relative rotation angle for 1e-6 rad | 557586d | node test ATinyRotation... (1.6e-9 rad about the origin, no withhold; failed on the old subtraction); frame tests: tiny rotation, 5 m move reads 5 m, 2e-6 rad rotation reads above tolerance |
+| 3 | Footprint cap off-by-one | done: cap = 2001 x 2001 = 4,004,001 indices, header and README say what it admits (axis-aligned 200 m at 0.1 m, any alignment) | 2c5f392 | accumulator boundary test: 2000 x 2000 passes (footprint exactly the cap), 2000 x 2001 refused; failed before |
+| 4 | Pending queue overflow | done: shape check on arrival with a TF-free local equirectangular ring (`localGeoPolygon` + `rasterisePolygon`); overflow drops the lowest stamp with a throttled WARN naming id and stamp; accepted definition held apart | 881626e | node tests DegenerateAreasBeforeTf... (one valid + eight zero-area, Codex's scenario) and QueueOverflowDropsTheLowestStamp...; both failed on the old code; frame test for localGeoPolygon |
+| 5 | Startup reporting | done: `have_georef` checked first, "waiting for <map_frame> <- earth", `withheld_no_earth` counts, kept grids not counted as unplaced and not flagged; they become unplaced only once the georeference exists and their frame does not | 881626e | node test GridsBeforeEarthReportTheWait...; failed before |
+| 6 | failed_frame logging, fold ordering | done: frame passed by value; kept grid and placement flag released only after `accumulator.add` returns | 881626e | node tests ARejectedKeptGridIsLoggedWithItsFrame (failed before) and AFailedFoldOfAKeptGrid... (injected throw at "grid fold"; failed with the clear-before-add order) |
+| 7 | State ordering | done: `areas_` emplace before `area_order_` push (erased again if the push throws); `areas_dirty_` cleared after `projectAreas` | 881626e | node tests AThrowWhileProjectingAreas... (failed with the old order) and AThrowWhileRegisteringANewArea... (injected throw at "area registration"; pins the invariant, new seam so it cannot fail on code without the seam) |
+| 8 | Stale-definition WARN | done: throttled per node | 881626e | covered by ARejectedNewerArea... (log still seen once) |
+| 9 | README nit | done: moved-georeference case is an ERROR; every README statement I touched re-checked against the code (launch, move test, footprint cap, queue, earth wait, tests list) | 557586d, f3b18aa, 2c5f392, 881626e | n/a |
+| 10 | Committed .pyc | done: `git rm --cached`, `__pycache__/` and `*.pyc` in `.gitignore` | 3addf40 | `git ls-files | grep pyc` empty |
+| 11 | Reset script retries | done: read-only `ros2` calls retried (3 attempts, 2 s pause, `RESET_CUBE_GET_TRIES` / `RESET_CUBE_RETRY_PAUSE`), transitions never; header and README updated | 7a53fa1 | test case 12: reads failing twice then answering (12a), param and state reads failing every time (exactly 3 attempts, nothing changed, 12b/12c), failed transition run once (12d); 12a-c fail on the old script |
+
+Results: coverage_assessment 194 xunit tests, 0 failures, 0 errors (20 skipped: cppcheck not installed); cube_bathymetry 782, 0 failures (90 skipped). Lint in both: uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257 all pass (they run as colcon tests).
+
+Not run: a live sim re-check of `reset_cube_nodes.sh --consumer /coverage_assessment` with the launch file; the launch behaviour and the script's retries are covered by the launch test and the stub-ros2 test.
