@@ -19,6 +19,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#include <exception>
 #include <memory>
 
 #include "coverage_assessment_node.hpp"
@@ -26,12 +27,22 @@
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<coverage_assessment::CoverageAssessmentNode>();
+  int status = 0;
+  try {
+    auto node = std::make_shared<coverage_assessment::CoverageAssessmentNode>();
 
-  rclcpp::executors::SingleThreadedExecutor executor;
-  executor.add_node(node->get_node_base_interface());
-  executor.spin();
-
-  rclcpp::shutdown();
-  return 0;
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(node->get_node_base_interface());
+    executor.spin();
+  } catch (const std::exception & e) {
+    RCLCPP_FATAL(rclcpp::get_logger("coverage_assessment"), "Fatal: %s", e.what());
+    status = 1;
+  } catch (...) {
+    RCLCPP_FATAL(rclcpp::get_logger("coverage_assessment"), "Fatal: unknown exception");
+    status = 1;
+  }
+  if (rclcpp::ok()) {
+    rclcpp::shutdown();
+  }
+  return status;
 }

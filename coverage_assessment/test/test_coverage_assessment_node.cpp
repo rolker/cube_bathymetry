@@ -711,6 +711,74 @@ TEST_F(NodeTest, ReconfigureEmptiesTheUnion)
       [&]() {h.publishGrid("A", grid);}));
 }
 
+// ---- exception containment ----------------------------------------------------
+
+TEST_F(NodeTest, ExceptionsInCallbacksAreContainedCountedAndTheNodeKeepsWorking)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  // The first call of each callback throws: a std::exception from the grid, a
+  // non-std one from the survey area, a std::exception from the timer.
+  std::map<std::string, int> calls;
+  h.node_->setFaultInjectorForTest([&calls](const char * what) {
+      const std::string name(what);
+      if (calls[name]++ > 0) {
+        return;
+      }
+      if (name == "survey_area callback") {
+        throw 42;
+      }
+      throw std::runtime_error("injected " + name);
+    });
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  const SurveyArea area = makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1);
+  // The transient_local survey_area is delivered once; resend it so the second
+  // delivery (which is not injected) defines the area.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {
+        h.publishArea(area);
+        h.publishGrid("A", grid);
+      }));
+  EXPECT_GE(h.node_->stats().callback_exceptions, 3u)
+    << "grid, survey_area and timer each threw once";
+  EXPECT_GE(calls["grid callback"], 2);
+  EXPECT_GE(calls["survey_area callback"], 2);
+  EXPECT_GE(calls["assessment timer"], 2);
+  EXPECT_GE(countLog("Unhandled exception"), 1u);
+  EXPECT_GE(countLog("The node keeps running"), 1u);
+}
+
+// ---- incompatible QoS is an ERROR naming the topic -------------------------------
+
+TEST_F(NodeTest, IncompatibleQosPublishersAreReportedByTopic)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+
+  // A volatile survey_area publisher cannot reach a transient_local subscription,
+  // and a best-effort grid publisher cannot reach a reliable one.
+  auto volatile_area = h.io_->create_publisher<SurveyArea>(
+    h.prefix_ + "/survey_area", rclcpp::QoS(10).reliable().durability_volatile());
+  auto best_effort_grid = h.io_->create_publisher<grid_map_msgs::msg::GridMap>(
+    h.gridTopic("A"), rclcpp::QoS(10).best_effort());
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return countLog("'" + h.prefix_ + "/survey_area': a publisher offers a QoS incompatible") >= 1 &&
+               countLog("'" + h.gridTopic("A") + "': a publisher offers a QoS incompatible") >= 1;
+      }, 20.0));
+}
+
 // ---- configure refusals and parameters ---------------------------------------
 
 namespace

@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -82,6 +83,8 @@ struct NodeStats
   uint64_t skipped_surface_unavailable = 0;
   uint64_t skipped_surface_stale = 0;
   uint64_t skipped_surface_too_far = 0;
+  /// exceptions caught at the top of a callback (the node kept running)
+  uint64_t callback_exceptions = 0;
   /// cells with depth below -kNegativeDepthMargin in the last assessment, over
   /// all areas (see AreaAssessment::cells_above_surface)
   std::size_t cells_above_surface = 0;
@@ -122,6 +125,14 @@ public:
   /// Counters, for diagnostics and tests.
   const NodeStats & stats() const {return stats_;}
 
+  /// Test seam: called with the callback's name at the start of every guarded
+  /// callback ("grid callback", "survey_area callback", "assessment timer"); a
+  /// throw from it exercises the containment of an unexpected exception.
+  void setFaultInjectorForTest(std::function<void(const char *)> injector)
+  {
+    fault_injector_ = std::move(injector);
+  }
+
   CallbackReturn on_configure(const rclcpp_lifecycle::State & state)
   {
     bool ok = false;
@@ -146,7 +157,7 @@ public:
     last_status_log_ = get_clock()->now();
     timer_ = create_wall_timer(
       std::chrono::nanoseconds(static_cast<int64_t>(assessment_period_s_ * 1.0e9)),
-      [this]() {onTimer();});
+      [this]() {guarded("assessment timer", [this]() {onTimer();});});
     return LifecycleNode::on_activate(state);
   }
 
@@ -399,13 +410,19 @@ private:
 
     area_subscription_ = create_subscription<marine_interfaces::msg::SurveyArea>(
       survey_area_topic_, rclcpp::QoS(kLatchedDepth).reliable().transient_local(),
-      [this](marine_interfaces::msg::SurveyArea::ConstSharedPtr msg) {onArea(*msg);});
+      [this](marine_interfaces::msg::SurveyArea::ConstSharedPtr msg) {
+        guarded("survey_area callback", [&]() {onArea(*msg);});
+      },
+      qosOptions(survey_area_topic_, "reliable, transient_local"));
 
     // Reliable, depth 10: what the cube_bathymetry `grid` publisher offers.
     for (std::size_t i = 0; i < sources_.size(); ++i) {
       sources_[i]->subscription = create_subscription<grid_map_msgs::msg::GridMap>(
         sources_[i]->topic, rclcpp::QoS(10),
-        [this, i](grid_map_msgs::msg::GridMap::ConstSharedPtr msg) {onGrid(i, *msg);});
+        [this, i](grid_map_msgs::msg::GridMap::ConstSharedPtr msg) {
+          guarded("grid callback", [&]() {onGrid(i, *msg);});
+        },
+        qosOptions(sources_[i]->topic, "reliable"));
     }
 
     RCLCPP_INFO(get_logger(),
@@ -439,6 +456,47 @@ private:
     registry_.reset();
     areas_.clear();
     area_order_.clear();
+  }
+
+  /// Subscription options whose incompatible-QoS event logs an ERROR naming the
+  /// topic: without it a publisher with a QoS the subscription cannot match (a
+  /// volatile survey_area, say) fails silently and nothing is ever received.
+  rclcpp::SubscriptionOptions qosOptions(const std::string & topic, const std::string & requested)
+  {
+    rclcpp::SubscriptionOptions options;
+    const std::string resolved = get_node_topics_interface()->resolve_topic_name(topic);
+    options.event_callbacks.incompatible_qos_callback =
+      [this, resolved, requested](rclcpp::QOSRequestedIncompatibleQoSInfo &) {
+        RCLCPP_ERROR(get_logger(),
+          "Topic '%s': a publisher offers a QoS incompatible with this subscription (it requests "
+          "%s); nothing will be received from that publisher until it offers at least that.",
+          resolved.c_str(), requested.c_str());
+      };
+    return options;
+  }
+
+  /// Run one callback body so that no exception can leave the callback: it is
+  /// logged (throttled), counted, and the node keeps running.
+  template<typename F>
+  void guarded(const char * what, F && body)
+  {
+    try {
+      if (fault_injector_) {
+        fault_injector_(what);
+      }
+      body();
+    } catch (const std::exception & e) {
+      noteCallbackFailure(what, e.what());
+    } catch (...) {
+      noteCallbackFailure(what, "unknown exception");
+    }
+  }
+
+  void noteCallbackFailure(const char * what, const char * why)
+  {
+    ++stats_.callback_exceptions;
+    RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
+      "Unhandled exception in the %s: %s. The node keeps running.", what, why);
   }
 
   // ---- inputs ---------------------------------------------------------------
@@ -700,11 +758,11 @@ private:
     RCLCPP_INFO(get_logger(),
       "Assessments: %lu published; ticks without one: %lu waiting for an unplaced source, %lu "
       "without earth, %lu water surface unavailable, %lu stale, %lu tide boat too far; "
-      "%zu cell(s) above the surface in the last assessment.",
+      "%zu cell(s) above the surface in the last assessment; %lu callback exception(s) caught.",
       n(stats_.assessments_published), n(stats_.withheld_unplaced_source),
       n(stats_.withheld_no_earth), n(stats_.skipped_surface_unavailable),
       n(stats_.skipped_surface_stale), n(stats_.skipped_surface_too_far),
-      stats_.cells_above_surface);
+      stats_.cells_above_surface, n(stats_.callback_exceptions));
   }
 
   void onTimer()
@@ -879,6 +937,7 @@ private:
   bool have_last_surface_ = false;
   rclcpp::Time last_status_log_{0, 0, RCL_ROS_TIME};
   NodeStats stats_;
+  std::function<void(const char *)> fault_injector_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
