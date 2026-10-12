@@ -689,16 +689,22 @@ private:
       cells += source->accumulator.elevationCellCount();
       bytes += source->accumulator.memoryBytes();
     }
+    auto n = [](uint64_t v) {return static_cast<unsigned long>(v);};  // NOLINT(runtime/int)
     RCLCPP_INFO(get_logger(),
       "Holding %zu cell(s) with elevation over %zu source(s), %.1f MB; grids %lu received, %lu "
-      "placed, %lu unplaced, %lu rejected; %lu assessment(s) published; %zu area(s).",
-      cells, sources_.size(), static_cast<double>(bytes) / 1.0e6,
-      static_cast<unsigned long>(stats_.grids_received),  // NOLINT(runtime/int)
-      static_cast<unsigned long>(stats_.grids_placed),  // NOLINT(runtime/int)
-      static_cast<unsigned long>(stats_.grids_unplaced),  // NOLINT(runtime/int)
-      static_cast<unsigned long>(stats_.grids_rejected),  // NOLINT(runtime/int)
-      static_cast<unsigned long>(stats_.assessments_published),  // NOLINT(runtime/int)
+      "placed, %lu unplaced, %lu rejected; areas %lu received, %lu rejected, %zu held.",
+      cells, sources_.size(), static_cast<double>(bytes) / 1.0e6, n(stats_.grids_received),
+      n(stats_.grids_placed), n(stats_.grids_unplaced), n(stats_.grids_rejected),
+      n(stats_.areas_received), n(stats_.areas_rejected),
       registry_ ? registry_->areas().size() : static_cast<std::size_t>(0));
+    RCLCPP_INFO(get_logger(),
+      "Assessments: %lu published; ticks without one: %lu waiting for an unplaced source, %lu "
+      "without earth, %lu water surface unavailable, %lu stale, %lu tide boat too far; "
+      "%zu cell(s) above the surface in the last assessment.",
+      n(stats_.assessments_published), n(stats_.withheld_unplaced_source),
+      n(stats_.withheld_no_earth), n(stats_.skipped_surface_unavailable),
+      n(stats_.skipped_surface_stale), n(stats_.skipped_surface_too_far),
+      stats_.cells_above_surface);
   }
 
   void onTimer()
