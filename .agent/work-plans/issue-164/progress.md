@@ -314,3 +314,31 @@ Plan and code agree; the plan's sync commit `a0c418d` records every round-1 chan
 - Clean rebuild (build and install dirs for the package deleted), then `./sensors_ws/test.sh cube_bathymetry` at `d6e8d21`: **813 tests, 0 errors, 0 failures, 90 skipped** (the 90 are cppcheck cases); ctest 39 of 39. `test_node_lifecycle` has 12 cases (was 9), `test_reset_cube_nodes` 10 case groups (was 8). An earlier run with the CMake lines at 150 columns failed `lint_cmake` (2 failures); fixed in d6e8d21. shellcheck clean on both scripts.
 - Mutation checks: dropping `--foreground` fails case 9a; dropping `trap '' HUP PIPE` fails 9b and 9c (exit 129 and 141). ASan build of a copy of the package (scratchpad), `test_node_lifecycle`: all 12 cases pass with the fix; with the `tf_listener_.reset()` line commented out, `FailedConfigureCanBeRetriedWhileTfIsPublished` fails with AddressSanitizer heap-use-after-free in 3 of 3 runs (it passes without ASan, as the comment says). Mutant reverted.
 - Full-scope `ci_local.sh` (ADR-0018): the first two runs failed before reaching this package, building `unh_marine_autonomy` packages that hosted CI prunes (`mission_manager*`, the integration tests, `marine_web_view`, via `COLCON_IGNORE` in `AFTER_SETUP_UPSTREAM_WORKSPACE`). This repo had no `ci_local` equivalent, so I added `.agents/ci_local_upstream_extra.sh` with the same prune. I did not add `.agents/ci_local_rosdep_skip_keys.txt` (the hosted `ROSDEP_SKIP_KEYS` analog): with three keys, `ci_local.sh`'s unquoted heredoc drops the quotes around `--skip-keys "a b c"` and rosdep reads `b` as a path ("given path 'marine_nav_tasks' does not exist"); verified with a bash one-liner. That is a workspace `ci_local.sh` bug for the host to decide on, not fixed here. With the prune hook alone: 813 tests, 0 errors, 0 failures, 96 skipped (6 more than the local run's 90; 5 of them are the real-bag smoke test, which the run reports as SKIPPED, not a pass: no bag at `/mnt/nadata/...`, so the depth-adaptive `main()` path was not exercised by this run). The attestation is in `git notes --ref=ci-local show HEAD`; the host hand-back has the final SHA. Nothing pushed.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-10-12 09:59 -04:00
+**By**: Claude Code Agent (Claude Opus 5.5)
+**Verdict**: approved
+
+**Branch**: feature/issue-164 at `6889634`
+**Mode**: pre-push, scoped to `0ab490e..HEAD` (the stop-path work after the third Copilot pass; everything before it passed earlier rounds)
+**Depth**: Standard (reason: lifecycle and signal handling in a core node, ~250 lines, C++ + shell)
+**Must-fix**: 2 (both fixed) | **Suggestions**: 9 (8 fixed, 1 carried out of scope)
+**Round**: 3 | **Ship**: recommended — every in-scope finding fixed; the remaining one belongs to another repo
+
+Specialists: static (ament_uncrustify, ament_cpplint clean; shellcheck not installed on this host), governance (cube ADR-0001 honoured and strengthened), plan drift (step 13 added), Claude Lens A + Lens B (fresh Sonnet sub-agents; Lens B built a throwaway LifecycleNode to check SIGINT, second SIGINT, logging after shutdown and the Jazzy destructor), cross-model gemini + codex (both EXIT=0, reviewed the three commits before the fixes below).
+
+Context for the work (2026-10-12): live checks on the PR build, `.agent/scratchpad/cube164_live/shutdown_probe.sh` in the workspace, showed SIGINT exiting with unsaved tiles and writing nothing, and a FINALIZED node still publishing its catalog. Both now pass live: SIGINT writes the tile and logs "Stopping: saved the changes...", and after `shutdown` no catalog arrives in 12 s (3 in the active control window). Tests: 821, 0 failures, 95 skipped; each new node test was checked failing against a mutant without its fix, and case 11 against the old script.
+
+### Findings
+- [x] (must-fix) reset script passed the typed spelling to ros2 after normalising only for the duplicate check (Gemini) — `cube_bathymetry/scripts/reset_cube_nodes.sh`
+- [x] (must-fix) sub-nanosecond interval still gave a zero timer period; huge one made create_wall_timer throw (Codex, Lens A) — `cube_bathymetry/src/cube_bathymetry_node.hpp` isUsableTimerInterval
+- [x] (suggestion) flush skipped when a callback throws out of spin() (Lens B, Gemini) — spinUntilStopped
+- [x] (suggestion) repeated or multiple trailing slashes bypassed the duplicate check (Lens A, Gemini) — qualified()
+- [x] (suggestion) NaN / inf intervals untested (Lens A, Gemini) — TimerIntervalFallback
+- [x] (suggestion) rejected interval left in the parameter store (Gemini) — usableIntervalOrDefault writes the default back
+- [x] (suggestion) case 11c had no no-change assertion (Gemini) — test_reset_cube_nodes.sh
+- [x] (suggestion) stop log overcounted written tiles (Lens A) — flushForStop wording
+- [x] (suggestion) single-threaded executor is load-bearing for the no-race flush, undocumented (Lens B) — signature now takes SingleThreadedExecutor, comment added
+- [ ] (suggestion, OUT OF SCOPE) tile writes are not atomic, and one unreadable tile makes the configure-time load fail whole, after which saves overwrite earlier sessions' data in good tiles (Lens B; reproduced live, `.agent/scratchpad/cube164_live/corrupt_tile_probe.sh`: patch A's 260 cells gone after a session-2 write) — marine_tiled_raster_store saveTile (unh_marine_autonomy) + this node's load fallback; raised with the owner, needs its own issue
