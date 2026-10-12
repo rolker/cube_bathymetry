@@ -558,9 +558,11 @@ TEST_F(NodeTest, UnplacedSourceWithholdsEveryAssessmentUntilItIsPlaced)
       h.publishGrid("A", grid_a);
       h.publishGrid("C", grid_c);
     };
-  h.spinFor(3.0, send);
+  // Positive: the node reports having withheld on several ticks, then nothing
+  // may have been published.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().withheld_unplaced_source >= 3;}, 20.0, send));
   EXPECT_EQ(h.received_, 0u) << "an assessment was published while source C was unplaced";
-  EXPECT_GT(h.node_->stats().withheld_unplaced_source, 0u);
   EXPECT_GT(h.node_->stats().grids_unplaced, 0u);
   EXPECT_GE(countLog("Source 'C'"), 1u) << "the WARN must name the source";
   EXPECT_GE(countLog("c/map"), 1u) << "the WARN must name the frame";
@@ -619,7 +621,9 @@ TEST_F(NodeTest, StaleTideSkipsScoringForEveryoneAndLeavesTheLastAssessment)
   Harness::Options opt;
   opt.sources = {"A"};
   opt.dynamic_tide = true;
-  opt.max_age = 1.0;
+  // Generous against a CI stall: the tide is republished every 150 ms, so a bound
+  // of a second would be crossed by a slow first assessment alone.
+  opt.max_age = 4.0;
   Harness h(opt);
   h.publishCommonTf();
   h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
@@ -647,12 +651,16 @@ TEST_F(NodeTest, StaleTideSkipsScoringForEveryoneAndLeavesTheLastAssessment)
   // and nothing may be scored with the old surface.
   tide_alive = false;
   ASSERT_TRUE(h.spinUntil(
-      [&]() {return h.node_->stats().skipped_surface_stale > 0;}, 20.0, each));
+      [&]() {return h.node_->stats().skipped_surface_stale > 0;}, 30.0, each));
+  h.spinFor(0.3, each);  // let an assessment already published drain
   const std::size_t before_growth = h.received_;
+  const uint64_t stale_before = h.node_->stats().skipped_surface_stale;
   send_big = true;
-  h.spinFor(3.0, each);
+  // Positive: the node refuses on several more ticks while the bigger grid is in.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().skipped_surface_stale >= stale_before + 3;}, 30.0, each));
+  EXPECT_GT(h.node_->stats().grids_placed, 0u);
   EXPECT_EQ(h.received_, before_growth) << "scored with a stale water surface";
-  EXPECT_GT(h.node_->stats().skipped_surface_stale, 0u);
   EXPECT_GE(countLog("stale"), 1u);
   EXPECT_GE(countLog("map_tide"), 1u) << "the WARN names the frame";
   const auto late = h.lateJoiner();
@@ -678,9 +686,10 @@ TEST_F(NodeTest, TideBoatBeyondTheDistanceBoundSkipsScoring)
   ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
   h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
   const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
-  h.spinFor(3.0, [&]() {h.publishGrid("A", grid);});
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().skipped_surface_too_far >= 3;}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
   EXPECT_EQ(h.received_, 0u);
-  EXPECT_GT(h.node_->stats().skipped_surface_too_far, 0u);
   EXPECT_GE(countLog("water_surface_max_boat_distance"), 1u);
   EXPECT_GT(h.node_->stats().grids_placed, 0u) << "grids keep accumulating while scoring waits";
 

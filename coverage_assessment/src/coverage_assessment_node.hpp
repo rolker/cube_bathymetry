@@ -59,6 +59,16 @@
 #include "coverage_assessment/source_accumulator.h"
 #include "frame_chain.hpp"
 
+/// A log line at most once per kWarnPeriodSeconds PER NODE and call site: the rclcpp
+/// *_THROTTLE macros keep their state per call site for the whole process, so a
+/// second node (or test) in the process would hide this one's line.
+#define COVERAGE_LOG_THROTTLED(level, ...) \
+  do { \
+    if (throttle(__LINE__)) { \
+      RCLCPP_##level(get_logger(), __VA_ARGS__); \
+    } \
+  } while (0)
+
 namespace coverage_assessment
 {
 
@@ -320,6 +330,12 @@ private:
     return true;
   }
 
+  /// True (and the call site `line` marked) when its throttled line may be logged.
+  bool throttle(int line)
+  {
+    return mayWarn(&throttle_times_[line]);
+  }
+
   static bool isUsableDuration(double seconds)
   {
     return std::isfinite(seconds) && seconds >= 0.001 && seconds <= 86400.0;
@@ -420,6 +436,7 @@ private:
     }
 
     stats_ = NodeStats{};
+    throttle_times_.clear();
     registry_ = std::make_unique<AreaRegistry>(cell_size_, max_raster_cells_);
     areas_.clear();
     area_order_.clear();
@@ -533,7 +550,7 @@ private:
   void noteCallbackFailure(const char * what, const char * why)
   {
     ++stats_.callback_exceptions;
-    RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
+    COVERAGE_LOG_THROTTLED(ERROR,
       "Unhandled exception in the %s: %s. The node keeps running.", what, why);
   }
 
@@ -748,7 +765,7 @@ private:
         moved_angle_rad_ > kGeorefRotationTolerance;
     }
     if (georef_moved_) {
-      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
+      COVERAGE_LOG_THROTTLED(ERROR,
         "The map frame '%s' <- 'earth' moved by %.3f m and %.2e rad since the raster georeference "
         "was captured. The accumulated coverage and the survey areas are laid out in the captured "
         "frame and no longer line up with the moved one, so nothing is published until the node "
@@ -973,7 +990,7 @@ private:
     }
     if (!unplaced.empty()) {
       ++stats_.withheld_unplaced_source;
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
+      COVERAGE_LOG_THROTTLED(WARN,
         "Not assessing: the latest grid of %s could not be placed. Assessment resumes once "
         "each of them has a grid that is placed.", unplaced.c_str());
       return;
@@ -983,7 +1000,7 @@ private:
     }
     if (!have_georef) {
       ++stats_.withheld_no_earth;
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
+      COVERAGE_LOG_THROTTLED(WARN,
         "Not assessing: cannot project the survey areas, %s. 'earth' is absent from TF for about "
         "the first 10 s after a simulation starts, which is normal.", no_earth.c_str());
       return;
@@ -1004,25 +1021,25 @@ private:
         break;
       case SurfaceStatus::kUnavailable:
         ++stats_.skipped_surface_unavailable;
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
+        COVERAGE_LOG_THROTTLED(WARN,
           "Not scoring: water surface unavailable (%s). Grids keep accumulating; the last "
           "assessment stays published.", detail.c_str());
         return;
       case SurfaceStatus::kStale:
         ++stats_.skipped_surface_stale;
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
+        COVERAGE_LOG_THROTTLED(WARN,
           "Not scoring: water surface is stale (%s). Grids keep accumulating; the last "
           "assessment stays published.", detail.c_str());
         return;
       case SurfaceStatus::kTooFar:
         ++stats_.skipped_surface_too_far;
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
+        COVERAGE_LOG_THROTTLED(WARN,
           "Not scoring: %s. Grids keep accumulating; the last assessment stays published.",
           detail.c_str());
         return;
       case SurfaceStatus::kMisconfigured:
         ++stats_.skipped_surface_misconfigured;
-        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000,
+        COVERAGE_LOG_THROTTLED(ERROR,
           "Not scoring: the water surface is misconfigured: %s. Grids keep accumulating; the last "
           "assessment stays published.", detail.c_str());
         return;
@@ -1046,7 +1063,7 @@ private:
     try {
       assessed = assessAll(*registry_, accumulators, h_surface);
     } catch (const std::exception & e) {
-      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 10000, "Assessment failed: %s", e.what());
+      COVERAGE_LOG_THROTTLED(ERROR, "Assessment failed: %s", e.what());
       return;
     }
 
@@ -1073,7 +1090,7 @@ private:
     }
     stats_.cells_above_surface = above_surface;
     if (above_surface > 0) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000,
+      COVERAGE_LOG_THROTTLED(WARN,
         "%zu cell(s) have a depth below -%g m (the seabed above the water surface) with the "
         "surface at %.3f m ellipsoid height; they are not counted as covered. A wrong sign, "
         "datum or a stale tide looks like this.", above_surface, kNegativeDepthMargin, h_surface);
@@ -1087,7 +1104,7 @@ private:
       msg->header.frame_id = map_frame_;
       grid_publisher_->publish(std::move(msg));
     } else {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000, "No coverage_grid published: %s",
+      COVERAGE_LOG_THROTTLED(WARN, "No coverage_grid published: %s",
         grid.error.c_str());
     }
 
@@ -1132,6 +1149,8 @@ private:
   rclcpp::Time last_status_log_{0, 0, RCL_ROS_TIME};
   NodeStats stats_;
   std::function<void(const char *)> fault_injector_;
+  /// Last time each throttled call site logged (see COVERAGE_LOG_THROTTLED).
+  std::map<int, rclcpp::Time> throttle_times_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -1143,5 +1162,7 @@ private:
 };
 
 }  // namespace coverage_assessment
+
+#undef COVERAGE_LOG_THROTTLED
 
 #endif  // COVERAGE_ASSESSMENT_NODE_HPP_
