@@ -325,6 +325,12 @@ private:
       "max_raster_cells", 1000000,
       desc("Per-area raster cap, lattice cells (guards a swapped latitude/longitude)."));
     declare_parameter<int64_t>(
+      "max_total_raster_cells", 4000000,
+      desc("Bounding-box lattice cells of ALL held survey areas together; an area that would "
+      "take the total over it is refused with an ERROR (an update of a held id is judged with "
+      "its old size removed). Bounds the cost of an assessment pass, which scans every held "
+      "area's box once per source."));
+    declare_parameter<int64_t>(
       "max_areas", 20,
       desc("Most survey areas held at once, 1 to 100; a new id beyond it is refused with an "
       "ERROR. Keeps the transient_local history (100) holding the newest assessment of every "
@@ -375,6 +381,7 @@ private:
     max_boat_distance_ = get_parameter("water_surface_max_boat_distance").as_double();
     max_surface_age_s_ = get_parameter("water_surface_max_age").as_double();
     max_raster_cells_ = get_parameter("max_raster_cells").as_int();
+    max_total_raster_cells_ = get_parameter("max_total_raster_cells").as_int();
     max_areas_ = get_parameter("max_areas").as_int();
 
     if (topics.empty()) {
@@ -430,6 +437,12 @@ private:
         static_cast<long>(max_raster_cells_));  // NOLINT(runtime/int)
       return false;
     }
+    if (max_total_raster_cells_ < 1) {
+      RCLCPP_ERROR(get_logger(),
+        "Configure refused: max_total_raster_cells=%ld must be at least 1.",
+        static_cast<long>(max_total_raster_cells_));  // NOLINT(runtime/int)
+      return false;
+    }
     if (max_areas_ < 1 || max_areas_ > kMaxAreasLimit) {
       RCLCPP_ERROR(get_logger(),
         "Configure refused: max_areas=%ld must be from 1 to %ld (the coverage_assessment history "
@@ -455,7 +468,8 @@ private:
 
     stats_ = NodeStats{};
     throttle_times_.clear();
-    registry_ = std::make_unique<AreaRegistry>(cell_size_, max_raster_cells_);
+    registry_ = std::make_unique<AreaRegistry>(
+      cell_size_, max_raster_cells_, max_total_raster_cells_);
     areas_.clear();
     area_order_.clear();
     areas_dirty_ = false;
@@ -1021,13 +1035,15 @@ private:
       "Assessments: %lu published; ticks without one: %lu waiting for an unplaced source, %lu "
       "without earth, %lu with the map frame moved, %lu water surface unavailable, %lu stale, "
       "%lu tide boat too far, %lu tide frame under earth; "
-      "%zu cell(s) above the surface in the last assessment; %lu callback exception(s) caught.",
+      "%zu cell(s) above the surface in the last assessment; %lu callback exception(s) caught; "
+      "last assessment pass %.3f s over %ld raster cell(s).",
       n(stats_.assessments_published), n(stats_.withheld_unplaced_source),
       n(stats_.withheld_no_earth), n(stats_.withheld_map_moved),
       n(stats_.skipped_surface_unavailable),
       n(stats_.skipped_surface_stale), n(stats_.skipped_surface_too_far),
       n(stats_.skipped_surface_misconfigured), stats_.cells_above_surface,
-        n(stats_.callback_exceptions));
+        n(stats_.callback_exceptions), last_pass_seconds_,
+      static_cast<long>(registry_ ? registry_->totalCells() : 0));  // NOLINT(runtime/int)
   }
 
   void onTimer()
@@ -1135,7 +1151,10 @@ private:
     }
     std::vector<AreaAssessment> assessed;
     try {
+      const auto started = std::chrono::steady_clock::now();
       assessed = assessAll(*registry_, accumulators, h_surface);
+      last_pass_seconds_ = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
     } catch (const std::exception & e) {
       COVERAGE_LOG_THROTTLED(ERROR, "Assessment failed: %s", e.what());
       return;
@@ -1199,7 +1218,10 @@ private:
   double max_boat_distance_ = 1500.0;
   double max_surface_age_s_ = 30.0;
   int64_t max_raster_cells_ = 1000000;
+  int64_t max_total_raster_cells_ = 4000000;
   int64_t max_areas_ = 20;
+  /// Wall time of the last assessment pass (assessAll), seconds; in the status line.
+  double last_pass_seconds_ = 0.0;
 
   // State, all rebuilt by a configure.
   std::vector<std::unique_ptr<SourceState>> sources_;

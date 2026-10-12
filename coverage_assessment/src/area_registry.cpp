@@ -24,9 +24,26 @@
 namespace coverage_assessment
 {
 
-AreaRegistry::AreaRegistry(double cell_size, int64_t max_cells)
-: cell_size_(cell_size), max_cells_(max_cells)
+namespace
 {
+int64_t boxCells(const PolygonMask & mask)
+{
+  return mask.ni * mask.nj;
+}
+}  // namespace
+
+AreaRegistry::AreaRegistry(double cell_size, int64_t max_cells, int64_t max_total_cells)
+: cell_size_(cell_size), max_cells_(max_cells), max_total_cells_(max_total_cells)
+{
+}
+
+int64_t AreaRegistry::totalCells() const
+{
+  int64_t total = 0;
+  for (const RegisteredArea & a : areas_) {
+    total += boxCells(a.mask);
+  }
+  return total;
 }
 
 const RegisteredArea * AreaRegistry::find(const std::string & id) const
@@ -37,6 +54,20 @@ const RegisteredArea * AreaRegistry::find(const std::string & id) const
     }
   }
   return nullptr;
+}
+
+bool AreaRegistry::exceedsTotal(
+  int64_t others, int64_t added, const std::string & id, std::string * reason) const
+{
+  // Written to avoid overflow: both operands are bounded by max_cells_ times areas.
+  if (others <= max_total_cells_ && added <= max_total_cells_ - others) {
+    return false;
+  }
+  *reason = "area '" + id + "': its " + std::to_string(added) +
+    "-cell raster would take the " + std::to_string(others) +
+    " cell(s) already held over the total budget of " +
+    std::to_string(max_total_cells_) + " cell(s) (parameter max_total_raster_cells)";
+  return true;
 }
 
 RegistryResult AreaRegistry::update(const AreaDefinition & definition)
@@ -58,9 +89,19 @@ RegistryResult AreaRegistry::update(const AreaDefinition & definition)
       result.reason = "area '" + definition.id + "': older than the definition already held";
       return result;
     }
+    if (exceedsTotal(totalCells() - boxCells(held.mask), boxCells(raster.mask), definition.id,
+        &result.reason))
+    {
+      result.outcome = RegistryOutcome::kRejected;
+      return result;
+    }
     held.definition = definition;
     held.mask = std::move(raster.mask);
     result.outcome = RegistryOutcome::kReplaced;
+    return result;
+  }
+  if (exceedsTotal(totalCells(), boxCells(raster.mask), definition.id, &result.reason)) {
+    result.outcome = RegistryOutcome::kRejected;
     return result;
   }
   areas_.push_back(RegisteredArea{definition, std::move(raster.mask), cell_size_});

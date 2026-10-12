@@ -254,6 +254,7 @@ every parameter is `read_only` (set it from YAML or a launch file):
 | `water_surface_max_boat_distance` | `1500.0` m | Beyond this, scoring is skipped with a WARN. |
 | `water_surface_max_age` | `30.0` s | Older than this, the tide (or the tide boat's frame) is refused and scoring is skipped with a WARN. |
 | `max_raster_cells` | `1000000` | Per-area raster cap. |
+| `max_total_raster_cells` | `4000000` | Bounding-box cells of all held areas together; an area that would exceed it is refused with an ERROR. |
 | `max_areas` | `20` | Most areas held at once (1 to 100); a new id beyond it is refused with an ERROR. |
 
 Because it keeps a union over time, a CUBE reset must also reset the assessor: pass it

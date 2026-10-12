@@ -96,8 +96,10 @@ void captureHandler(
   char buffer[4096];
   vsnprintf(buffer, sizeof(buffer), format, copy);
   va_end(copy);
-  if (severity >= RCUTILS_LOG_SEVERITY_WARN && std::string(name).find("coverage_assessment") !=
-    std::string::npos)
+  // WARN and above, plus the periodic "Assessments:" status line (INFO).
+  const bool status_line = std::string(buffer).rfind("Assessments:", 0) == 0;
+  if ((severity >= RCUTILS_LOG_SEVERITY_WARN || status_line) &&
+    std::string(name).find("coverage_assessment") != std::string::npos)
   {
     std::lock_guard<std::mutex> lock(g_log_mutex);
     g_log.push_back(std::to_string(severity) + "|" + buffer);
@@ -232,6 +234,7 @@ public:
     bool dynamic_tide = false;
     double boat_x = 10.0;
     int64_t max_areas = 0;  // 0: the node's default
+    int64_t max_total_cells = 0;  // 0: the node's default
     bool dynamic_boat = false;      // base_link comes from publishBoatNow(), stamped
     bool tide_under_earth = false;  // map_tide hangs directly off earth
     bool use_sim_time = false;      // node clock follows /clock (nobody publishes it)
@@ -268,6 +271,9 @@ public:
     options.append_parameter_override("water_surface_max_boat_distance", opt_.max_distance);
     if (opt_.use_sim_time) {
       options.append_parameter_override("use_sim_time", true);
+    }
+    if (opt_.max_total_cells > 0) {
+      options.append_parameter_override("max_total_raster_cells", opt_.max_total_cells);
     }
     if (opt_.max_areas > 0) {
       options.append_parameter_override("max_areas", opt_.max_areas);
@@ -1237,6 +1243,57 @@ TEST_F(NodeTest, AnUnsetStandardIsScoredAndPublishedNotRefused)
   EXPECT_EQ(countLog("Rejecting SurveyArea"), 0u);
 }
 
+TEST_F(NodeTest, MaxTotalRasterCellsRefusesTheAreaThatWouldExceedItAndNamesTheBudget)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.max_total_cells = 250;  // two 10 x 10 squares fit, a third does not
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("a1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  h.publishArea(makeArea("a2", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  h.publishArea(makeArea("a3", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.latest_.count("a1") && h.latest_.count("a2");}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.node_->stats().areas_rejected, 1u);
+  EXPECT_EQ(countLog("max_total_raster_cells"), 1u);
+  EXPECT_EQ(h.latest_.count("a3"), 0u);
+}
+
+TEST_F(NodeTest, StatusLineReportsTheLastAssessmentPassDuration)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("a1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  auto send = [&]() {h.publishGrid("A", grid);};
+  ASSERT_TRUE(h.spinUntil([&]() {return h.received_ > 0;}, 20.0, send));
+  // The status line comes every 10 s after activation.
+  ASSERT_TRUE(h.spinUntil([&]() {return countLog("last assessment pass") >= 1;}, 20.0));
+  EXPECT_GE(countLog(" s over "), 1u);
+}
+
+TEST_F(NodeTest, ConfigureRefusesAMaxTotalRasterCellsBelowOne)
+{
+  rclcpp::NodeOptions options;
+  options.arguments({"--ros-args", "-r", "__ns:=/t" + std::to_string(g_next_namespace++)});
+  options.append_parameter_override("grid_topics", std::vector<std::string>{"/g"});
+  options.append_parameter_override("max_total_raster_cells", static_cast<int64_t>(0));
+  auto node = std::make_shared<CoverageAssessmentNode>(options);
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(countLog("max_total_raster_cells=0 must be at least 1"), 1u);
+}
+
 TEST_F(NodeTest, MaxAreasRefusesANewIdButStillUpdatesAHeldOne)
 {
   Harness::Options opt;
@@ -1467,7 +1524,8 @@ TEST_F(NodeTest, ParametersReadAtConfigureAreReadOnly)
   auto node = makeNode({"/x/grid"}, {});
   for (const char * name : {"cell_size", "map_frame", "grid_topics", "source_names",
       "survey_area_topic", "assessment_period", "water_surface_frame", "water_surface_boat_frame",
-      "water_surface_max_boat_distance", "water_surface_max_age", "max_raster_cells", "max_areas"})
+      "water_surface_max_boat_distance", "water_surface_max_age", "max_raster_cells",
+      "max_total_raster_cells", "max_areas"})
   {
     ASSERT_TRUE(node->has_parameter(name)) << name;
     EXPECT_TRUE(node->describe_parameter(name).read_only) << name;

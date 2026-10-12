@@ -63,6 +63,7 @@ and ignored. Set them from a launch file or YAML before the node starts.
 | `water_surface_max_boat_distance` | `1500.0` m | Beyond this the surface is refused: warn and skip scoring. |
 | `water_surface_max_age` | `30.0` s | Oldest acceptable transform, for both the water-surface frame and the tide boat's frame (the distance bound). |
 | `max_raster_cells` | `1000000` | Per-area raster cap in lattice cells; guards a swapped latitude/longitude. A union of areas that exceeds it cannot be drawn as `coverage_grid` (WARN). |
+| `max_total_raster_cells` | `4000000` | Bounding-box lattice cells of **all** held areas together (read_only, at least 1). Every pass scans each held area's whole box once per source, so this bounds the pass: at the measured ~0.1 s per 1e6 cells x 4 sources it keeps a pass near 0.4 s, where 20 areas of `max_raster_cells` each would take ~12 s and block the single-threaded node. An area that would take the total over it is refused with an ERROR naming the budget and the cells already held; an update of a held id is judged with its old size removed. The 10 s status line reports the last pass duration and the cells held. |
 | `max_areas` | `20` | Most survey areas held at once; 1 to 100, else configure fails. A SurveyArea with a **new** id beyond it is refused with an ERROR (an update of a held id still applies). Bounds the cost of an assessment pass and keeps the 100-deep latched history holding the newest assessment of every area. |
 
 `earth_frame` is hard-coded `earth`.
@@ -272,8 +273,8 @@ ERROR. The first tick after activation always assesses.
 A `SurveyArea` is rejected with an ERROR, and any earlier definition of that id is kept,
 when it has fewer than 3 vertices, a vertex that is not a finite latitude in [-90, 90]
 and longitude in [-180, 180], zero area, a raster over `max_raster_cells`, a vertex more
-than 1e7 m (in x or y, in the raster frame) from the raster origin, or a new id beyond
-`max_areas`. The standard is **not** a reason to reject: a NaN, negative or infinite `a`
+than 1e7 m (in x or y, in the raster frame) from the raster origin, a definition that would take the bounding
+boxes of all held areas over `max_total_raster_cells`, or a new id beyond `max_areas`. The standard is **not** a reason to reject: a NaN, negative or infinite `a`
 or `b` means "not set" (above).
 
 Definitions are validated as they arrive and queued per id; the registry sees them in

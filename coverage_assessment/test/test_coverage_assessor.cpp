@@ -645,6 +645,51 @@ TEST(AreaRegistry, InvalidAreaKeepsTheOldOneAndIsNotAddedIfNew)
   EXPECT_EQ(registry.areas().size(), 1u);
 }
 
+TEST(AreaRegistry, TotalCellBudgetAcceptsUpToItRefusesBeyondAndJudgesAnUpdateWithoutItsOldSize)
+{
+  // One 10 x 10 square is a 100-cell box (checked below, not assumed).
+  AreaRegistry probe(1.0, kBig);
+  AreaDefinition d;
+  d.id = "p";
+  d.polygon = square10();
+  d.standard = standard(0.5, 0.0);
+  ASSERT_EQ(probe.update(d).outcome, RegistryOutcome::kAdded);
+  const int64_t box = probe.totalCells();
+  ASSERT_GT(box, 0);
+
+  AreaRegistry registry(1.0, kBig, 2 * box);  // room for exactly two
+  d.id = "a";
+  EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kAdded);
+  d.id = "b";
+  EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kAdded);  // up to the budget
+  EXPECT_EQ(registry.totalCells(), 2 * box);
+
+  d.id = "c";
+  const RegistryResult refused = registry.update(d);  // one over
+  EXPECT_EQ(refused.outcome, RegistryOutcome::kRejected);
+  EXPECT_NE(refused.reason.find("max_total_raster_cells"), std::string::npos) << refused.reason;
+  EXPECT_NE(refused.reason.find("'c'"), std::string::npos) << refused.reason;
+  EXPECT_EQ(registry.find("c"), nullptr);
+  EXPECT_EQ(registry.totalCells(), 2 * box);
+
+  // A held id is judged with its old box removed: the same size again fits...
+  d.id = "a";
+  d.stamp_ns = 10;
+  EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kReplaced);
+  // ... a smaller one fits ...
+  d.polygon = {{0.0, 0.0}, {5.0, 0.0}, {5.0, 5.0}, {0.0, 5.0}};
+  d.stamp_ns = 20;
+  EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kReplaced);
+  EXPECT_LT(registry.totalCells(), 2 * box);
+  // ... and a larger one that pushes the total over is refused, keeping the old.
+  d.polygon = {{0.0, 0.0}, {20.0, 0.0}, {20.0, 20.0}, {0.0, 20.0}};
+  d.stamp_ns = 30;
+  const int64_t before = registry.totalCells();
+  EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kRejected);
+  EXPECT_EQ(registry.totalCells(), before);
+  EXPECT_EQ(registry.find("a")->definition.stamp_ns, 20);
+}
+
 TEST(AreaRegistry, UnsetStandardIsAcceptedAndReported)
 {
   AreaRegistry registry(1.0, kBig);
