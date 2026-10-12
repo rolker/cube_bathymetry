@@ -23,6 +23,9 @@
 #  11. a node given twice, or as both a CUBE node and a consumer (in any spelling
 #      of its name), is a usage error before anything is read or changed; a node
 #      typed in another spelling is handed to `ros2` fully qualified.
+#  12. a read (lifecycle get, param get) that fails twice and then answers does not
+#      abort the reset; one that fails every time does, after the bounded number
+#      of attempts and before any change; a transition is never retried.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -39,6 +42,15 @@ cat > "$work/bin/ros2" <<'STUB'
 key() { echo "${1//\//_}"; }
 case "$1 $2" in
   "lifecycle get")
+    echo "lifecycle get $3" >> "$STUB_DIR/reads"
+    if [ -e "$STUB_DIR/flaky_state_$(key "$3")" ]; then
+      n=$(cat "$STUB_DIR/flaky_state_$(key "$3")")
+      if [ "$n" -gt 0 ]; then
+        echo $((n - 1)) > "$STUB_DIR/flaky_state_$(key "$3")"
+        echo "stub: lifecycle service did not answer" >&2
+        exit 1
+      fi
+    fi
     s=$(cat "$STUB_DIR/state/$(key "$3")" 2>/dev/null) || { echo "Node not found"; exit 1; }
     [ -e "$STUB_DIR/hang_$(key "$3")" ] && exec sleep 30
     [ -e "$STUB_DIR/noise" ] && echo "[WARN] [rcl]: stub deprecation warning" >&2
@@ -71,6 +83,15 @@ case "$1 $2" in
     echo "Transitioning successful"
     ;;
   "param get")
+    echo "param get $3 $4" >> "$STUB_DIR/reads"
+    if [ -e "$STUB_DIR/flaky_param_$(key "$3")_$4" ]; then
+      n=$(cat "$STUB_DIR/flaky_param_$(key "$3")_$4")
+      if [ "$n" -gt 0 ]; then
+        echo $((n - 1)) > "$STUB_DIR/flaky_param_$(key "$3")_$4"
+        echo "stub: timed out waiting for the parameter service" >&2
+        exit 1
+      fi
+    fi
     v=$(cat "$STUB_DIR/param/$(key "$3")_$4" 2>/dev/null) || { echo "Parameter not set."; exit 1; }
     echo "String value is: $v"
     ;;
@@ -88,13 +109,15 @@ exec $real_timeout "\$@"
 TIMEOUT
 chmod +x "$work/bin/timeout"
 export STUB_DIR="$work" PATH="$work/bin:$PATH"
+# Short pause between read attempts, so the retry cases stay quick.
+export RESET_CUBE_RETRY_PAUSE=0.05
 
 failures=0
 fail() { echo "FAIL: $*"; failures=$((failures + 1)); }
 
 setup_nodes() {
   rm -f "$work"/log "$work"/fail_* "$work"/hang_* "$work"/noise "$work"/slow \
-    "$work"/timeout_calls "$work"/onconfigure_* "$work"/state/* "$work"/param/*
+    "$work"/timeout_calls "$work"/reads "$work"/flaky_* "$work"/onconfigure_* "$work"/state/* "$work"/param/*
   for n in boat1 boat2 boat3 boat4; do
     echo active > "$work/state/_${n}_cube_bathymetry"
     printf '' > "$work/param/_${n}_cube_bathymetry_draft_dir"
@@ -305,6 +328,49 @@ setup_nodes
 out=$("$script" boat1/cube_bathymetry/ /boat2/cube_bathymetry 2>&1); rc=$?
 [ "$rc" -eq 0 ] || fail "case 11f: other spelling of a single node: exit $rc: $out"
 [ -n "$(line "/boat1/cube_bathymetry cleanup")" ] || fail "case 11f: not reset under /boat1/cube_bathymetry: $(cat "$work/log")"
+
+# --- 12. reads are retried a bounded number of times; transitions never ----------
+# 12a. a parameter read and a state read each fail twice, then answer: the reset
+# completes.
+setup_nodes
+echo 2 > "$work/flaky_param__boat2_cube_bathymetry_prior_store_dir"
+echo 2 > "$work/flaky_param__boat3_cube_bathymetry_draft_dir"
+echo 2 > "$work/flaky_state__boat1_cube_bathymetry"
+out=$("$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 12a: a read that failed twice aborted the reset, exit $rc: $out"
+for n in "${cubes[@]}" /coverage_assessment; do
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 12a: $n not active at the end"
+done
+[ "$(grep -c '^param get /boat2/cube_bathymetry prior_store_dir$' "$work/reads")" -ge 3 ] ||
+  fail "case 12a: prior_store_dir was not retried: $(grep boat2 "$work/reads")"
+
+# 12b. a parameter read that fails every time: three attempts, then the script
+# fails, naming the node and the parameter, before anything was changed.
+setup_nodes
+echo 99 > "$work/flaky_param__boat2_cube_bathymetry_prior_store_dir"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 12b: expected exit 1, got $rc: $out"
+case "$out" in *"/boat2/cube_bathymetry"*"prior_store_dir"*"nothing was changed"*) ;; *) fail "case 12b: message: $out" ;; esac
+attempts=$(grep -c '^param get /boat2/cube_bathymetry prior_store_dir$' "$work/reads")
+[ "$attempts" -eq 3 ] || fail "case 12b: expected exactly 3 attempts, got $attempts"
+[ ! -s "$work/log" ] || fail "case 12b: transitions ran: $(cat "$work/log")"
+
+# 12c. a state read that fails every time, same bound, nothing changed.
+setup_nodes
+echo 99 > "$work/flaky_state__boat3_cube_bathymetry"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 12c: expected exit 1, got $rc: $out"
+attempts=$(grep -c '^lifecycle get /boat3/cube_bathymetry$' "$work/reads")
+[ "$attempts" -eq 3 ] || fail "case 12c: expected exactly 3 attempts, got $attempts"
+[ ! -s "$work/log" ] || fail "case 12c: transitions ran: $(cat "$work/log")"
+
+# 12d. a failing transition is run once, never retried.
+setup_nodes
+touch "$work/fail__boat2_cube_bathymetry_cleanup"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 12d: expected exit 1, got $rc"
+[ "$(grep -c '^/boat2/cube_bathymetry cleanup$' "$work/log")" -eq 1 ] ||
+  fail "case 12d: the failed transition was retried: $(cat "$work/log")"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

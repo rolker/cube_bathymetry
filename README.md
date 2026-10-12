@@ -111,7 +111,12 @@ After the first change, a failure also prints every node's state and says to re-
 running it again is safe (a node that is already reset is simply cycled again). Every
 `ros2` call is bounded by `timeout` (`RESET_CUBE_GET_TIMEOUT`, default 30 s, for reads;
 `RESET_CUBE_SET_TIMEOUT`, default 300 s, for transitions), so an unresponsive node
-fails the script instead of hanging it with boats half reset. The calls run under
+fails the script instead of hanging it with boats half reset. A read (`ros2 lifecycle
+get`, `ros2 param get`) that fails or times out is retried, 3 attempts in all
+(`RESET_CUBE_GET_TRIES`) with a 2 s pause (`RESET_CUBE_RETRY_PAUSE`), because under a heavy
+load one parameter service can miss its turn and answer the next time; only when every
+attempt fails does the read fail the script, and the preflight reads do that before
+anything has changed. A transition is never retried. The calls run under
 `timeout --foreground`, so Ctrl-C still reaches `ros2`. The script ignores SIGHUP and
 SIGPIPE so a dropped ssh session cannot kill it between the quiesce and the
 bring-up; run it under `tmux` or `nohup` anyway if the link is unreliable, because a
