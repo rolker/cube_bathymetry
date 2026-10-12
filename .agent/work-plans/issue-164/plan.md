@@ -188,6 +188,16 @@ either applied below or listed under "Review disposition" at the end.
 
 (`earth_frame` is hard-coded `earth`; `survey_area_queue_depth` is hard-coded.)
 
+**Review fixes after the first pass (owner-approved; they supersede the text above where they differ).**
+- **Map-origin lock (owner decision).** The raster georeference (`map_frame <- earth`) is captured at the first successful lookup after configure and used for BOTH polygon projection and source placement (source frame -> earth -> captured raster); the plan's "re-projected whenever the transform changes" and "`lookupTransform(message_frame <- map_frame)`" no longer apply. Each tick compares the live transform with the captured one (1 cm / 1e-6 rad); beyond it the node logs an ERROR naming the frame and the shift and withholds everything until reconfigured. No silent re-projection.
+- **`max_areas` (owner decision).** New read_only parameter, default 20, 1 to 100 else configure fails; a new id beyond it is refused with an ERROR, so the 100-deep transient_local history holds the newest assessment of every area and the per-pass cost is bounded. Parameter table above gains the row.
+- **Unset standard.** A NaN, negative or infinite `a` or `b` is accepted as "not set" (SurveyStandard.msg), not rejected: the "Robustness decisions" list above no longer rejects on the standard.
+- **Area arrival.** Deviation from "the registry replaces by id only if stamp >= the held one" judged on arrival: definitions are validated on arrival (vertex count, finite coordinates), queued per id, and handed to the registry in stamp order once `earth` is known; the stamp is judged against the last ACCEPTED definition.
+- **Unplaced source retry.** Deviation: the latest unplaced grid is kept (one per source) and folded in when a per-tick retry of its frame succeeds, instead of only clearing the flag, so a silent boat's last grid is not lost. The flag also clears as soon as the transform resolves, whether or not the grid then turns out usable.
+- **Bounds.** Raster-frame coordinates beyond 1e7 m (or 1e12 lattice cells) are refused; the per-message footprint cap is 4e6 cells (was 1e8).
+- **Throttling.** The node keeps its throttled log lines per node (the rclcpp `*_THROTTLE` macros are per call site for the process).
+- Also: callback exception containment, incompatible-QoS ERRORs, the tide boat's transform age check, the explicit `earth`-parented tide frame refusal, `-O2` default build type, the launch handler matching `start_state='configuring'`.
+
 **Steps (build order). B1 is the first thing done in (b), before any package code; B3-B6 build and pass in CI without #406 on their own, B7 is what needs it.**
 
 - B0. Re-read #406 (merged by then) and compare field names to the plan; until it is merged, create the local, **uncommitted** `upstream.repos` override and a layer worktree of the #406 branch.

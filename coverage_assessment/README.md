@@ -22,8 +22,8 @@ converts messages and frames into the core's structs.
 
 | Direction | Topic (default) | Type | QoS |
 |---|---|---|---|
-| in | each of `grid_topics` | `grid_map_msgs/GridMap` (`elevation`, `uncertainty`) | reliable, volatile, depth 10 (what `cube_bathymetry`'s `grid` publisher offers) |
-| in | `survey_area_topic` (`survey_area`) | `marine_interfaces/SurveyArea` | reliable, **transient_local**, depth 100 |
+| in | each of `grid_topics` | `grid_map_msgs/GridMap` (`elevation`, `uncertainty`) | reliable, volatile, depth 10 (what `cube_bathymetry`'s `grid` publisher offers); a publisher with an incompatible QoS (best-effort, say) is reported with an ERROR naming the topic |
+| in | `survey_area_topic` (`survey_area`) | `marine_interfaces/SurveyArea` | reliable, **transient_local**, depth 100; a **volatile** publisher cannot reach it and is reported with an ERROR naming the topic, instead of failing silently |
 | in | `/tf`, `/tf_static` | | |
 | out | `coverage_assessment` | `marine_interfaces/CoverageAssessment`, one per area per assessment | reliable, **transient_local**, depth 100 |
 | out | `coverage_grid` | `grid_map_msgs/GridMap`, one layer `meets_standard` | reliable, **transient_local**, depth 1 |
@@ -35,6 +35,9 @@ Relative names resolve in the node's namespace. `header.frame_id` of both output
 publisher's history is the last 100 messages (a fixed depth, like `survey_area`'s), not
 one per area: a late consumer receives up to the last 100 assessments, oldest first, so
 it may see older repeats of an area before the newest. Keep the latest per `area.id`.
+`max_areas` (default 20, at most 100) is what makes that safe: one pass publishes one
+message per held area, so with at most 100 areas the newest assessment of every area is
+always inside the history.
 
 `coverage_grid` covers the bounding box of all areas on the assessment lattice. Layer
 `meets_standard`: NaN where a cell is outside every area or not covered, `0` covered but
@@ -58,8 +61,9 @@ and ignored. Set them from a launch file or YAML before the node starts.
 | `water_surface_frame` | `map_tide` | The frame whose origin is the water surface. One boat's, e.g. `boat1/map_tide`; the same surface is applied to every source. |
 | `water_surface_boat_frame` | `base_link` | The tide-publishing boat (e.g. `boat1/base_link`), for the distance bound below. |
 | `water_surface_max_boat_distance` | `1500.0` m | Beyond this the surface is refused: warn and skip scoring. |
-| `water_surface_max_age` | `30.0` s | Oldest acceptable water-surface transform. |
+| `water_surface_max_age` | `30.0` s | Oldest acceptable transform, for both the water-surface frame and the tide boat's frame (the distance bound). |
 | `max_raster_cells` | `1000000` | Per-area raster cap in lattice cells; guards a swapped latitude/longitude. A union of areas that exceeds it cannot be drawn as `coverage_grid` (WARN). |
+| `max_areas` | `20` | Most survey areas held at once; 1 to 100, else configure fails. A SurveyArea with a **new** id beyond it is refused with an ERROR (an update of a held id still applies). Bounds the cost of an assessment pass and keeps the 100-deep latched history holding the newest assessment of every area. |
 
 `earth_frame` is hard-coded `earth`.
 
@@ -75,7 +79,9 @@ ros2 launch coverage_assessment coverage_assessment_launch.py \
 ```
 
 The launch file starts one node, configures it as soon as the process is up and
-activates it once it is inactive. `config/coverage_assessment.yaml` is an example for
+activates it once, right after that first configure (it matches the transition
+`configuring` -> `inactive`, so a later deactivate, as in `reset_cube_nodes.sh`, leaves
+the node inactive; `test_launch_lifecycle.py` pins this). `config/coverage_assessment.yaml` is an example for
 the four-boat simulation (it needs editing for anything else; `grid_topics` is
 required). It is not part of the `unh_marine_simulation` demo launch.
 
@@ -113,9 +119,10 @@ elevation and uncertainty only; coverage is judged at assessment time.
 
 ### Frames
 
-For each message the node does one `lookupTransform(grid frame <- map_frame)` (latest
-available) and hands the core its horizontal part, so lattice centre to grid frame is
-that transform at z = 0. `elevation` is an ellipsoid height, independent of frame, so
+For each message the node does one `lookupTransform(grid frame <- earth)` (latest
+available), composes it with the captured raster georeference (below), and hands the core
+the horizontal part of the result, so lattice centre to grid frame is that transform at
+z = 0. `elevation` is an ellipsoid height, independent of frame, so
 it is never transformed. Dropping the z term changes the horizontal placement only by
 the tangent-plane tilt between two frames times a depth: a millimetre or two for frames a
 few hundred metres apart, far below a 1 m cell.
@@ -123,8 +130,25 @@ few hundred metres apart, far below a 1 m cell.
 The area polygon is projected with exactly the chain `cube_bathymetry` uses to place
 its cell centres (`grid_projection.cpp`): `GeoPointLatLongDegrees(lat, lon, 0)` to ECEF
 to the `map_frame <- earth` transform to x, y (`src/frame_chain.hpp`, pinned against
-`cube::geoGridsToGridMap` by `test_frame_chain`). The polygon is re-projected whenever
-that transform changes.
+`cube::geoGridsToGridMap` by `test_frame_chain`).
+
+**The raster georeference is captured once.** At the first successful lookup of
+`map_frame <- earth` after configure the node keeps that transform and uses it for
+**both** the polygon projection and the placement of every source (source frame to
+`earth` to the captured raster), so the target and the accumulated history are always in
+the same coordinates. Each timer tick compares the live `map_frame <- earth` with the
+captured one. If it moved by more than 1 cm or 1e-6 rad, the node logs an ERROR naming
+the frame and the shift and **withholds** everything (no `CoverageAssessment`, no
+`coverage_grid`, counted as `withheld_map_moved`) until it is reconfigured
+(deactivate, cleanup, configure, activate), which recaptures. Nothing is re-projected
+silently: cells already accumulated cannot be moved with the frame. Grids keep
+accumulating in the captured frame meanwhile. A live lookup that fails is not movement;
+the captured transform stays in use.
+
+**Startup wait for `earth`.** Nothing can be captured, projected or placed before
+`earth` is in TF, which is about the first 10 s after the simulation launches. Until then
+the node withholds with a throttled WARN that says this is normal; the latest grid of
+each source that arrives meanwhile is kept and placed once the frame resolves.
 
 **A source that cannot be placed withholds the assessment.** `CoverageAssessment` cannot
 represent a failed source, and zeros would read as "uncovered", so:
@@ -133,12 +157,13 @@ represent a failed source, and zeros would read as "uncovered", so:
   slot in `sources`;
 - a source whose **latest grid could not be placed** (no transform to its frame) makes
   the node publish **no** `CoverageAssessment` and no `coverage_grid` for any area, with
-  a throttled WARN naming the source, its topic and the frame, until one of that
-  source's grids is placed again. A source that stops publishing while flagged keeps the
-  node withholding.
+  a throttled WARN naming the source, its topic and the frame. Every timer tick retries
+  the lookup of that frame: when it resolves, the grid the node kept is folded in and
+  scoring resumes, so a boat that has gone silent does not halt the scoreboard for
+  everyone.
 
-`earth` is absent from TF for about the first 10 s after the simulation launches. So the
-assessor starts by withholding, with a WARN that says this is normal.
+That a source which has **sent no grid yet** scores zero is by design (decided
+2026-10-12): the message keeps its slot, and its zero is true, not a failure.
 
 ### Water surface
 
@@ -165,9 +190,24 @@ consequences:
    distance of `water_surface_boat_frame` from the origin of the tide frame's parent
    (as TF reports the parent), and above `water_surface_max_boat_distance` it warns and
    skips scoring, like (2). If the parent or the boat frame cannot be found, it also
-   skips (fail closed).
+   skips (fail closed). The boat's transform is held to `water_surface_max_age` like the
+   tide's: a dead boat's last position does not pass the bound for ever (counted with the
+   stale refusals). If the tide frame's parent is `earth` itself, the distance would be
+   measured from the centre of the Earth (about 6.4e6 m) and could never pass; the node
+   says so with an ERROR (counted separately) and names the fix: a tide frame under a
+   local map frame, such as `bluefin/map_tide` under `bluefin/map`.
+
+The distance bound checks **the tide boat only**: it is the one-surface assumption made
+explicit (one boat's tide for the whole area, an area of a few kilometres), not a check
+of where the other boats are.
 
 A change of less than 1 cm in the surface does not trigger a new assessment.
+
+**Clocks.** The assessment timer is a wall timer, but every age (the tide's, the boat's)
+is measured against the node clock. With `use_sim_time:=true` the node clock follows
+`/clock` while the timer keeps wall time, so for a simulation set `use_sim_time` on this
+node as on the simulation's other nodes (the stamps in TF are simulation time); with
+real boats leave it `false`. A paused simulation freezes ages, not the timer.
 
 ### Rasterising and judging
 
@@ -189,7 +229,12 @@ The judging rules are those of the message comments:
   the cell meets when `u <= sqrt(a^2 + (b*depth)^2)`. A covered cell where nothing
   competes does not meet;
 - a standard that is **not set** (`a = b = 0`, or `a` or `b` NaN, negative or infinite)
-  is checked first and nothing meets it, whatever the uncertainty;
+  is checked first and nothing meets it, whatever the uncertainty. Such an area is
+  accepted, scored for coverage, and published with `area_meeting_standard` 0, as
+  `SurveyStandard.msg` defines it;
+- a cell exactly at the standard meets: the grids carry `float` uncertainty, so the
+  allowed value is rounded to `float` before the comparison (`0.1f` against `a = 0.1`
+  meets; one float step above does not);
 - per source, covered and meeting are judged on its own grid with its own depth;
   `area_unique` is the cells only that source covers.
 
@@ -207,28 +252,51 @@ cannot pose as a plausible verdict. The count is in the status line.
 
 ### When it assesses
 
-A timer (`assessment_period`) assesses only when a grid was folded in, an area changed
-or was re-projected, or the surface moved by more than 1 cm; so `coverage_grid` is
+A timer (`assessment_period`) assesses only when a grid was folded in, an area was
+added or changed, or the surface moved by more than 1 cm; so `coverage_grid` is
 published at most once per period. It does nothing, with a WARN, while any source is
-unplaced, while `map_frame <- earth` is missing, or while the water surface is refused.
-The first tick after activation always assesses.
+unplaced, while `map_frame <- earth` has not been captured (or has moved off the capture),
+or while the water surface is refused. The first tick after activation always assesses.
 
 ### Invalid input
 
-A `SurveyArea` is rejected with an ERROR, and an earlier definition of that id is kept,
-when it has fewer than 3 vertices, a vertex that is not a finite latitude in
-[-90, 90] and longitude in [-180, 180], a negative or non-finite `a` or `b`, zero area, or
-a raster over `max_raster_cells`. An area whose stamp is older than the one held for that
-id is ignored; on an equal stamp the last received wins. `a = b = 0` is accepted and
-published as "not set". A grid message that cannot be converted, has no `elevation` layer
-or has unusable geometry is dropped with a throttled ERROR; a source without an
-`uncertainty` layer can cover but never meets a standard (warned once).
+A `SurveyArea` is rejected with an ERROR, and any earlier definition of that id is kept,
+when it has fewer than 3 vertices, a vertex that is not a finite latitude in [-90, 90]
+and longitude in [-180, 180], zero area, a raster over `max_raster_cells`, a vertex more
+than 1e7 m (in x or y, in the raster frame) from the raster origin, or a new id beyond
+`max_areas`. The standard is **not** a reason to reject: a NaN, negative or infinite `a`
+or `b` means "not set" (above).
+
+Definitions are validated as they arrive and queued per id; the registry sees them in
+stamp order once `earth` is known. The node keeps, per id, the last **accepted**
+definition and its stamp: a rejected update never displaces it, and an update older than
+it is ignored with a WARN (on an equal stamp the last received wins). So a valid area
+followed by a newer invalid one, both arriving before the first assessment, still scores
+the valid one.
+
+A grid message that cannot be converted, has no `elevation` layer or has unusable geometry
+is dropped with a throttled ERROR, and so is one whose footprint reaches more than 1e7 m
+(or 1e12 lattice cells) from the raster origin. One that spans more than 4e6 lattice cells
+(`SourceAccumulator::kMaxFootprintCells`, sized for CUBE's 200 m window: 2000 x 2000 at
+0.1 m) is dropped with a throttled WARN naming the cell count; a window rotated 45 degrees
+spans twice its own cells, so lattices finer than about 0.15 m are not supported. A
+source without an `uncertainty` layer can cover but never meets a standard (warned once).
+A finite negative uncertainty is not a measurement and never overwrites a held value, so
+the union cannot shrink.
+
+### Faults
+
+No exception can leave a callback: the grid, survey-area and timer callbacks catch
+`std::exception` and anything else, log a throttled ERROR, count it (`callback_exceptions`
+in the status line) and keep running. `main()` catches anything that escapes the spin,
+logs FATAL and returns non-zero.
 
 ## Status line
 
 Every 10 s the node logs the cells held (with memory), per-counter grid and area totals,
 and why ticks did not assess (unplaced source, no `earth`, water surface unavailable,
-stale or too far), plus the last above-surface count. The same counters back the tests.
+stale, too far, a tide frame under `earth`, or the map frame moved), the last
+above-surface count and the number of caught callback exceptions. The same counters back the tests.
 
 ## Tests
 
@@ -240,5 +308,9 @@ projection against `cube::geoGridsToGridMap`) and `test_coverage_assessment_node
 runs the real node over a static TF broadcaster and synthetic grids on its own
 `ROS_DOMAIN_ID` (86) with localhost-only discovery and checks exact numbers, two sources
 in different (one rotated) frames, withholding for an unplaced source, a silent source,
-a stale tide, a tide boat beyond the bound, the reset, the configure refusals and the
-read-only parameters.
+a stale tide and a stale tide boat, a tide boat beyond the bound, a tide frame under
+`earth`, the reset, the map frame moving after the capture, the retry of a silent
+unplaced source, area arrival ordering, unset standards, `max_areas`, injected callback
+exceptions, incompatible QoS, the configure refusals and the read-only parameters. The
+launch file has its own `launch_testing` test (`test_launch_lifecycle.py`, own
+`ROS_DOMAIN_ID` 85).

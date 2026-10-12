@@ -27,3 +27,4 @@
     water_surface_max_boat_distance: 1500.0
     water_surface_max_age: 30.0
     max_raster_cells: 1000000
+    max_areas: 20
