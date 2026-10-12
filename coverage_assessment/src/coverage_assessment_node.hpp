@@ -73,6 +73,14 @@
 namespace coverage_assessment
 {
 
+/// When a throttled log line last went out. An explicit flag says "never logged":
+/// a zero timestamp cannot, since a simulated clock legitimately reads zero.
+struct LogThrottle
+{
+  bool logged = false;
+  std::chrono::steady_clock::time_point at;
+};
+
 /// Counters for the node's diagnostics: logged with the periodic status line and
 /// read back by tests. Reset on every configure.
 struct NodeStats
@@ -238,9 +246,9 @@ private:
     bool uncertainty_warned = false;
     /// Last time each repeating warning was logged for this source: the throttle
     /// is per source, so one noisy source cannot hide another's warning.
-    rclcpp::Time last_unplaced_warn{0, 0, RCL_ROS_TIME};
-    rclcpp::Time last_convert_warn{0, 0, RCL_ROS_TIME};
-    rclcpp::Time last_rejected_warn{0, 0, RCL_ROS_TIME};
+    LogThrottle last_unplaced_warn;
+    LogThrottle last_convert_warn;
+    LogThrottle last_rejected_warn;
     rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr subscription;
   };
 
@@ -324,13 +332,19 @@ private:
   }
 
   /// True (and `last` updated) when the warning behind `last` may be logged now.
-  bool mayWarn(rclcpp::Time * last)
+  /// Throttled on the steady clock, not the node clock: under use_sim_time the
+  /// node clock reads zero until /clock advances (and stands still while paused),
+  /// which would let a repeating condition log on every tick.
+  bool mayWarn(LogThrottle * last)
   {
-    const rclcpp::Time now = get_clock()->now();
-    if (last->nanoseconds() != 0 && (now - *last).seconds() < kWarnPeriodSeconds) {
+    const auto now = std::chrono::steady_clock::now();
+    if (last->logged &&
+      std::chrono::duration<double>(now - last->at).count() < kWarnPeriodSeconds)
+    {
       return false;
     }
-    *last = now;
+    last->logged = true;
+    last->at = now;
     return true;
   }
 
@@ -1210,7 +1224,7 @@ private:
   NodeStats stats_;
   std::function<void(const char *)> fault_injector_;
   /// Last time each throttled call site logged (see COVERAGE_LOG_THROTTLED).
-  std::map<int, rclcpp::Time> throttle_times_;
+  std::map<int, LogThrottle> throttle_times_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

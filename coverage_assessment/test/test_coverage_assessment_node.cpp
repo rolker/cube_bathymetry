@@ -234,6 +234,7 @@ public:
     int64_t max_areas = 0;  // 0: the node's default
     bool dynamic_boat = false;      // base_link comes from publishBoatNow(), stamped
     bool tide_under_earth = false;  // map_tide hangs directly off earth
+    bool use_sim_time = false;      // node clock follows /clock (nobody publishes it)
   };
 
   explicit Harness(const Options & opt)
@@ -265,6 +266,9 @@ public:
     options.append_parameter_override("assessment_period", 0.1);
     options.append_parameter_override("water_surface_max_age", opt_.max_age);
     options.append_parameter_override("water_surface_max_boat_distance", opt_.max_distance);
+    if (opt_.use_sim_time) {
+      options.append_parameter_override("use_sim_time", true);
+    }
     if (opt_.max_areas > 0) {
       options.append_parameter_override("max_areas", opt_.max_areas);
     }
@@ -632,6 +636,24 @@ TEST_F(NodeTest, ARejectedKeptGridIsLoggedWithItsFrame)
   h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
   ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().grids_rejected >= 1;}, 20.0));
   EXPECT_GE(countLog("grid in frame 'a/map' not used: it has no 'elevation' layer"), 1u);
+}
+
+TEST_F(NodeTest, ARepeatingConditionLogsOncePerWindowWhileTheNodeClockIsStuckAtZero)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.use_sim_time = true;  // nobody publishes /clock: the node clock stays at zero
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  ASSERT_EQ(h.node_->get_clock()->now().nanoseconds(), 0);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  // No TF: every 0.1 s tick finds `earth` missing. Many ticks, one line.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().withheld_no_earth >= 8;}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(countLog("waiting for 'map' <- 'earth'"), 1u);
 }
 
 TEST_F(NodeTest, AFailedFoldOfAKeptGridKeepsItForTheNextTick)
