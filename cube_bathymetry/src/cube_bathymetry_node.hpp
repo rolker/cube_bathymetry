@@ -848,9 +848,9 @@ public:
     // Final flush so the last accumulation since the previous periodic save is
     // not stranded when the sheet is released below. (This is the cleanup path
     // only: a shutdown requested from INACTIVE or ACTIVE goes through on_shutdown,
-    // and a process killed without either transition loses whatever the periodic
-    // save has not yet written.) The save timer is normally cancelled
-    // on_deactivate, but guard here too in case cleanup is reached by another path.
+    // and a process stopped by SIGINT/SIGTERM flushes in spinUntilStopped(). Only
+    // a hard stop -- SIGKILL, a crash, power loss -- loses whatever the periodic
+    // save has not yet written.)
     saveDirtyTiles();
     // saveDirtyTiles() logs a write failure and KEEPS the dirty set so the next
     // save retries. Cleanup is the last chance: the next configure replaces the
@@ -872,6 +872,58 @@ public:
                CallbackReturn::FAILURE;
       }
     }
+    releaseConfiguredEntities();
+    return LifecycleNode::on_cleanup(state);
+  }
+
+  /// Shutdown from UNCONFIGURED, INACTIVE or ACTIVE (`ros2 lifecycle set shutdown`).
+  /// Unlike cleanup it cannot be refused, so a failed flush is logged and the
+  /// transition still completes; the tiles that could not be written are lost with
+  /// the process, and the error says how many. Everything configure/activate
+  /// created is then released, as on cleanup: a FINALIZED node must not keep
+  /// publishing its catalog or serving tiles from its timers.
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
+  on_shutdown(const rclcpp_lifecycle::State & state)
+  {
+    flushForStop();
+    releaseConfiguredEntities();
+    return LifecycleNode::on_shutdown(state);
+  }
+
+  /// Write every tile accumulated since the last periodic save, for a stop that
+  /// cannot be refused: the shutdown transition, and the process stopping on
+  /// SIGINT/SIGTERM (spinUntilStopped(), after the executor has stopped). Logs
+  /// how many tiles could not be written; they are lost with the process.
+  /// Nothing to do when no sheet is configured or draft_dir is empty.
+  void flushForStop()
+  {
+    if (draft_dir_.empty() || !geo_map_sheet_) {
+      return;
+    }
+    const std::size_t pending = geo_map_sheet_->dirtyGrids().size();
+    saveDirtyTiles();
+    const std::size_t unsaved = geo_map_sheet_->dirtyGrids().size();
+    if (unsaved > 0) {
+      RCLCPP_ERROR(get_logger(),
+        "Stopping with %zu tile(s) that could not be written to %s; they are "
+        "lost with the process.", unsaved, draft_dir_.c_str());
+    } else if (pending > 0) {
+      // saveDirtyTiles' own report is throttled; the last flush must be visible.
+      RCLCPP_INFO(get_logger(),
+        "Stopping: wrote the %zu tile(s) changed since the last save to %s.",
+        pending, draft_dir_.c_str());
+    }
+  }
+
+private:
+  /// Release everything on_configure and on_activate created, so nothing of the
+  /// old configuration can run afterwards. Shared by on_cleanup (after its final
+  /// flush has succeeded) and on_shutdown (which cannot refuse). Safe to call
+  /// with any of them already released.
+  void releaseConfiguredEntities()
+  {
+    // The timers are normally cancelled on_deactivate; a shutdown from ACTIVE, or
+    // a cleanup reached by another path, arrives with them still running.
     if (save_timer_) {
       save_timer_->cancel();
       save_timer_.reset();
@@ -884,8 +936,6 @@ public:
       disk_serve_timer_->cancel();
       disk_serve_timer_.reset();
     }
-    // on_deactivate cancels this one too; the guard covers a cleanup reached by
-    // another path, like the other timers above.
     if (refresh_timer_) {
       refresh_timer_->cancel();
       refresh_timer_.reset();
@@ -912,36 +962,15 @@ public:
     // touch a destroyed buffer.
     tf_listener_.reset();
     tf_buffer_.reset();
-    // The sheet can hold up to max_resident_tiles 960x960 grids. The final flush
-    // above has succeeded (or there is no draft_dir, so nothing was ever going to
-    // be saved), so release it and the version registry now instead of holding
-    // them until the next configure replaces them (#164). Every reader of either
-    // is a subscription or timer released above.
+    // The sheet can hold up to max_resident_tiles 960x960 grids. The caller has
+    // flushed it (cleanup refuses when that failed; shutdown has logged what it
+    // could not write), so release it and the version registry now instead of
+    // holding them until the next configure replaces them (#164). Every reader of
+    // either is a subscription or timer released above.
     geo_map_sheet_.reset();
     catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
-    return LifecycleNode::on_cleanup(state);
   }
 
-  /// Shutdown from UNCONFIGURED, INACTIVE or ACTIVE (`ros2 lifecycle set shutdown`).
-  /// Unlike cleanup it cannot be refused, so a failed flush is logged and the
-  /// transition still completes; the tiles that could not be written are lost with
-  /// the process, and the error says how many.
-  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
-  on_shutdown(const rclcpp_lifecycle::State & state)
-  {
-    saveDirtyTiles();
-    if (!draft_dir_.empty() && geo_map_sheet_) {
-      const std::size_t unsaved = geo_map_sheet_->dirtyGrids().size();
-      if (unsaved > 0) {
-        RCLCPP_ERROR(get_logger(),
-          "Shutting down with %zu tile(s) that could not be written to %s; they are "
-          "lost with the process.", unsaved, draft_dir_.c_str());
-      }
-    }
-    return LifecycleNode::on_shutdown(state);
-  }
-
-private:
   /// Declare a parameter the first time only and return its current value.
   ///
   /// Parameters outlive cleanup, so a second on_configure must not declare them
@@ -2320,5 +2349,20 @@ private:
     }
   }
 };
+
+/// Spin the node until the context shuts down, then flush its unsaved tiles.
+///
+/// SIGINT/SIGTERM (a terminal Ctrl-C, or `ros2 launch` stopping its nodes) shuts
+/// the context down and makes spin() return without any lifecycle transition, so
+/// on_shutdown never runs; before this, every normal stop lost what the periodic
+/// save had not yet written (#164). The flush runs here, after the executor has
+/// stopped, so no callback can touch the sheet at the same time.
+inline void spinUntilStopped(
+  const std::shared_ptr<CubeBathymetry> & node, rclcpp::Executor & executor)
+{
+  executor.add_node(node->get_node_base_interface());
+  executor.spin();
+  node->flushForStop();
+}
 
 #endif  // CUBE_BATHYMETRY_NODE_HPP_

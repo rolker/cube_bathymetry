@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "lifecycle_msgs/msg/state.hpp"
+#include "marine_interfaces/msg/tile_catalog.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "tf2_msgs/msg/tf_message.hpp"
 
@@ -466,6 +467,83 @@ TEST_F(NodeLifecycle, ShutdownCompletesWhenTheFlushFails)
       blocker << "not a directory";
     }
     EXPECT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+  }
+  std::filesystem::remove_all(dir);
+}
+
+// A shutdown from ACTIVE releases what configure/activate created, as cleanup
+// does. Before, the timers outlived it and a FINALIZED node went on publishing
+// its coverage catalog every catalog_interval. Spun in an executor so the timers
+// can actually fire; the control phase proves the listener would see them.
+TEST_F(NodeLifecycle, ShutdownFromActiveStopsAllOutput)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("catalog_interval", 0.1)}));
+  auto listener = std::make_shared<rclcpp::Node>("catalog_listener");
+  int catalogs = 0;
+  auto sub = listener->create_subscription<marine_interfaces::msg::TileCatalog>(
+    std::string(node->get_fully_qualified_name()) + "/coverage_catalog",
+    rclcpp::QoS(10).reliable(),
+    [&catalogs](marine_interfaces::msg::TileCatalog::ConstSharedPtr) {++catalogs;});
+  rclcpp::executors::SingleThreadedExecutor exe;
+  exe.add_node(node->get_node_base_interface());
+  exe.add_node(listener);
+  // Spin until `done` or the deadline, on this thread: transitions below run
+  // between spins, never concurrently with a callback.
+  auto spinUntil = [&exe](std::chrono::milliseconds limit, auto done) {
+      const auto end = std::chrono::steady_clock::now() + limit;
+      while (std::chrono::steady_clock::now() < end && !done()) {
+        exe.spin_some(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    };
+  auto never = [] {return false;};
+
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  spinUntil(std::chrono::milliseconds(5000), [&catalogs] {return catalogs >= 3;});
+  ASSERT_GE(catalogs, 3) << "control: the listener must see the catalog while ACTIVE";
+
+  ASSERT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+  spinUntil(std::chrono::milliseconds(200), never);  // drain anything in flight
+  catalogs = 0;
+  spinUntil(std::chrono::milliseconds(1000), never);  // ten catalog intervals
+  EXPECT_EQ(catalogs, 0) << "a FINALIZED node must not keep publishing its catalog";
+  EXPECT_FALSE(node->sheet()) << "shutdown must release the sheet, as cleanup does";
+}
+
+// SIGINT/SIGTERM (Ctrl-C, or ros2 launch stopping its nodes) shuts the context
+// down and returns from spin() with no lifecycle transition, so on_shutdown never
+// runs. spinUntilStopped() -- what main() runs -- must still write the tiles
+// accumulated since the last periodic save. The context is shut down directly,
+// which is what rclcpp's signal handler does; a private context keeps the suite's
+// global one alive for the other tests.
+TEST_F(NodeLifecycle, ContextShutdownFlushesUnsavedTiles)
+{
+  const auto dir = makeTempDir();
+  {
+    auto context = std::make_shared<rclcpp::Context>();
+    context->init(0, nullptr);
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}).context(context));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    addPatch(node->sheet(), -12.5);
+    ASSERT_FALSE(node->sheet()->dirtyGrids().empty());
+    ASSERT_FALSE(std::filesystem::exists(dir / "draft")) << "test setup: nothing saved yet";
+
+    rclcpp::ExecutorOptions options;
+    options.context = context;
+    rclcpp::executors::SingleThreadedExecutor exe(options);
+    std::thread spinner([&node, &exe] {spinUntilStopped(node, exe);});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    context->shutdown("test: what the SIGINT handler does");
+    spinner.join();
+
+    EXPECT_TRUE(std::filesystem::exists(dir / "draft") &&
+      !std::filesystem::is_empty(dir / "draft"))
+      << "stopping on a signal must write the tiles accumulated since the last save";
+    EXPECT_TRUE(node->sheet()->dirtyGrids().empty());
   }
   std::filesystem::remove_all(dir);
 }

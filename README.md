@@ -155,8 +155,13 @@ none of the previous window's cells (`test_node_lifecycle`).
   is refused the save timer is stopped and nothing retries the write: the tiles stay in
   RAM until cleanup is requested again. A `shutdown` transition (from `unconfigured`,
   `inactive` or `active`) makes one last attempt to write them and then completes
-  whether or not it succeeded; a process killed without either transition loses
-  whatever the periodic save has not written.
+  whether or not it succeeded, releasing the node's timers, subscriptions and
+  publishers as cleanup does. A process stopped with SIGINT or SIGTERM (Ctrl-C, or
+  `ros2 launch` stopping its nodes) makes the same last attempt after it stops
+  spinning, and logs `Stopping: wrote the N tile(s)...` (or, on failure, how many
+  were lost). Only a hard stop (SIGKILL, a crash, power loss) loses whatever the
+  periodic save has not written; `ros2 launch` sends SIGKILL to a node that has not
+  exited after its SIGINT and SIGTERM timeouts, so a flush slower than that is cut off.
 - **Nothing is saved when `draft_dir` is empty.** That is what makes the sheet fresh,
   and it also means the reset **permanently discards the in-RAM survey**: the old
   window exists nowhere afterwards. Save or export what you want to keep first. With

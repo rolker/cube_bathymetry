@@ -29,9 +29,7 @@ int main(int argc, char **argv)
   auto cube = std::make_shared<CubeBathymetry>();
 
   rclcpp::executors::SingleThreadedExecutor exe;
-  exe.add_node(cube->get_node_base_interface());
-  exe.spin();
-
+  spinUntilStopped(cube, exe);
 
   rclcpp::shutdown();
   return 0;
