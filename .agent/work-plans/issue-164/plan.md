@@ -108,7 +108,7 @@ either applied below or listed under "Review disposition" at the end.
     a wrong `read_only` value (`capture_spacing_scale`, `publish_dirty_subwindow`) needs a restart; and a cleanup whose flush failed refuses. After round 2: do not clear `draft_dir` with `''` (no persistence and no eviction, so RAM grows on a long survey, and cleanup flushes against the directory the node was configured with); point it at a new empty directory and pass `--allow-persistence`.)*
 11. **Live verification** on a built node (no persistence): run the script against a real `cube_bathymetry_node` (own `ROS_DOMAIN_ID`, localhost discovery), confirm `ros2 lifecycle get` ends `active`
     and the first `grid` after the reset contains none of the previous window's cells; record in progress.md. Full-scope `ci_local.sh` before push.
-    *(Done 2026-10-09 with a throwaway publisher feeding two patches 120 m apart; recorded in progress.md `## Implementation`. `ci_local.sh` is still owed before push.)*
+    *(Done 2026-10-09 with a throwaway publisher feeding two patches 120 m apart; recorded in progress.md `## Implementation`. Full-scope `ci_local.sh` passed before push; the attestation is in `refs/notes/ci-local` and the run is recorded in progress.md.)*
 12. **Follow-up named, not built:** a `clear` service (draft below under Follow-ups). Filing the issue needs the owner's yes.
 
 ### PR (b): the `coverage_assessment` package (core first, wrapper last; after #406 is on `jazzy`)
@@ -197,7 +197,7 @@ either applied below or listed under "Review disposition" at the end.
 | `cube_bathymetry/package.xml` | (a) `exec_depend` `ros2lifecycle`, `ros2param` |
 | `cube_bathymetry/test/test_node_lifecycle.cpp` | (a) new: reconfigure, empty start, draft_dir characterization |
 | `cube_bathymetry/test/test_publish_equivalence.cpp` | (a) elevation sign test |
-| `cube_bathymetry/scripts/reset_cube_nodes.sh`, `cube_bathymetry/test/test_reset_cube_nodes.sh` | (a) new (three-case stub test) |
+| `cube_bathymetry/scripts/reset_cube_nodes.sh`, `cube_bathymetry/test/test_reset_cube_nodes.sh` | (a) new (stubbed-`ros2` test, ten cases) |
 | `.agents/ci_local_upstream_extra.sh` | (a) new: `ci_local.sh` prune hook mirroring hosted CI's `AFTER_SETUP_UPSTREAM_WORKSPACE` (without it `ci_local.sh` cannot build the upstream monorepo; found when the attestation first ran, round 2) |
 | `README.md` | (a) elevation sign, reset section, event `draft_dir` note; (b) Nodes row, parameter table |
 | `coverage_assessment/**` | (b) new package: core, ROS wrapper, launch, tests, README |
