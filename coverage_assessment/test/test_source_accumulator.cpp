@@ -26,6 +26,7 @@
 #include <string>
 
 #include "coverage_assessment/source_accumulator.h"
+#include "message_fixtures.h"
 
 namespace coverage_assessment
 {
@@ -33,39 +34,6 @@ namespace coverage_assessment
 namespace
 {
 
-const float kNan = std::numeric_limits<float>::quiet_NaN();
-
-// A message of `nx` x `ny` cells of `res` metres whose lower-left corner is at
-// (x0, y0) in the message's own frame. `fill(cx, cy, &elevation, &uncertainty)`
-// is called with each cell's centre.
-template<typename F>
-grid_map::GridMap makeMessage(double x0, double y0, int nx, int ny, double res, F fill)
-{
-  grid_map::GridMap m({"elevation", "uncertainty"});
-  m.setFrameId("src");
-  m.setGeometry(
-    grid_map::Length(nx * res, ny * res), res,
-    grid_map::Position(x0 + nx * res / 2.0, y0 + ny * res / 2.0));
-  for (grid_map::GridMapIterator it(m); !it.isPastEnd(); ++it) {
-    grid_map::Position p;
-    m.getPosition(*it, p);
-    float e = kNan, u = kNan;
-    fill(p.x(), p.y(), &e, &u);
-    m.at("elevation", *it) = e;
-    m.at("uncertainty", *it) = u;
-  }
-  return m;
-}
-
-grid_map::GridMap constantMessage(
-  double x0, double y0, int nx, int ny, float elevation, float uncertainty)
-{
-  return makeMessage(
-    x0, y0, nx, ny, 1.0, [ = ](double, double, float * e, float * u) {
-      *e = elevation;
-      *u = uncertainty;
-    });
-}
 
 // Lattice cells in [i0, i1) x [j0, j1) holding a finite elevation.
 std::size_t countCovered(
