@@ -13,6 +13,8 @@
   <!-- The core library needs grid_map_core alone (plain C++, no ROS). The rest
        belong to the ROS wrapper (lifecycle node, TF, message conversion) and are
        declared with the package so the CI image bakes them (#164). -->
+  <depend>eigen</depend>
+  <depend>geometry_msgs</depend>
   <depend>grid_map_core</depend>
   <depend>grid_map_ros</depend>
   <depend>grid_map_msgs</depend>
@@ -24,6 +26,13 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>marine_autonomy</depend>
   <depend>marine_interfaces</depend>
+
+  <!-- The launch file; ros2lifecycle drives configure/activate/cleanup by hand,
+       as scripts/reset_cube_nodes.sh does for the CUBE nodes. -->
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ros2lifecycle</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>

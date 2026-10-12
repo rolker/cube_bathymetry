@@ -9,12 +9,24 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(grid_map_core REQUIRED)
+find_package(grid_map_ros REQUIRED)
+find_package(grid_map_msgs REQUIRED)
+find_package(marine_autonomy REQUIRED)
+find_package(marine_interfaces REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_eigen REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 # The core (polygon rasterising, per-source accumulation, judging) is plain
 # C++ over grid_map_core: no ROS, no message types, no TF. The ROS wrapper
-# (a later step of #164) converts messages and frames into the core's own
-# structs, which keeps every judging rule unit-testable without a graph.
+# (src/coverage_assessment_node.hpp) converts messages and frames into the
+# core's own structs, which keeps every judging rule unit-testable without a
+# graph.
 add_library(coverage_assessment_core
   src/polygon_raster.cpp
   src/source_accumulator.cpp
@@ -36,6 +48,39 @@ install(TARGETS coverage_assessment_core EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
+
+# The node's compile/link requirements live on an INTERFACE target so the
+# executable and the node tests consume ONE list and cannot drift. The node class
+# is src/coverage_assessment_node.hpp -- deliberately not under include/, so it is
+# neither installed nor public API; consumers add src/ to their own private
+# include path.
+add_library(coverage_assessment_node_link INTERFACE)
+target_include_directories(coverage_assessment_node_link INTERFACE
+  ${grid_map_ros_INCLUDE_DIRS}
+)
+target_link_libraries(coverage_assessment_node_link INTERFACE
+  coverage_assessment_core
+  marine_autonomy::marine_autonomy  # gz4d geodesy, shared with cube_bathymetry's projection
+  Eigen3::Eigen
+  ${geometry_msgs_TARGETS}
+  ${marine_interfaces_TARGETS}
+  ${grid_map_msgs_TARGETS}
+  ${grid_map_ros_LIBRARIES}
+  rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
+  tf2::tf2
+  tf2_eigen::tf2_eigen
+  tf2_ros::tf2_ros
+)
+
+add_executable(coverage_assessment_node src/coverage_assessment_node.cpp)
+target_include_directories(coverage_assessment_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(coverage_assessment_node coverage_assessment_node_link)
+install(TARGETS coverage_assessment_node DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
