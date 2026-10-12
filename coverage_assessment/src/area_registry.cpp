@@ -21,9 +21,6 @@
 
 #include "coverage_assessment/area_registry.h"
 
-#include <cmath>
-#include <sstream>
-
 namespace coverage_assessment
 {
 
@@ -45,15 +42,6 @@ const RegisteredArea * AreaRegistry::find(const std::string & id) const
 RegistryResult AreaRegistry::update(const AreaDefinition & definition)
 {
   RegistryResult result;
-  const SurveyStandard & s = definition.standard;
-  if (!std::isfinite(s.a) || !std::isfinite(s.b) || s.a < 0.0 || s.b < 0.0) {
-    std::ostringstream os;
-    os << "area '" << definition.id << "': standard a=" << s.a << " b=" << s.b
-       << " must be finite and >= 0";
-    result.outcome = RegistryOutcome::kRejected;
-    result.reason = os.str();
-    return result;
-  }
   PolygonRasterResult raster = rasterisePolygon(definition.polygon, cell_size_, max_cells_);
   if (!raster.ok) {
     result.outcome = RegistryOutcome::kRejected;

@@ -57,6 +57,16 @@ namespace coverage_assessment
     {
       return std::sqrt(a * a + (b * depth) * (b * depth));
     }
+
+  /// True when a cell of uncertainty `u` at `depth` meets the standard. Only
+  /// meaningful when isSet(). The grids carry float uncertainty, and a float
+  /// such as 0.1f widens to a double above the double 0.1, so a cell exactly at
+  /// the standard would fail a double compare; the allowed value is therefore
+  /// rounded to float, the type `u` came in, before the comparison.
+    bool meets(double u, double depth) const
+    {
+      return static_cast<float>(u) <= static_cast<float>(allowed(depth));
+    }
   };
 
 /// One target polygon, with the polygon already in assessment-raster metres
@@ -110,9 +120,10 @@ public:
   /// stamp is >= the held one (on an equal stamp the last received wins). A
   /// definition is refused, keeping any earlier one of the same id, when its
   /// polygon cannot be rasterised (fewer than 3 vertices, non-finite
-  /// coordinates, zero area, over `max_cells`) or its standard has a NaN,
-  /// infinite or negative a or b. A standard with a = b = 0 is accepted: it is
-  /// "not set" and nothing will meet it, which is an honest state to publish.
+  /// coordinates, zero area, over `max_cells`). The standard is never a reason
+  /// to refuse: SurveyStandard.msg defines a = b = 0, or a NaN, negative or
+  /// infinite a or b, as "not set", and nothing will meet it -- an honest state
+  /// to publish (area_meeting_standard 0).
     RegistryResult update(const AreaDefinition & definition);
 
     const std::vector < RegisteredArea > & areas() const {

@@ -271,6 +271,20 @@ TEST(CoverageAssessor, EqualityMeets)
   EXPECT_EQ(assess(area, {&below}).area_meeting_standard, 100.0);
 }
 
+TEST(CoverageAssessor, UncertaintyExactlyAtTheStandardMeetsDespiteFloatWidening)
+{
+  // 0.1f widens to 0.10000000149..., above the double 0.1: a double compare would
+  // fail a cell that is exactly at the standard.
+  const RegisteredArea area = makeArea(square10(), standard(0.1, 0.0));
+  const auto at = uniformSource(-10.0f, 0.1f);
+  const AreaAssessment a = assess(area, {&at});
+  EXPECT_EQ(a.area_meeting_standard, 100.0);
+  EXPECT_EQ(a.sources[0].area_meeting_standard, 100.0);
+  // One float step above still fails.
+  const auto above = uniformSource(-10.0f, std::nextafter(0.1f, 1.0f));
+  EXPECT_EQ(assess(area, {&above}).area_meeting_standard, 0.0);
+}
+
 TEST(CoverageAssessor, DepthComesFromTheSmallestUncertaintySource)
 {
   // a = 0.5, b = 0.05: allowed(10) = 0.7071, allowed(2) = 0.5099.
@@ -607,13 +621,10 @@ TEST(AreaRegistry, InvalidAreaKeepsTheOldOneAndIsNotAddedIfNew)
   ASSERT_EQ(registry.update(good).outcome, RegistryOutcome::kAdded);
 
   const double nan = std::numeric_limits<double>::quiet_NaN();
-  std::vector<AreaDefinition> bad(6, good);
+  std::vector<AreaDefinition> bad(3, good);
   bad[0].polygon = {{0.0, 0.0}, {5.0, 5.0}};                                // 2 vertices
   bad[1].polygon = {{0.0, 0.0}, {nan, 0.0}, {0.0, 5.0}};                    // non-finite
   bad[2].polygon = {{0.0, 0.0}, {5000.0, 0.0}, {5000.0, 5000.0}};           // oversize
-  bad[3].standard = standard(-0.5, 0.0);                                    // negative a
-  bad[4].standard = standard(0.5, nan);                                     // NaN b
-  bad[5].standard = standard(kInf, 0.0);                                    // infinite a
   for (AreaDefinition & d : bad) {
     d.stamp_ns = 500;  // newer, so only the validation can be what refuses it
     const RegistryResult r = registry.update(d);
@@ -642,6 +653,42 @@ TEST(AreaRegistry, UnsetStandardIsAcceptedAndReported)
   d.polygon = square10();  // standard left at a = b = 0
   EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kAdded);
   EXPECT_FALSE(registry.find("unset")->definition.standard.isSet());
+}
+
+TEST(AreaRegistry, NanNegativeAndInfiniteStandardsAreAcceptedAsNotSet)
+{
+  // SurveyStandard.msg: such a standard means "not set"; the area is still a
+  // valid area, scored with nothing meeting it, and replaces an earlier one.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  AreaRegistry registry(1.0, kBig);
+  AreaDefinition d;
+  d.id = "a";
+  d.stamp_ns = 100;
+  d.polygon = square10();
+  d.standard = standard(0.5, 0.0);
+  ASSERT_EQ(registry.update(d).outcome, RegistryOutcome::kAdded);
+  const SurveyStandard unset[] = {
+    standard(-0.5, 0.0), standard(0.5, nan), standard(kInf, 0.0), standard(0.5, -kInf),
+    standard(nan, nan)};
+  int64_t stamp = 100;
+  for (const SurveyStandard & s : unset) {
+    d.standard = s;
+    d.stamp_ns = ++stamp;
+    EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kReplaced);
+    const RegisteredArea * held = registry.find("a");
+    ASSERT_NE(held, nullptr);
+    EXPECT_FALSE(held->definition.standard.isSet());
+    EXPECT_EQ(held->mask.count, 100u);
+    // ... and a grid that would meet any real standard does not meet it.
+    const auto src = uniformSource(-10.0f, 0.0f);
+    const AreaAssessment out = assess(*held, {&src});
+    EXPECT_EQ(out.area_covered, 100.0);
+    EXPECT_EQ(out.area_meeting_standard, 0.0);
+  }
+  // A new id with a NaN standard is added, not refused.
+  d.id = "fresh";
+  d.standard = standard(nan, 0.0);
+  EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kAdded);
 }
 
 TEST(SurveyStandard, AllowedAndIsSet)

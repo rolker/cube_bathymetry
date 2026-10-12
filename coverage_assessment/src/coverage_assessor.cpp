@@ -92,7 +92,7 @@ AreaAssessment assessArea(
         if (!(std::isfinite(u) && u >= 0.0)) {
           continue;  // covers, does not compete
         }
-        if (standard_set && u <= standard.allowed(depth)) {
+        if (standard_set && standard.meets(u, depth)) {
           ++src_meeting[s];
         }
         if (!have_winner || u < win_u || (u == win_u && depth < win_depth)) {
@@ -112,7 +112,7 @@ AreaAssessment assessArea(
       if (covering == 1) {
         ++src_unique[only];
       }
-      if (standard_set && have_winner && win_u <= standard.allowed(win_depth)) {
+      if (standard_set && have_winner && standard.meets(win_u, win_depth)) {
         ++meeting;
         out.verdict[k] = kMeetsStandard;
       } else {
