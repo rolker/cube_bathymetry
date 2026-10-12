@@ -469,3 +469,32 @@ Report-only run of the `coverage_assessment` node against the four-boat sim (`de
 ### Defects
 - **D1 (real): `reset_cube_nodes.sh --consumer /coverage_assessment` fails when the assessor was started by `coverage_assessment_launch.py`.** The launch's `OnStateTransition(goal_state='inactive')` handler re-activates the node on EVERY transition to inactive, including the script's deactivate. Result: script aborts "transition 'deactivate' failed (state is 'active', expected 'inactive')" with all four CUBE nodes left `unconfigured` (boats publish no grid until the script is re-run, which fails the same way), and the assessor kept its old union. Reproduce: launch sim + `ros2 launch coverage_assessment coverage_assessment_launch.py`, then run the script with `--consumer /coverage_assessment` and the four cube nodes. Launch log shows a second "coverage_assessment configured, activating" at the deactivate. Fix idea: activate only on the first inactive (handler removes itself / matches previous_state 'configuring'), or document that the reset needs a node started without the launch handler.
 - D2 (minor, not a defect in the node): reset_cube_nodes.sh with 4 nodes + consumer took ~3 min here (each `ros2 lifecycle` CLI call 3-8 s).
+
+## Implementation
+
+Address-findings round. Review findings for PR (b), the `coverage_assessment` package, all 16 items fixed in this PR (owner-approved; item 7 map-origin policy and item 14 `max_areas` are owner decisions). Nothing pushed.
+
+| # | Item | Result | Commit | Test evidence |
+|---|---|---|---|---|
+| 1 | Default build type | done: RelWithDebInfo block copied from cube_bathymetry | 69a3928 | build log shows the default message |
+| 2 | Exception containment | done: guarded() on grid/area/timer callbacks (std::exception and `...`), throttled ERROR, `callback_exceptions` in the status line; main() try/catch logs FATAL, returns 1. Test seam `setFaultInjectorForTest` | 04c62dd | node test ExceptionsInCallbacksAreContained... throws std::runtime_error from grid and timer, `int` from survey_area |
+| 3 | Launch re-activation | done: OnStateTransition start_state='configuring' | 7dc385d | new launch_testing test: fails (3 != 2) on the old handler, passes now |
+| 4 | Unset standard | done: registry no longer rejects, node no longer rejects, README fixed | fe47736, ad4f197 | registry test with NaN/neg/inf; node test AnUnsetStandardIsScored... (areas_rejected 0, meeting 0) |
+| 5 | Area arrival ordering | done: arrival validation, per-id pending queue in stamp order, last accepted + stamp kept | ad4f197 | node test ARejectedNewerArea... (4 messages before any TF) |
+| 6 | Numeric bounds | done: 1e7 m coordinate and 1e12 lattice-index bounds in polygon_raster and the accumulator, new statuses with reasons; footprint cap 4e6 with WARN | ed2dfa9, e87aaf2 | boundary tests (at/just over bound, 1e16, 1e300, tiny cell size, cap 3.996e6 vs 4.002e6); node test with a far map frame |
+| 7 | Map-origin lock | done: georeference captured at first lookup, used for polygons and placement, tick compares (1 cm / 1e-6 rad), ERROR + withhold until reconfigure | e87aaf2 | node tests MapFrameMovingAfterTheCapture... (moved 5 m, withheld counter, reconfigure recaptures, overlap 50 m^2) and a 5 mm non-movement test |
+| 8 | Negative uncertainty | done: u_ok requires u >= 0 | ed2dfa9 | accumulator test |
+| 9 | Boundary in float | done: SurveyStandard::meets rounds allowed to float | fe47736 | assessor test a=0.1, u=0.1f meets, nextafter fails |
+| 10 | Placement retry | done: per-tick retry; the kept unplaced grid is folded in (deviation: not only the flag clears) | e87aaf2 | node test SilentUnplacedSourceIsRetried... |
+| 11 | Boat transform age | done | 9369eb1 | node test StaleTideBoatTransformSkipsScoringToo |
+| 12 | Tide frame under earth | done: explicit ERROR, own counter | 9369eb1 | node test TideFrameDirectlyUnderEarth... |
+| 13 | Incompatible QoS | done: ERROR naming the topic on survey_area and grid subscriptions | 04c62dd | node test IncompatibleQosPublishers... |
+| 14 | max_areas | done: read_only, default 20, 1..100 at configure, new id beyond it refused | ad4f197 | node tests MaxAreasRefuses..., ConfigureRefusesAMaxAreas... |
+| 15 | Tests | done: start-index circular-buffer accumulator test (ed2dfa9); positive withheld checks, stale tide 4 s bound (bdd0a41). Also made the throttled log lines per node, since rclcpp *_THROTTLE state is per call site for the process and hid a log line across tests | ed2dfa9, bdd0a41 | node tests pass 3 of 3 repeated runs |
+| 16 | README | done: unsent-source zero, tide-boat-only bound, wall timer vs node clock / use_sim_time, georeference lock, max_areas, startup wait for earth | 068f925 | n/a |
+
+Plan: PR (b) section gained a "Review fixes" note (items 7 and 14 as owner decisions, plus deviations) in 068f925. Lint fixes in 2412679.
+
+Results: coverage_assessment 181 xunit tests, 0 failures, 0 errors (20 cppcheck skipped, cppcheck not installed); cube_bathymetry 782, 0 failures. Lint (uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257) all pass.
+
+Open: the pre-existing uncommitted edits to `.agent/work-plans/issue-164/review-*` files were left alone. B10-style live re-check of the fixes (launch with reset_cube_nodes.sh --consumer on the real sim) was not run; the launch behaviour is covered by the launch_testing test only.
