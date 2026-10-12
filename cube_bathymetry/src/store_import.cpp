@@ -245,7 +245,7 @@ void primeFromTileSkippingMask(
   // deliver Processed-wins-on-overlap independent of CUBE's chooseHypothesis
   // tie-break: the overlapped cell carries ONLY the Processed hypothesis, matching
   // the store's query-side `Processed > Draft` walk (see the fused-prime callers in
-  // cube_bathymetry_node.cpp).
+  // cube_bathymetry_node.hpp).
   const std::vector<double> * mask_depth = mask ? &mask->depthBand() : nullptr;
 
   // Walk the tile in GGGS cell order (row 0 = south, row-major) -- the same order

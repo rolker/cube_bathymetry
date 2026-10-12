@@ -332,6 +332,94 @@ TEST(PublishEquivalence, ProjectionPlacesCellCentersExactly)
   EXPECT_EQ(matched, reference.size());
 }
 
+// The `elevation` layer is WGS84-ELLIPSOID HEIGHT, POSITIVE UP (cube_bathymetry#164).
+// It is neither depth below the water surface nor map-frame z. A seabed is BELOW
+// THE WATER SURFACE'S ELLIPSOID HEIGHT: negative near sea level (offset by the
+// geoid separation), but positive on a lake whose surface is above the ellipsoid
+// (Lake Massabesic full pool is +48.88 m ellipsoidal). "Depth below the surface"
+// is `h_surface - elevation` with `h_surface` an ellipsoid height too. This is the
+// convention the README states for stored depths (uma ADR-0002 D4) and
+// ssp_ray_tracer.h documents ("an elevation, positive up"); this test pins that
+// the `grid` layer carries the same quantity, so a sign flip on the sheet ->
+// grid path (a negated depth, an altitude read as height above the surface)
+// fails here instead of in a downstream depth threshold.
+//
+// Scope: soundings are built from a geodetic height through the same
+// ECEF -> geodetic conversion the live node applies, then added to the sheet
+// directly. This bypasses pingCallback (TF, point-cloud parsing), so it pins the
+// sheet and projection, not the node's subscription path.
+namespace
+{
+
+// Cells of a sheet whose single patch sits at ellipsoid height `seabed_height`.
+std::vector<Cell> cellsForSeabedAt(double seabed_height)
+{
+  const Eigen::Isometry3d map_from_earth = makeMapFromEarth();
+  const double lat = 43.07;
+  const double lon = -70.76;
+
+  const gz4d::GeoPointLatLongDegrees truth(lat, lon, seabed_height);
+  const gz4d::GeoPointECEF ecef(truth);
+  const gz4d::GeoPointLatLongDegrees roundtrip(ecef);
+  EXPECT_NEAR(roundtrip[2], seabed_height, 1e-3)
+    << "ECEF -> geodetic must return the ellipsoid height unchanged";
+
+  GeoMapSheet geo_sheet(1.0f);
+  for (int rep = 0; rep < 25; ++rep) {
+    GeoSounding gs(roundtrip);
+    EXPECT_NEAR(gs.sounding.depth, roundtrip[2], 1e-4)   // stored as float
+      << "the sounding carries the geodetic height, not a negated depth";
+    gs.sounding.vertical_error = 0.5f;
+    gs.sounding.horizontal_error = 0.1f;
+    geo_sheet.addSoundings({gs});
+  }
+
+  const grid_map::GridMap projected = geoMapSheetToGridMap(
+    geo_sheet, "map", geo_sheet.nominalCellSizeMeters(), map_from_earth);
+  EXPECT_TRUE(projected.exists("elevation"));
+  return collectFiniteCells(projected);
+}
+
+}  // namespace
+
+TEST(PublishEquivalence, ElevationIsEllipsoidHeightPositiveUp)
+{
+  // Surface below the ellipsoid (near sea level): the seabed elevation is negative.
+  {
+    const double seabed_height = -14.25;   // ellipsoid height of the seabed, m
+    const double h_surface = -1.0;         // a surface 1 m below the ellipsoid
+    const std::vector<Cell> cells = cellsForSeabedAt(seabed_height);
+    ASSERT_FALSE(cells.empty()) << "no finite cells -- CUBE produced no estimate";
+    for (const auto & c : cells) {
+      EXPECT_NEAR(c.depth, seabed_height, 0.05)
+        << "elevation must equal the ellipsoid height of the seabed, positive up, "
+        "not its negation or a depth below the surface";
+      EXPECT_LT(c.depth, 0.0f);
+      // Depth below the surface: positive for a seabed below it.
+      EXPECT_NEAR(h_surface - c.depth, h_surface - seabed_height, 0.05);
+      EXPECT_GT(h_surface - c.depth, 0.0);
+    }
+  }
+
+  // Surface ABOVE the ellipsoid (Lake Massabesic: full pool +48.88 m ellipsoidal),
+  // seabed 10 m below it. The seabed is still below the surface but its elevation
+  // is POSITIVE: "elevation < 0" is not the same as "below the water".
+  {
+    const double h_surface = 48.88;
+    const double water_depth = 10.0;
+    const double seabed_height = h_surface - water_depth;   // +38.88 m
+    const std::vector<Cell> cells = cellsForSeabedAt(seabed_height);
+    ASSERT_FALSE(cells.empty()) << "no finite cells -- CUBE produced no estimate";
+    for (const auto & c : cells) {
+      EXPECT_NEAR(c.depth, seabed_height, 0.05)
+        << "elevation must be the (positive) ellipsoid height of the seabed";
+      EXPECT_GT(c.depth, 0.0f) << "a seabed under a surface above the ellipsoid is positive";
+      EXPECT_NEAR(h_surface - c.depth, water_depth, 0.05)
+        << "depth below the surface is h_surface - elevation";
+    }
+  }
+}
+
 // The migrated geographic-accumulation + publish-projection path must produce a
 // map-frame elevation grid equivalent to the legacy Cartesian path: every finite
 // cell in one grid is matched 1:1 to a finite cell within HALF a cell of the

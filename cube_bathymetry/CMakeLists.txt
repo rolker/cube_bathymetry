@@ -242,11 +242,16 @@ install(TARGETS cube_bathymetry_ssp_ray_tracer EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
-add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
-target_include_directories(cube_bathymetry_node PUBLIC
+# The node's compile/link requirements live on an INTERFACE target so the
+# executable and test_node_lifecycle consume ONE list and cannot drift (#164).
+# The node class is src/cube_bathymetry_node.hpp -- deliberately not under
+# include/, so it is neither installed nor public API; consumers add src/ to
+# their own private include path.
+add_library(cube_bathymetry_node_link INTERFACE)
+target_include_directories(cube_bathymetry_node_link INTERFACE
   ${grid_map_ros_INCLUDE_DIRS}
 )
-target_link_libraries(cube_bathymetry_node
+target_link_libraries(cube_bathymetry_node_link INTERFACE
   cube_bathymetry
   cube_bathymetry_grid_projection
   cube_bathymetry_quantize_tile   # GeoGrid -> SonarVisualizationTile (#78)
@@ -258,11 +263,18 @@ target_link_libraries(cube_bathymetry_node
   ${geometry_msgs_TARGETS}
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
   ${sensor_msgs_TARGETS}
   tf2_eigen::tf2_eigen
   tf2_geometry_msgs::tf2_geometry_msgs
   tf2_sensor_msgs::tf2_sensor_msgs
 )
+
+add_executable(cube_bathymetry_node src/cube_bathymetry_node.cpp)
+target_include_directories(cube_bathymetry_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(cube_bathymetry_node cube_bathymetry_node_link)
 
 install(TARGETS cube_bathymetry_node
   DESTINATION lib/${PROJECT_NAME}
@@ -276,6 +288,12 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/derive_angular_response.py
   scripts/make_bag_excerpt.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Operator tool: start a fresh CUBE sheet without restarting the nodes (#164).
+install(PROGRAMS
+  scripts/reset_cube_nodes.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -365,6 +383,39 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 
   find_package(ament_cmake_gtest REQUIRED)
+
+  # Lifecycle cycle of the live node (#164): second configure must succeed and
+  # an unpersisted reconfigure starts empty. Links the same INTERFACE target as
+  # the executable. Its own ROS_DOMAIN_ID and localhost-only discovery keep it
+  # from talking to live boats, parallel colcon tests or a CI container's other
+  # tests (jazzy: ROS_AUTOMATIC_DISCOVERY_RANGE replaces ROS_LOCALHOST_ONLY).
+  # The domain id must be <= 101: above it the DDS port formula (7400 + 250 * id)
+  # overlaps the ephemeral port range on Linux. Other tests in this workspace use 89
+  # (mru_transform) and 101 (marine_web_view); 87 is not taken.
+  # Private domain, localhost-only discovery, and any discovery-server / static-peer
+  # setting inherited from the environment blanked (as in the mru_transform test).
+  set(CUBE_ISOLATED_TEST_ENV
+    "ROS_DOMAIN_ID=87;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+    "ROS_DISCOVERY_SERVER=;ROS_STATIC_PEERS=;FASTRTPS_DEFAULT_PROFILES_FILE=;CYCLONEDDS_URI=")
+  ament_add_gtest(test_node_lifecycle test/test_node_lifecycle.cpp TIMEOUT 120)
+  target_include_directories(test_node_lifecycle PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
+  set_tests_properties(test_node_lifecycle PROPERTIES
+    ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
+
+  # reset_cube_nodes.sh against a stub `ros2` on PATH (#164), 11 case groups:
+  # consumer ordering, refusal on a non-empty draft_dir, fail-fast, preflight,
+  # flag parsing, the never-configured probe, timeouts, stderr noise,
+  # `timeout --foreground` / SIGHUP / SIGPIPE, probe-failure reporting, and each
+  # node named once. The
+  # stub never talks to DDS; the environment is blanked anyway so a future case
+  # that does cannot reach live boats (same variables as the mru_transform test).
+  add_test(NAME test_reset_cube_nodes
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test/test_reset_cube_nodes.sh
+      ${CMAKE_CURRENT_SOURCE_DIR}/scripts/reset_cube_nodes.sh)
+  set_tests_properties(test_reset_cube_nodes PROPERTIES
+    ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
 
   ament_add_gtest(test_hypothesis test/test_hypothesis.cpp)
   target_link_libraries(test_hypothesis cube_bathymetry)
