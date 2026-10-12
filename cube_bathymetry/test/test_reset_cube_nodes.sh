@@ -21,7 +21,8 @@
 #  10. a failing probe is not reported as a failed reset; a CUBE node that is not
 #      active is warned about in the preflight.
 #  11. a node given twice, or as both a CUBE node and a consumer (in any spelling
-#      of its name), is a usage error before anything is read or changed.
+#      of its name), is a usage error before anything is read or changed; a node
+#      typed in another spelling is handed to `ros2` fully qualified.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -286,12 +287,24 @@ out=$("$script" --consumer boat2/cube_bathymetry/ "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 2 ] || fail "case 11b: same node in another spelling: expected exit 2, got $rc: $out"
 [ ! -s "$work/log" ] || fail "case 11b: transitions ran: $(cat "$work/log")"
 setup_nodes
+out=$("$script" --consumer //boat3//cube_bathymetry// "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 2 ] || fail "case 11e: repeated slashes: expected exit 2, got $rc: $out"
+[ ! -s "$work/log" ] || fail "case 11e: transitions ran: $(cat "$work/log")"
+setup_nodes
 out=$("$script" "${cubes[@]}" /boat1/cube_bathymetry 2>&1); rc=$?
 [ "$rc" -eq 2 ] || fail "case 11c: CUBE node given twice: expected exit 2, got $rc: $out"
+case "$out" in *"/boat1/cube_bathymetry"*"twice"*) ;; *) fail "case 11c: message: $out" ;; esac
+[ ! -s "$work/log" ] || fail "case 11c: transitions ran: $(cat "$work/log")"
 setup_nodes
 out=$("$script" --consumer /coverage_assessment --consumer coverage_assessment "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 2 ] || fail "case 11d: consumer given twice: expected exit 2, got $rc: $out"
 [ ! -s "$work/log" ] || fail "case 11d: transitions ran: $(cat "$work/log")"
+
+# 11f. a lone node in another spelling is reset under its qualified name
+setup_nodes
+out=$("$script" boat1/cube_bathymetry/ /boat2/cube_bathymetry 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 11f: other spelling of a single node: exit $rc: $out"
+[ -n "$(line "/boat1/cube_bathymetry cleanup")" ] || fail "case 11f: not reset under /boat1/cube_bathymetry: $(cat "$work/log")"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

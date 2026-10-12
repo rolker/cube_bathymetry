@@ -17,7 +17,7 @@
 #                         stale window from a node that has not been reset yet.
 #                         May be repeated.
 #   Each node is named once: a node given twice, or as both NODE and --consumer
-#   (`/a/b`, `a/b` and `/a/b/` are the same node), is a usage error.
+#   (`/a/b`, `a/b`, `/a/b/` and `//a//b` are the same node), is a usage error.
 #   --allow-persistence   reset even though a node has a non-empty `draft_dir`.
 #                         Saved draft tiles are RELOADED on configure, so the sheet
 #                         is then NOT fresh; without this flag the script refuses.
@@ -88,7 +88,13 @@ done
 # step 2 and publish `grid` while the remaining consumers are still being reset,
 # which is exactly what the ordering exists to prevent; a node given twice would
 # be cycled twice. Compared fully qualified, as ROS names the node.
-qualified() { local n=${1%/}; [ "${n#/}" = "$n" ] && n="/$n"; echo "$n"; }
+qualified() {
+  local n
+  n=$(printf '%s' "$1" | tr -s /)
+  while [ "${#n}" -gt 1 ] && [ "${n%/}" != "$n" ]; do n=${n%/}; done
+  [ "${n#/}" = "$n" ] && n="/$n"
+  echo "$n"
+}
 declare -A listed_as=()
 list_once() {
   local key
@@ -101,6 +107,10 @@ list_once() {
 }
 for node in "${nodes[@]}"; do list_once "$node" "a CUBE node"; done
 for node in "${consumers[@]}"; do list_once "$node" "a --consumer"; done
+# From here on every name is the fully qualified one, so `ros2` is given the
+# spelling ROS uses whatever form was typed.
+for i in "${!nodes[@]}"; do nodes[i]=$(qualified "${nodes[i]}"); done
+for i in "${!consumers[@]}"; do consumers[i]=$(qualified "${consumers[i]}"); done
 
 # A dropped ssh session (SIGHUP) or a closed pipe (SIGPIPE) would otherwise kill
 # the script mid-reset, leaving boats without `grid` and nothing printed.
