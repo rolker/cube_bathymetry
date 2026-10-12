@@ -520,3 +520,24 @@ Fix round 3 for PR (b), the `coverage_assessment` package, plus one fix in the m
 Results: coverage_assessment 194 xunit tests, 0 failures, 0 errors (20 skipped: cppcheck not installed); cube_bathymetry 782, 0 failures (90 skipped). Lint in both: uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257 all pass (they run as colcon tests).
 
 Not run: a live sim re-check of `reset_cube_nodes.sh --consumer /coverage_assessment` with the launch file; the launch behaviour and the script's retries are covered by the launch test and the stub-ros2 test.
+
+## Implementation
+
+### Live reset re-check after fix round 3 (2026-10-12)
+
+Report-only run on the real four-boat sim (`demo_boats_launch.py enable_joysticks:=false`, ROS_DOMAIN_ID=69, default discovery), assessor started WITH `coverage_assessment_launch.py`, one latched SurveyArea (500 x 500 m box round the bluefin/map origin, a=0.5 b=0.013, area_total 250000). Scratch: `.agent/scratchpad/cube164b_reset3/`. No code changed.
+
+| Check | Result |
+|---|---|
+| Reset 1: `reset_cube_nodes.sh --consumer /coverage_assessment` + 4 CUBE nodes | PASS, exit 0, 317.5 s; coverage before 9741 -> 10835 (last before), first assessment after 0 / 0 meeting, area_total 250000 unchanged |
+| Reset 2 (back to back, ~5 min later) | PASS, exit 0, 324.1 s; coverage before ~4671, first assessment after 0, total 250000 |
+| End states | all four CUBE nodes and `/coverage_assessment` `active` after both resets (script's own state table, plus `ros2 lifecycle get` after reset 2) |
+| Launch log "activating" | exactly ONE across the whole run (startup), both resets: PASS (round 2 saw a second one at the deactivate) |
+| Coverage grows again | 0 -> 4505 within ~125 s after reset 1, 0 -> 5499 after reset 2: PASS |
+| Status line | "0 callback exception(s) caught" and "0 cell(s) above the surface" in the last line: PASS |
+| Read retries logged | none (reset logs hold no retry text); durations are dominated by `ros2 lifecycle` CLI calls (~3 min per run as in B10 D2) |
+| Startup notice (assessor launched BEFORE the sim) | PASS: "Not assessing: waiting for 'bluefin/map' <- 'earth' ..." (2 WARNs, 'Grids and survey areas are kept meanwhile'), 'ticks without one: ... 9 without earth', then georeference captured, one "water surface unavailable" WARN, assessments from ~+20 s; no unplaced-source warning (0 unplaced) |
+
+Caveat: my own `drive.py` launch failed (bad path in my wrapper, no process ran), so the boats were not driven by the script. Coverage was still non-zero and grew on its own, so the sim boats move without the joystick feed; the reset checks do not depend on it.
+
+Everything started was stopped (process groups of my own launches, plus the domain-69 ros2 daemon).
