@@ -99,6 +99,28 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_assessment_raster test/test_assessment_raster.cpp)
   target_link_libraries(test_assessment_raster coverage_assessment_core)
+
+  # The polygon and the grids must share one projection chain: pin the node's
+  # vertex projection against cube_bathymetry's own (B8 (i)). Needs the built
+  # cube_bathymetry package, which colcon builds first (test_depend).
+  find_package(cube_bathymetry QUIET)
+  if(cube_bathymetry_FOUND)
+    ament_add_gtest(test_frame_chain test/test_frame_chain.cpp)
+    # cube_bathymetry installs its headers under include/cube_bathymetry/ and
+    # exports that directory through cube_bathymetry_INCLUDE_DIRS.
+    target_include_directories(test_frame_chain PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+      ${cube_bathymetry_INCLUDE_DIRS})
+    target_link_libraries(test_frame_chain
+      coverage_assessment_node_link
+      cube_bathymetry::cube_bathymetry_grid_projection)
+  else()
+    # Never skip silently: a missing cube_bathymetry is a failing test, not an
+    # absent one. Build both: `colcon build --packages-up-to coverage_assessment`.
+    message(WARNING "cube_bathymetry not found: test_frame_chain will FAIL. "
+      "Build cube_bathymetry first (colcon --packages-up-to coverage_assessment).")
+    add_test(NAME test_frame_chain COMMAND ${CMAKE_COMMAND} -E false)
+  endif()
 endif()
 
 ament_package()
