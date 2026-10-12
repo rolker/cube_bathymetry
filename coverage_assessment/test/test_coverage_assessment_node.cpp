@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -230,6 +231,7 @@ public:
     double max_distance = 1500.0;
     bool dynamic_tide = false;
     double boat_x = 10.0;
+    int64_t max_areas = 0;  // 0: the node's default
   };
 
   explicit Harness(const Options & opt)
@@ -261,6 +263,9 @@ public:
     options.append_parameter_override("assessment_period", 0.1);
     options.append_parameter_override("water_surface_max_age", opt_.max_age);
     options.append_parameter_override("water_surface_max_boat_distance", opt_.max_distance);
+    if (opt_.max_areas > 0) {
+      options.append_parameter_override("max_areas", opt_.max_areas);
+    }
     node_ = std::make_shared<CoverageAssessmentNode>(options);
 
     executor_.add_node(io_);
@@ -711,6 +716,125 @@ TEST_F(NodeTest, ReconfigureEmptiesTheUnion)
       [&]() {h.publishGrid("A", grid);}));
 }
 
+// ---- survey areas: arrival ordering, unset standards, max_areas -------------------
+
+namespace
+{
+
+// A SurveyArea whose polygon has too few vertices to be one.
+SurveyArea invalidArea(const std::string & id, int stamp_sec)
+{
+  SurveyArea area = makeArea(id, {0, 0, 10, 10}, 0.5, 0.0, stamp_sec);
+  area.polygon.points.resize(2);
+  return area;
+}
+
+}  // namespace
+
+TEST_F(NodeTest, ARejectedNewerAreaNeverDisplacesNorOutranksAValidOne)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+
+  // No TF yet, so nothing can be projected: all four messages are in the node
+  // before the first assessment. Valid (stamp 1), invalid and newer (stamp 9),
+  // valid with a stamp below the invalid one (stamp 5, a 10 x 6 rectangle), and
+  // valid with a stamp below that (stamp 4). The invalid one must not outrank
+  // stamp 5, and stamp 5 must win over the later-arriving stamp 4.
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  h.publishArea(invalidArea("area1", 9));
+  h.publishArea(makeArea("area1", {0, 0, 10, 6}, 0.5, 0.0, 5));
+  h.publishArea(makeArea("area1", {0, 0, 10, 8}, 0.5, 0.0, 4));
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().areas_received == 4;}, 10.0));
+  EXPECT_EQ(h.node_->stats().areas_rejected, 1u);
+  EXPECT_EQ(h.received_, 0u);
+
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > 0;}, 20.0, [&]() {h.publishGrid("A", grid);}));
+  ASSERT_TRUE(h.first_.has_value());
+  EXPECT_DOUBLE_EQ(h.first_->area_total, 60.0) << "the stamp-5 definition must be the one scored";
+  EXPECT_EQ(h.first_->area.stamp.sec, 5);
+
+  // Now that stamp 5 is accepted, an older arrival is ignored and an invalid
+  // newer one is rejected, and neither changes what is scored.
+  const std::size_t before = h.node_->stats().areas_rejected;
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 3));
+  h.publishArea(invalidArea("area1", 20));
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().areas_rejected > before;}, 10.0));
+  h.spinFor(1.0, [&]() {h.publishGrid("A", grid);});
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").area_total, 60.0);
+  EXPECT_EQ(h.latest_.at("area1").area.stamp.sec, 5);
+  EXPECT_GE(countLog("older than the definition held"), 1u);
+}
+
+TEST_F(NodeTest, AnUnsetStandardIsScoredAndPublishedNotRefused)
+{
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("nan_a", {0, 0, 10, 10}, nan, 0.0, 1));
+  h.publishArea(makeArea("negative_b", {0, 0, 10, 10}, 0.5, -1.0, 1));
+  h.publishArea(makeArea("zero", {0, 0, 10, 10}, 0.0, 0.0, 1));
+  h.publishArea(makeArea("real", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.0f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        for (const char * id : {"nan_a", "negative_b", "zero", "real"}) {
+          if (!h.latest_.count(id) || h.latest_.at(id).area_covered != 100.0) {
+            return false;
+          }
+        }
+        return true;
+      }, 20.0, [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.node_->stats().areas_rejected, 0u);
+  for (const char * id : {"nan_a", "negative_b", "zero"}) {
+    EXPECT_DOUBLE_EQ(h.latest_.at(id).area_meeting_standard, 0.0) << id;
+    EXPECT_DOUBLE_EQ(h.latest_.at(id).sources[0].area_meeting_standard, 0.0) << id;
+  }
+  EXPECT_DOUBLE_EQ(h.latest_.at("real").area_meeting_standard, 100.0);
+  EXPECT_EQ(countLog("Rejecting SurveyArea"), 0u);
+}
+
+TEST_F(NodeTest, MaxAreasRefusesANewIdButStillUpdatesAHeldOne)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.max_areas = 2;
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("a1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  h.publishArea(makeArea("a2", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  h.publishArea(makeArea("a3", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.latest_.count("a1") && h.latest_.count("a2");}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.node_->stats().areas_rejected, 1u);
+  EXPECT_EQ(countLog("max_areas (2) areas are already held"), 1u);
+  EXPECT_EQ(h.latest_.count("a3"), 0u);
+
+  // A held id is still updated.
+  h.publishArea(makeArea("a1", {0, 0, 10, 5}, 0.5, 0.0, 2));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.latest_.at("a1").area_total == 50.0;}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.latest_.count("a3"), 0u);
+}
+
 // ---- exception containment ----------------------------------------------------
 
 TEST_F(NodeTest, ExceptionsInCallbacksAreContainedCountedAndTheNodeKeepsWorking)
@@ -828,12 +952,34 @@ TEST_F(NodeTest, ConfigureFailsWithAReasonOnAnUnusableSourceList)
   }
 }
 
+TEST_F(NodeTest, ConfigureRefusesAMaxAreasOutsideOneToAHundred)
+{
+  for (const int64_t bad : {0, -3, 101, 100000}) {
+    rclcpp::NodeOptions options;
+    options.arguments({"--ros-args", "-r", "__ns:=/t" + std::to_string(g_next_namespace++)});
+    options.append_parameter_override("grid_topics", std::vector<std::string>{"/x/grid"});
+    options.append_parameter_override("max_areas", bad);
+    auto node = std::make_shared<CoverageAssessmentNode>(options);
+    clearLog();
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED) << bad;
+    EXPECT_EQ(countLog("max_areas=" + std::to_string(bad) + " must be from 1 to 100"), 1u) << bad;
+  }
+  for (const int64_t good : {1, 20, 100}) {
+    rclcpp::NodeOptions options;
+    options.arguments({"--ros-args", "-r", "__ns:=/t" + std::to_string(g_next_namespace++)});
+    options.append_parameter_override("grid_topics", std::vector<std::string>{"/x/grid"});
+    options.append_parameter_override("max_areas", good);
+    auto node = std::make_shared<CoverageAssessmentNode>(options);
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE) << good;
+  }
+}
+
 TEST_F(NodeTest, ParametersReadAtConfigureAreReadOnly)
 {
   auto node = makeNode({"/x/grid"}, {});
   for (const char * name : {"cell_size", "map_frame", "grid_topics", "source_names",
       "survey_area_topic", "assessment_period", "water_surface_frame", "water_surface_boat_frame",
-      "water_surface_max_boat_distance", "water_surface_max_age", "max_raster_cells"})
+      "water_surface_max_boat_distance", "water_surface_max_age", "max_raster_cells", "max_areas"})
   {
     ASSERT_TRUE(node->has_parameter(name)) << name;
     EXPECT_TRUE(node->describe_parameter(name).read_only) << name;

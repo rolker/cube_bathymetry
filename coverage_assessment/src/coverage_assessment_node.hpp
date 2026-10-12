@@ -116,6 +116,14 @@ public:
   /// new assessment (metres).
   static constexpr double kSurfaceChangeThreshold = 0.01;
 
+  /// Most definitions of one area id kept while the raster georeference is not
+  /// available yet to project them (the oldest are dropped first).
+  static constexpr std::size_t kMaxPendingPerArea = 8;
+
+  /// Upper bound of the max_areas parameter: the coverage_assessment publisher's
+  /// transient_local history is kLatchedDepth messages, one per area per pass.
+  static constexpr int64_t kMaxAreasLimit = 100;
+
   explicit CoverageAssessmentNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
   : rclcpp_lifecycle::LifecycleNode("coverage_assessment", options)
   {
@@ -210,20 +218,21 @@ private:
     rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr subscription;
   };
 
-  /// A SurveyArea as received, kept so its polygon can be projected again when
-  /// the earth -> map transform changes.
+  /// A SurveyArea as received.
   struct RawArea
   {
     marine_interfaces::msg::SurveyArea msg;
     int64_t stamp_ns = 0;
   };
 
+  /// One area id. `pending` holds definitions that passed the checks possible on
+  /// arrival and wait to be projected into the registry; `accepted` is the last
+  /// definition the registry accepted, which a rejected or older update never
+  /// displaces and which stamp ordering is judged against.
   struct AreaEntry
   {
-    RawArea current;
-    /// The last definition the registry accepted, to fall back to when a newer
-    /// one is rejected.
-    std::optional<RawArea> last_good;
+    std::vector<RawArea> pending;
+    std::optional<RawArea> accepted;
   };
 
   enum class SurfaceStatus
@@ -280,6 +289,11 @@ private:
     declare_parameter<int64_t>(
       "max_raster_cells", 1000000,
       desc("Per-area raster cap, lattice cells (guards a swapped latitude/longitude)."));
+    declare_parameter<int64_t>(
+      "max_areas", 20,
+      desc("Most survey areas held at once, 1 to 100; a new id beyond it is refused with an "
+      "ERROR. Keeps the transient_local history (100) holding the newest assessment of every "
+      "area, and bounds the cost of an assessment pass."));
   }
 
   /// True (and `last` updated) when the warning behind `last` may be logged now.
@@ -314,6 +328,7 @@ private:
     max_boat_distance_ = get_parameter("water_surface_max_boat_distance").as_double();
     max_surface_age_s_ = get_parameter("water_surface_max_age").as_double();
     max_raster_cells_ = get_parameter("max_raster_cells").as_int();
+    max_areas_ = get_parameter("max_areas").as_int();
 
     if (topics.empty()) {
       RCLCPP_ERROR(get_logger(),
@@ -366,6 +381,14 @@ private:
     if (max_raster_cells_ < 1) {
       RCLCPP_ERROR(get_logger(), "Configure refused: max_raster_cells=%ld must be at least 1.",
         static_cast<long>(max_raster_cells_));  // NOLINT(runtime/int)
+      return false;
+    }
+    if (max_areas_ < 1 || max_areas_ > kMaxAreasLimit) {
+      RCLCPP_ERROR(get_logger(),
+        "Configure refused: max_areas=%ld must be from 1 to %ld (the coverage_assessment history "
+        "is %zu messages deep, so more areas could not all stay latched).",
+        static_cast<long>(max_areas_), static_cast<long>(kMaxAreasLimit),  // NOLINT(runtime/int)
+        kLatchedDepth);
       return false;
     }
     if (!std::isfinite(max_surface_age_s_) || max_surface_age_s_ <= 0.0 ||
@@ -427,9 +450,10 @@ private:
 
     RCLCPP_INFO(get_logger(),
       "Configured: %zu source(s), cell_size=%g m, raster frame '%s', water surface '%s' "
-      "(boat frame '%s', max distance %g m, max age %g s), survey areas on '%s'.",
+      "(boat frame '%s', max distance %g m, max age %g s), survey areas on '%s' (at most %ld).",
       sources_.size(), cell_size_, map_frame_.c_str(), water_surface_frame_.c_str(),
-      boat_frame_.c_str(), max_boat_distance_, max_surface_age_s_, survey_area_topic_.c_str());
+      boat_frame_.c_str(), max_boat_distance_, max_surface_age_s_, survey_area_topic_.c_str(),
+      static_cast<long>(max_areas_));  // NOLINT(runtime/int)
     return true;
   }
 
@@ -501,6 +525,13 @@ private:
 
   // ---- inputs ---------------------------------------------------------------
 
+  /// Checks what can be checked on arrival (vertex count, finite coordinates in
+  /// range) and queues the definition for projection. A definition that fails
+  /// them never touches what is held, and stamp ordering is judged against the
+  /// last definition the registry ACCEPTED, so neither a rejected update nor an
+  /// unvalidated one can displace or outrank a good one. The standard is not
+  /// checked: SurveyStandard.msg defines a negative, NaN or infinite a or b as
+  /// "not set", which is a state to score and publish, not to refuse.
   void onArea(const marine_interfaces::msg::SurveyArea & msg)
   {
     ++stats_.areas_received;
@@ -517,26 +548,26 @@ private:
         return;
       }
     }
-    const double a = msg.standard.a;
-    const double b = msg.standard.b;
-    if (!std::isfinite(a) || !std::isfinite(b) || a < 0.0 || b < 0.0) {
-      reject(msg, "the standard's a or b is negative or not finite");
-      return;
-    }
     RawArea raw;
     raw.msg = msg;
     raw.stamp_ns = static_cast<int64_t>(msg.stamp.sec) * 1000000000LL + msg.stamp.nanosec;
     auto it = areas_.find(msg.id);
-    if (it != areas_.end() && raw.stamp_ns < it->second.current.stamp_ns) {
+    if (it == areas_.end()) {
+      if (static_cast<int64_t>(areas_.size()) >= max_areas_) {
+        reject(msg, "max_areas (" + std::to_string(max_areas_) + ") areas are already held");
+        return;
+      }
+      area_order_.push_back(msg.id);
+      it = areas_.emplace(msg.id, AreaEntry{}).first;
+    } else if (it->second.accepted && raw.stamp_ns < it->second.accepted->stamp_ns) {
       RCLCPP_WARN(get_logger(),
         "Ignoring SurveyArea '%s': its stamp is older than the definition held.", msg.id.c_str());
       return;
     }
-    if (it == areas_.end()) {
-      area_order_.push_back(msg.id);
-      areas_[msg.id] = AreaEntry{raw, std::nullopt};
-    } else {
-      it->second.current = raw;
+    auto & pending = it->second.pending;
+    pending.push_back(std::move(raw));
+    if (pending.size() > kMaxPendingPerArea) {
+      pending.erase(pending.begin());
     }
     areas_dirty_ = true;
   }
@@ -630,45 +661,53 @@ private:
            (x.linear() - y.linear()).cwiseAbs().maxCoeff() < 1.0e-9;
   }
 
-  /// Project every held polygon with `map_from_earth` into the registry.
-  void projectAreas(const Eigen::Isometry3d & map_from_earth)
+  /// Project the queued definitions with `map_from_earth` into the registry, in
+  /// stamp order (arrival order within one stamp, so the last received wins), and
+  /// the accepted ones again when `reproject_all`. A definition the registry
+  /// refuses is reported and never displaces the accepted one; an id with no
+  /// accepted definition left is forgotten, which frees its max_areas slot.
+  void projectAreas(const Eigen::Isometry3d & map_from_earth, bool reproject_all)
   {
+    auto submit = [&](const RawArea & raw) {
+        AreaDefinition def;
+        def.id = raw.msg.id;
+        def.stamp_ns = raw.stamp_ns;
+        def.standard.name = raw.msg.standard.name;
+        def.standard.a = raw.msg.standard.a;
+        def.standard.b = raw.msg.standard.b;
+        for (const auto & p : raw.msg.polygon.points) {
+          def.polygon.push_back(projectGeoPoint(p.latitude, p.longitude, map_from_earth));
+        }
+        return registry_->update(def);
+      };
     std::vector<std::string> dropped;
     for (const auto & id : area_order_) {
       AreaEntry & entry = areas_.at(id);
-      auto submit = [&](const RawArea & raw) {
-          AreaDefinition def;
-          def.id = raw.msg.id;
-          def.stamp_ns = raw.stamp_ns;
-          def.standard.name = raw.msg.standard.name;
-          def.standard.a = raw.msg.standard.a;
-          def.standard.b = raw.msg.standard.b;
-          for (const auto & p : raw.msg.polygon.points) {
-            def.polygon.push_back(projectGeoPoint(p.latitude, p.longitude, map_from_earth));
-          }
-          return registry_->update(def);
-        };
-      const RegistryResult result = submit(entry.current);
-      if (result.outcome == RegistryOutcome::kAdded ||
-        result.outcome == RegistryOutcome::kReplaced)
-      {
-        entry.last_good = entry.current;
-        continue;
+      if (reproject_all && entry.accepted) {
+        const RegistryResult result = submit(*entry.accepted);
+        if (result.outcome == RegistryOutcome::kRejected) {
+          ++stats_.areas_rejected;
+          RCLCPP_ERROR(get_logger(), "Rejecting SurveyArea '%s' at the new origin: %s; the "
+            "previous projection is kept.", id.c_str(), result.reason.c_str());
+        }
       }
-      if (result.outcome == RegistryOutcome::kRejected && !(entry.last_good &&
-        entry.last_good->stamp_ns == entry.current.stamp_ns &&
-        entry.last_good->msg == entry.current.msg))
-      {
-        ++stats_.areas_rejected;
-        RCLCPP_ERROR(get_logger(), "Rejecting SurveyArea '%s': %s%s.", id.c_str(),
-          result.reason.c_str(),
-          entry.last_good ? "; the earlier definition of that id is kept" : "");
+      std::stable_sort(entry.pending.begin(), entry.pending.end(),
+        [](const RawArea & x, const RawArea & y) {return x.stamp_ns < y.stamp_ns;});
+      for (const RawArea & raw : entry.pending) {
+        const RegistryResult result = submit(raw);
+        if (result.outcome == RegistryOutcome::kAdded ||
+          result.outcome == RegistryOutcome::kReplaced)
+        {
+          entry.accepted = raw;
+        } else if (result.outcome == RegistryOutcome::kRejected) {
+          ++stats_.areas_rejected;
+          RCLCPP_ERROR(get_logger(), "Rejecting SurveyArea '%s': %s%s.", id.c_str(),
+            result.reason.c_str(),
+            entry.accepted ? "; the earlier definition of that id is kept" : "");
+        }
       }
-      if (entry.last_good) {
-        // Keep the earlier definition, projected with the current transform.
-        entry.current = *entry.last_good;
-        submit(entry.current);
-      } else {
+      entry.pending.clear();
+      if (!entry.accepted) {
         dropped.push_back(id);
       }
     }
@@ -806,11 +845,13 @@ private:
         "normal.", map_frame_.c_str(), e.what());
       return;
     }
-    if (areas_dirty_ || !have_map_from_earth_ || !sameTransform(map_from_earth, map_from_earth_)) {
+    const bool origin_changed =
+      have_map_from_earth_ && !sameTransform(map_from_earth, map_from_earth_);
+    if (areas_dirty_ || !have_map_from_earth_ || origin_changed) {
       map_from_earth_ = map_from_earth;
       have_map_from_earth_ = true;
       areas_dirty_ = false;
-      projectAreas(map_from_earth);
+      projectAreas(map_from_earth, origin_changed);
       force_assessment_ = true;
     }
     if (registry_->areas().empty()) {
@@ -870,7 +911,7 @@ private:
       marine_interfaces::msg::CoverageAssessment out;
       out.header.stamp = now;
       out.header.frame_id = map_frame_;
-      out.area = areas_.at(a.area_id).current.msg;
+      out.area = areas_.at(a.area_id).accepted->msg;
       out.cell_size = a.cell_size;
       out.area_total = a.area_total;
       out.area_covered = a.area_covered;
@@ -922,6 +963,7 @@ private:
   double max_boat_distance_ = 1500.0;
   double max_surface_age_s_ = 30.0;
   int64_t max_raster_cells_ = 1000000;
+  int64_t max_areas_ = 20;
 
   // State, all rebuilt by a configure.
   std::vector<std::unique_ptr<SourceState>> sources_;
