@@ -79,9 +79,10 @@ ros2 launch coverage_assessment coverage_assessment_launch.py \
 ```
 
 The launch file starts one node, configures it as soon as the process is up and
-activates it once, right after that first configure (it matches the transition
-`configuring` -> `inactive`, so a later deactivate, as in `reset_cube_nodes.sh`, leaves
-the node inactive; `test_launch_lifecycle.py` pins this). `config/coverage_assessment.yaml` is an example for
+activates it once, right after that first configure (the handler fires for the first
+`configuring` -> `inactive` transition only, so the later configure of
+`reset_cube_nodes.sh --consumer` (deactivate, cleanup, configure, activate) is not followed
+by a second activation; `test_launch_lifecycle.py` runs that sequence). `config/coverage_assessment.yaml` is an example for
 the four-boat simulation (it needs editing for anything else; `grid_topics` is
 required). It is not part of the `unh_marine_simulation` demo launch.
 

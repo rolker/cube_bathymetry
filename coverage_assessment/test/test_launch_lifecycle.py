@@ -20,11 +20,12 @@
 # THE SOFTWARE.
 
 """
-Launch-file test: the node is activated once, and a deactivate stays put.
+Launch-file test: the node is activated once, and a later reset stays put.
 
 reset_cube_nodes.sh --consumer drives deactivate, cleanup, configure, activate.
-The launch file's own activation handler must not undo the first step (it used
-to re-activate on every transition into 'inactive').
+The launch file's own activation handler must fire for the first configure only:
+it used to re-activate on every transition into 'inactive', then on every
+configure, so the script's own activate found the node already active.
 """
 
 import os
@@ -90,25 +91,42 @@ class TestLaunchLifecycle(unittest.TestCase):
             time.sleep(0.1)
         return False
 
-    def test_activates_once_and_deactivate_stays_inactive(self):
+    def test_activates_once_and_a_reset_sequence_stays_put(self):
         self.assertTrue(self.get_state.wait_for_service(timeout_sec=30.0))
         self.assertTrue(self.change_state.wait_for_service(timeout_sec=30.0))
         self.assertTrue(
             self._wait_for(State.PRIMARY_STATE_ACTIVE, 30.0),
             'the launch file did not configure and activate the node')
 
+        self._transition(Transition.TRANSITION_DEACTIVATE)
+        self._assert_stays(State.PRIMARY_STATE_INACTIVE, 5.0)
+
+        # The rest of the script's sequence: after the second configure the
+        # launch handler must not activate the node a second time.
+        self._transition(Transition.TRANSITION_CLEANUP)
+        self._assert_stays(State.PRIMARY_STATE_UNCONFIGURED, 1.0)
+        self._transition(Transition.TRANSITION_CONFIGURE)
+        self._assert_stays(State.PRIMARY_STATE_INACTIVE, 5.0)
+
+        # And the script's own activate works.
+        self._transition(Transition.TRANSITION_ACTIVATE)
+        self.assertEqual(self._state(), State.PRIMARY_STATE_ACTIVE)
+
+    def _transition(self, transition_id):
         request = ChangeState.Request()
-        request.transition.id = Transition.TRANSITION_DEACTIVATE
+        request.transition.id = transition_id
         future = self.change_state.call_async(request)
         rclpy.spin_until_future_complete(self.node, future, timeout_sec=10.0)
-        self.assertTrue(future.result() is not None and future.result().success)
+        self.assertTrue(
+            future.result() is not None and future.result().success,
+            'transition %d failed' % transition_id)
 
-        # Positive check, repeated: inactive now, and still inactive after the
-        # launch event handlers have had time to react to the transition.
-        end = time.monotonic() + 5.0
+    def _assert_stays(self, state_id, seconds):
+        """Positive check, repeated: in `state_id` now and for `seconds` more."""
+        end = time.monotonic() + seconds
         seen = 0
         while time.monotonic() < end:
-            self.assertEqual(self._state(), State.PRIMARY_STATE_INACTIVE)
+            self.assertEqual(self._state(), state_id)
             seen += 1
             time.sleep(0.25)
-        self.assertGreaterEqual(seen, 10)
+        self.assertGreaterEqual(seen, int(seconds * 2))

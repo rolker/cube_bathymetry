@@ -37,8 +37,25 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
+from launch_ros.events.lifecycle import StateTransition
 
 from lifecycle_msgs.msg import Transition
+
+
+def _first_configure_matcher(node):
+    """Match the node's configuring -> inactive transition the first time only."""
+    fired = []
+
+    def matches(event):
+        if (isinstance(event, StateTransition) and event.action == node and
+                event.start_state == 'configuring' and event.goal_state == 'inactive'):
+            if fired:
+                return False
+            fired.append(True)
+            return True
+        return False
+
+    return matches
 
 
 def generate_launch_description():
@@ -73,15 +90,14 @@ def generate_launch_description():
             description='YAML parameter file; grid_topics is required.'),
         node,
         # Configure as soon as the process is up, activate once that first
-        # configure has finished. start_state is what keeps this handler from
-        # firing again on a later transition into 'inactive': a deactivate
-        # (reset_cube_nodes.sh --consumer) must leave the node inactive, or the
-        # script's cleanup that follows it fails.
+        # configure has finished. The activation handler fires ONCE: a later
+        # configure (reset_cube_nodes.sh --consumer drives deactivate, cleanup,
+        # configure, activate) must not be followed by a second activate, or the
+        # script's own activate finds the node already active.
         RegisterEventHandler(OnProcessStart(
             target_action=node, on_start=[configure])),
         RegisterEventHandler(OnStateTransition(
-            target_lifecycle_node=node, start_state='configuring',
-            goal_state='inactive',
+            target_lifecycle_node=node, matcher=_first_configure_matcher(node),
             entities=[LogInfo(msg='coverage_assessment configured, activating'),
                       activate])),
     ])

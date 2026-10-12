@@ -127,7 +127,8 @@ if(BUILD_TESTING)
     ENVIRONMENT "${COVERAGE_ISOLATED_TEST_ENV}")
 
   # The launch file's activation handler: activate once after the first
-  # configure, and leave a later deactivate alone (reset_cube_nodes.sh --consumer).
+  # configure, and leave a later reset sequence alone (reset_cube_nodes.sh
+  # --consumer: deactivate, cleanup, configure, activate).
   find_package(launch_testing_ament_cmake REQUIRED)
   add_launch_test(test/test_launch_lifecycle.py
     TIMEOUT 120
