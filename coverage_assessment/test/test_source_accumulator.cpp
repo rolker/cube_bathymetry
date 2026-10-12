@@ -381,13 +381,127 @@ TEST(SourceAccumulator, BadGeometryIsRefusedAndStoresNothing)
   Affine2 tiny;
   tiny.a = 1.0e-9;
   tiny.d = 1.0e-9;
-  EXPECT_EQ(acc.add(msg, tiny).status, AddStatus::kBadGeometry);
+  EXPECT_EQ(acc.add(msg, tiny).status, AddStatus::kOutOfRange);
 
   grid_map::GridMap empty({"elevation", "uncertainty"});
   EXPECT_EQ(acc.add(empty, Affine2()).status, AddStatus::kBadGeometry);
 
   EXPECT_EQ(acc.elevationCellCount(), 0u);
   EXPECT_EQ(acc.blockCount(), 0u);
+}
+
+// Footprints beyond the stated bounds are refused with a reason before any
+// double -> int64 conversion (a huge finite value used to be undefined behaviour).
+TEST(SourceAccumulator, FootprintBeyondTheCoordinateBoundIsRefusedWithAReason)
+{
+  const auto msg = constantMessage(0.0, 0.0, 4, 4, -9.0f, 0.1f);
+  SourceAccumulator acc(1.0);
+
+  // Just inside the bound: a 4 m message whose far corner lands at 1e7 - 1.
+  Affine2 inside;
+  // raster_to_source maps raster -> source; source_to_raster is its inverse, so a
+  // raster_to_source translation of -T places the message at +T in the raster.
+  inside.tx = -(kMaxRasterCoordinate - 5.0);
+  EXPECT_EQ(acc.add(msg, inside).status, AddStatus::kAdded);
+  EXPECT_GT(acc.elevationCellCount(), 0u);
+
+  // Just outside: the far corner at 1e7 + 1.
+  SourceAccumulator out_acc(1.0);
+  Affine2 outside;
+  outside.tx = -(kMaxRasterCoordinate - 3.0);
+  const AddResult r = out_acc.add(msg, outside);
+  EXPECT_EQ(r.status, AddStatus::kOutOfRange);
+  EXPECT_FALSE(r.reason.empty());
+  EXPECT_EQ(out_acc.elevationCellCount(), 0u);
+  EXPECT_EQ(out_acc.blockCount(), 0u);
+
+  // Huge finite and overflowing values: no conversion UB, a refusal.
+  for (const double huge : {1.0e18, 1.0e300, -1.0e300}) {
+    SourceAccumulator a(1.0);
+    Affine2 t;
+    t.tx = huge;
+    EXPECT_EQ(a.add(msg, t).status, AddStatus::kOutOfRange) << huge;
+    EXPECT_EQ(a.blockCount(), 0u);
+  }
+
+  // A tiny cell size pushes the lattice index past its bound before the
+  // coordinate bound.
+  SourceAccumulator fine(1.0e-6);
+  const AddResult f = fine.add(constantMessage(1.0e7 - 100.0, 0.0, 4, 4, -9.0f, 0.1f), Affine2());
+  EXPECT_EQ(f.status, AddStatus::kOutOfRange);
+}
+
+TEST(SourceAccumulator, FootprintOverTheCellCapIsRefusedAtTheBoundary)
+{
+  // The footprint is the lattice box around the message (a message edge that
+  // falls on a lattice line adds a cell): 1998 x 1998 cells span 1999 x 1999 =
+  // 3.996e6, just under the cap; 2000 x 2000 span 2001 x 2001, just over it.
+  static_assert(SourceAccumulator::kMaxFootprintCells == 4.0e6, "the cap is sized for CUBE");
+  SourceAccumulator at_cap(1.0);
+  const auto ok = constantMessage(0.0, 0.0, 1998, 1998, -9.0f, 0.1f);
+  const AddResult r_ok = at_cap.add(ok, Affine2());
+  EXPECT_EQ(r_ok.status, AddStatus::kAdded);
+  EXPECT_EQ(r_ok.cells_in_message, 1998u * 1998u);
+
+  SourceAccumulator over(1.0);
+  const auto big = constantMessage(0.0, 0.0, 2000, 2000, -9.0f, 0.1f);
+  const AddResult r = over.add(big, Affine2());
+  EXPECT_EQ(r.status, AddStatus::kFootprintTooLarge);
+  EXPECT_NE(r.reason.find("lattice cells"), std::string::npos) << r.reason;
+  EXPECT_EQ(over.elevationCellCount(), 0u);
+}
+
+TEST(SourceAccumulator, NegativeUncertaintyNeverOverwritesAHeldValue)
+{
+  SourceAccumulator acc(1.0);
+  acc.add(constantMessage(0.0, 0.0, 4, 4, -9.0f, 0.25f), Affine2());
+  // Negative finite uncertainty (and -0 stays a valid zero, below) with a fresh
+  // elevation: the elevation updates, the held uncertainty stays.
+  acc.add(constantMessage(0.0, 0.0, 4, 4, -8.0f, -0.5f), Affine2());
+  EXPECT_EQ(acc.get(1, 1).elevation, -8.0f);
+  EXPECT_EQ(acc.get(1, 1).uncertainty, 0.25f);
+  // On a cell with no held uncertainty a negative one is not stored either.
+  acc.add(constantMessage(10.0, 10.0, 2, 2, -7.0f, -1.0f), Affine2());
+  EXPECT_EQ(acc.get(10, 10).elevation, -7.0f);
+  EXPECT_TRUE(std::isnan(acc.get(10, 10).uncertainty));
+  // Zero is a legitimate uncertainty.
+  acc.add(constantMessage(0.0, 0.0, 4, 4, -8.0f, 0.0f), Affine2());
+  EXPECT_EQ(acc.get(1, 1).uncertainty, 0.0f);
+}
+
+// grid_map stores a circular buffer: after move() the start index is not zero and
+// storage order differs from spatial order. Cells are addressed by position, so
+// the accumulator must be unaffected.
+TEST(SourceAccumulator, CircularBufferWithNonZeroStartIndexLandsCellForCell)
+{
+  grid_map::GridMap m({"elevation", "uncertainty"});
+  m.setFrameId("src");
+  m.setGeometry(grid_map::Length(10.0, 8.0), 1.0, grid_map::Position(5.0, 4.0));
+  // Slide the window by (3, 2) cells: the buffer wraps and the start index moves.
+  m.move(grid_map::Position(8.0, 6.0));
+  ASSERT_NE(m.getStartIndex()(0), 0);
+  ASSERT_NE(m.getStartIndex()(1), 0);
+  for (grid_map::GridMapIterator it(m); !it.isPastEnd(); ++it) {
+    grid_map::Position p;
+    m.getPosition(*it, p);
+    m.at("elevation", *it) = static_cast<float>(std::floor(p.x()) * 1000.0 + std::floor(p.y()));
+    m.at("uncertainty", *it) = static_cast<float>(std::floor(p.x()) * 0.01);
+  }
+  SourceAccumulator acc(1.0);
+  const AddResult r = acc.add(m, Affine2());
+  ASSERT_EQ(r.status, AddStatus::kAdded);
+  EXPECT_EQ(r.cells_in_message, 80u);
+  // The window now spans x in [3, 13), y in [2, 10).
+  for (int64_t j = 2; j < 10; ++j) {
+    for (int64_t i = 3; i < 13; ++i) {
+      EXPECT_EQ(acc.get(i, j).elevation, static_cast<float>(i * 1000 + j)) << i << "," << j;
+      EXPECT_FLOAT_EQ(acc.get(i, j).uncertainty, static_cast<float>(i * 0.01)) << i << "," << j;
+    }
+  }
+  EXPECT_TRUE(std::isnan(acc.get(2, 5).elevation));
+  EXPECT_TRUE(std::isnan(acc.get(13, 5).elevation));
+  EXPECT_TRUE(std::isnan(acc.get(5, 1).elevation));
+  EXPECT_TRUE(std::isnan(acc.get(5, 10).elevation));
 }
 
 TEST(SourceAccumulator, RejectsBadCellSize)

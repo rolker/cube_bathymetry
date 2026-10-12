@@ -217,4 +217,37 @@ TEST(PolygonRaster, RejectsOversizeBoundingBox)
   EXPECT_FALSE(absurd.ok);
 }
 
+// Huge finite coordinates used to overflow the double -> int64 conversion or spin
+// firstCentreAtOrAbove above 2^53; they are refused with a reason first.
+TEST(PolygonRaster, RejectsCoordinatesBeyondTheStatedBound)
+{
+  const double lim = kMaxRasterCoordinate;
+  // At the bound: accepted, and exact.
+  const auto at = rasterisePolygon(rect(lim - 10.0, lim - 10.0, lim, lim), 1.0, kBig);
+  ASSERT_TRUE(at.ok) << at.error;
+  EXPECT_EQ(at.mask.count, 100u);
+  const auto neg = rasterisePolygon(rect(-lim, -lim, -lim + 10.0, -lim + 10.0), 1.0, kBig);
+  ASSERT_TRUE(neg.ok) << neg.error;
+  EXPECT_EQ(neg.mask.count, 100u);
+
+  // Just beyond it, in x and in y: refused, with the bound named.
+  const auto over_x = rasterisePolygon(rect(lim - 10.0, 0.0, lim + 1.0, 10.0), 1.0, kBig);
+  EXPECT_FALSE(over_x.ok);
+  EXPECT_NE(over_x.error.find("beyond the limit"), std::string::npos) << over_x.error;
+  EXPECT_FALSE(rasterisePolygon(rect(0.0, -lim - 1.0, 10.0, 10.0), 1.0, kBig).ok);
+
+  // Small polygons at huge coordinates (these used to loop or hit UB).
+  for (const double huge : {1.0e16, 9.0e18, 1.0e300}) {
+    const auto r = rasterisePolygon(rect(huge, huge, huge * 2.0, huge * 2.0), 1.0, kBig);
+    EXPECT_FALSE(r.ok) << huge;
+    EXPECT_FALSE(r.error.empty());
+  }
+  EXPECT_FALSE(rasterisePolygon(rect(1.0e16, 0.0, 1.0e16 + 4.0, 4.0), 1.0, kBig).ok);
+
+  // A tiny cell size drives the lattice index past its own bound.
+  const auto fine = rasterisePolygon(rect(0.0, 0.0, 1.0, 1.0), 1.0e-13, kBig);
+  EXPECT_FALSE(fine.ok);
+  EXPECT_NE(fine.error.find("lattice index"), std::string::npos) << fine.error;
+}
+
 }  // namespace coverage_assessment

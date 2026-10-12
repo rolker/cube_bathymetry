@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 
 namespace coverage_assessment
@@ -118,6 +119,7 @@ AddResult SourceAccumulator::add(
     message.getSize().minCoeff() <= 0 || !raster_to_source.inverse(&source_to_raster))
   {
     result.status = AddStatus::kBadGeometry;
+    result.reason = "its resolution, extent or placement is not finite and positive";
     return result;
   }
 
@@ -136,13 +138,27 @@ AddResult SourceAccumulator::add(
       hi_y = std::max(hi_y, q.y);
     }
   }
+  const double largest = std::max(
+    std::max(std::fabs(lo_x), std::fabs(hi_x)), std::max(std::fabs(lo_y), std::fabs(hi_y)));
+  if (!(largest <= kMaxRasterCoordinate) || !(largest / cell_size_ <= kMaxLatticeIndex)) {
+    result.status = AddStatus::kOutOfRange;
+    std::ostringstream os;
+    os << "its footprint reaches " << largest << " m from the raster origin (limit "
+       << kMaxRasterCoordinate << " m, or " << kMaxLatticeIndex << " lattice cells)";
+    result.reason = os.str();
+    return result;
+  }
   const double fi0 = std::floor(lo_x / cell_size_);
   const double fi1 = std::floor(hi_x / cell_size_);
   const double fj0 = std::floor(lo_y / cell_size_);
   const double fj1 = std::floor(hi_y / cell_size_);
   const double footprint = (fi1 - fi0 + 1.0) * (fj1 - fj0 + 1.0);
   if (!std::isfinite(footprint) || footprint > kMaxFootprintCells) {
-    result.status = AddStatus::kBadGeometry;
+    result.status = AddStatus::kFootprintTooLarge;
+    std::ostringstream os;
+    os << "its footprint spans " << footprint << " lattice cells, over the limit of "
+       << kMaxFootprintCells;
+    result.reason = os.str();
     return result;
   }
 
@@ -164,7 +180,10 @@ AddResult SourceAccumulator::add(
       const float u = uncertainty != nullptr ? (*uncertainty)(idx(0), idx(1)) :
         std::numeric_limits<float>::quiet_NaN();
       const bool e_ok = std::isfinite(e);
-      const bool u_ok = std::isfinite(u);
+      // A negative uncertainty is not a measurement: it must not overwrite a held
+      // value (the union must never shrink or turn bad), exactly as the assessor
+      // refuses to let one compete.
+      const bool u_ok = std::isfinite(u) && u >= 0.0f;
       if (!e_ok && !u_ok) {
         continue;  // nothing to hold; do not allocate a block for it
       }

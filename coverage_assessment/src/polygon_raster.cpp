@@ -76,6 +76,23 @@ PolygonRasterResult rasterisePolygon(
       return fail("polygon has a non-finite coordinate");
     }
   }
+  double largest = 0.0;
+  for (const Point2 & p : polygon) {
+    largest = std::max(largest, std::max(std::fabs(p.x), std::fabs(p.y)));
+  }
+  if (largest > kMaxRasterCoordinate) {
+    std::ostringstream os;
+    os << "polygon has a coordinate " << largest << " m from the raster origin, beyond the limit of "
+       << kMaxRasterCoordinate << " m (check the map frame and the vertices)";
+    return fail(os.str());
+  }
+  if (largest / cell_size > kMaxLatticeIndex) {
+    std::ostringstream os;
+    os << "polygon reaches lattice index " << largest / cell_size << " at cell size " << cell_size
+       << " m, beyond the limit of " << kMaxLatticeIndex;
+    return fail(os.str());
+  }
+
   std::vector<Point2> ring = polygon;
   if (ring.size() > 1 && ring.front().x == ring.back().x && ring.front().y == ring.back().y) {
     ring.pop_back();

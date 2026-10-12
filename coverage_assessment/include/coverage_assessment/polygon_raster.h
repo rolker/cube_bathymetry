@@ -30,6 +30,18 @@
 namespace coverage_assessment
 {
 
+/// Largest raster-frame coordinate, metres, in x or y, that a polygon vertex or a
+/// grid footprint may have. Beyond it the double -> lattice-index conversions lose
+/// their meaning (a huge finite value overflows int64, and above 2^53 the cell
+/// loops cannot step by one), so such input is refused with a reason before any
+/// conversion. 1e7 m is ten thousand kilometres from the raster origin: far beyond
+/// any survey, still well inside double precision.
+constexpr double kMaxRasterCoordinate = 1.0e7;
+
+/// Largest lattice index (coordinate / cell size) accepted, for the same reason:
+/// a tiny cell size must not push the indices toward 2^53.
+constexpr double kMaxLatticeIndex = 1.0e12;
+
 /// A point in the assessment raster's frame, metres.
   struct Point2
   {

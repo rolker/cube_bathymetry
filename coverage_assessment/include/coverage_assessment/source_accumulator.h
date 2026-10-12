@@ -73,9 +73,14 @@ namespace coverage_assessment
   /// The message has no elevation layer; nothing was stored.
     kMissingElevationLayer,
   /// Unusable geometry (non-positive or non-finite resolution or extent, a
-  /// non-invertible or non-finite affine, or an implausibly large footprint);
-  /// nothing was stored.
-    kBadGeometry
+  /// non-invertible or non-finite affine); nothing was stored.
+    kBadGeometry,
+  /// The footprint reaches beyond kMaxRasterCoordinate (or kMaxLatticeIndex
+  /// lattice cells) from the raster origin; nothing was stored.
+    kOutOfRange,
+  /// The footprint spans more than kMaxFootprintCells lattice cells; nothing was
+  /// stored.
+    kFootprintTooLarge
   };
 
   struct AddResult
@@ -86,6 +91,9 @@ namespace coverage_assessment
     bool has_uncertainty_layer = false;
   /// Lattice cells whose centre fell inside the message's extent.
     std::size_t cells_in_message = 0;
+  /// For a status other than kAdded and kMissingElevationLayer: why, ready for a
+  /// log line.
+    std::string reason;
   };
 
 /// The latched union over time of one source's grids, on the assessment
@@ -136,8 +144,11 @@ public:
     void clear();
 
   /// Largest lattice footprint one message may span; beyond it add() returns
-  /// kBadGeometry rather than looping over a bogus affine.
-    static constexpr double kMaxFootprintCells = 1.0e8;
+  /// kFootprintTooLarge rather than looping over a bogus affine. Sized for
+  /// CUBE's 200 m window: 4e6 cells is 2000 x 2000 at 0.1 m (a window rotated 45
+  /// degrees spans twice the cells of its box, so 0.1 m cells just fail there; at
+  /// 0.25 m it is 1.3e6). One message is folded inside one callback.
+    static constexpr double kMaxFootprintCells = 4.0e6;
 
 private:
     static constexpr int64_t kBlock = 64;
