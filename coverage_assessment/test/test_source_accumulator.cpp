@@ -434,17 +434,20 @@ TEST(SourceAccumulator, FootprintBeyondTheCoordinateBoundIsRefusedWithAReason)
 TEST(SourceAccumulator, FootprintOverTheCellCapIsRefusedAtTheBoundary)
 {
   // The footprint is the lattice box around the message (a message edge that
-  // falls on a lattice line adds a cell): 1998 x 1998 cells span 1999 x 1999 =
-  // 3.996e6, just under the cap; 2000 x 2000 span 2001 x 2001, just over it.
-  static_assert(SourceAccumulator::kMaxFootprintCells == 4.0e6, "the cap is sized for CUBE");
+  // falls on a lattice line adds an index): a 2000 x 2000 cell message centred on
+  // the origin spans 2001 x 2001 = 4,004,001 indices, exactly the cap, which is
+  // CUBE's 200 m window at 0.1 m (2000 x 2000 cells) and must pass. One cell more
+  // on one axis is over the cap.
+  static_assert(SourceAccumulator::kMaxFootprintCells == 2001.0 * 2001.0,
+    "the cap admits CUBE's 200 m window at 0.1 m");
   SourceAccumulator at_cap(1.0);
-  const auto ok = constantMessage(0.0, 0.0, 1998, 1998, -9.0f, 0.1f);
+  const auto ok = constantMessage(0.0, 0.0, 2000, 2000, -9.0f, 0.1f);
   const AddResult r_ok = at_cap.add(ok, Affine2());
   EXPECT_EQ(r_ok.status, AddStatus::kAdded);
-  EXPECT_EQ(r_ok.cells_in_message, 1998u * 1998u);
+  EXPECT_EQ(r_ok.cells_in_message, 2000u * 2000u);
 
   SourceAccumulator over(1.0);
-  const auto big = constantMessage(0.0, 0.0, 2000, 2000, -9.0f, 0.1f);
+  const auto big = constantMessage(0.0, 0.0, 2000, 2001, -9.0f, 0.1f);
   const AddResult r = over.add(big, Affine2());
   EXPECT_EQ(r.status, AddStatus::kFootprintTooLarge);
   EXPECT_NE(r.reason.find("lattice cells"), std::string::npos) << r.reason;

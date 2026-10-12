@@ -277,10 +277,12 @@ the valid one.
 
 A grid message that cannot be converted, has no `elevation` layer or has unusable geometry
 is dropped with a throttled ERROR, and so is one whose footprint reaches more than 1e7 m
-(or 1e12 lattice cells) from the raster origin. One that spans more than 4e6 lattice cells
-(`SourceAccumulator::kMaxFootprintCells`, sized for CUBE's 200 m window: 2000 x 2000 at
-0.1 m) is dropped with a throttled WARN naming the cell count; a window rotated 45 degrees
-spans twice its own cells, so lattices finer than about 0.15 m are not supported. A
+(or 1e12 lattice cells) from the raster origin. One whose footprint (the lattice box around
+its corners, every index it touches) spans more than 2001 x 2001 = 4,004,001 lattice cells
+(`SourceAccumulator::kMaxFootprintCells`) is dropped with a throttled WARN naming the cell
+count. That admits CUBE's axis-aligned 200 m window at 0.1 m at any alignment (2000 cells
+wide, 2001 indices when an edge lies on a lattice line); a window rotated 45 degrees spans
+twice its own cells, so lattices finer than about 0.15 m are not supported. A
 source without an `uncertainty` layer can cover but never meets a standard (warned once).
 A finite negative uncertainty is not a measurement and never overwrites a held value, so
 the union cannot shrink.

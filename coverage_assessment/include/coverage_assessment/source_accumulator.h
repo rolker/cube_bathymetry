@@ -144,11 +144,15 @@ public:
     void clear();
 
   /// Largest lattice footprint one message may span; beyond it add() returns
-  /// kFootprintTooLarge rather than looping over a bogus affine. Sized for
-  /// CUBE's 200 m window: 4e6 cells is 2000 x 2000 at 0.1 m (a window rotated 45
-  /// degrees spans twice the cells of its box, so 0.1 m cells just fail there; at
-  /// 0.25 m it is 1.3e6). One message is folded inside one callback.
-    static constexpr double kMaxFootprintCells = 4.0e6;
+  /// kFootprintTooLarge rather than looping over a bogus affine. The footprint is
+  /// the lattice box around the message's corners, counting every lattice index it
+  /// touches: an axis-aligned 200 m window (CUBE's) at 0.1 m is 2000 cells wide, or
+  /// 2001 indices when an edge lies on a lattice line. The cap is therefore
+  /// 2001 x 2001 = 4,004,001 indices, which admits that window at any alignment
+  /// (a window rotated 45 degrees spans twice the cells of its box, so 0.1 m cells
+  /// just fail there; at 0.25 m it is 1.3e6). One message is folded inside one
+  /// callback.
+    static constexpr double kMaxFootprintCells = 2001.0 * 2001.0;
 
 private:
     static constexpr int64_t kBlock = 64;
