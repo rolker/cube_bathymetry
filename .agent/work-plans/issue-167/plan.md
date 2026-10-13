@@ -292,6 +292,7 @@ Facts verified in source that shape the design:
     the 318 to 324 s baseline, and note it in the PR. **Owner decision 2026-10-13: the host
     runs this check after implementation, not the implementation session.** The work item stays UNCHECKED, the PR body
     lists it as an open item, and the PR carries no closing keyword for #167 until it is done or the owner waives it.
+    Done 2026-10-13 14:52 -04:00: 19.2 s and 17.7 s, see the Open Questions entry.
 
 ## Files to Change
 
@@ -373,14 +374,25 @@ All three decided by the owner on 2026-10-13.
 - [x] **Partial reset on a refusal (step 14).** Accepted: the script stops at the first refusal, prints what happened,
   and exits 1 (re-running is safe; the service is idempotent and RAM only). No all-or-nothing `param get` preflight.
 - [x] **Stats counters on reset (step 8).** The assessor's counters stay cumulative; the reset never zeroes them.
-- [x] **Live check (step 21)** is run by the host after implementation, not by the implementation session. The work
-  item stays unchecked.
+- [x] **Live check (step 21)** on the four-boat simulation, run by the host after implementation (2026-10-13 14:52 -04:00, head 285cdd5,
+  `ROS_DOMAIN_ID=93`, `demo_boats_launch.py enable_joysticks:=false current_speed:=0.0` plus the assessor's launch file
+  with the demo params, a 300 m box around the roster start poses as the one `SurveyArea`). Four CUBE nodes
+  (`/bluefin`, `/clownfish`, `/urchin`, `/beluga` `/sensors/mbes/cube_bathymetry`) and `/coverage_assessment` as
+  `--consumer`, all on the service path (6 `ros2` calls): **run 1 19.2 s, run 2 17.7 s**, both exit 0, against the
+  318 s and 324 s of the lifecycle walk measured on 2026-10-12. Every CUBE node answered "reset: N tile(s) dropped from
+  RAM; prior_store_dir unset; node is active; no tile written to disk"; the assessor answered "N cell(s) dropped from 4
+  source(s); 1 area(s), the georeference and the counters kept". The first `grid` after each CUBE reset held 5 to 11 %
+  of the finite elevation cells of the one before in run 1 (bluefin 2530 -> 133, clownfish 1827 -> 147, urchin 2550 -> 135,
+  beluga 1313 -> 142),
+  and the assessor published an emptied `coverage_assessment` (area_covered 0.0, all four sources 0.0) right after its
+  reset. Ordering caveat (documented in the README) seen live: cells a CUBE node accumulated between its own reset and
+  the assessor's reset (about 18 s later) came back in the next assessment, from the nodes' next 200 m windows.
 
 ## Estimated Scope
 
 Single PR (two services, one script change, tests, READMEs, one instruction-file line). Part of #164; the PR body says
-"Part of #164" and carries no closing keyword for #164. The PR carries no closing keyword for #167 either until the
-host's live four-boat timing check (step 21) is done or the owner waives it; the PR body lists it as an open item. The largest risk is the `on_configure` split (step 2),
+"Part of #164" and carries no closing keyword for #164. The live four-boat timing check (step 21) is done
+(2026-10-13, 19.2 s and 17.7 s); the PR body reports it. The largest risk is the `on_configure` split (step 2),
 so it lands as its own commit with the existing lifecycle tests unchanged and green before the service is added.
 
 ## Implementation Notes

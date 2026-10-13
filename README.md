@@ -83,9 +83,9 @@ for each node:
 
 The time goes into the `ros2` command-line start-up (3 to 8 s per call under load), not
 into the transitions, which is why the service path is faster: four boats and the
-assessor take 6 calls instead of about 80. At 3 to 8 s per call that is an estimate of
-about 18 to 48 s sequentially, from the call count; it is not a measurement on the
-four-boat simulation, where the walk took 318 to 324 s.
+assessor take 6 calls instead of about 80. Measured on the four-boat simulation on
+2026-10-13 (the full stack running on one host), two back-to-back resets took 19.2 s and
+17.7 s (about 3 s per call), where the walk took 318 to 324 s.
 
 ```bash
 # the common case: services where the nodes have them, the walk where they do not
