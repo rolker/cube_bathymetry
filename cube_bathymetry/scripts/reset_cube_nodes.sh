@@ -96,20 +96,24 @@
 # `timeout --foreground` (so Ctrl-C still reaches `ros2`; plain `timeout` moves it
 # into its own process group): RESET_CUBE_GET_TIMEOUT (default 30 s) for reads,
 # RESET_CUBE_SET_TIMEOUT (default 300 s) for transitions, because a configure with
-# `draft_dir` set loads the saved tiles, and RESET_CUBE_CALL_TIMEOUT (default 120 s)
-# for a service call, because the reset reads the prior store from disk. An
-# unresponsive node fails the script instead of hanging it with boats half reset.
+# `draft_dir` set loads the saved tiles, and RESET_CUBE_CALL_TIMEOUT for a service
+# call, because the reset reads the prior store from disk: its default is the
+# transition bound (300 s), so a prior that the walk's configure can load within its
+# bound is not failed by the service path. An unresponsive node fails the script
+# instead of hanging it with boats half reset.
 #
 # A READ (`ros2 service list`, `ros2 lifecycle get`, `ros2 param get`) that fails or
 # times out is retried, RESET_CUBE_GET_TRIES attempts in all (default 3) with
 # RESET_CUBE_RETRY_PAUSE seconds between them (default 2): under a heavily loaded
 # system one service can miss its turn once and answer the next, and a cold ROS 2
 # daemon answers `service list` with an empty list at first. Reads change nothing,
-# so a retry is always safe. A SERVICE CALL is retried too, unlike a transition,
-# because a reset only replaces RAM state and so is idempotent: repeating one that
-# timed out costs nothing. It has its own, smaller budget, RESET_CUBE_CALL_TRIES
-# (default 2), so a service that is still listed in the daemon's graph cache but
-# whose node is dead or hung costs 2 x 120 s, not more. Whether a node HAS the
+# so a retry is always safe. A SERVICE CALL that FAILS FAST (the CLI exits non-zero, or
+# answers with no Trigger response) is retried too, unlike a transition, because a
+# reset only replaces RAM state and so is idempotent. It has its own budget,
+# RESET_CUBE_CALL_TRIES (default 2). A call that TIMES OUT (exit 124) is NOT retried:
+# the first request is still queued in the node, and a retry would queue a second
+# whole-store prior load behind it with the node's executor blocked again, so the
+# script stops and says the node may have been reset. Whether a node HAS the
 # service is decided only by the classification, never by the outcome of a call:
 # a slow node is never sent down the walk after it already reset. A transition is
 # NEVER retried: it fails fast, because a repeated configure or cleanup is not the
@@ -136,7 +140,7 @@ get_timeout=${RESET_CUBE_GET_TIMEOUT:-30}
 set_timeout=${RESET_CUBE_SET_TIMEOUT:-300}
 get_tries=${RESET_CUBE_GET_TRIES:-3}
 retry_pause=${RESET_CUBE_RETRY_PAUSE:-2}
-call_timeout=${RESET_CUBE_CALL_TIMEOUT:-120}
+call_timeout=${RESET_CUBE_CALL_TIMEOUT:-$set_timeout}
 call_tries=${RESET_CUBE_CALL_TRIES:-2}
 
 usage() {
@@ -343,10 +347,11 @@ has_reset_service() {
   printf '%s\n' "$service_list" | grep -Fxq -- "$1/reset"
 }
 
-# service_reset NODE: one `ros2 service call NODE/reset std_srvs/srv/Trigger '{}'`,
-# retried up to $call_tries attempts because a reset is idempotent (see the header).
-# Sets $svc_message from the response. Returns 0 on success=True, 1 on a refusal
-# (success=False), 2 when no attempt gave a usable answer. The response is read from
+# service_reset NODE: one `ros2 service call NODE/reset std_srvs/srv/Trigger '{}'`.
+# A call that fails fast is retried up to $call_tries attempts, because a reset is
+# idempotent; a call that times out (124) is not, because its request is still queued
+# in the node (see the header). Sets $svc_message from the response. Returns 0 on
+# success=True, 1 on a refusal (success=False), 2 when no attempt gave a usable answer. The response is read from
 # the line `std_srvs.srv.Trigger_Response(success=..., message=...)` and nothing else:
 # a message may echo a user-supplied path, so a bare "success=True" substring means
 # nothing.
@@ -373,6 +378,8 @@ service_reset() {
         return "$verdict"
       fi
     fi
+    # Exit 124 is a timeout: the node may still be working on the first request.
+    [ "$rc" -ne 124 ] || return 2
     [ "$attempt" -lt "$call_tries" ] || return 2
     attempt=$((attempt + 1))
     sleep "$retry_pause"
@@ -508,7 +515,7 @@ service_node() {
       ;;
     1) return 1 ;;
     *)
-      die "$node: ~/reset gave no usable answer ($call_tries attempt(s), $call_timeout s each). The node may be hung, or its service may be listed only in the daemon's cache. It was not walked: the call may have reached it."
+      die "$node: ~/reset gave no usable answer (timed out after $call_timeout s, or $call_tries failed attempt(s)). The node may be hung, or its service may be listed only in the daemon's cache. It was not walked, and a timed-out call is not repeated: the request may still be queued in the node."
       ;;
   esac
 }

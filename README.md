@@ -196,15 +196,20 @@ immune: its subscription is destroyed.
 **Time bounds and retries.** Every `ros2` call is bounded by `timeout --foreground` (so
 Ctrl-C still reaches `ros2`): `RESET_CUBE_GET_TIMEOUT` (default 30 s) for reads,
 `RESET_CUBE_SET_TIMEOUT` (default 300 s) for transitions, and `RESET_CUBE_CALL_TIMEOUT`
-(default 120 s) for a service call, because the reset reads the prior store from disk. A
+for a service call, because the reset reads the prior store from disk. The call timeout
+defaults to the transition timeout, so a prior store that a `configure` can load within
+its bound is not failed by the service path. A
 read (`ros2 service list`, `ros2 lifecycle get`, `ros2 param get`) that fails or times out is
 retried, 3 attempts in all (`RESET_CUBE_GET_TRIES`) with a 2 s pause
 (`RESET_CUBE_RETRY_PAUSE`); only when every attempt fails does it fail the script, and the
-preflight reads do that before anything has changed. A service call is retried too, with its
-own budget of 2 attempts (`RESET_CUBE_CALL_TRIES`): a reset only replaces RAM state, so
-repeating one that timed out costs nothing. Whether a node has the service is decided only
-by the classification, never by the outcome of a call, so a slow node is never walked after
-it already reset. A transition is never retried: a repeated configure or cleanup is not the
+preflight reads do that before anything has changed. A service call that fails fast (the
+CLI exits non-zero, or answers with no `Trigger` response) is retried too, with its own
+budget of 2 attempts (`RESET_CUBE_CALL_TRIES`): a reset only replaces RAM state, so
+repeating it is harmless. A call that **times out is not retried**: its request is still
+queued in the node, and a second one would run a second whole-store prior load behind it
+with the executor blocked again. The script stops and says the node may have been reset.
+Whether a node has the service is decided only by the classification, never by the outcome
+of a call, so a slow node is never walked after it already reset. A transition is never retried: a repeated configure or cleanup is not the
 same operation as the one that failed. The script ignores SIGHUP and SIGPIPE so a dropped
 ssh session cannot kill it between the quiesce and the bring-up; run it under `tmux` or
 `nohup` anyway if the link is unreliable, because a script killed midway leaves walked boats

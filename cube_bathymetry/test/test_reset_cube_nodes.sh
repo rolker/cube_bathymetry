@@ -44,8 +44,9 @@
 #  17. a consumer that refuses falls back to the walk, after the reason is printed.
 #  18. an empty, failing or hanging `service list` is retried, then stops the script
 #      before any change; it never selects the walk.
-#  19. a `service call` that times out or fails is retried (own budget) and never
-#      selects the walk; one that answers after a retry is a success.
+#  19. a `service call` that fails fast is retried (own budget), one that times out
+#      is not, and neither selects the walk; one that answers after a retry is a
+#      success. The call timeout defaults to the transition timeout.
 #  20. everything that can refuse runs before the first service call: a mistyped
 #      consumer, a finalized walk-class node, a draft_dir on a walk-class node.
 #  21. a node that answers "inactive" is warned about by name, the last line says it
@@ -615,19 +616,36 @@ start=$SECONDS
 out=$(RESET_CUBE_CALL_TIMEOUT=1 "$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 1 ] || fail "case 19b: a hung call: expected exit 1, got $rc: $out"
 [ $((SECONDS - start)) -lt 30 ] || fail "case 19b: the call timeout did not bound the call"
-[ "$(grep -c '^call /boat2/cube_bathymetry$' "$work/calls")" -eq 2 ] ||
-  fail "case 19b: expected RESET_CUBE_CALL_TRIES (2) attempts, got: $(cat "$work/calls")"
-case "$out" in *"/boat2/cube_bathymetry"*"no usable answer"*"was not walked"*) ;; *) fail "case 19b: message: $out" ;; esac
+[ "$(grep -c '^call /boat2/cube_bathymetry$' "$work/calls")" -eq 1 ] ||
+  fail "case 19b: a call that timed out was repeated (its request is still queued in the node): $(cat "$work/calls")"
+case "$out" in *"/boat2/cube_bathymetry"*"no usable answer"*"was not walked"*"not repeated"*) ;; *) fail "case 19b: message: $out" ;; esac
 case "$out" in *"reset before this: /boat1/cube_bathymetry"*) ;; *) fail "case 19b: does not say boat1 was reset: $out" ;; esac
 [ ! -e "$work/reads" ] || fail "case 19b: the node was read or walked after the timeout: $(cat "$work/reads")"
 grep -qE ' (deactivate|cleanup|configure|activate)$' "$work/log" && fail "case 19b: a transition ran: $(cat "$work/log")"
 grep -q "boat3\|boat4\|coverage_assessment" "$work/log" && fail "case 19b: went on past the failed call"
-# the retry budget is its own variable
+# the retry budget is its own variable, spent on calls that fail fast
+setup_nodes
+mark_service "${cubes[@]}"
+echo 99 > "$work/flaky_call__boat1_cube_bathymetry"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 19c: a call that fails every time: expected exit 1, got $rc: $out"
+[ "$(grep -c '^call /boat1/cube_bathymetry$' "$work/calls")" -eq 2 ] || fail "case 19c: the default RESET_CUBE_CALL_TRIES (2) was not used: $(cat "$work/calls")"
+setup_nodes
+mark_service "${cubes[@]}"
+echo 99 > "$work/flaky_call__boat1_cube_bathymetry"
+out=$(RESET_CUBE_CALL_TRIES=3 "$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$(grep -c '^call /boat1/cube_bathymetry$' "$work/calls")" -eq 3 ] || fail "case 19c: RESET_CUBE_CALL_TRIES was not honoured"
+
+# 19d. with no RESET_CUBE_CALL_TIMEOUT a call is bounded by the transition bound
+# (the set timeout), and the one that times out is still not repeated.
 setup_nodes
 mark_service "${cubes[@]}"
 touch "$work/hang_call__boat1_cube_bathymetry"
-out=$(RESET_CUBE_CALL_TIMEOUT=1 RESET_CUBE_CALL_TRIES=3 "$script" "${cubes[@]}" 2>&1); rc=$?
-[ "$(grep -c '^call /boat1/cube_bathymetry$' "$work/calls")" -eq 3 ] || fail "case 19c: RESET_CUBE_CALL_TRIES was not honoured"
+start=$SECONDS
+out=$(RESET_CUBE_SET_TIMEOUT=1 "$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 19d: a hung call: expected exit 1, got $rc: $out"
+[ $((SECONDS - start)) -lt 20 ] || fail "case 19d: the default call timeout is not the set timeout"
+[ "$(grep -c '^call /boat1/cube_bathymetry$' "$work/calls")" -eq 1 ] || fail "case 19d: a timed-out call was repeated: $(cat "$work/calls")"
 
 # --- 20. everything that can refuse runs before the first service call -----------------
 setup_nodes
