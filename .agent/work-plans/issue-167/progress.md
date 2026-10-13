@@ -231,3 +231,38 @@ None. Two findings (peak RAM, not for use underway) were closed by documentation
 - [ ] Live four-boat timing check by the host (issue work item), against the 318 to 324 s baseline; the README still gives only a call-count estimate. The PR body must carry no closing keyword for #167 until it is done or waived.
 - [ ] PR body: the new `AGENTS.md` sentence for the owner to see, and the statement that a boat with `draft_dir` set is not served until rolker/unh_marine_autonomy#391.
 - [ ] Run `/review-code` (pre-push mode) again on the fixes before pushing; nothing was pushed.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-10-13 13:55 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-167 at `6d33f6e`
+**Mode**: pre-push
+**Depth**: Deep (reason: 3582 changed lines across 15 files; lifecycle and concurrency change)
+**Must-fix**: 2 | **Suggestions**: 5
+**Round**: 2 | **Ship**: recommended — must-fix fell from 3 to 2 and both have a precise fix with a targeted test; apply them and ship without a third full round
+
+Specialists: static analysis (shellcheck 0.11 on the script and its test, clean; build and `colcon test` of both packages at `6d33f6e`, private `ROS_DOMAIN_ID`: 1076 tests, 0 errors, 0 failures, 110 skipped, the cppcheck tests); governance; plan drift; Claude adversarial Lens A and Lens B (Deep); cross-model review by gemini and codex (both completed); local model off.
+
+Round-1 closure: 15 of the 16 findings are closed by their commits (checked against the code, the new stub cases and gtests, and the revert checks in the Implementation entry). Round-1 finding 7 (a prior that cannot be loaded must fail the reset) is only partly closed by `f80042f`: see must-fix 1. Governance is unchanged from round 1 (ADR-0001 preserved, ADR-0008 followed). The plan was synced in `a106de6`. Nothing outside this repo calls `reset_cube_nodes.sh` or reads its exit status, so retiring exit 4 breaks no caller.
+
+### Findings
+- [ ] (must-fix) A missing, unmounted, empty or all-level-mismatched prior store does not fail the reset. `load()` returns 0 tiles without throwing, so `primed.total()==0` takes the warn branch and the reset returns success with the blunder gate off, replacing a gated session with an ungated one, which `f80042f` was meant to prevent. `ResetWithAnUnloadablePriorKeepsTheGatedSession` covers only a corrupt tile, which throws. Fix: record what the adopted session primed; under `prior_must_load`, fail when the running session was gated and the rebuild primes zero tiles, so a node whose prior never primed anything is not locked out. Add a test that renames the prior directory after configure. README line 103 ("Refuses ... when") should name this case. [Lens A + Lens B + codex + gemini + lead] — `cube_bathymetry/src/cube_bathymetry_node.hpp:1847-1856`
+- [ ] (must-fix) `has_reset_service` pipes `printf` into `grep -Fxq` under `pipefail` with SIGPIPE ignored. When the service list is over the pipe buffer (about 64 KB, plausible on a multi-boat graph), `grep -q` exits on the match, `printf` gets EPIPE, the pipeline returns 1, and a node that serves `~/reset` is classified walk ("no ~/reset service", about 17 calls instead of 1). The lead reproduced it: rc 1 with the pipe, rc 0 with a here-string. Fix: `grep -Fxq -- "$1/reset [std_srvs/srv/Trigger]" <<<"$service_list"` (and the same at the `grep -m1` on line 387); add a stub case whose `service list -t` prints more than 64 KB before the match. [Lens A, reproduced by lead] — `cube_bathymetry/scripts/reset_cube_nodes.sh:368`
+- [ ] (suggestion) An inactive consumer is reset and then activated by the script. `publishEmptyAssessment` runs only when the node is active at reset time, so with the water surface unavailable the old `coverage_assessment` and `coverage_grid` stay latched after "reset done". Fix: set a pending flag in `resetSession` and publish the empty result in `on_activate`. [Lens B + lead] — `coverage_assessment/src/coverage_assessment_node.hpp:950-952`
+- [ ] (suggestion) `publishEmptyAssessment` returns without publishing while an area definition is queued (`areas_dirty_`). Its docstring says "the first tick that can projects them, and publishes", but a tick projects and then returns at an unavailable surface, so the old result stays latched. Fix: project the queued areas there, or correct the docstring. [gemini + lead] — `coverage_assessment/src/coverage_assessment_node.hpp:960-977`
+- [ ] (suggestion) The `resetService` containment covers only the build. The `prior_status` copy, the message concatenation and the logging run outside it, at the documented RAM peak, so a `bad_alloc` there escapes the callback and ends the process. Wrap the whole handler as the assessor's `onReset` does. [Lens B] — `cube_bathymetry/src/cube_bathymetry_node.hpp:2083-2131`
+- [ ] (suggestion) The callback-group audit ignores the waitables in groups outside the executor, so an action server or other waitable on its own thread would pass. Allow only the subscriptions' QoS event handlers (compare the counts). [Lens B] — `cube_bathymetry/test/test_node_lifecycle.cpp:1336`, `coverage_assessment/test/test_coverage_assessment_node.cpp:1897`
+- [ ] (suggestion) The final summary `echo` is the script's last command, so with stdout closed (`| head -1`) a finished reset exits 1, against "0 reset done". End with `exit 0`, as `print_states` already guards. [Lens A] — `cube_bathymetry/scripts/reset_cube_nodes.sh:591-593`
+
+Dropped:
+- gemini: "`changed` is never set when an inactive node is activated". False: `to_active` goes through `transition()`, which sets it.
+- gemini: "partial fleet reset on a refusal". An owner decision.
+- gemini: "the empty assessment publishes a synthetic 0.0 m surface". False: `CoverageAssessment` carries no surface field.
+- gemini: "lethal NaN window after a reset". Documented in round 1.
+- gemini: "composition with a MultiThreadedExecutor". False: the nodes are not registered components, and `spinUntilStopped` requires a SingleThreadedExecutor.
+- gemini: "the refresh-parameter callback during a reset". False: it runs on the same single-threaded executor, and `clear()` keeps the interval and budget.
+- gemini: "preflight skips service-class nodes". A design choice: a finalized node serves no `~/reset`.
+- gemini: "trailing slash in `has_reset_service`". False: `qualified()` strips it.
