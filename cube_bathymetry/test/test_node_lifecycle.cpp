@@ -1077,6 +1077,35 @@ TEST_F(NodeLifecycle, FailedResetLeavesTheOldSessionIntact)
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
+// A throw that is not a std::exception while building the session must not escape
+// the service callback (that would end the process, with the boat's CUBE node on
+// it): the service answers success=false, the session is untouched, and the next
+// call works.
+TEST_F(NodeLifecycle, ANonStdThrowWhileBuildingTheResetIsContained)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  addPatch(node->sheet(), -12.5);
+  CubeBathymetryTestAccess::dirtySessionState(*node);
+  const auto sheet_before = node->sheet();
+
+  CubeBathymetryTestAccess::setBuildFault(*node, [] {throw 42;});
+  ResetCaller caller(node);
+  auto [ok, message] = caller.call();
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("unknown exception"), std::string::npos) << message;
+  EXPECT_NE(message.find("unchanged"), std::string::npos) << message;
+  EXPECT_EQ(node->sheet().get(), sheet_before.get());
+  EXPECT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u);
+
+  CubeBathymetryTestAccess::setBuildFault(*node, nullptr);
+  std::tie(ok, message) = caller.call();
+  EXPECT_TRUE(ok) << message;
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
 // The prior store is read again by every reset: the new sheet's predicted surface
 // is seeded, so the blunder gate is active from the first ping of the new session.
 // Control: the same false-deep patch is accepted at those cells by a sheet with no

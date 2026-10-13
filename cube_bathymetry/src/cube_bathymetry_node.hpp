@@ -2086,6 +2086,10 @@ private:
       fresh = buildSession();
     } catch (const std::exception & e) {
       return std::string("failed, the running session is unchanged: ") + e.what();
+    } catch (...) {
+      // A non-std throw must not escape a service callback (it would end the
+      // process); the assessor's handler contains it the same way.
+      return "failed with an unknown exception, the running session is unchanged";
     }
     const std::size_t dropped = geo_map_sheet_->residentTileCount();
     const std::string prior = fresh.prior_status;
