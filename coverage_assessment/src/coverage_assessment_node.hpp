@@ -47,6 +47,7 @@
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "tf2/exceptions.h"
 #include "tf2/time.h"
 #include "tf2_eigen/tf2_eigen.hpp"
@@ -82,7 +83,7 @@ struct LogThrottle
 };
 
 /// Counters for the node's diagnostics: logged with the periodic status line and
-/// read back by tests. Reset on every configure.
+/// read back by tests. Reset on every configure; cumulative across a `~/reset`.
 struct NodeStats
 {
   /// grid messages received, and what became of them
@@ -117,6 +118,9 @@ struct NodeStats
   std::size_t cells_above_surface = 0;
 };
 
+/// Test-only access to the node's private state (defined in the test).
+struct CoverageAssessmentTestAccess;
+
 /// Lifecycle node: scores how much of each SurveyArea the sources' grids cover
 /// and how much of that meets the area's standard. The judging lives in the
 /// plain-C++ core; this class converts messages and frames into the core's
@@ -124,6 +128,8 @@ struct NodeStats
 class CoverageAssessmentNode : public rclcpp_lifecycle::LifecycleNode
 {
 public:
+  friend struct CoverageAssessmentTestAccess;
+
   using CallbackReturn =
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
@@ -164,6 +170,9 @@ public:
 
   /// Counters, for diagnostics and tests.
   const NodeStats & stats() const {return stats_;}
+
+  /// Lattice cells the sources hold (all sources), for diagnostics and tests.
+  std::size_t heldCellCount() const {return heldCells();}
 
   /// Test seam: called with the callback's name at the start of every guarded
   /// callback ("grid callback", "survey_area callback", "assessment timer") and
@@ -341,7 +350,8 @@ private:
       "blocks, 8 bytes per cell: 1e8 is about 800 MB). Each source keeps every cell it has "
       "mapped until reset, inside the survey areas or not. Once over it, no further grid is "
       "folded in and nothing is published (coverage would be under-reported), with an ERROR, "
-      "until the node is reset (deactivate, cleanup, configure, activate)."));
+      "until the node is reset (the ~/reset service, or deactivate, cleanup, configure, "
+      "activate)."));
     declare_parameter<int64_t>(
       "max_area_vertices", 10000,
       desc("Most vertices in one SurveyArea polygon, at least 3; a definition with more is "
@@ -551,6 +561,17 @@ private:
         qosOptions(sources_[i]->topic, "reliable"));
     }
 
+    // `~/reset`, created last and released first with the other entities, so
+    // "no service" reads "not configured".
+    reset_service_.reset();
+    reset_service_ = create_service<std_srvs::srv::Trigger>(
+      "~/reset",
+      [this](
+        const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        onReset(response.get());
+      });
+
     RCLCPP_INFO(get_logger(),
       "Configured: %zu source(s), cell_size=%g m, raster frame '%s', water surface '%s' "
       "(boat frame '%s', max distance %g m, max age %g s), survey areas on '%s' (at most %ld).",
@@ -565,6 +586,8 @@ private:
   /// configuration can run. Shared by cleanup, shutdown and a failed configure.
   void releaseConfiguredEntities()
   {
+    // First: its handler reads the registry and the sources released below.
+    reset_service_.reset();
     if (timer_) {
       timer_->cancel();
       timer_.reset();
@@ -839,6 +862,87 @@ private:
     }
   }
 
+  // ---- reset ------------------------------------------------------------------
+
+  /// `~/reset` handler: the exception containment of `guarded`, with the reason
+  /// returned to the caller as well as logged.
+  void onReset(std_srvs::srv::Trigger::Response * response)
+  {
+    response->success = false;
+    try {
+      injectFault("reset service");
+      response->success = resetSession(&response->message);
+    } catch (const std::exception & e) {
+      response->success = false;
+      response->message = std::string("failed with an exception: ") + e.what();
+      noteCallbackFailure("reset service", e.what());
+    } catch (...) {
+      response->success = false;
+      response->message = "failed with an unknown exception";
+      noteCallbackFailure("reset service", "unknown exception");
+    }
+    if (response->success) {
+      RCLCPP_INFO(get_logger(), "Reset: %s", response->message.c_str());
+    } else {
+      RCLCPP_WARN(get_logger(), "Reset not done: %s", response->message.c_str());
+    }
+  }
+
+  /// Start a new assessment session in RAM (cube_bathymetry#167), for the run after
+  /// the CUBE nodes were reset: every source's union, its kept unplaced grid and
+  /// flags, the held-limit latch and the change flags go back to what a fresh
+  /// configure would build. Kept on purpose: the survey areas, their projections,
+  /// the registry, the subscriptions, TF, and the raster georeference (the map must
+  /// not move under the areas), and the counters, which stay cumulative -- they
+  /// also count areas received and rejected, which a reset that keeps the areas must
+  /// not zero, and callback_exceptions is evidence of a fault. Refuses, changing
+  /// nothing, when the map frame has moved since the georeference was captured: the
+  /// service keeps the georeference, so that state needs the lifecycle walk, which
+  /// captures it again.
+  bool resetSession(std::string * message)
+  {
+    if (!registry_ || !tf_buffer_) {
+      *message = "refused: the node is not configured";
+      return false;
+    }
+    // Only once a georeference exists: before the first capture raster_from_earth_
+    // is still the identity, so the comparison would latch a false "map moved".
+    // A node that has captured nothing has nothing to protect.
+    if (have_georef_ && checkGeorefMoved()) {
+      *message = "refused: the map frame '" + map_frame_ + "' <- 'earth' moved since the raster "
+        "georeference was captured. This service keeps the georeference, so only the "
+        "lifecycle walk (deactivate, cleanup, configure, activate), which captures it "
+        "again, recovers this. Nothing was changed.";
+      return false;
+    }
+    const std::size_t cells = heldCells();
+    for (auto & source : sources_) {
+      source->accumulator.clear();
+      source->have_grid = false;
+      // A kept unplaced grid would be folded in on the next tick and bring the old
+      // session's cells back.
+      source->placement_failed = false;
+      source->failed_frame.clear();
+      source->unplaced_grid.reset();
+      source->resolution_warned = false;
+      source->uncertainty_warned = false;
+      source->last_unplaced_warn = LogThrottle{};
+      source->last_convert_warn = LogThrottle{};
+      source->last_rejected_warn = LogThrottle{};
+    }
+    held_limit_reached_ = false;
+    grids_changed_ = false;
+    force_assessment_ = true;       // the first tick assesses even if the surface did not change
+    have_last_surface_ = false;
+    throttle_times_.clear();
+    const bool active = get_current_state().label() == "active";
+    *message = std::to_string(cells) + " cell(s) dropped from " +
+      std::to_string(sources_.size()) + " source(s); " + std::to_string(areas_.size()) +
+      " area(s), the georeference and the counters kept; node is " +
+      (active ? "active" : "inactive: nothing is assessed until activated");
+    return true;
+  }
+
   // ---- raster georeference ----------------------------------------------------
 
   /// Capture the raster georeference, map_frame <- earth, at the first successful
@@ -907,7 +1011,8 @@ private:
         "The map frame '%s' <- 'earth' moved by %.3f m and %.2e rad since the raster georeference "
         "was captured. The accumulated coverage and the survey areas are laid out in the captured "
         "frame and no longer line up with the moved one, so nothing is published until the node "
-        "is reconfigured (deactivate, cleanup, configure, activate).",
+        "is reconfigured (deactivate, cleanup, configure, activate); the ~/reset service refuses "
+        "in this state because it keeps the captured georeference.",
         map_frame_.c_str(), moved_shift_m_, moved_angle_rad_);
     }
     return georef_moved_;
@@ -1158,8 +1263,8 @@ private:
       COVERAGE_LOG_THROTTLED(ERROR,
         "Not assessing: the sources hold %zu lattice cells (%.0f MB), over max_held_cells=%ld. "
         "No further grids are folded in, so coverage would be under-reported; nothing is "
-        "published until the node is reset (deactivate, cleanup, configure, activate) or "
-        "restarted with a larger max_held_cells.", heldCells(),
+        "published until the node is reset with the ~/reset service (or deactivate, cleanup, "
+        "configure, activate) or restarted with a larger max_held_cells.", heldCells(),
         static_cast<double>(heldCells()) * 8.0 / 1.0e6,
         static_cast<long>(max_held_cells_));  // NOLINT(runtime/int)
       return;
@@ -1353,6 +1458,7 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<grid_map_msgs::msg::GridMap>::SharedPtr grid_publisher_;
   rclcpp::Subscription<marine_interfaces::msg::SurveyArea>::SharedPtr area_subscription_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
 };
 
 }  // namespace coverage_assessment

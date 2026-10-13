@@ -99,9 +99,12 @@ Facts verified in source that shape the design:
 
 ### B. `coverage_assessment_node`: `~/reset`
 
-8. **`resetSession(std::string * message)`**, called from a `~/reset` Trigger handler wrapped in the node's `guarded`
-   pattern (an exception becomes `success=false` with the text and is counted in `callback_exceptions`). Service
-   created in `configureEntities`, released in `releaseConfiguredEntities`.
+8. **`resetSession(std::string * message)`**, called from a `~/reset` Trigger handler (`onReset`) that has the
+   containment of the node's `guarded` pattern but its own try/catch, because the exception text must reach the caller
+   (an exception becomes `success=false` with the text, is logged and counted in `callback_exceptions`; the fault
+   injector name is `"reset service"`). Service created last in `configureEntities`, released first in
+   `releaseConfiguredEntities`. For tests: a public `heldCellCount()` and a `CoverageAssessmentTestAccess` friend that
+   calls the handler directly when no service exists.
    - Refuse when not configured (`registry_` or `tf_buffer_` null).
    - **Refuse when the map frame has moved**: when `have_georef_` is set, run `checkGeorefMoved()` first (the latch
      only updates on ticks, so a stale `false` is possible while inactive). Only when `have_georef_` is set: before the

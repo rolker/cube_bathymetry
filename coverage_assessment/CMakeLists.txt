@@ -27,6 +27,7 @@ find_package(marine_autonomy REQUIRED)
 find_package(marine_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(std_srvs REQUIRED)  # ~/reset Trigger service (#167)
 find_package(tf2 REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -77,6 +78,7 @@ target_link_libraries(coverage_assessment_node_link INTERFACE
   ${grid_map_ros_LIBRARIES}
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
+  ${std_srvs_TARGETS}  # ~/reset (#167)
   tf2::tf2
   tf2_eigen::tf2_eigen
   tf2_ros::tf2_ros

@@ -61,6 +61,7 @@
 #include "marine_interfaces/msg/survey_area.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rcutils/logging.h"
+#include "std_srvs/srv/trigger.hpp"
 #include "tf2_eigen/tf2_eigen.hpp"
 #include "tf2_ros/static_transform_broadcaster.h"
 #include "tf2_ros/transform_broadcaster.h"
@@ -96,8 +97,11 @@ void captureHandler(
   char buffer[4096];
   vsnprintf(buffer, sizeof(buffer), format, copy);
   va_end(copy);
-  // WARN and above, plus the periodic "Assessments:" status line (INFO).
-  const bool status_line = std::string(buffer).rfind("Assessments:", 0) == 0;
+  // WARN and above, plus the periodic "Assessments:" status line and the
+  // georeference capture (INFO).
+  const std::string text(buffer);
+  const bool status_line = text.rfind("Assessments:", 0) == 0 ||
+    text.rfind("Raster georeference captured", 0) == 0;
   if ((severity >= RCUTILS_LOG_SEVERITY_WARN || status_line) &&
     std::string(name).find("coverage_assessment") != std::string::npos)
   {
@@ -421,6 +425,52 @@ public:
   std::map<std::string, CoverageAssessment> latest_;
   std::optional<CoverageAssessment> first_;
   grid_map_msgs::msg::GridMap last_coverage_grid_;
+
+  // `~/reset` (cube_bathymetry#167) through a real Trigger client, spun with the
+  // node by this harness's executor. {success, message}.
+  std::pair<bool, std::string> callReset()
+  {
+    if (!reset_client_) {
+      reset_client_ = io_->create_client<std_srvs::srv::Trigger>(
+        std::string(node_->get_fully_qualified_name()) + "/reset");
+    }
+    if (!reset_client_->wait_for_service(std::chrono::seconds(5))) {
+      ADD_FAILURE() << "~/reset is not available";
+      return {false, ""};
+    }
+    auto future =
+      reset_client_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    if (executor_.spin_until_future_complete(future, std::chrono::seconds(20)) !=
+      rclcpp::FutureReturnCode::SUCCESS)
+    {
+      ADD_FAILURE() << "~/reset did not answer";
+      return {false, ""};
+    }
+    const auto response = future.get();
+    return {response->success, response->message};
+  }
+
+  // Whether the node's graph entry lists `reset`, polled up to `seconds` for it to
+  // be `present` (graph updates arrive asynchronously).
+  bool waitForResetService(bool present, double seconds = 5.0)
+  {
+    const std::string name = std::string(node_->get_fully_qualified_name()) + "/reset";
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    auto listed = [&]() {
+        return io_->get_service_names_and_types_by_node(
+          node_->get_name(), node_->get_namespace()).count(name) > 0;
+      };
+    while (std::chrono::steady_clock::now() < end) {
+      if (listed() == present) {
+        return true;
+      }
+      executor_.spin_some(std::chrono::milliseconds(10));
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return listed() == present;
+  }
+
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reset_client_;
 };
 
 class NodeTest : public ::testing::Test
@@ -1719,4 +1769,334 @@ TEST_F(NodeTest, ResolutionDifferingFromCellSizeWarnsOncePerSource)
   ASSERT_TRUE(h.spinUntil(
       [&]() {return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;},
       20.0, [&]() {h.publishGrid("A", grid);}));
+}
+
+// ---- `~/reset` (cube_bathymetry#167) ------------------------------------------
+
+namespace coverage_assessment
+{
+// Friend of the node: calls the `~/reset` handler directly, for the states in
+// which the service itself does not exist.
+struct CoverageAssessmentTestAccess
+{
+  static std::pair<bool, std::string> callResetHandler(CoverageAssessmentNode & n)
+  {
+    auto response = std::make_shared<std_srvs::srv::Trigger::Response>();
+    n.onReset(response.get());
+    return {response->success, response->message};
+  }
+};
+}  // namespace coverage_assessment
+
+using coverage_assessment::CoverageAssessmentTestAccess;
+
+// The service empties every source's union without a lifecycle walk. The next tick
+// publishes the zero (the assessment is forced even though nothing changed), the
+// areas, their projections and the georeference are kept, the counters stay
+// cumulative, and a grid that arrives afterwards is folded in normally.
+TEST_F(NodeTest, ResetServiceEmptiesTheUnionAndKeepsAreasGeoreferenceAndCounters)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  // The first grid callback throws once, so callback_exceptions has something a
+  // reset must not erase.
+  int grid_calls = 0;
+  h.node_->setFaultInjectorForTest([&grid_calls](const char * what) {
+      if (std::string(what) == "grid callback" && grid_calls++ == 0) {
+        throw std::runtime_error("injected");
+      }
+    });
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {h.publishGrid("A", grid);}));
+  ASSERT_EQ(countLog("Raster georeference captured"), 1u);
+  ASSERT_GT(h.node_->heldCellCount(), 0u);
+  const auto before = h.node_->stats();
+  ASSERT_GE(before.callback_exceptions, 1u);
+  ASSERT_GE(before.grids_placed, 1u);
+  ASSERT_GE(before.areas_received, 1u);
+
+  const auto [ok, message] = h.callReset();
+  ASSERT_TRUE(ok) << message;
+  EXPECT_NE(message.find("cell(s) dropped from 1 source(s)"), std::string::npos) << message;
+  EXPECT_NE(message.find("1 area(s)"), std::string::npos) << message;
+  EXPECT_NE(message.find("node is active"), std::string::npos) << message;
+  EXPECT_EQ(h.node_->heldCellCount(), 0u) << "the union survived the reset";
+
+  // No grid is sent: the forced tick publishes the area with nothing covered.
+  const std::size_t received = h.received_;
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > received && h.latest_.at("area1").area_covered == 0.0;}, 20.0));
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").area_total, 100.0) << "the area is kept";
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").area_meeting_standard, 0.0);
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").sources[0].area_covered, 0.0);
+  EXPECT_EQ(countLog("Raster georeference captured"), 1u)
+    << "the georeference is kept, not captured again";
+
+  const auto after = h.node_->stats();
+  EXPECT_EQ(after.grids_placed, before.grids_placed) << "counters stay cumulative";
+  EXPECT_EQ(after.areas_received, before.areas_received);
+  EXPECT_EQ(after.callback_exceptions, before.callback_exceptions);
+
+  // And the node works afterwards: a grid is folded in normally.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.latest_.at("area1").area_covered == 100.0;}, 20.0,
+      [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(countLog("Raster georeference captured"), 1u);
+}
+
+// A source whose latest grid could not be placed keeps that grid, to fold it in
+// when its frame resolves. A reset that left it would bring the old session's
+// cells back on the next tick.
+TEST_F(NodeTest, ResetDropsAKeptUnplacedGridSoItsCellsDoNotReturn)
+{
+  Harness::Options opt;
+  opt.sources = {"A", "C"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);  // c/map is not in TF
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid_a = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  const auto grid_c = makeGrid("c/map", {0, 0, 10, 5}, 1.0, flat(12.0f, 0.25f));
+  // C's grid is sent until the node has flagged it as unplaced, then C goes silent.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.node_->stats().grids_unplaced >= 1 && h.node_->stats().grids_placed >= 1;
+      }, 20.0, [&]() {
+        h.publishGrid("A", grid_a);
+        if (h.node_->stats().grids_unplaced == 0) {
+          h.publishGrid("C", grid_c);
+        }
+      }));
+  h.spinFor(0.5);
+  ASSERT_EQ(h.received_, 0u) << "test setup: C must be withholding the assessment";
+
+  const auto [ok, message] = h.callReset();
+  ASSERT_TRUE(ok) << message;
+
+  // C's frame appears; nobody sends C's grid again. Without the reset of the kept
+  // grid the retry would fold it in and credit C with 50.
+  h.publishSourceFrame("c/map", 0.0, 0.0, 0.0);
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {h.publishGrid("A", grid_a);}));
+  h.spinFor(1.0, [&]() {h.publishGrid("A", grid_a);});
+  ASSERT_EQ(h.latest_.at("area1").sources.size(), 2u);
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").sources[0].area_covered, 100.0);
+  EXPECT_EQ(h.latest_.at("area1").sources[1].source, "C");
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").sources[1].area_covered, 0.0)
+    << "the kept grid of the old session came back";
+}
+
+// Past max_held_cells the node withholds, fail closed, "until reset". The reset
+// service is such a reset: the latch clears and assessments resume.
+TEST_F(NodeTest, ResetClearsTheHeldLimitAndAssessmentsResume)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.max_held_cells = 8192;  // two 64 x 64 blocks
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("a1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto near = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  const auto second = makeGrid("a/map", {200, 0, 210, 10}, 1.0, flat(12.0f, 0.25f));
+  const auto third = makeGrid("a/map", {400, 0, 410, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().grids_placed >= 2;}, 20.0, [&]() {
+        h.publishGrid("A", near);
+        h.publishGrid("A", second);
+      }));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().withheld_held_limit > 0;}, 20.0,
+      [&]() {h.publishGrid("A", third);}));
+  const std::size_t published = h.node_->stats().assessments_published;
+  h.spinFor(0.5);
+  ASSERT_EQ(h.node_->stats().assessments_published, published)
+    << "test setup: the node must be withholding";
+  EXPECT_GE(countLog("~/reset service"), 1u) << "the ERROR names the service as the cure";
+
+  const auto [ok, message] = h.callReset();
+  ASSERT_TRUE(ok) << message;
+  EXPECT_EQ(h.node_->heldCellCount(), 0u);
+  // The forced first tick after the reset publishes the empty union; then the
+  // folded grid is scored.
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.node_->stats().assessments_published > published &&
+        h.latest_.count("a1") && h.latest_.at("a1").area_covered == 100.0;
+      }, 20.0, [&]() {h.publishGrid("A", near);}));
+}
+
+// The service keeps the captured georeference, so a node that withholds because
+// the map frame moved is NOT recovered by it: it refuses, says why and points at
+// the lifecycle walk, and leaves the union alone.
+TEST_F(NodeTest, ResetIsRefusedWhenTheMapFrameHasMoved)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  auto send = [&]() {h.publishGrid("A", grid);};
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, send));
+  const std::size_t held = h.node_->heldCellCount();
+  ASSERT_GT(held, 0u);
+
+  const Eigen::Isometry3d moved =
+    earthFromEnu(kLat0, kLon0, 0.0) * Eigen::Isometry3d(Eigen::Translation3d(5.0, 0.0, 0.0));
+  h.static_tf_->sendTransform(transformMsg("earth", "map", moved));
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().withheld_map_moved >= 1;}, 20.0, send));
+
+  const auto [ok, message] = h.callReset();
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("moved"), std::string::npos) << message;
+  EXPECT_NE(message.find("lifecycle walk"), std::string::npos) << message;
+  EXPECT_NE(message.find("Nothing was changed"), std::string::npos) << message;
+  EXPECT_EQ(h.node_->heldCellCount(), held) << "a refusal must leave the union alone";
+  EXPECT_GE(countLog("the ~/reset service refuses"), 1u)
+    << "the map-moved ERROR must say the service refuses in this state";
+}
+
+// The latch only updates on ticks, so while the node is deactivated a moved map
+// frame is not yet latched: the service still looks at the live transform.
+TEST_F(NodeTest, ResetIsRefusedWhenTheMapFrameMovedButTheLatchIsNotSetYet)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {h.publishGrid("A", grid);}));
+  ASSERT_EQ(h.node_->deactivate().id(), State::PRIMARY_STATE_INACTIVE);  // no more ticks
+  const std::size_t held = h.node_->heldCellCount();
+  ASSERT_GT(held, 0u);
+
+  const Eigen::Isometry3d moved =
+    earthFromEnu(kLat0, kLon0, 0.0) * Eigen::Isometry3d(Eigen::Translation3d(5.0, 0.0, 0.0));
+  h.static_tf_->sendTransform(transformMsg("earth", "map", moved));
+  h.spinFor(0.7);
+  ASSERT_EQ(h.node_->stats().withheld_map_moved, 0u) << "test setup: nothing has latched it";
+
+  const auto [ok, message] = h.callReset();
+  EXPECT_FALSE(ok) << "the live map frame has moved: " << message;
+  EXPECT_NE(message.find("lifecycle walk"), std::string::npos) << message;
+  EXPECT_EQ(h.node_->heldCellCount(), held);
+}
+
+// Before the first georeference capture raster_from_earth_ is the identity: a
+// comparison against it would latch a false "map moved" and refuse a reset that
+// has nothing to protect. TF is present but the node has not ticked yet (it is
+// only configured), so the capture has not happened; the reset goes through, says
+// the node is inactive, and the node then works normally.
+TEST_F(NodeTest, ResetBeforeTheFirstGeoreferenceIsNotRefused)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  h.spinFor(0.7);  // let the TF reach the node's buffer
+
+  const auto [ok, message] = h.callReset();
+  EXPECT_TRUE(ok) << message;
+  EXPECT_NE(message.find("node is inactive"), std::string::npos) << message;
+
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.node_->stats().withheld_map_moved, 0u);
+}
+
+// "Service absent" reads "not configured": created by configure, there in inactive
+// and active, gone after cleanup and shutdown. A service is not state-gated, so the
+// handler refuses on its own when nothing is configured.
+TEST_F(NodeTest, ResetServiceExistsOnlyWhileConfiguredAndRefusesWhenNot)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  EXPECT_TRUE(h.waitForResetService(false)) << "no service before configure";
+
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(h.waitForResetService(true)) << "inactive";
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_TRUE(h.waitForResetService(true)) << "active";
+  ASSERT_EQ(h.node_->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_TRUE(h.waitForResetService(false)) << "no service after cleanup";
+
+  const auto [ok, message] = CoverageAssessmentTestAccess::callResetHandler(*h.node_);
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("not configured"), std::string::npos) << message;
+
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(h.waitForResetService(true)) << "back after a second configure";
+  ASSERT_EQ(h.node_->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+  EXPECT_TRUE(h.waitForResetService(false)) << "no service after shutdown";
+}
+
+// An exception inside the handler is contained like one in any callback: counted,
+// logged, returned to the caller as the reason, and the state is left as it was.
+TEST_F(NodeTest, AnExceptionInTheResetServiceIsContainedAndReported)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  h.node_->setFaultInjectorForTest([](const char * what) {
+      if (std::string(what) == "reset service") {
+        throw std::runtime_error("injected reset fault");
+      }
+    });
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 100.0;
+      }, 20.0, [&]() {h.publishGrid("A", grid);}));
+  const std::size_t held = h.node_->heldCellCount();
+  const uint64_t exceptions = h.node_->stats().callback_exceptions;
+
+  const auto [ok, message] = h.callReset();
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("injected reset fault"), std::string::npos) << message;
+  EXPECT_EQ(h.node_->stats().callback_exceptions, exceptions + 1);
+  EXPECT_EQ(h.node_->heldCellCount(), held);
+  EXPECT_EQ(h.node_->get_current_state().id(), State::PRIMARY_STATE_ACTIVE);
 }
