@@ -100,7 +100,7 @@ ros2 service call /boat1/cube_bathymetry/reset std_srvs/srv/Trigger '{}'
 
 | Node | Service | Answers in | Refuses (`success: false`, nothing changed) when |
 |---|---|---|---|
-| `cube_bathymetry_node` | `~/reset`, e.g. `/boat1/cube_bathymetry/reset` | `inactive`, `active` | the node was configured with a `draft_dir`; or nothing is configured |
+| `cube_bathymetry_node` | `~/reset`, e.g. `/boat1/cube_bathymetry/reset` | `inactive`, `active` | the node was configured with a `draft_dir`; or the running session primed prior tiles and the rebuild primes none (the prior directory is missing, unmounted, empty or of the wrong level); or the prior cannot be loaded; or nothing is configured |
 | `coverage_assessment_node` | `~/reset`, e.g. `/coverage_assessment/reset` | `inactive`, `active` | the map frame has moved since the raster georeference was captured; or nothing is configured |
 
 A service exists only while its node is configured (it is created last in `configure` and
@@ -117,7 +117,13 @@ backscatter curve that arrived on `sonar_info`, which is not redelivered) and re
 `prior_store_dir`, so the blunder gate is active from the first ping. A prior that cannot be
 loaded **fails the reset** (the running session, which has the gate, is kept and the response
 says why), whereas a `configure` only warns and runs ungated: replacing a gated session
-with an ungated one is worse than keeping the old one. Like `configure`, it
+with an ungated one is worse than keeping the old one. The same holds for a prior that
+loads **without error but primes nothing** (the directory is missing or unmounted, empty,
+or holds only tiles of another level): the node remembers how many prior tiles the running
+session primed, and when that is more than zero and the rebuild primes none, the reset
+is refused and the running session kept. A node whose prior never primed anything (an
+unset `prior_store_dir`, or one that was already empty at `configure`) has no gate to lose
+and is reset as usual. Like `configure`, it
 starts a new sheet and tile catalog and clears the evicted-tile markers, the disk-serve
 queue, the refresh tracker, the saving ledger and the publish cursor. Publishers,
 subscriptions, timers and parameters are not touched. The prime is a whole-store disk read

@@ -1289,6 +1289,77 @@ TEST_F(NodeLifecycle, ResetWithAnUnloadablePriorKeepsTheGatedSession)
   std::filesystem::remove_all(dir);
 }
 
+// load() does not throw for a prior directory that is missing, unmounted, empty or
+// of the wrong level: it primes zero tiles. A reset must not replace a session that
+// HAS the blunder gate with one that has none, so it refuses; once the prior is back
+// the reset works. A node whose prior never primed anything is not locked out.
+TEST_F(NodeLifecycle, ResetWithAPriorThatPrimesNothingKeepsTheGatedSession)
+{
+  const auto dir = makeTempDir();
+  auto source = std::make_shared<cube::GeoMapSheet>(1.0f);
+  addPatch(source, -10.0);
+  auto tiles = cube::mapSheetToTiles(*source);
+  ASSERT_FALSE(tiles.empty());
+  {
+    auto store = marine_bathymetry_store::BathymetryStore::fromCellSize(
+      1.0f, /*reference_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Reference, tiles);
+    ASSERT_GT(marine_bathymetry_store::save(store, dir.string()), 0u);
+  }
+  const auto moved = std::filesystem::path(dir.string() + ".moved");
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("prior_store_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    ASSERT_FALSE(node->sheet()->grids().empty()) << "test setup: the prior was not primed";
+    CubeBathymetryTestAccess::dirtySessionState(*node);
+    const auto sheet_before = node->sheet();
+    const auto resident_before = sheet_before->residentTileCount();
+
+    // The prior goes away after configure (an unmounted disk): no throw, zero tiles.
+    std::filesystem::rename(dir, moved);
+    ResetCaller caller(node);
+    auto [ok, message] = caller.call();
+    EXPECT_FALSE(ok) << "an ungated session replaced a gated one: " << message;
+    EXPECT_NE(message.find("primed no tiles"), std::string::npos) << message;
+    EXPECT_NE(message.find(dir.string()), std::string::npos) << message;
+    EXPECT_NE(message.find("unchanged"), std::string::npos) << message;
+    EXPECT_EQ(node->sheet().get(), sheet_before.get()) << "the old session must be kept";
+    EXPECT_EQ(node->sheet()->residentTileCount(), resident_before);
+    EXPECT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u)
+      << "a failed reset must leave every session field as it was";
+
+    // The prior is back: the reset works.
+    std::filesystem::rename(moved, dir);
+    std::tie(ok, message) = caller.call();
+    EXPECT_TRUE(ok) << message;
+    EXPECT_NE(node->sheet().get(), sheet_before.get());
+    EXPECT_FALSE(node->sheet()->grids().empty());
+    EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+
+  // A node whose prior never primed anything has no gate to lose, so it is not
+  // locked out of resetting.
+  {
+    const auto missing = dir.string() + ".never_existed";
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("prior_store_dir", missing)}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    const auto sheet_before = node->sheet();
+    ResetCaller caller(node);
+    const auto [ok, message] = caller.call();
+    EXPECT_TRUE(ok) << "a node that never had a gate was locked out: " << message;
+    EXPECT_NE(node->sheet().get(), sheet_before.get());
+    EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(moved);
+}
+
 // The swap in the service handler has no mutex. That is safe because every
 // callback of the node's own entities (pings, timers, subscriptions, the service)
 // is in the ONE default mutually exclusive callback group that the node's

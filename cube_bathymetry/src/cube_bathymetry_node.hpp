@@ -1013,6 +1013,11 @@ private:
   // the 920k-cell grids it lets us drop; it is the revisit-detection signal.
   std::set<gggs::GridIndex> evicted_indices_;
 
+  // How many prior-store tiles primed the running sheet's predicted surface; zero
+  // means the session runs without the prior's blunder gate. Describes the session,
+  // so adoptSession() sets it; the reset service compares it with the rebuild's.
+  std::size_t prior_tiles_primed_ = 0;
+
   // Draft-tile persistence (#21). draft_dir_ empty = disabled. Tiles are written
   // to a single fused `draft/` grid (no per-day epochs, unh_marine_autonomy#221);
   // newest value wins per cell across saves and sessions.
@@ -1777,6 +1782,10 @@ private:
     marine_tiled_raster_store::TileCatalogBuilder catalog_builder;
     /// What became of prior_store_dir, for the reset response.
     std::string prior_status;
+    /// How many prior tiles (Reference + Chart) primed this sheet's predicted surface.
+    /// Zero means the session has no blunder gate from the prior. The reset compares
+    /// the running session's count with the rebuild's (see resetSession).
+    std::size_t prior_tiles_primed = 0;
   };
 
   /// Build a fresh sheet from the stored configuration: the same sheet-level
@@ -1844,6 +1853,7 @@ private:
         marine_bathymetry_store::load(prior, prior_store_dir_);
         const cube::PriorLayerPrimeResult primed =
           cube::primeFromPriorLayers(prior, *session.sheet);
+        session.prior_tiles_primed = primed.total();
         if (primed.total() == 0) {
           RCLCPP_WARN(get_logger(),
             "prior_store_dir='%s' primed no tiles (%zu level-mismatched "
@@ -2043,6 +2053,7 @@ private:
     evicted_indices_ = std::move(fresh.evicted_indices);
     catalog_builder_ = std::move(fresh.catalog_builder);
     // Last: the swap itself, which destroys the old sheet.
+    prior_tiles_primed_ = fresh.prior_tiles_primed;
     geo_map_sheet_ = std::move(fresh.sheet);
   }
 
@@ -2067,6 +2078,11 @@ private:
   /// cost is that the prime is a whole-store disk read that BLOCKS the executor
   /// for its duration while the node is active (unlike configure): the
   /// best-effort depth-5 ping subscription drops pings meanwhile.
+  ///
+  /// A reset also refuses when the running session primed prior-store tiles (it has
+  /// the blunder gate) and the rebuild primes none: load() does not throw for a prior
+  /// directory that is missing, unmounted, empty or of the wrong level, so the check
+  /// is on the count. A node whose prior never primed anything is not locked out.
   ///
   /// Not for use underway, for two more reasons. A reset while ACTIVE makes the next
   /// collision-avoidance window hold only the new session's cells, and unknown
@@ -2117,6 +2133,18 @@ private:
       // A non-std throw must not escape a service callback (it would end the
       // process); the assessor's handler contains it the same way.
       return "failed with an unknown exception, the running session is unchanged";
+    }
+    // A running session that has the prior's blunder gate is not replaced by a rebuild
+    // that primed nothing: load() does not throw for a missing, unmounted, empty or
+    // all-level-mismatched store, so that case reaches here as a clean build with zero
+    // tiles. A node whose prior never primed anything (prior_tiles_primed_ == 0) is
+    // not locked out: there is no gate to lose.
+    if (prior_tiles_primed_ > 0 && fresh.prior_tiles_primed == 0) {
+      return "failed, the running session is unchanged: prior_store_dir '" +
+             prior_store_dir_ + "' primed no tiles this time, so a reset would replace the session that has the blunder gate (it "
+             "primed " + std::to_string(prior_tiles_primed_) + " tile(s)) with one "
+             "that has none; check the path and that the store is mounted, or use the "
+             "lifecycle walk";
     }
     const std::size_t dropped = geo_map_sheet_->residentTileCount();
     const std::string prior = fresh.prior_status;
