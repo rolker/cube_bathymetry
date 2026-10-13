@@ -42,6 +42,14 @@ namespace coverage_assessment
 /// a tiny cell size must not push the indices toward 2^53.
   constexpr double kMaxLatticeIndex = 1.0e12;
 
+/// Most edge-row crossings a polygon may have in total: the sum, over its edges,
+/// of the lattice rows each one spans, which is the work of the scanline fill
+/// (and its intersection count). A convex polygon has about twice its rows; a
+/// comb whose thousands of teeth each span every row of a tall area has far more.
+/// Counted from the edges alone, before anything is allocated. 1e8 is about a
+/// second of fill on the single-threaded node.
+  constexpr double kMaxEdgeRowCrossings = 1.0e8;
+
 /// A point in the assessment raster's frame, metres.
   struct Point2
   {
@@ -106,10 +114,12 @@ namespace coverage_assessment
 ///
 /// Rejected, with the reason in `error`: fewer than 3 distinct vertices, a
 /// non-finite coordinate, a non-positive or non-finite cell size, zero area
-/// (collinear vertices), and a bounding box of more than `max_cells` lattice
+/// (collinear vertices), a bounding box of more than `max_cells` lattice
 /// cells (guards a swapped latitude/longitude, which would otherwise ask for a
-/// raster of the whole earth). A polygon smaller than a cell is valid and
-/// yields an empty mask (count 0).
+/// raster of the whole earth), and more than kMaxEdgeRowCrossings edge-row
+/// crossings. The fill visits only the edges that span each row (an edge table),
+/// so its cost is the crossings plus the rows, not the rows times the vertices.
+/// A polygon smaller than a cell is valid and yields an empty mask (count 0).
   PolygonRasterResult rasterisePolygon(
     const std::vector < Point2 > &polygon, double cell_size, int64_t max_cells);
 

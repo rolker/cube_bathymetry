@@ -25,6 +25,7 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <vector>
 
 namespace coverage_assessment
 {
@@ -154,22 +155,63 @@ PolygonRasterResult rasterisePolygon(
       static_cast<double>(i_end - i_first) * static_cast<double>(j_end - j_first),
       cell_size, max_cells));
   }
+  // Edge table. An edge counts for row j when exactly one end is at or below the
+  // row's centre line, (a.y <= cy) != (b.y <= cy), that is min_y <= cy < max_y:
+  // the rows from the first centre at or above its lower end up to (not
+  // including) the first centre at or above its upper end. Same comparison as
+  // the row centres below, so no boundary row moves.
+  struct Edge
+  {
+    int64_t j_begin;
+    int64_t j_end;
+    Point2 a;
+    Point2 b;
+  };
+  std::vector<Edge> edges;
+  edges.reserve(ring.size());
+  double crossings = 0.0;
+  for (std::size_t k = 0; k < ring.size(); ++k) {
+    const Point2 & a = ring[k];
+    const Point2 & b = ring[(k + 1) % ring.size()];
+    const int64_t j_begin = firstCentreAtOrAbove(std::min(a.y, b.y), cell_size);
+    const int64_t j_end = firstCentreAtOrAbove(std::max(a.y, b.y), cell_size);
+    if (j_end <= j_begin) {
+      continue;  // spans no row centre (horizontal, or between two centres)
+    }
+    crossings += static_cast<double>(j_end - j_begin);
+    edges.push_back(Edge{j_begin, j_end, a, b});
+  }
+  if (crossings > kMaxEdgeRowCrossings) {
+    std::ostringstream os;
+    os << "polygon edges cross " << crossings << " lattice rows in total at cell size "
+       << cell_size << " m, over the limit of " << kMaxEdgeRowCrossings
+       << " (too many vertices spanning its rows)";
+    return fail(os.str());
+  }
+  std::sort(edges.begin(), edges.end(),
+    [](const Edge & x, const Edge & y) {return x.j_begin < y.j_begin;});
+
   m.i0 = i_first;
   m.j0 = j_first;
   m.ni = i_end - i_first;
   m.nj = j_end - j_first;
   m.inside.assign(static_cast<std::size_t>(m.ni * m.nj), 0);
 
+  std::vector<const Edge *> active;
+  std::size_t next = 0;
   std::vector<double> xs;
   for (int64_t j = m.j0; j < m.j0 + m.nj; ++j) {
     const double cy = (static_cast<double>(j) + 0.5) * cell_size;
+    while (next < edges.size() && edges[next].j_begin <= j) {
+      active.push_back(&edges[next]);
+      ++next;
+    }
+    active.erase(
+      std::remove_if(active.begin(), active.end(), [j](const Edge * e) {return e->j_end <= j;}),
+      active.end());
     xs.clear();
-    for (std::size_t k = 0; k < ring.size(); ++k) {
-      const Point2 & a = ring[k];
-      const Point2 & b = ring[(k + 1) % ring.size()];
-      if ((a.y <= cy) != (b.y <= cy)) {
-        xs.push_back(a.x + (cy - a.y) * (b.x - a.x) / (b.y - a.y));
-      }
+    for (const Edge * e : active) {
+      xs.push_back(e->a.x + (cy - e->a.y) * (e->b.x - e->a.x) / (e->b.y - e->a.y));
     }
     std::sort(xs.begin(), xs.end());
     for (std::size_t k = 0; k + 1 < xs.size(); k += 2) {

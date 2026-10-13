@@ -21,8 +21,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <vector>
 
 #include "coverage_assessment/polygon_raster.h"
@@ -218,6 +220,123 @@ TEST(PolygonRaster, RejectsOversizeBoundingBox)
   EXPECT_FALSE(earth.ok);
   const auto absurd = rasterisePolygon(rect(-1.0e300, -1.0e300, 1.0e300, 1.0e300), 1.0, kBig);
   EXPECT_FALSE(absurd.ok);
+}
+
+namespace
+{
+// The fill as it was before the edge table: every edge tested on every row.
+// The reference the edge-table fill must match cell for cell.
+std::vector<uint8_t> referenceFill(
+  const std::vector<Point2> & ring, const PolygonMask & m,
+  double cs)
+{
+  auto centre_at_or_above = [cs](double x) {
+      int64_t i = static_cast<int64_t>(std::ceil(x / cs - 0.5));
+      while ((static_cast<double>(i) + 0.5) * cs < x) {
+        ++i;
+      }
+      while ((static_cast<double>(i - 1) + 0.5) * cs >= x) {
+        --i;
+      }
+      return i;
+    };
+  std::vector<uint8_t> inside(static_cast<std::size_t>(m.ni * m.nj), 0);
+  std::vector<double> xs;
+  for (int64_t j = m.j0; j < m.j0 + m.nj; ++j) {
+    const double cy = (static_cast<double>(j) + 0.5) * cs;
+    xs.clear();
+    for (std::size_t k = 0; k < ring.size(); ++k) {
+      const Point2 & a = ring[k];
+      const Point2 & b = ring[(k + 1) % ring.size()];
+      if ((a.y <= cy) != (b.y <= cy)) {
+        xs.push_back(a.x + (cy - a.y) * (b.x - a.x) / (b.y - a.y));
+      }
+    }
+    std::sort(xs.begin(), xs.end());
+    for (std::size_t k = 0; k + 1 < xs.size(); k += 2) {
+      const int64_t first = std::max(centre_at_or_above(xs[k]), m.i0);
+      const int64_t end = std::min(centre_at_or_above(xs[k + 1]), m.i0 + m.ni);
+      for (int64_t i = first; i < end; ++i) {
+        inside[static_cast<std::size_t>((j - m.j0) * m.ni + (i - m.i0))] = 1;
+      }
+    }
+  }
+  return inside;
+}
+}  // namespace
+
+// Random polygons (self-intersecting ones included, and vertices snapped onto
+// cell-centre lines to exercise the half-open rule) fill exactly as the
+// every-edge-on-every-row reference does.
+TEST(PolygonRaster, EdgeTableFillMatchesTheEveryEdgeReference)
+{
+  std::mt19937 rng(164);
+  std::uniform_real_distribution<double> coord(-40.0, 40.0);
+  std::uniform_int_distribution<int> nverts(3, 30);
+  std::uniform_int_distribution<int> snap(0, 3);
+  int compared = 0;
+  for (const double cs : {1.0, 0.5, 0.37}) {
+    for (int trial = 0; trial < 300; ++trial) {
+      std::vector<Point2> ring;
+      const int n = nverts(rng);
+      for (int k = 0; k < n; ++k) {
+        Point2 p{coord(rng), coord(rng)};
+        if (snap(rng) == 0) {  // onto a centre line
+          p.y = (std::round(p.y / cs - 0.5) + 0.5) * cs;
+        }
+        if (snap(rng) == 0) {
+          p.x = (std::round(p.x / cs - 0.5) + 0.5) * cs;
+        }
+        ring.push_back(p);
+      }
+      const auto r = rasterisePolygon(ring, cs, kBig);
+      if (!r.ok) {
+        continue;
+      }
+      const auto expected = referenceFill(ring, r.mask, cs);
+      ASSERT_EQ(r.mask.inside, expected) << "cell size " << cs << ", trial " << trial;
+      ++compared;
+    }
+  }
+  EXPECT_GT(compared, 800);
+}
+
+// A comb whose teeth each span every row of a tall area has edges x rows
+// crossings; over kMaxEdgeRowCrossings it is refused from the edges alone.
+TEST(PolygonRaster, RejectsTooManyEdgeRowCrossings)
+{
+  const double height = 1.0e6;  // rows at 1 m
+  std::vector<Point2> comb = {{0.0, 0.0}};
+  for (int t = 0; t < 60; ++t) {  // 120 tall edges x 1e6 rows = 1.2e8 crossings
+    comb.push_back({2.0 * t, height});
+    comb.push_back({2.0 * t + 1.0, height});
+    comb.push_back({2.0 * t + 1.0, 1.0});
+    comb.push_back({2.0 * t + 2.0, 1.0});
+  }
+  comb.push_back({120.0, 0.0});
+  const auto r = rasterisePolygon(comb, 1.0, 1000000000);
+  EXPECT_FALSE(r.ok);
+  EXPECT_FALSE(r.over_max_cells);
+  EXPECT_NE(r.error.find("edges cross"), std::string::npos) << r.error;
+}
+
+// A tall thin area with thousands of vertices along its long sides has few
+// crossings per row; the edge table fills it without testing every edge on
+// every row (that was 2e5 rows x 1e4 edges, about 2e9 tests).
+TEST(PolygonRaster, ManyVerticesOnATallThinAreaAreCheap)
+{
+  const double height = 200000.0;
+  const int per_side = 5000;
+  std::vector<Point2> ring;  // up the left side, down the right
+  for (int k = 0; k <= per_side; ++k) {
+    ring.push_back({0.0, height * k / per_side});
+  }
+  for (int k = per_side; k >= 0; --k) {
+    ring.push_back({2.0, height * k / per_side});
+  }
+  const auto r = rasterisePolygon(ring, 1.0, kBig);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.mask.count, static_cast<std::size_t>(2 * 200000));
 }
 
 // Huge finite coordinates used to overflow the double -> int64 conversion or spin

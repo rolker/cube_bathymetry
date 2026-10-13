@@ -274,7 +274,7 @@ ERROR. The first tick after activation always assesses.
 
 A `SurveyArea` is rejected with an ERROR, and any earlier definition of that id is kept,
 when it has fewer than 3 vertices or more than `max_area_vertices`, a vertex that is not a finite latitude in [-90, 90]
-and longitude in [-180, 180], zero area, a raster over `max_raster_cells`, a vertex more
+and longitude in [-180, 180], zero area, a raster over `max_raster_cells`, edges that cross more than 1e8 lattice rows in total (the fill visits only the edges spanning each row, so its cost is those crossings; a comb with thousands of teeth across a tall area has too many), a vertex more
 than 1e7 m (in x or y, in the raster frame) from the raster origin, a definition that would take the bounding
 boxes of all held areas, times the number of sources, over `max_pass_cell_checks`, or a new id beyond `max_areas`. The standard is **not** a reason to reject: a NaN, negative or infinite `a`
 or `b` means "not set" (above).
