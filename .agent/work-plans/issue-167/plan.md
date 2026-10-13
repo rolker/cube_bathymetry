@@ -86,8 +86,12 @@ Facts verified in source that shape the design:
    change between cycles; same source `on_cleanup` uses): `success=false`, message names the directory, says saved
    tiles would reload so the sheet would not be fresh, and points at `--allow-persistence` with a new empty `draft_dir`;
    (b) `buildSession(prior_must_load=true)` inside try/catch (`std::exception` and `...`; a prior store that cannot be
-   loaded fails the reset, while configure keeps its warn-and-continue); any failure leaves `geo_map_sheet_` and every other member untouched and
-   returns `success=false` with the reason; (c) remember the old tile count, `adoptSession`, return `success=true`
+   loaded fails the reset, while configure keeps its warn-and-continue); the rebuild also fails the reset when the
+   running session primed prior tiles (`prior_tiles_primed_ > 0`, set by `adoptSession`) and the rebuild primed none,
+   because `load()` does not throw for a missing, unmounted, empty or all-level-mismatched prior (a node whose prior never
+   primed anything is not locked out); any failure leaves `geo_map_sheet_` and every other member untouched and
+   returns `success=false` with the reason; the handler as a whole is inside try/catch (the message is built before the
+   swap, so nothing that can throw runs after it); (c) remember the old tile count, `adoptSession`, return `success=true`
    with a message saying what was reset: "N tile(s) dropped from RAM; prior_store_dir <unset | primed X Reference + Y
    Chart tile(s)>; node is <active | inactive: no grid until activated>; no tile written to disk (loading a prior
    store renames a legacy survey/ directory, as configure does)". The old sheet is destroyed after the swap, last.
@@ -123,7 +127,10 @@ Facts verified in source that shape the design:
      When the node is active, the georeference exists and the areas are projected, the reset also publishes the emptied
      `coverage_assessment` and `coverage_grid` itself (`publishEmptyAssessment`; with nothing held the result does not
      depend on the surface height) and puts the flags above back, so the old run's coverage is not left latched while
-     the water surface is unavailable (pre-push review).
+     the water surface is unavailable (pre-push review). A reset while INACTIVE sets `publish_empty_on_activate_`, and
+     `on_activate` publishes the emptied result after the base class has activated the publishers (round 2). A queued
+     area definition (`areas_dirty_`) still makes it publish nothing at reset time: the next tick projects the areas, but
+     returns before assessing while the surface is unavailable, so the old result stays latched until a tick can assess.
    - **Counters stay cumulative** (owner decision 2026-10-13): `stats_` is not touched. `NodeStats` also holds
      `areas_received`, `areas_rejected` and `callback_exceptions`; the service keeps the areas, so zeroing would print
      "areas 0 received, 0 rejected, N held", and zeroing `callback_exceptions` would erase evidence of a fault. The
@@ -143,7 +150,8 @@ Facts verified in source that shape the design:
 11. **Classify before changing anything, with one call.** One `ros2 service list -t` (via the read-retry rules: a failure,
     a timeout or an EMPTY list is "indeterminate", retried `RESET_CUBE_GET_TRIES` times, then the script dies before any
     change; an empty list cannot be a real graph, since every node exposes its parameter services) gives the set of
-    services and their types in the graph. A node whose `<node>/reset [std_srvs/srv/Trigger]` is in the list (a `/reset` of
+    services and their types in the graph (matched with a here-string, not `printf | grep -q`: a list over a pipe buffer
+    made grep exit on the match, printf got EPIPE under pipefail, and the node was classified as having no service). A node whose `<node>/reset [std_srvs/srv/Trigger]` is in the list (a `/reset` of
     another type is not) is `service` class; a node that is not in a
     non-empty list is `walk` class (older binary, unconfigured node, wrong name, or discovery lag). A wrong name then
     dies in the existing lifecycle preflight exactly as today, and a false "absent" under discovery lag is safe: it only
@@ -195,7 +203,7 @@ Facts verified in source that shape the design:
     inactive): <nodes>" and exit 0. (First drafted as a warning and exit 4; the pre-push review found that a node a
     failed run left inactive is configured, so it serves `~/reset`, and a re-run would then reset it and exit 4
     forever, never activating it. Owner decision 2026-10-13: reset, then activate, so re-running converges; exit 4 is
-    retired.) A failed activation is a failure with the re-run hint. The old preflight warning for a not-active CUBE node is kept for walk-class nodes.
+    retired.) The script ends with `exit 0`, so a closed stdout cannot fail a finished reset. A failed activation is a failure with the re-run hint. The old preflight warning for a not-active CUBE node is kept for walk-class nodes.
 16. **Restate the ordering claim honestly in both directions** in the script header and README. The walk quiesced every
     CUBE node before the consumer was reset. With services the CUBE nodes keep publishing, which has two consequences.
     (i) A `grid` published by an old sheet just before its reset and still queued in the assessor's subscription
@@ -243,8 +251,13 @@ Facts verified in source that shape the design:
       been created (invalid `sonar_info_topic`) leaves the node UNCONFIGURED with no `~/reset` service in the graph.
     - `AllCallbacksShareTheDefaultGroup`: exactly one callback group is spun by the node's executor (the default,
       mutually exclusive one), no group is reentrant, and every group NOT spun by it holds no service, client or timer
-      and subscribes only to `/tf`, `/tf_static` or `/clock`; run with and without `use_sim_time`. A control test shows
-      the audit reports a reentrant group, an unspun timer and a foreign subscription. The assessor has the same pin.
+      and subscribes only to `/tf`, `/tf_static` or `/clock`, and every waitable in them is the QoS event handler of one
+      of those subscriptions (compared by pointer); run with and without `use_sim_time`. A control test shows
+      the audit reports a reentrant group, an unspun timer, a foreign subscription and a foreign waitable. The assessor has the same pin.
+    - `ResetWithAPriorThatPrimesNothingKeepsTheGatedSession`: the prior directory is renamed after configure, the reset
+      fails and keeps the session, works once the prior is back; a node whose prior never primed anything still resets.
+    - `AThrowAfterTheBuildIsContainedByTheHandler`: a throw (`bad_alloc`, and a non-std one) after the build answers
+      `success=false` with the old session intact.
 19. **`test_coverage_assessment_node.cpp`** (harness as in `ReconfigureEmptiesTheUnion`): reset service empties the
     union and the next tick publishes `area_covered == 0`; areas, their projections and the georeference are kept
     (`area_total` unchanged, no new `Raster georeference captured` line); a kept unplaced grid does not return after
@@ -271,7 +284,8 @@ Facts verified in source that shape the design:
     a `service call` that fails fast is retried (with `RESET_CUBE_CALL_TRIES`), one that times out is not, and neither
     selects the walk; a message echoing `(success=True,` in a path while `success=False` is still a refusal; an
     inactive node is reset and then activated (exit 0), and a re-run recovers a node a failed walk or probe left
-    inactive; the state is read from the last clause; a `/reset` of another type walks; every new call still goes through `timeout --foreground`; the existing 12 cases keep
+    inactive; the state is read from the last clause; a `/reset` of another type walks; a service list of about 200 KB (case 25)
+    still classifies a service node; a closed stdout or `| head -1` does not fail a finished reset (case 26); every new call still goes through `timeout --foreground`; the existing 12 cases keep
     passing (they exercise the walk path; the stub's default service list contains no `/reset`). The test header list
     of cases and the "12 case groups" comment at `CMakeLists.txt:407` are updated with it.
 21. **Live check** on the four-boat simulation (work-list item): record the wall time of the all-service reset against
@@ -399,3 +413,10 @@ changed the design: a node that answers inactive is reset and then activated (ex
 to the set timeout and a timed-out call is not retried; "nothing on disk" is qualified (the legacy `survey/` rename)
 rather than refused; a reset whose prior store cannot be loaded fails and keeps the gated session; the assessor reset
 publishes the emptied `coverage_assessment` and `coverage_grid` itself when active.
+
+### Pre-push review round 2 (2026-10-13), owner decision: fix all seven
+Both must-fixes and all five suggestions were addressed; the progress entry lists the commit for each. The changes to the
+design: a reset refuses when the running session was gated and the rebuild primes no prior tile; the classification reads
+the service list through a here-string; the assessor publishes the emptied result on activation after a reset while
+inactive; the whole CUBE reset handler is contained; the callback-group audits also cover waitables; the script ends
+with `exit 0`.
