@@ -1491,7 +1491,7 @@ TEST_F(NodeLifecycle, AllCallbacksShareTheDefaultGroup)
       << "a group that is not in the executor holds a service, client or timer";
     EXPECT_EQ(audit.unspun_foreign_waitables, 0u)
       << "a group that is not in the executor holds a waitable (an action server, say) "
-         "that is not a QoS event handler of one of its subscriptions";
+      "that is not a QoS event handler of one of its subscriptions";
     const std::set<std::string> allowed = {"/tf", "/tf_static", "/clock"};
     for (const auto & topic : audit.unspun_topics) {
       EXPECT_EQ(allowed.count(topic), 1u)

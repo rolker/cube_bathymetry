@@ -1945,7 +1945,7 @@ TEST_F(NodeTest, CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor)
     EXPECT_EQ(audit.unspun_services_clients_timers, 0u);
     EXPECT_EQ(audit.unspun_foreign_waitables, 0u)
       << "a group outside the executor holds a waitable that is not a QoS event handler "
-         "of one of its subscriptions";
+      "of one of its subscriptions";
     const std::set<std::string> allowed = {"/tf", "/tf_static", "/clock"};
     for (const auto & topic : audit.unspun_topics) {
       EXPECT_EQ(allowed.count(topic), 1u)

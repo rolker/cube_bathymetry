@@ -2175,8 +2175,9 @@ private:
     // not locked out: there is no gate to lose.
     if (prior_tiles_primed_ > 0 && fresh.prior_tiles_primed == 0) {
       return "failed, the running session is unchanged: prior_store_dir '" +
-             prior_store_dir_ + "' primed no tiles this time, so a reset would replace the session that has the blunder gate (it "
-             "primed " + std::to_string(prior_tiles_primed_) + " tile(s)) with one "
+             prior_store_dir_ + "' primed no tiles this time, so a reset would replace "
+             "the session that has the blunder gate (it primed " +
+             std::to_string(prior_tiles_primed_) + " tile(s)) with one "
              "that has none; check the path and that the store is mounted, or use the "
              "lifecycle walk";
     }

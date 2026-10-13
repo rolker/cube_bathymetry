@@ -916,9 +916,9 @@ private:
   /// not zero, and callback_exceptions is evidence of a fault. When active and the
   /// areas are projected, the emptied result is published at once
   /// (publishEmptyAssessment); when inactive, it does so on the next activation.
-  /// Refuses, changing nothing, when the map frame has moved since the georeference was captured: the
-  /// service keeps the georeference, so that state needs the lifecycle walk, which
-  /// captures it again.
+  /// Refuses, changing nothing, when the map frame has moved since the georeference was
+  /// captured: the service keeps the georeference, so that state needs the lifecycle walk,
+  /// which captures it again.
   bool resetSession(std::string * message)
   {
     if (!registry_ || !tf_buffer_) {
