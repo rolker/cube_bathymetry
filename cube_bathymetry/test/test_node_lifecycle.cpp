@@ -57,6 +57,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <new>
 #include <set>
 #include <string>
 #include <thread>
@@ -121,6 +122,12 @@ struct CubeBathymetryTestAccess
   static void setBuildFault(CubeBathymetry & n, std::function<void()> fault)
   {
     n.build_fault_injector_ = std::move(fault);
+  }
+
+  /// Make resetSession() throw after the build, outside the build's own try block.
+  static void setResetFault(CubeBathymetry & n, std::function<void()> fault)
+  {
+    n.reset_fault_injector_ = std::move(fault);
   }
 
   static void deliverSonarInfo(CubeBathymetry & n, const marine_interfaces::msg::SonarInfo & info)
@@ -1358,6 +1365,41 @@ TEST_F(NodeLifecycle, ResetWithAPriorThatPrimesNothingKeepsTheGatedSession)
   }
   std::filesystem::remove_all(dir);
   std::filesystem::remove_all(moved);
+}
+
+// The handler is contained as a whole, not only its build: a throw after the build
+// (the copies, the message, the swap preparation run at the RAM peak) must answer
+// success=false with the old session intact instead of escaping the service callback
+// and ending the process.
+TEST_F(NodeLifecycle, AThrowAfterTheBuildIsContainedByTheHandler)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  addPatch(node->sheet(), -12.5);
+  CubeBathymetryTestAccess::dirtySessionState(*node);
+  const auto sheet_before = node->sheet();
+
+  ResetCaller caller(node);
+  CubeBathymetryTestAccess::setResetFault(*node, [] {throw std::bad_alloc();});
+  auto [ok, message] = caller.call();
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("unchanged"), std::string::npos) << message;
+  EXPECT_EQ(node->sheet().get(), sheet_before.get());
+  EXPECT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u);
+
+  CubeBathymetryTestAccess::setResetFault(*node, [] {throw 42;});
+  std::tie(ok, message) = caller.call();
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("unknown exception"), std::string::npos) << message;
+  EXPECT_EQ(node->sheet().get(), sheet_before.get());
+
+  CubeBathymetryTestAccess::setResetFault(*node, nullptr);
+  std::tie(ok, message) = caller.call();
+  EXPECT_TRUE(ok) << message;
+  EXPECT_NE(node->sheet().get(), sheet_before.get());
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
 // The swap in the service handler has no mutex. That is safe because every

@@ -2097,12 +2097,46 @@ private:
     const std::shared_ptr<std_srvs::srv::Trigger::Request>,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
+    // The whole handler is contained, not just the build: the copies, the message
+    // concatenation and the logging below run at the documented RAM peak, and an
+    // exception that escapes a service callback ends the process. Everything that
+    // can throw in resetSession happens before the swap, so success=false here is
+    // true: the old session is the running one.
     response->success = false;
-    response->message = resetSession(response->success);
-    if (response->success) {
-      RCLCPP_INFO(get_logger(), "Reset: %s", response->message.c_str());
-    } else {
-      RCLCPP_WARN(get_logger(), "Reset refused or failed: %s", response->message.c_str());
+    try {
+      bool success = false;
+      response->message = resetSession(success);
+      response->success = success;
+    } catch (const std::exception & e) {
+      response->success = false;
+      setFailureMessage(*response, "failed, the running session is unchanged: ", e.what());
+      return;
+    } catch (...) {
+      response->success = false;
+      setFailureMessage(*response,
+        "failed with an unknown exception, the running session is unchanged", "");
+      return;
+    }
+    try {
+      if (response->success) {
+        RCLCPP_INFO(get_logger(), "Reset: %s", response->message.c_str());
+      } else {
+        RCLCPP_WARN(get_logger(), "Reset refused or failed: %s", response->message.c_str());
+      }
+    } catch (...) {
+      // Logging must not undo a reset that has been done.
+    }
+  }
+
+  /// Set a failure message without letting a second allocation failure escape the
+  /// catch block that calls it.
+  static void setFailureMessage(
+    std_srvs::srv::Trigger::Response & response, const char * text, const char * detail)
+  {
+    try {
+      response.message = std::string(text) + detail;
+    } catch (...) {
+      response.message.clear();
     }
   }
 
@@ -2146,22 +2180,30 @@ private:
              "that has none; check the path and that the store is mounted, or use the "
              "lifecycle walk";
     }
-    const std::size_t dropped = geo_map_sheet_->residentTileCount();
-    const std::string prior = fresh.prior_status;
-    adoptSession(std::move(fresh));
+    if (reset_fault_injector_) {
+      reset_fault_injector_();
+    }
+    // The whole message is built BEFORE the swap, so nothing that can throw runs
+    // after the old session is gone.
     const bool active = get_current_state().id() ==
       lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+    std::string message = std::to_string(geo_map_sheet_->residentTileCount()) +
+      " tile(s) dropped from RAM; prior_store_dir " + fresh.prior_status +
+      "; node is " + (active ? "active" : "inactive: no grid until activated") +
+      "; no tile written to disk (loading a prior store renames a legacy survey/ "
+      "directory, as configure does)";
+    adoptSession(std::move(fresh));
     success = true;
-    return std::to_string(dropped) + " tile(s) dropped from RAM; prior_store_dir " + prior +
-           "; node is " + (active ? "active" : "inactive: no grid until activated") +
-           "; no tile written to disk (loading a prior store renames a legacy survey/ "
-           "directory, as configure does)";
+    return message;
   }
 
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
   /// Test seam: called by buildSession() once the candidate sheet exists, so a
   /// test can make a build fail part way.
   std::function<void()> build_fault_injector_;
+  /// Test seam: called by resetSession() after the build and the gate check, before
+  /// the swap, outside the build's own try block.
+  std::function<void()> reset_fault_injector_;
 
   // Vessel lat/lon from earth <- base_link (translation = the ECEF position of
   // the base_link origin).
