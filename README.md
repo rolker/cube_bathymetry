@@ -78,7 +78,7 @@ for each node:
 
 | Way | What it does | `ros2` calls |
 |---|---|---|
-| the `~/reset` service (`std_srvs/Trigger`) | replaces the session state in RAM; the node keeps its lifecycle state; **nothing on disk changes** | 1 `service call` per node, plus 1 `service list` for all of them |
+| the `~/reset` service (`std_srvs/Trigger`) | replaces the session state in RAM; the node keeps its lifecycle state; **no tile is written to disk** (loading a prior store can rename a legacy `survey/` directory in it to `processed/`, exactly as `configure` does) | 1 `service call` per node, plus 1 `service list` for all of them |
 | the lifecycle walk | `deactivate` -> `cleanup` -> `configure` -> `activate` | about 17 per CUBE node, about 14 per consumer |
 
 The time goes into the `ros2` command-line start-up (3 to 8 s per call under load), not
@@ -106,7 +106,7 @@ ros2 service call /boat1/cube_bathymetry/reset std_srvs/srv/Trigger '{}'
 A service exists only while its node is configured (it is created last in `configure` and
 released with the other entities), so a missing service means an unconfigured or finalized
 node, or an older binary. The response says what was reset, for example
-`3 tile(s) dropped from RAM; prior_store_dir unset; node is active; nothing on disk was changed`;
+`3 tile(s) dropped from RAM; prior_store_dir unset; node is active; no tile written to disk (loading a prior store renames a legacy survey/ directory, as configure does)`;
 an `inactive` node is reset too, and the message says it publishes no `grid` until it is
 activated (`reset_cube_nodes.sh` then activates it, see below).
 
@@ -123,7 +123,15 @@ queue, the refresh tracker, the saving ledger and the publish cursor. Publishers
 subscriptions, timers and parameters are not touched. The prime is a whole-store disk read
 that **blocks the node's executor while it runs**, with the node active (a `configure` does
 not): pings that arrive meanwhile are dropped once five are queued (the subscription is
-best-effort, depth 5). That is one more reason not to reset underway.
+best-effort, depth 5). That is one reason not to reset underway. Two more: a reset while
+the node is `active` makes the next collision-avoidance `grid` window hold only the new
+session's cells, and unknown cells in the window are `NaN`, which the costmap treats as
+lethal (`unsurveyed_is_lethal`) around the vessel; and the **peak RAM** is the old sheet, plus
+the whole prior store, plus the new sheet, all at once. With `draft_dir` empty, the only case
+the service serves, the old sheet never evicts, so it is at its largest exactly when a reset
+is wanted. (The old sheet is not dropped first, because a failed build must leave it
+intact; running out of memory while loading the prior fails the reset and keeps the old
+session.)
 
 **On a boat with `draft_dir` set, the service does not help.** It refuses, because the saved
 tiles would reload (the sheet would not be fresh) and dropping the unsaved ones would break

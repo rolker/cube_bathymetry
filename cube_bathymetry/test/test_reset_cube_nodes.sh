@@ -189,9 +189,9 @@ case "$1 $2" in
       prior=unset
       [ -e "$STUB_DIR/prior_$k" ] && prior=$(cat "$STUB_DIR/prior_$k")
       if [ "$s" = active ]; then
-        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir $prior; node is active; nothing on disk was changed')"
+        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir $prior; node is active; no tile written to disk (loading a prior store renames a legacy survey/ directory, as configure does)')"
       else
-        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir $prior; node is inactive: no grid until activated; nothing on disk was changed')"
+        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir $prior; node is inactive: no grid until activated; no tile written to disk (loading a prior store renames a legacy survey/ directory, as configure does)')"
       fi
     fi
     echo

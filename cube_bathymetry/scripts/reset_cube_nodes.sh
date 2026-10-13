@@ -5,7 +5,8 @@
 # Start a fresh CUBE sheet on running cube_bathymetry nodes without restarting
 # them (cube_bathymetry#164, #167). A node that serves the std_srvs/Trigger
 # `<node>/reset` service is reset with ONE `ros2 service call`: its session state is
-# replaced in RAM and nothing on disk changes. Any other node (an older binary, an
+# replaced in RAM and no tile is written to disk (loading a prior store can rename
+# a legacy `survey/` directory in it, as a configure does). Any other node (an older binary, an
 # unconfigured node, one that has a draft_dir and was passed --allow-persistence) is
 # walked through deactivate -> cleanup -> configure -> activate, as before. See
 # "Starting a fresh sheet without restarting" in the top-level README.
@@ -133,7 +134,11 @@
 #
 # Not for use underway: between the quiesce and the bring-up a walked boat
 # publishes no `grid`, and a service reset blocks the node's executor while it
-# reads the prior store (pings arriving meanwhile are dropped).
+# reads the prior store (pings arriving meanwhile are dropped). After a service reset
+# of an ACTIVE node the next collision-avoidance window holds only the new session's
+# cells, and unknown cells are NaN, which the costmap treats as lethal around the
+# vessel. The peak RAM of a service reset is the old sheet plus the whole prior store
+# plus the new sheet.
 #
 # Exit status: 0 reset done, every node active; 1 a transition, read or service call
 # failed, or a CUBE node refused; 2 usage.

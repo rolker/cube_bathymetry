@@ -2046,8 +2046,11 @@ private:
     geo_map_sheet_ = std::move(fresh.sheet);
   }
 
-  /// `~/reset` (std_srvs/Trigger): start a new live session in RAM, nothing on
-  /// disk changed (cube_bathymetry#167). Refuses while the node was configured
+  /// `~/reset` (std_srvs/Trigger): start a new live session in RAM; no tile is
+  /// written to disk (cube_bathymetry#167). Loading the prior store can rename a
+  /// legacy `survey/` layer directory in it to `processed/` (the ADR-0010 D8
+  /// one-time migration), exactly as configure does, so "nothing on disk" is not
+  /// claimed without that qualification. Refuses while the node was configured
   /// with a draft_dir: saved tiles would reload (ADR-0001), so the sheet would not
   /// be fresh, and dropping the unsaved ones would break "persist before drop".
   /// On-disk session identity belongs to unh_marine_autonomy#391.
@@ -2061,8 +2064,17 @@ private:
   /// thread; it only writes the TF buffer, which a reset does not replace.) The
   /// cost is that the prime is a whole-store disk read that BLOCKS the executor
   /// for its duration while the node is active (unlike configure): the
-  /// best-effort depth-5 ping subscription drops pings meanwhile. Not for use
-  /// underway.
+  /// best-effort depth-5 ping subscription drops pings meanwhile.
+  ///
+  /// Not for use underway, for two more reasons. A reset while ACTIVE makes the next
+  /// collision-avoidance window hold only the new session's cells, and unknown
+  /// cells in the window are NaN, which the costmap treats as lethal under
+  /// unsurveyed_is_lethal, around the vessel. And the peak RAM is the old sheet, plus
+  /// the whole prior store, plus the new sheet, all at once: with draft_dir empty
+  /// (the only case served) the old sheet never evicts, so it is at its largest
+  /// exactly when a reset is wanted. The old sheet is not dropped first because a
+  /// failed build must leave it intact; a bad_alloc while loading the prior fails
+  /// the reset and keeps the old session.
   void resetService(
     const std::shared_ptr<std_srvs::srv::Trigger::Request>,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -2112,7 +2124,8 @@ private:
     success = true;
     return std::to_string(dropped) + " tile(s) dropped from RAM; prior_store_dir " + prior +
            "; node is " + (active ? "active" : "inactive: no grid until activated") +
-           "; nothing on disk was changed";
+           "; no tile written to disk (loading a prior store renames a legacy survey/ "
+           "directory, as configure does)";
   }
 
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;

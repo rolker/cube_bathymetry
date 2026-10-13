@@ -850,7 +850,9 @@ TEST_F(NodeLifecycle, ResetServiceResetsTheSessionState)
   EXPECT_TRUE(ok) << message;
   EXPECT_NE(message.find("tile(s) dropped from RAM"), std::string::npos) << message;
   EXPECT_NE(message.find("node is active"), std::string::npos) << message;
-  EXPECT_NE(message.find("nothing on disk was changed"), std::string::npos) << message;
+  EXPECT_NE(message.find("no tile written to disk"), std::string::npos) << message;
+  EXPECT_NE(message.find("renames a legacy survey/ directory"), std::string::npos)
+    << "the claim must carry its qualification: " << message;
 
   expectNoStaleSessionState(*node, "the reset service");
   EXPECT_EQ(stateId(*node), State::PRIMARY_STATE_ACTIVE);
@@ -1187,6 +1189,36 @@ TEST_F(NodeLifecycle, ResetReprimesPriorStore)
     EXPECT_GT(primed_cells, 0u) << "the re-primed sheet must carry the prior's cells";
     EXPECT_EQ(deep, 0u)
       << "the false-deep patch must be rejected at every cell the prior covers";
+    EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  std::filesystem::remove_all(dir);
+}
+
+// The response says no TILE is written, not "nothing on disk": loading the prior
+// store renames a legacy `survey/` layer directory to `processed/` (ADR-0010 D8),
+// exactly as configure does. This pins that the qualification is true, so the
+// wording cannot drift back to an unconditional claim while the behaviour stays.
+TEST_F(NodeLifecycle, ResetMayRenameALegacyPriorSurveyDirLikeConfigure)
+{
+  const auto dir = makeTempDir();
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("prior_store_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    // A pre-D8 store appears after configure, so only the reset's load meets it.
+    std::filesystem::create_directories(dir / "survey");
+    ASSERT_FALSE(std::filesystem::exists(dir / "processed"));
+
+    ResetCaller caller(node);
+    const auto [ok, message] = caller.call();
+    EXPECT_TRUE(ok) << message;
+    EXPECT_FALSE(std::filesystem::exists(dir / "survey")) << "the legacy dir was not renamed";
+    EXPECT_TRUE(std::filesystem::exists(dir / "processed"));
+    EXPECT_NE(message.find("renames a legacy survey/ directory"), std::string::npos)
+      << "the response must not claim that nothing on disk changed: " << message;
+    EXPECT_EQ(message.find("nothing on disk"), std::string::npos) << message;
     EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
     EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   }
