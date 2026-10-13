@@ -719,6 +719,31 @@ TEST(AreaRegistry, PassBudgetIsSharedBetweenTheSources)
   EXPECT_THROW(AreaRegistry(1.0, kBig, kBig, 0), std::invalid_argument);
 }
 
+// When the per-pass allowance is smaller than max_raster_cells, it is the cap the
+// raster is built against (an area too large for a pass is refused before its
+// mask is allocated), and the refusal names the pass budget.
+TEST(AreaRegistry, PassAllowanceCapsTheRasterBeforeItIsBuilt)
+{
+  AreaDefinition d;
+  d.id = "big";
+  d.polygon = {{0.0, 0.0}, {20.0, 0.0}, {20.0, 20.0}, {0.0, 20.0}};  // 400 cells
+  d.standard = standard(0.5, 0.0);
+  AreaRegistry registry(1.0, 1000000, 200, 2);  // allowance 100 cells
+  const RegistryResult refused = registry.update(d);
+  EXPECT_EQ(refused.outcome, RegistryOutcome::kRejected);
+  EXPECT_NE(refused.reason.find("over the limit of 100"), std::string::npos) << refused.reason;
+  EXPECT_NE(refused.reason.find("per-pass allowance: max_pass_cell_checks=200 over 2 source(s)"),
+    std::string::npos) << refused.reason;
+  // Within the allowance it is accepted; with a smaller max_raster_cells that
+  // cap applies and the reason does not blame the pass budget.
+  d.polygon = {{0.0, 0.0}, {10.0, 0.0}, {10.0, 5.0}, {0.0, 5.0}};  // 50 cells
+  EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kAdded);
+  AreaRegistry per_area(1.0, 10, 200, 2);
+  const RegistryResult small_cap = per_area.update(d);
+  EXPECT_EQ(small_cap.outcome, RegistryOutcome::kRejected);
+  EXPECT_EQ(small_cap.reason.find("per-pass allowance"), std::string::npos) << small_cap.reason;
+}
+
 TEST(AreaRegistry, UnsetStandardIsAcceptedAndReported)
 {
   AreaRegistry registry(1.0, kBig);

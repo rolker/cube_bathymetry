@@ -88,6 +88,8 @@ namespace coverage_assessment
     bool ok = false;
     PolygonMask mask;
     std::string error;
+    /// The failure was the bounding box over `max_cells` (not a shape error).
+    bool over_max_cells = false;
   };
 
 /// Rasterise a polygon (raster-frame metres, ring closed implicitly; a repeated

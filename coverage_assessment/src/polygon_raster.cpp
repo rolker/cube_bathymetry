@@ -55,6 +55,13 @@ int64_t firstCentreAtOrAbove(double x, double cs)
   return i;
 }
 
+PolygonRasterResult failOversize(const std::string & why)
+{
+  PolygonRasterResult r = fail(why);
+  r.over_max_cells = true;
+  return r;
+}
+
 std::string oversize(double cells, double cell_size, int64_t max_cells)
 {
   std::ostringstream os;
@@ -127,7 +134,7 @@ PolygonRasterResult rasterisePolygon(
   const double est_nj = std::ceil(max_y / cell_size - 0.5) - std::ceil(min_y / cell_size - 0.5);
   const double estimate = std::max(est_ni, 0.0) * std::max(est_nj, 0.0);
   if (!(estimate <= static_cast<double>(max_cells))) {
-    return fail(oversize(estimate, cell_size, max_cells));
+    return failOversize(oversize(estimate, cell_size, max_cells));
   }
 
   PolygonRasterResult out;
@@ -143,7 +150,7 @@ PolygonRasterResult rasterisePolygon(
   if (static_cast<double>(i_end - i_first) * static_cast<double>(j_end - j_first) >
     static_cast<double>(max_cells))
   {
-    return fail(oversize(
+    return failOversize(oversize(
       static_cast<double>(i_end - i_first) * static_cast<double>(j_end - j_first),
       cell_size, max_cells));
   }

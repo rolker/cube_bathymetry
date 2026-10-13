@@ -185,6 +185,7 @@ TEST(PolygonRaster, RejectsZeroArea)
   const auto r = rasterisePolygon({{0.0, 0.0}, {5.0, 5.0}, {10.0, 10.0}}, 1.0, kBig);
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("zero area"), std::string::npos);
+  EXPECT_FALSE(r.over_max_cells);  // a shape error, not the cell cap
   EXPECT_FALSE(rasterisePolygon({{0.0, 0.0}, {5.0, 0.0}, {9.0, 0.0}}, 1.0, kBig).ok);
 }
 
@@ -210,6 +211,8 @@ TEST(PolygonRaster, RejectsOversizeBoundingBox)
   const auto over = rasterisePolygon(rect(0.0, 0.0, 101.0, 10.0), 1.0, 1000);
   EXPECT_FALSE(over.ok);
   EXPECT_NE(over.error.find("1010"), std::string::npos) << over.error;
+  EXPECT_TRUE(over.over_max_cells);
+  EXPECT_FALSE(at_limit.over_max_cells);
 
   const auto earth = rasterisePolygon(rect(-6.0e6, -6.0e6, 6.0e6, 6.0e6), 1.0, kBig);
   EXPECT_FALSE(earth.ok);

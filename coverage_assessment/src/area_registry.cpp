@@ -84,10 +84,20 @@ bool AreaRegistry::exceedsTotal(
 RegistryResult AreaRegistry::update(const AreaDefinition & definition)
 {
   RegistryResult result;
-  PolygonRasterResult raster = rasterisePolygon(definition.polygon, cell_size_, max_cells_);
+  // The smaller of the per-area cap and the per-pass allowance bounds the raster
+  // BEFORE it is allocated: an area too large for a pass on its own must not cost
+  // its full mask first (max_raster_cells may be raised above the allowance).
+  const bool pass_binds = max_total_cells_ < max_cells_;
+  PolygonRasterResult raster = rasterisePolygon(
+    definition.polygon, cell_size_, pass_binds ? max_total_cells_ : max_cells_);
   if (!raster.ok) {
     result.outcome = RegistryOutcome::kRejected;
     result.reason = "area '" + definition.id + "': " + raster.error;
+    if (raster.over_max_cells && pass_binds) {
+      result.reason += " (the per-pass allowance: max_pass_cell_checks=" +
+        std::to_string(max_cell_checks_) + " over " + std::to_string(source_count_) +
+        " source(s), smaller than max_raster_cells=" + std::to_string(max_cells_) + ")";
+    }
     return result;
   }
 
