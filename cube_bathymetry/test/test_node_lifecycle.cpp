@@ -1394,7 +1394,8 @@ TEST_F(NodeLifecycle, TheCallbackGroupAuditNoticesWhatItIsFor)
   rclcpp::SubscriptionOptions options;
   options.callback_group = own_thread;
   auto sub = node->create_subscription<marine_interfaces::msg::SonarInfo>(
-    "/pings_on_my_own_thread", 1, [](marine_interfaces::msg::SonarInfo::ConstSharedPtr) {}, options);
+    "/pings_on_my_own_thread", 1, [](marine_interfaces::msg::SonarInfo::ConstSharedPtr) {},
+    options);
 
   const auto audit = auditGroups(*node);
   EXPECT_EQ(audit.executor_groups, 2) << "an extra group spun by the executor is counted";
