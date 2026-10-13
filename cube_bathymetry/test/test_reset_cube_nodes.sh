@@ -59,6 +59,7 @@
 #  24. the usage text says a refusing consumer is walked (exit 1 is a CUBE node's refusal).
 #  25. a `service list -t` answer far over a pipe buffer (~64 KB) still classifies a node
 #      that serves ~/reset as a service node (one call each, no lifecycle walk).
+#  26. a closed stdout (`| head -1`) does not turn a finished reset into exit 1.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -835,6 +836,21 @@ grep -qE ' (deactivate|cleanup|configure|activate)$' "$work/log" &&
 [ "$(wc -l < "$work/log")" -eq 5 ] || fail "case 25: expected 5 resets in the log: $(cat "$work/log")"
 [ "$(wc -l < "$work/timeout_calls")" -eq 6 ] ||
   fail "case 25: expected 6 ros2 calls (1 list + 5 service calls), got: $(cat "$work/timeout_calls")"
+
+# --- 26. the summary line cannot change the exit status -------------------------------------
+# boat3 answers inactive, so the script is reset-and-activated and ends by printing the
+# "activated after the reset" line; with stdout closed that echo fails.
+setup_nodes
+echo inactive > "$work/state/_boat3_cube_bathymetry"
+mark_service "${cubes[@]}"
+"$script" "${cubes[@]}" >&- 2>/dev/null; rc=$?
+[ "$rc" -eq 0 ] || fail "case 26: a finished reset exited $rc with stdout closed"
+[ "$(cat "$work/state/_boat3_cube_bathymetry")" = active ] || fail "case 26: boat3 was not activated"
+setup_nodes
+echo inactive > "$work/state/_boat3_cube_bathymetry"
+mark_service "${cubes[@]}"
+"$script" "${cubes[@]}" 2>/dev/null | head -1 >/dev/null; rc=${PIPESTATUS[0]}
+[ "$rc" -eq 0 ] || fail "case 26: a finished reset exited $rc under | head -1"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

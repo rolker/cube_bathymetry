@@ -594,3 +594,6 @@ print_states
 if [ "${#activated_nodes[@]}" -gt 0 ]; then
   echo "$prog: reset done; activated after the reset (they were inactive): ${activated_nodes[*]}"
 fi
+# The reset is done. A closed stdout (SIGPIPE is ignored, so `| head -1` makes the
+# summary echo fail) must not turn it into exit 1, which the usage reserves for a refusal.
+exit 0
