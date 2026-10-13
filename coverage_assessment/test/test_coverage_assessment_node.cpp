@@ -236,6 +236,7 @@ public:
     int64_t max_areas = 0;  // 0: the node's default
     int64_t max_pass_cell_checks = 0;  // 0: the node's default
     int64_t max_held_cells = 0;  // 0: the node's default
+    int64_t max_area_vertices = 0;  // 0: the node's default
     bool dynamic_boat = false;      // base_link comes from publishBoatNow(), stamped
     bool tide_under_earth = false;  // map_tide hangs directly off earth
     bool use_sim_time = false;      // node clock follows /clock (nobody publishes it)
@@ -278,6 +279,9 @@ public:
     }
     if (opt_.max_held_cells > 0) {
       options.append_parameter_override("max_held_cells", opt_.max_held_cells);
+    }
+    if (opt_.max_area_vertices > 0) {
+      options.append_parameter_override("max_area_vertices", opt_.max_area_vertices);
     }
     if (opt_.max_areas > 0) {
       options.append_parameter_override("max_areas", opt_.max_areas);
@@ -1390,6 +1394,43 @@ TEST_F(NodeTest, ConfigureRefusesTwoGridTopicsThatResolveToOne)
   EXPECT_EQ(countLog("which both resolve to '" + ns + "/grid'"), 1u);
 }
 
+TEST_F(NodeTest, ConfigureRefusesAMaxAreaVerticesBelowThree)
+{
+  rclcpp::NodeOptions options;
+  options.arguments({"--ros-args", "-r", "__ns:=/t" + std::to_string(g_next_namespace++)});
+  options.append_parameter_override("grid_topics", std::vector<std::string>{"/g"});
+  options.append_parameter_override("max_area_vertices", static_cast<int64_t>(2));
+  auto node = std::make_shared<CoverageAssessmentNode>(options);
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(countLog("max_area_vertices=2 must be at least 3"), 1u);
+}
+
+// A definition with more vertices than max_area_vertices is refused on arrival;
+// one at the limit is scored.
+TEST_F(NodeTest, MaxAreaVerticesRefusesALargerPolygonOnArrival)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.max_area_vertices = 4;
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  SurveyArea five = makeArea("five", {0, 0, 10, 10}, 0.5, 0.0, 1);
+  geographic_msgs::msg::GeoPoint mid;  // a fifth vertex halfway along the last edge
+  mid.latitude = 0.5 * (five.polygon.points[3].latitude + five.polygon.points[0].latitude);
+  mid.longitude = 0.5 * (five.polygon.points[3].longitude + five.polygon.points[0].longitude);
+  five.polygon.points.push_back(mid);
+  h.publishArea(five);
+  h.publishArea(makeArea("four", {0, 0, 10, 10}, 0.5, 0.0, 1));
+  const auto grid = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.latest_.count("four") > 0;}, 20.0, [&]() {h.publishGrid("A", grid);}));
+  EXPECT_EQ(h.latest_.count("five"), 0u);
+  EXPECT_EQ(countLog("5 vertices, over max_area_vertices (4)"), 1u);
+}
+
 TEST_F(NodeTest, ConfigureRefusesAMaxHeldCellsBelowOne)
 {
   rclcpp::NodeOptions options;
@@ -1632,7 +1673,7 @@ TEST_F(NodeTest, ParametersReadAtConfigureAreReadOnly)
   for (const char * name : {"cell_size", "map_frame", "grid_topics", "source_names",
       "survey_area_topic", "assessment_period", "water_surface_frame", "water_surface_boat_frame",
       "water_surface_max_boat_distance", "water_surface_max_age", "max_raster_cells",
-      "max_pass_cell_checks", "max_held_cells", "max_areas"})
+      "max_pass_cell_checks", "max_held_cells", "max_area_vertices", "max_areas"})
   {
     ASSERT_TRUE(node->has_parameter(name)) << name;
     EXPECT_TRUE(node->describe_parameter(name).read_only) << name;

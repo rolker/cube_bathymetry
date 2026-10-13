@@ -343,6 +343,11 @@ private:
       "folded in and nothing is published (coverage would be under-reported), with an ERROR, "
       "until the node is reset (deactivate, cleanup, configure, activate)."));
     declare_parameter<int64_t>(
+      "max_area_vertices", 10000,
+      desc("Most vertices in one SurveyArea polygon, at least 3; a definition with more is "
+      "refused on arrival with an ERROR (filling a polygon scans every edge on every row, and "
+      "queued definitions keep every vertex)."));
+    declare_parameter<int64_t>(
       "max_areas", 20,
       desc("Most survey areas held at once, 1 to 100; a new id beyond it is refused with an "
       "ERROR. Keeps the transient_local history (100) holding the newest assessment of every "
@@ -395,6 +400,7 @@ private:
     max_raster_cells_ = get_parameter("max_raster_cells").as_int();
     max_pass_cell_checks_ = get_parameter("max_pass_cell_checks").as_int();
     max_held_cells_ = get_parameter("max_held_cells").as_int();
+    max_area_vertices_ = get_parameter("max_area_vertices").as_int();
     max_areas_ = get_parameter("max_areas").as_int();
 
     if (topics.empty()) {
@@ -462,6 +468,12 @@ private:
         "Configure refused: max_pass_cell_checks=%ld must be at least the number of sources "
         "(%zu): a pass checks every cell once per source.",
         static_cast<long>(max_pass_cell_checks_), topics.size());  // NOLINT(runtime/int)
+      return false;
+    }
+    if (max_area_vertices_ < 3) {
+      RCLCPP_ERROR(get_logger(),
+        "Configure refused: max_area_vertices=%ld must be at least 3.",
+        static_cast<long>(max_area_vertices_));  // NOLINT(runtime/int)
       return false;
     }
     if (max_held_cells_ < 1) {
@@ -638,6 +650,11 @@ private:
     const auto & pts = msg.polygon.points;
     if (pts.size() < 3) {
       reject(msg, "fewer than 3 vertices");
+      return;
+    }
+    if (pts.size() > static_cast<std::size_t>(max_area_vertices_)) {
+      reject(msg, std::to_string(pts.size()) + " vertices, over max_area_vertices (" +
+        std::to_string(max_area_vertices_) + ")");
       return;
     }
     std::vector<std::pair<double, double>> lat_lon;
@@ -1290,6 +1307,7 @@ private:
   int64_t max_raster_cells_ = 1000000;
   int64_t max_pass_cell_checks_ = 16000000;
   int64_t max_held_cells_ = 100000000;
+  int64_t max_area_vertices_ = 10000;
   int64_t max_areas_ = 20;
   /// Wall time of the last assessment pass (assessAll), seconds; in the status line.
   double last_pass_seconds_ = 0.0;

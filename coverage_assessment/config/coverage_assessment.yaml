@@ -29,4 +29,5 @@
     max_raster_cells: 1000000
     max_pass_cell_checks: 16000000
     max_held_cells: 100000000
+    max_area_vertices: 10000
     max_areas: 20

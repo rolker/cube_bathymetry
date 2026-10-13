@@ -256,6 +256,7 @@ every parameter is `read_only` (set it from YAML or a launch file):
 | `max_raster_cells` | `1000000` | Per-area raster cap. |
 | `max_pass_cell_checks` | `16000000` | Work budget of one pass: the bounding-box cells of all held areas times the number of sources; an area that would exceed it is refused with an ERROR. |
 | `max_held_cells` | `100000000` | Most cells held for all sources together (about 800 MB); once over it nothing more is folded in and nothing is published, with an ERROR, until reset. |
+| `max_area_vertices` | `10000` | Most vertices in one area polygon; a definition with more is refused on arrival with an ERROR. |
 | `max_areas` | `20` | Most areas held at once (1 to 100); a new id beyond it is refused with an ERROR. |
 
 Because it keeps a union over time, a CUBE reset must also reset the assessor: pass it
