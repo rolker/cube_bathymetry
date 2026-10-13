@@ -11,7 +11,7 @@ four-boat simulation that is 318 to 324 s, against game rounds of about two minu
 (3 to 8 s per call under load), not the transitions: the script makes about 17 `ros2` calls per CUBE node today
 (preflight `lifecycle get` plus two `param get`, then roughly seven calls to walk down and seven to walk up). This
 issue adds a `std_srvs/Trigger` service `~/reset` to `cube_bathymetry_node` and to `coverage_assessment_node` that
-starts a new session in RAM and changes nothing on disk, and makes the script use it (about 2 calls per node).
+starts a new session in RAM and writes no tile to disk (a legacy prior-store `survey/` directory can be renamed on load, as configure already does), and makes the script use it (about 2 calls per node).
 
 Scope boundaries (issue text, owner decisions 2026-10-13): the CUBE service refuses while `draft_dir` is set, so
 real-boat configurations such as `bizzyboat.yaml` are NOT served by this slice; the on-disk session work belongs to
@@ -28,9 +28,10 @@ Facts verified in source that shape the design:
 - `trimResidentToBudget()` writes the member `evicted_indices_` and `refresh_tracker_`, and the draft prime fills the
   member `catalog_builder_`: building a sheet aside needs those three to be candidate-local until the swap.
 - Every callback of the node's own entities (pings, timers, subscriptions) lives in the node's default callback
-  group, which is mutually exclusive, and no package code creates a callback group (grep). The one other group is
-  made by `tf2_ros::TransformListener` for its own dedicated thread (`automatically_add_to_executor_with_node` is
-  false, so the node's executor never spins it); it only writes the TF buffer, which a reset does not replace.
+  group, which is mutually exclusive, and no package code creates a callback group (grep). The other groups are
+  made by libraries for their own threads (`automatically_add_to_executor_with_node` is false, so the node's executor
+  never spins them): `tf2_ros::TransformListener`'s (`/tf`, `/tf_static`) and, under `use_sim_time`, rclcpp's clock
+  thread (`/clock`); they only feed the TF buffer and the clock, which a reset does not replace.
   `main` also uses a `SingleThreadedExecutor`. Either fact alone makes a swap inside a callback safe without a mutex.
 - The `grid` header stamp is `GeoMapSheet::lastUpdateTime()` (`stampGrid`): the header stamp (ROS time) of the latest
   ping that changed a tile, carried as `epoch + header.stamp` in a `steady_clock` type (`pingCallback` ->
@@ -84,11 +85,12 @@ Facts verified in source that shape the design:
    Handler order: (a) refuse if the configured `draft_dir_` member is non-empty (not the writable parameter, which can
    change between cycles; same source `on_cleanup` uses): `success=false`, message names the directory, says saved
    tiles would reload so the sheet would not be fresh, and points at `--allow-persistence` with a new empty `draft_dir`;
-   (b) `buildSession()` inside try/catch; any failure leaves `geo_map_sheet_` and every other member untouched and
+   (b) `buildSession(prior_must_load=true)` inside try/catch (`std::exception` and `...`; a prior store that cannot be
+   loaded fails the reset, while configure keeps its warn-and-continue); any failure leaves `geo_map_sheet_` and every other member untouched and
    returns `success=false` with the reason; (c) remember the old tile count, `adoptSession`, return `success=true`
    with a message saying what was reset: "N tile(s) dropped from RAM; prior_store_dir <unset | primed X Reference + Y
-   Chart tile(s) | could not be loaded: why, continuing ungated>; node is <active | inactive: no grid until
-   activated>; nothing on disk was changed". The old sheet is destroyed after the swap, last.
+   Chart tile(s)>; node is <active | inactive: no grid until activated>; no tile written to disk (loading a prior
+   store renames a legacy survey/ directory, as configure does)". The old sheet is destroyed after the swap, last.
 6. **Comment the concurrency argument** at the handler: default mutually exclusive callback group plus single-threaded
    `main`; the prime is a whole-store disk read that **blocks the executor for its duration while the node is active**
    (unlike configure). The ping subscription is `SensorDataQoS` (best effort, depth 5), so pings arriving during the
@@ -118,6 +120,10 @@ Facts verified in source that shape the design:
      once-per-source warning flags and per-source log throttles reset (parity with a freshly built `SourceState`).
      Node: `held_limit_reached_ = false`, `grids_changed_ = false`, `force_assessment_ = true`,
      `have_last_surface_ = false` (so the next tick assesses even when the surface did not change).
+     When the node is active, the georeference exists and the areas are projected, the reset also publishes the emptied
+     `coverage_assessment` and `coverage_grid` itself (`publishEmptyAssessment`; with nothing held the result does not
+     depend on the surface height) and puts the flags above back, so the old run's coverage is not left latched while
+     the water surface is unavailable (pre-push review).
    - **Counters stay cumulative** (owner decision 2026-10-13): `stats_` is not touched. `NodeStats` also holds
      `areas_received`, `areas_rejected` and `callback_exceptions`; the service keeps the areas, so zeroing would print
      "areas 0 received, 0 rejected, N held", and zeroing `callback_exceptions` would erase evidence of a fault. The
@@ -134,10 +140,11 @@ Facts verified in source that shape the design:
 
 ### C. `scripts/reset_cube_nodes.sh`
 
-11. **Classify before changing anything, with one call.** One `ros2 service list` (via the read-retry rules: a failure,
+11. **Classify before changing anything, with one call.** One `ros2 service list -t` (via the read-retry rules: a failure,
     a timeout or an EMPTY list is "indeterminate", retried `RESET_CUBE_GET_TRIES` times, then the script dies before any
     change; an empty list cannot be a real graph, since every node exposes its parameter services) gives the set of
-    services in the graph. A node whose `<node>/reset` is in the list is `service` class; a node that is not in a
+    services and their types in the graph. A node whose `<node>/reset [std_srvs/srv/Trigger]` is in the list (a `/reset` of
+    another type is not) is `service` class; a node that is not in a
     non-empty list is `walk` class (older binary, unconfigured node, wrong name, or discovery lag). A wrong name then
     dies in the existing lifecycle preflight exactly as today, and a false "absent" under discovery lag is safe: it only
     sends that node down the walk, whose own preflight still refuses `draft_dir`. `--allow-persistence` sends every CUBE
@@ -148,7 +155,7 @@ Facts verified in source that shape the design:
 
     | Path | Calls |
     |---|---|
-    | classification | 1 `service list`, shared by every node |
+    | classification | 1 `service list -t`, shared by every node |
     | service node (CUBE or consumer) | 1 `service call` (no `lifecycle get`, no `param get`, no final `print_states`: the service refuses on `draft_dir` itself and reports its own state) |
     | walk node (unchanged) | about 17 per CUBE node, about 14 per consumer, plus the final `print_states` |
     | four boats plus assessor, all on services | 6, against about 80 today |
@@ -158,13 +165,13 @@ Facts verified in source that shape the design:
     round, so the script keeps them sequential (simpler failure reporting); the live check (item 20) judges whether
     that is enough.
 13. **The call.** `ros2 service call <node>/reset std_srvs/srv/Trigger '{}'` under `timeout --foreground` with its own
-    bound `RESET_CUBE_CALL_TIMEOUT` (default 120 s: the prime is a disk read). Success is parsed from
-    `Trigger_Response(success=True` (not the bare substring `success=True`, because a refusal message echoes a
-    user-supplied path); `Trigger_Response(success=False` is a refusal. A reset is idempotent (it only replaces RAM
-    state), so, unlike a transition, **a timed-out or failed call is retried**; the script comment says why. The call
-    gets its own, smaller retry budget, `RESET_CUBE_CALL_TRIES` (default 2), not `RESET_CUBE_GET_TRIES`: a service
-    still listed in the daemon's graph cache but dead or hung would otherwise cost 120 s x 3 = 6 minutes before the
-    script gives up (with 2 tries, 4 minutes at worst). "No service" is decided only by the classification, never from
+    bound `RESET_CUBE_CALL_TIMEOUT` (default: the transition bound, 300 s, because the prime is a whole-store disk read
+    that the walk's configure is allowed the same time for). The verdict is read from the START of the response line
+    (`Trigger_Response(success=True,` / `success=False,`), never from a substring, because a refusal message echoes a
+    user-supplied path that can contain `(success=True,`. A reset is idempotent (it only replaces RAM state), so,
+    unlike a transition, **a call that fails fast is retried** (own budget `RESET_CUBE_CALL_TRIES`, default 2); a
+    call that **times out is not**: its request is still queued in the node and a retry would queue a second
+    whole-store load. The script then says the node may or may not have been reset. "No service" is decided only by the classification, never from
     a call outcome, so a slow node is never sent down the walk after it already reset. `success=False` from a CUBE node
     is a refusal: print its message, stop.
 14. **Order: everything that can refuse runs before the first change.** (a) classification; (b) the existing lifecycle
@@ -175,17 +182,20 @@ Facts verified in source that shape the design:
     walk-class CUBE nodes back to active. Service-class CUBE nodes come first so that a `draft_dir` refusal, which only
     the service can report, is found before the script has taken any boat out of `active`. The remaining partial result
     is accepted (owner decision 2026-10-13): a boat with `draft_dir` set is found when the script reaches it, so
-    service-class boats earlier in the list are already reset (idempotent, RAM only, nothing on disk). The script
+    service-class boats earlier in the list are already reset (idempotent, RAM only, no tile written). The script
     **stops at the first refusal**, prints which nodes were reset and which refused, does not touch consumers or the
     walk-class nodes, exits 1, and says re-running is safe. A consumer refusal (map moved, or any reason) falls back to
     the lifecycle walk for that consumer, printing the reason: the walk re-captures the georeference, so it is the
     superset.
 15. **Final report and the inactive case.** The service path has no `print_states`; the script prints each service
     node's response message (what was reset, active or inactive), and `print_states` only for nodes that took the walk.
-    A node whose response says it is inactive was reset but publishes no `grid` (CUBE) or assesses nothing
-    (consumer): the script prints a WARNING naming it, ends with the last line "reset done, but NOT publishing: <nodes>
-    (inactive)" and exits **4** (reset done, a node is inactive), so the exit status and last line never read as "done,
-    publishing" for it. The old preflight warning for a not-active CUBE node is kept for walk-class nodes.
+    A node whose response says it is inactive (the state is read from the last `; node is <state>` clause, since
+    earlier text can be echoed) was reset but would publish no `grid` (CUBE) or assess nothing (consumer): the script
+    **activates it** right after its reset, names it, and ends with "reset done; activated after the reset (they were
+    inactive): <nodes>" and exit 0. (First drafted as a warning and exit 4; the pre-push review found that a node a
+    failed run left inactive is configured, so it serves `~/reset`, and a re-run would then reset it and exit 4
+    forever, never activating it. Owner decision 2026-10-13: reset, then activate, so re-running converges; exit 4 is
+    retired.) A failed activation is a failure with the re-run hint. The old preflight warning for a not-active CUBE node is kept for walk-class nodes.
 16. **Restate the ordering claim honestly in both directions** in the script header and README. The walk quiesced every
     CUBE node before the consumer was reset. With services the CUBE nodes keep publishing, which has two consequences.
     (i) A `grid` published by an old sheet just before its reset and still queued in the assessor's subscription
@@ -199,7 +209,7 @@ Facts verified in source that shape the design:
     time base across hosts, and it does nothing for (ii). A consumer that goes down the walk is immune: its subscription
     is destroyed.
 17. Update the script header (usage, order, new variables `RESET_CUBE_CALL_TIMEOUT` and `RESET_CUBE_CALL_TRIES`, exit
-    status 4), keep `usage()` working (it prints the `# Usage:` to `# Exit status` block). Add
+    status), keep `usage()` working (it prints the comment block from `# Usage:` through the exit-status lines). Add
     `<exec_depend>ros2service</exec_depend>` to `cube_bathymetry/package.xml` (the existing comment there already lists
     the `ros2` verbs the script shells out to).
 
@@ -232,9 +242,9 @@ Facts verified in source that shape the design:
     - `ConfigureThatThrowsLeavesNoResetService`: a configure that fails after the sonar_info subscription would have
       been created (invalid `sonar_info_topic`) leaves the node UNCONFIGURED with no `~/reset` service in the graph.
     - `AllCallbacksShareTheDefaultGroup`: exactly one callback group is spun by the node's executor (the default,
-      mutually exclusive one) and no group is reentrant, so the swap-safety argument cannot be broken silently by
-      someone adding a reentrant group. (The `TransformListener`'s own group is not auto-added to the executor and is
-      excluded by that criterion.)
+      mutually exclusive one), no group is reentrant, and every group NOT spun by it holds no service, client or timer
+      and subscribes only to `/tf`, `/tf_static` or `/clock`; run with and without `use_sim_time`. A control test shows
+      the audit reports a reentrant group, an unspun timer and a foreign subscription. The assessor has the same pin.
 19. **`test_coverage_assessment_node.cpp`** (harness as in `ReconfigureEmptiesTheUnion`): reset service empties the
     union and the next tick publishes `area_covered == 0`; areas, their projections and the georeference are kept
     (`area_total` unchanged, no new `Raster georeference captured` line); a kept unplaced grid does not return after
@@ -258,9 +268,10 @@ Facts verified in source that shape the design:
     consumer on a service) with the order of step 14; **a mistyped `--consumer` or a refusing walk-class node dies
     before any service call**; `--allow-persistence` takes the walk for CUBE nodes; a consumer refusal falls back to the
     walk; **an empty or failing `service list` is retried and then dies before any change, and never selects the walk**;
-    a `service call` timeout is retried (with `RESET_CUBE_CALL_TRIES`) and never selects the walk; a message echoing
-    `success=True` in a path while `success=False` is still a refusal; an inactive node is reported with the warning,
-    the last line and exit 4; every new call still goes through `timeout --foreground`; the existing 12 cases keep
+    a `service call` that fails fast is retried (with `RESET_CUBE_CALL_TRIES`), one that times out is not, and neither
+    selects the walk; a message echoing `(success=True,` in a path while `success=False` is still a refusal; an
+    inactive node is reset and then activated (exit 0), and a re-run recovers a node a failed walk or probe left
+    inactive; the state is read from the last clause; a `/reset` of another type walks; every new call still goes through `timeout --foreground`; the existing 12 cases keep
     passing (they exercise the walk path; the stub's default service list contains no `/reset`). The test header list
     of cases and the "12 case groups" comment at `CMakeLists.txt:407` are updated with it.
 21. **Live check** on the four-boat simulation (work-list item): record the wall time of the all-service reset against
@@ -274,7 +285,7 @@ Facts verified in source that shape the design:
 |------|--------|
 | `cube_bathymetry/src/cube_bathymetry_node.hpp` | `buildSession` / `adoptSession` extracted from `on_configure`; `capture_spacing_scale_` member; trim function retargetable; `~/reset` service create/release/handler; concurrency comment; test hook |
 | `cube_bathymetry/CMakeLists.txt`, `cube_bathymetry/package.xml` | `std_srvs`; `<exec_depend>ros2service</exec_depend>`; the "12 case groups" comment at `CMakeLists.txt:407` |
-| `cube_bathymetry/scripts/reset_cube_nodes.sh` | one-call classification, service call, retry rules, order of step 14, inactive handling and exit 4, fallback, ordering comment (both directions), call-count comment |
+| `cube_bathymetry/scripts/reset_cube_nodes.sh` | one-call classification, service call, retry rules, order of step 14, inactive handling (reset, then activate), fallback, ordering comment (both directions), call-count comment |
 | `cube_bathymetry/test/test_node_lifecycle.cpp` | service tests and shared parity helper (step 18) |
 | `cube_bathymetry/test/test_reset_cube_nodes.sh` | stub verbs and the new cases (step 20), header list of cases |
 | `coverage_assessment/src/coverage_assessment_node.hpp` | `resetSession`, `~/reset` service, held-limit and map-moved log text |
@@ -320,7 +331,7 @@ Facts verified in source that shape the design:
   - `README.md` "Starting a fresh sheet without restarting": lead with the service and the one-line command, keep the
     walk as the fallback; the service refuses with `draft_dir` set; new step list and the call-count table; the
     ordering paragraph from step 16 (both directions, with "boats not underway" as the condition); the prime's blocking
-    cost while active (pings are dropped during it); exit status 4 and the inactive case; which states answer; that a real boat with
+    cost while active (pings are dropped during it); the inactive case (activated after its reset); which states answer; that a real boat with
     `draft_dir` set (`bizzyboat.yaml`, `draft_dir: /home/field/data/world/depths`) is **not** served until
     rolker/unh_marine_autonomy#391 and the 2026-08-27 operator request stays open; replace "the draft store is the product
     of record, ADR-0001" with what superseded it (live tiles are a derived product, the bags are the record) and the
@@ -372,12 +383,19 @@ five must-fixes and all suggestions). The plan text above is edited in place; th
 - The script classifies with one `service list` and runs every refusing check (classification, lifecycle preflight for
   walk-class nodes and consumers) before the first service call; service-class CUBE nodes are reset before any
   walk-class node leaves `active`, so a `draft_dir` refusal is found before a boat stops publishing.
-- The service path drops `print_states`, so an inactive node is reported from the response message and ends the script
-  with exit 4 rather than reading as "done, publishing".
+- The service path drops `print_states`; an inactive node is reported from the response message and activated (see
+  step 15; the first design, a warning and exit 4, was replaced after the pre-push review).
 - `~/reset` is created last in `on_configure` because a configure that throws returns to UNCONFIGURED without
   `on_cleanup`.
-- `AllCallbacksShareTheDefaultGroup` counts the groups the node's executor spins, not all groups: `tf2_ros::
-  TransformListener` makes a second group for its own thread, which only feeds the TF buffer and is not auto-added to
-  the executor. (The plan first said no group existed at all; the test run showed two.)
+- `AllCallbacksShareTheDefaultGroup` first counted only the groups the node's executor spins, so a group spun on a
+  thread of its own would have passed; it now also audits what every unspun group holds (see the test list). The
+  unspun groups are `tf2_ros::TransformListener`'s and, under `use_sim_time`, the clock thread's.
 - The first georeference-capture test needs TF present but the node not yet ticked, so it resets a configured but
   not yet activated node; it also covers the inactive response.
+
+### Pre-push review round 1 (2026-10-13), owner decisions
+All 3 must-fixes and 13 suggestions were addressed; the progress entry lists the commit for each. The decisions that
+changed the design: a node that answers inactive is reset and then activated (exit 4 retired); the call timeout defaults
+to the set timeout and a timed-out call is not retried; "nothing on disk" is qualified (the legacy `survey/` rename)
+rather than refused; a reset whose prior store cannot be loaded fails and keeps the gated session; the assessor reset
+publishes the emptied `coverage_assessment` and `coverage_grid` itself when active.
