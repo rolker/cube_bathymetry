@@ -83,16 +83,20 @@
 # across hosts, and it does nothing for (ii). A consumer that takes the walk is
 # immune: its subscription is destroyed.
 #
-# A node that answers "inactive" was reset but publishes no `grid` (CUBE) or assesses
-# nothing (consumer): the script warns, names it, ends with the line "reset done, but
-# NOT publishing: ..." and exits 4, so the status never reads as "done, publishing".
-# (A walk always ends active.)
+# A node that answers "inactive" (configured, not activated: an earlier run or a
+# failed probe left it so) was reset but would publish no `grid` (CUBE) or assess
+# nothing (consumer): the script then ACTIVATES it, right after its reset, so every
+# run ends with every node active, and re-running the same command after a failure
+# recovers a node that failure left inactive. It is reported by name. (A walk always
+# ends active.)
 #
 # Fails fast, naming the node and the step. Once a walk transition or a service call
 # has changed something, a failure says what was done and tells you to re-run: a
 # re-run is safe (a service reset is idempotent; an already-inactive or already-
-# unconfigured node is not an error for the walk), and a CUBE node that is not
-# `active` is NOT publishing `grid`. Every `ros2` call is bounded by
+# unconfigured node is not an error for the walk) and it converges: a node that the
+# failure left `inactive` is configured, so it serves ~/reset, and the re-run resets
+# it and activates it. Until then a CUBE node that is not `active` is NOT publishing
+# `grid`. Every `ros2` call is bounded by
 # `timeout --foreground` (so Ctrl-C still reaches `ros2`; plain `timeout` moves it
 # into its own process group): RESET_CUBE_GET_TIMEOUT (default 30 s) for reads,
 # RESET_CUBE_SET_TIMEOUT (default 300 s) for transitions, because a configure with
@@ -129,9 +133,8 @@
 # publishes no `grid`, and a service reset blocks the node's executor while it
 # reads the prior store (pings arriving meanwhile are dropped).
 #
-# Exit status: 0 reset done; 1 a transition, read or service call failed, or refused
-# (draft_dir, map frame moved); 2 usage; 4 reset done, but a node that answered
-# "inactive" is not publishing.
+# Exit status: 0 reset done, every node active; 1 a transition, read or service call
+# failed, or a CUBE node refused (a consumer that refuses is walked instead); 2 usage.
 
 set -u -o pipefail
 
@@ -263,10 +266,10 @@ die() {
   fi
   if [ "$changed" -eq 1 ]; then
     print_states >&2
-    echo "$prog: the reset did not finish. Re-run the same command to continue (a node that is already reset is simply reset or cycled again); a CUBE node that is not 'active' is not publishing grid." >&2
+    echo "$prog: the reset did not finish. Re-run the same command to continue (a node that is already reset is simply reset or cycled again; a node left 'inactive' is reset and then activated); a CUBE node that is not 'active' is not publishing grid." >&2
   elif [ -n "$probing" ]; then
     print_states >&2
-    echo "$prog: no CUBE node was reset, but $probing was being probed and may have been left 'inactive' (configured). Re-run the same command; it is read normally then." >&2
+    echo "$prog: no CUBE node was reset, but $probing was being probed and may have been left 'inactive' (configured). Re-run the same command: a configured node serves ~/reset, so the re-run resets it by service and then activates it." >&2
   elif [ "${#reset_done[@]}" -gt 0 ]; then
     echo "$prog: nothing else was changed. Re-running is safe: a service reset only replaces RAM state." >&2
   else
@@ -493,11 +496,12 @@ for node in "${probe[@]}"; do
   note_prior "$node" "$prior_dir"
 done
 
-# A node that answers "inactive" was reset but publishes nothing.
-inactive_nodes=()
+# Nodes that answered "inactive" and were activated after their reset.
+activated_nodes=()
 
-# service_node NODE: reset it by service. Returns 0 when reset, 1 when it refused
-# ($svc_message says why); dies when no attempt gave a usable answer.
+# service_node NODE: reset it by service, and activate it if it answered inactive.
+# Returns 0 when reset, 1 when it refused ($svc_message says why); dies when no
+# attempt gave a usable answer or the activation failed.
 service_node() {
   local node=$1 rc
   service_reset "$node"
@@ -508,8 +512,13 @@ service_node() {
       echo "$node: reset: $svc_message"
       case "$svc_message" in
         *"node is inactive"*)
-          inactive_nodes+=("$node")
-          echo "$prog: WARNING: $node is inactive: it was reset but is not publishing" >&2 ;;
+          # Configured but not activated: reset, and now activated, so that this
+          # command leaves it publishing and a re-run after a failure recovers it.
+          echo "$prog: $node was inactive (not publishing): reset, now activating it" >&2
+          walked+=("$node")
+          to_active "$node"
+          activated_nodes+=("$node")
+          ;;
       esac
       return 0
       ;;
@@ -549,7 +558,6 @@ done
 for node in "${walk_cube[@]}"; do to_active "$node"; done
 
 print_states
-if [ "${#inactive_nodes[@]}" -gt 0 ]; then
-  echo "$prog: reset done, but NOT publishing: ${inactive_nodes[*]} (inactive)"
-  exit 4
+if [ "${#activated_nodes[@]}" -gt 0 ]; then
+  echo "$prog: reset done; activated after the reset (they were inactive): ${activated_nodes[*]}"
 fi

@@ -6,7 +6,7 @@
 # lifecycle state per node (cube_bathymetry#164, #167). The stub also serves
 # `service list` and `service call <node>/reset` in the output format of a real
 # jazzy `ros2 service call` of a std_srvs/Trigger service. Cases 1-12 run on the
-# walk path (the stub's default `service list` holds no `/reset`); 13-21 are the
+# walk path (the stub's default `service list` holds no `/reset`); 13-22 are the
 # service path of cube_bathymetry#167. Cases:
 #   1. consumer ordering: every CUBE node is quiesced before a consumer is touched,
 #      and the consumer is back up before any CUBE node is configured.
@@ -49,8 +49,10 @@
 #      success. The call timeout defaults to the transition timeout.
 #  20. everything that can refuse runs before the first service call: a mistyped
 #      consumer, a finalized walk-class node, a draft_dir on a walk-class node.
-#  21. a node that answers "inactive" is warned about by name, the last line says it
-#      is not publishing, and the exit status is 4.
+#  21. a node that answers "inactive" is reset and then activated (exit 0); a failing
+#      activation is a failure with the re-run hint.
+#  22. re-running the same command recovers a node that a failed walk, or a failed
+#      probe of a never-configured node, left inactive.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -670,17 +672,71 @@ out=$("$script" "${cubes[@]}" 2>&1); rc=$?
 case "$out" in *"/boat4/cube_bathymetry"*"draft_dir"*"nothing was changed"*) ;; *) fail "case 20c: message: $out" ;; esac
 { [ ! -s "$work/log" ] && [ ! -e "$work/calls" ]; } || fail "case 20c: a boat was reset before the refusal was found"
 
-# --- 21. an inactive node is reported as not publishing --------------------------------
+# --- 21. an inactive node is reset, then activated ----------------------------------
+setup_nodes
+mark_service "${cubes[@]}" /coverage_assessment
+echo inactive > "$work/state/_boat2_cube_bathymetry"
+echo inactive > "$work/state/_coverage_assessment"
+out=$("$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 21: expected exit 0, got $rc: $out"
+for n in "${cubes[@]}" /coverage_assessment; do
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 21: $n is not active at the end"
+done
+r=$(line_of "/boat2/cube_bathymetry reset-service"); a=$(line_of "/boat2/cube_bathymetry activate")
+{ [ -n "$r" ] && [ -n "$a" ] && [ "$a" -gt "$r" ]; } || fail "case 21: boat2 was not reset and then activated: $(cat "$work/log")"
+r=$(line_of "/coverage_assessment reset-service"); a=$(line_of "/coverage_assessment activate")
+{ [ -n "$r" ] && [ -n "$a" ] && [ "$a" -gt "$r" ]; } || fail "case 21: the consumer was not reset and then activated: $(cat "$work/log")"
+[ -z "$(line_of "/boat1/cube_bathymetry activate")" ] || fail "case 21: an active node was activated"
+case "$out" in *"/boat2/cube_bathymetry was inactive"*) ;; *) fail "case 21: no note naming the node: $out" ;; esac
+case "$out" in *"activated after the reset (they were inactive): /boat2/cube_bathymetry /coverage_assessment"*) ;; *) fail "case 21: no summary line: $out" ;; esac
+case "$out" in *"NOT publishing"*) fail "case 21: reported a node as not publishing: $out" ;; esac
+
+# 21b. an activation that fails is a failure with the re-run hint, not a quiet success
 setup_nodes
 mark_service "${cubes[@]}"
 echo inactive > "$work/state/_boat2_cube_bathymetry"
+touch "$work/fail__boat2_cube_bathymetry_activate"
 out=$("$script" "${cubes[@]}" 2>&1); rc=$?
-[ "$rc" -eq 4 ] || fail "case 21: expected exit 4, got $rc: $out"
-case "$out" in *"WARNING: /boat2/cube_bathymetry is inactive"*) ;; *) fail "case 21: no warning naming the node: $out" ;; esac
-last=$(printf '%s\n' "$out" | tail -n 1)
-[ "$last" = "reset_cube_nodes.sh: reset done, but NOT publishing: /boat2/cube_bathymetry (inactive)" ] ||
-  fail "case 21: wrong last line: $last"
-[ "$(cat "$work/state/_boat2_cube_bathymetry")" = inactive ] || fail "case 21: the service path changed the lifecycle state"
+[ "$rc" -eq 1 ] || fail "case 21b: expected exit 1, got $rc: $out"
+case "$out" in *"/boat2/cube_bathymetry"*"activate"*"failed"*) ;; *) fail "case 21b: message: $out" ;; esac
+case "$out" in *"states:"*"/boat2/cube_bathymetry: inactive"*"Re-run"*) ;; *) fail "case 21b: no state listing and re-run hint: $out" ;; esac
+
+# --- 22. re-running the same command recovers a node that a failure left inactive ---------
+# 22a. a walk failed at cleanup: boat1 is unconfigured, boat2 inactive. A configured node
+# serves ~/reset, so the re-run resets boat2 by service and ACTIVATES it (exit 0).
+setup_nodes
+touch "$work/fail__boat2_cube_bathymetry_cleanup"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 22a: the failing first run: expected exit 1, got $rc: $out"
+[ "$(cat "$work/state/_boat2_cube_bathymetry")" = inactive ] || fail "case 22a: boat2 was not left inactive"
+rm -f "$work/fail__boat2_cube_bathymetry_cleanup" "$work/log"
+mark_service /boat2/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry   # configured nodes
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 22a: re-running the same command did not recover: exit $rc: $out"
+for n in "${cubes[@]}"; do
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 22a: $n is not active after the re-run"
+done
+r=$(line_of "/boat2/cube_bathymetry reset-service"); a=$(line_of "/boat2/cube_bathymetry activate")
+{ [ -n "$r" ] && [ -n "$a" ] && [ "$a" -gt "$r" ]; } || fail "case 22a: boat2 was not reset by service and then activated: $(cat "$work/log")"
+
+# 22b. a probe of a never-configured node failed at cleanup and left boat4 inactive
+setup_nodes
+echo unconfigured > "$work/state/_boat4_cube_bathymetry"
+rm -f "$work/param/_boat4_cube_bathymetry_"*
+printf '' > "$work/onconfigure__boat4_cube_bathymetry_draft_dir"
+printf '' > "$work/onconfigure__boat4_cube_bathymetry_prior_store_dir"
+touch "$work/fail__boat4_cube_bathymetry_cleanup"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 22b: the failing probe: expected exit 1, got $rc: $out"
+case "$out" in *"re-run resets it by service and then activates it"*) ;; *) fail "case 22b: the die text does not promise what the re-run does: $out" ;; esac
+[ "$(cat "$work/state/_boat4_cube_bathymetry")" = inactive ] || fail "case 22b: boat4 was not left inactive"
+rm -f "$work/fail__boat4_cube_bathymetry_cleanup" "$work/log"
+mark_service /boat4/cube_bathymetry
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 22b: re-running the same command did not recover: exit $rc: $out"
+for n in "${cubes[@]}"; do
+  [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 22b: $n is not active after the re-run"
+done
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

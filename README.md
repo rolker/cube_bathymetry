@@ -108,7 +108,7 @@ released with the other entities), so a missing service means an unconfigured or
 node, or an older binary. The response says what was reset, for example
 `3 tile(s) dropped from RAM; prior_store_dir unset; node is active; nothing on disk was changed`;
 an `inactive` node is reset too, and the message says it publishes no `grid` until it is
-activated.
+activated (`reset_cube_nodes.sh` then activates it, see below).
 
 **`cube_bathymetry_node`.** It builds the new session aside and swaps it in only when
 complete, so a failure (the response says why) leaves the running session untouched. The
@@ -171,11 +171,16 @@ once: a node given twice, or as both a CUBE node and a `--consumer` (`/a/b`, `a/
 6. configures and activates the walked CUBE nodes, and prints the states of the walked
    nodes. A service node is reported by its own response, with no extra call.
 
-A node whose service answers `inactive` was reset but publishes nothing: the script warns
-with its name, ends with `reset done, but NOT publishing: <nodes> (inactive)` and exits 4.
+A node whose service answers `inactive` (configured but not activated, as a failed run
+can leave it) was reset but would publish nothing, so the script **activates it right after
+its reset**, names it, and ends with `reset done; activated after the reset (they were
+inactive): <nodes>`. That makes the command converge: a node that a failed walk or a failed
+probe left `inactive` is configured, so it serves `~/reset`, and re-running the same command
+resets it and activates it. If the activation fails, the script fails (exit 1) with the
+state listing and the re-run hint.
 
-Exit status: 0 reset done; 1 a transition, read or service call failed, or a node refused;
-2 usage; 4 reset done, but a node that answered `inactive` is not publishing.
+Exit status: 0 reset done, every node active; 1 a transition, read or service call failed,
+or a CUBE node refused (a consumer that refuses is walked instead, step 5); 2 usage.
 
 **Ordering, honestly.** The walk quiesced every CUBE node before the consumer was reset,
 so no `grid` crossed the reset in either direction. With services the CUBE nodes keep
@@ -225,15 +230,16 @@ configured), the way to reload `draft_dir` deliberately (`--allow-persistence`),
 only way to recover an assessor whose map frame moved. The script stops at the first failed
 transition and names the node and the transition. After the first change, a failure also
 prints the state of every walked node and says to re-run; running it again is safe (a node
-that is already reset is simply reset or cycled again). The preflight warns for every walked
+that is already reset is simply reset or cycled again) and recovers a node the failure left
+`inactive`: it is configured, so the re-run resets it by service and activates it. The preflight warns for every walked
 CUBE node that is not `active` (an earlier run may have stopped part way), and a failing
 probe of a never-configured node is reported as a failed probe, not as a failed reset. A
 node that was never configured has no readable `draft_dir` yet (parameters are declared at
 configure), so once every other check has passed the script configures it, reads the
 parameters and puts it back to `unconfigured`, one node at a time; a refusal at that point
 has still reset nothing. If a transition or a read fails during that probe, the node may be
-left `inactive` (configured); the script says so, and re-running the same command reads it
-normally.
+left `inactive` (configured); the script says so. A configured node serves `~/reset`, so
+re-running the same command resets it by service and activates it.
 
 **Do not run it underway.** On the walk, between the quiesce and the bring-up the walked
 boats publish no `grid`, which is the collision-avoidance grid, and each `ros2` call takes
