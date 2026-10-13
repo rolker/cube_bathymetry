@@ -1193,6 +1193,69 @@ TEST_F(NodeLifecycle, ResetReprimesPriorStore)
   std::filesystem::remove_all(dir);
 }
 
+// A prior store that cannot be loaded does not fail a CONFIGURE (the node runs
+// ungated and warns: a misconfigured prior must not take down live perception at
+// start-up), but a RESET would replace a gated running session with an ungated
+// one. So the reset fails and keeps the old session; once the prior reads again,
+// the reset works.
+TEST_F(NodeLifecycle, ResetWithAnUnloadablePriorKeepsTheGatedSession)
+{
+  const auto dir = makeTempDir();
+  auto source = std::make_shared<cube::GeoMapSheet>(1.0f);
+  addPatch(source, -10.0);
+  auto tiles = cube::mapSheetToTiles(*source);
+  ASSERT_FALSE(tiles.empty());
+  {
+    auto store = marine_bathymetry_store::BathymetryStore::fromCellSize(
+      1.0f, /*reference_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Reference, tiles);
+    ASSERT_GT(marine_bathymetry_store::save(store, dir.string()), 0u);
+  }
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("prior_store_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    ASSERT_FALSE(node->sheet()->grids().empty()) << "test setup: the prior was not primed";
+    CubeBathymetryTestAccess::dirtySessionState(*node);
+    const auto sheet_before = node->sheet();
+    const auto resident_before = sheet_before->residentTileCount();
+
+    // A file load() cannot parse: no level in its name.
+    const auto bogus = dir / "reference" / "bogus.tif";
+    {
+      std::ofstream(bogus) << "not a tile";
+    }
+    ResetCaller caller(node);
+    auto [ok, message] = caller.call();
+    EXPECT_FALSE(ok) << "an ungated session replaced a gated one: " << message;
+    EXPECT_NE(message.find("could not be loaded"), std::string::npos) << message;
+    EXPECT_NE(message.find(dir.string()), std::string::npos) << message;
+    EXPECT_NE(message.find("unchanged"), std::string::npos) << message;
+    EXPECT_EQ(node->sheet().get(), sheet_before.get()) << "the old session must be kept";
+    EXPECT_EQ(node->sheet()->residentTileCount(), resident_before);
+    EXPECT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u)
+      << "a failed reset must leave every session field as it was";
+
+    // Configure keeps its warn-and-continue behaviour for the same prior.
+    auto fresh_node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("prior_store_dir", dir.string())}));
+    EXPECT_EQ(fresh_node->configure().id(), State::PRIMARY_STATE_INACTIVE)
+      << "configure must still run ungated on an unreadable prior";
+    EXPECT_EQ(fresh_node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+
+    // The prior reads again: the reset works.
+    std::filesystem::remove(bogus);
+    std::tie(ok, message) = caller.call();
+    EXPECT_TRUE(ok) << message;
+    EXPECT_NE(message.find("prior_store_dir primed"), std::string::npos) << message;
+    EXPECT_NE(node->sheet().get(), sheet_before.get());
+    EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  std::filesystem::remove_all(dir);
+}
+
 // The swap in the service handler has no mutex. That is safe because every
 // callback of the node's own entities (pings, timers, subscriptions, the service)
 // is in the ONE default mutually exclusive callback group that the node's

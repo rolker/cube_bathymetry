@@ -114,7 +114,10 @@ activated (`reset_cube_nodes.sh` then activates it, see below).
 complete, so a failure (the response says why) leaves the running session untouched. The
 new session has the same sheet-level settings as the old one (`capture_spacing_scale`, the
 backscatter curve that arrived on `sonar_info`, which is not redelivered) and re-reads
-`prior_store_dir`, so the blunder gate is active from the first ping. Like `configure`, it
+`prior_store_dir`, so the blunder gate is active from the first ping. A prior that cannot be
+loaded **fails the reset** (the running session, which has the gate, is kept and the response
+says why), whereas a `configure` only warns and runs ungated: replacing a gated session
+with an ungated one is worse than keeping the old one. Like `configure`, it
 starts a new sheet and tile catalog and clears the evicted-tile markers, the disk-serve
 queue, the refresh tracker, the saving ledger and the publish cursor. Publishers,
 subscriptions, timers and parameters are not touched. The prime is a whole-store disk read

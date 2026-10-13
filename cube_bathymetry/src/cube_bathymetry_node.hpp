@@ -1785,10 +1785,15 @@ private:
   /// reset and does not redeliver), then the prior-store prime, the draft-store
   /// warm start and catalog seed, and the trim to the resident budget. Reads the
   /// members declared by on_configure and writes none of the session members.
+  /// @param prior_must_load  false (configure): a prior store that cannot be loaded
+  ///        only warns and the node runs ungated, because a misconfigured prior must
+  ///        never take down live perception at start-up. true (the reset service):
+  ///        the same failure throws, so the reset fails and the running session, which
+  ///        has the blunder gate, is kept rather than replaced by an ungated one.
   /// @throws InvalidCaptureSpacingScale, LegacyStoreRefused (configure maps both
   ///         to FAILURE), or any other std::exception (the reset service maps it
   ///         to success=false).
-  FreshSession buildSession()
+  FreshSession buildSession(bool prior_must_load = false)
   {
     FreshSession session;
     session.prior_status = prior_store_dir_.empty() ? "unset" : "not loaded";
@@ -1868,6 +1873,11 @@ private:
           trimToBudget(*session.sheet, session.evicted_indices, nullptr);
         }
       } catch (const std::exception & e) {
+        if (prior_must_load) {
+          throw std::runtime_error(
+            "prior_store_dir '" + prior_store_dir_ + "' could not be loaded: " + e.what() +
+            " (a reset would run ungated, so none was done)");
+        }
         RCLCPP_WARN(get_logger(),
           "Could not load prior store from '%s': %s (continuing ungated).",
           prior_store_dir_.c_str(), e.what());
@@ -2083,7 +2093,10 @@ private:
     }
     FreshSession fresh;
     try {
-      fresh = buildSession();
+      // A prior that cannot be read fails the reset: replacing a gated session with
+      // an ungated one is worse than keeping the old one (configure keeps its
+      // warn-and-continue; there is no running session to protect there).
+      fresh = buildSession(/*prior_must_load=*/true);
     } catch (const std::exception & e) {
       return std::string("failed, the running session is unchanged: ") + e.what();
     } catch (...) {
