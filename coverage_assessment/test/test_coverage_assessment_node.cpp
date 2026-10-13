@@ -47,6 +47,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1851,6 +1852,113 @@ TEST_F(NodeTest, ResetServiceEmptiesTheUnionAndKeepsAreasGeoreferenceAndCounters
       [&]() {return h.latest_.at("area1").area_covered == 100.0;}, 20.0,
       [&]() {h.publishGrid("A", grid);}));
   EXPECT_EQ(countLog("Raster georeference captured"), 1u);
+}
+
+// The reset empties the unions without a mutex because every callback of the node
+// is in the one default mutually exclusive group that the single-threaded executor
+// spins (see onReset). Pin that, and what the groups made by libraries for their own
+// threads hold: nothing but a subscription to /tf, /tf_static or (use_sim_time)
+// /clock, no service, client or timer. The control adds the kinds of group the audit
+// exists to catch and checks they are reported.
+namespace
+{
+struct GroupAudit
+{
+  int executor_groups = 0;
+  int unspun_groups = 0;
+  bool all_exclusive = true;
+  bool executor_group_is_default = true;
+  std::set<std::string> unspun_topics;
+  std::size_t unspun_services_clients_timers = 0;
+};
+
+GroupAudit auditGroups(CoverageAssessmentNode & node)
+{
+  GroupAudit audit;
+  const auto base = node.get_node_base_interface();
+  base->for_each_callback_group(
+    [&](rclcpp::CallbackGroup::SharedPtr group) {
+      audit.all_exclusive = audit.all_exclusive &&
+      group->type() == rclcpp::CallbackGroupType::MutuallyExclusive;
+      if (group->automatically_add_to_executor_with_node()) {
+        ++audit.executor_groups;
+        audit.executor_group_is_default = audit.executor_group_is_default &&
+        group == base->get_default_callback_group();
+        return;
+      }
+      ++audit.unspun_groups;
+      group->collect_all_ptrs(
+        [&](const rclcpp::SubscriptionBase::SharedPtr & sub) {
+          audit.unspun_topics.insert(sub->get_topic_name());
+        },
+        [&](const rclcpp::ServiceBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
+        [&](const rclcpp::ClientBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
+        [&](const rclcpp::TimerBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
+        // The waitables are the QoS event handlers of those same subscriptions.
+        [](const rclcpp::Waitable::SharedPtr &) {});
+    });
+  return audit;
+}
+}  // namespace
+
+TEST_F(NodeTest, CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor)
+{
+  for (const bool sim_time : {false, true}) {
+    SCOPED_TRACE(sim_time ? "use_sim_time" : "wall clock");
+    Harness::Options opt;
+    opt.sources = {"A"};
+    opt.use_sim_time = sim_time;
+    Harness h(opt);
+    h.publishCommonTf();
+    ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    const auto audit = auditGroups(*h.node_);
+    EXPECT_EQ(audit.executor_groups, 1) << "the executor must spin exactly one callback group";
+    EXPECT_TRUE(audit.executor_group_is_default);
+    EXPECT_TRUE(audit.all_exclusive) << "no reentrant callback group";
+    EXPECT_GE(audit.unspun_groups, 1) << "test setup: the TF listener's group was not found";
+    EXPECT_EQ(audit.unspun_services_clients_timers, 0u);
+    const std::set<std::string> allowed = {"/tf", "/tf_static", "/clock"};
+    for (const auto & topic : audit.unspun_topics) {
+      EXPECT_EQ(allowed.count(topic), 1u)
+        << "a callback group outside the executor holds a subscription to '" << topic << "'";
+    }
+    EXPECT_EQ(audit.unspun_topics.count("/tf"), 1u);
+    if (sim_time) {
+      EXPECT_EQ(audit.unspun_topics.count("/clock"), 1u)
+        << "test setup: under use_sim_time the clock group should be present";
+    }
+    EXPECT_EQ(h.node_->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+}
+
+TEST_F(NodeTest, TheCallbackGroupAuditNoticesWhatItIsFor)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  h.publishCommonTf();
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  const auto clean = auditGroups(*h.node_);
+  ASSERT_EQ(clean.executor_groups, 1);
+
+  auto reentrant = h.node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  auto own_thread = h.node_->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive, false);
+  auto timer = h.node_->create_wall_timer(std::chrono::hours(1), [] {}, own_thread);
+  rclcpp::SubscriptionOptions options;
+  options.callback_group = own_thread;
+  auto sub = h.node_->create_subscription<grid_map_msgs::msg::GridMap>(
+    "/grids_on_my_own_thread", 1, [](grid_map_msgs::msg::GridMap::ConstSharedPtr) {}, options);
+
+  const auto audit = auditGroups(*h.node_);
+  EXPECT_EQ(audit.executor_groups, 2);
+  EXPECT_FALSE(audit.all_exclusive);
+  EXPECT_EQ(audit.unspun_groups, clean.unspun_groups + 1);
+  EXPECT_GE(audit.unspun_services_clients_timers, 1u);
+  EXPECT_EQ(audit.unspun_topics.count("/grids_on_my_own_thread"), 1u);
+  EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
 // A tick returns before assessing whenever the water surface is unavailable, stale

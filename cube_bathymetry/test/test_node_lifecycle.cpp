@@ -57,6 +57,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -1292,30 +1293,115 @@ TEST_F(NodeLifecycle, ResetWithAnUnloadablePriorKeepsTheGatedSession)
 // callback of the node's own entities (pings, timers, subscriptions, the service)
 // is in the ONE default mutually exclusive callback group that the node's
 // SingleThreadedExecutor spins, so none can run while the handler swaps the sheet.
-// The only other group is the one the tf2_ros::TransformListener makes for its own
-// dedicated thread; it is not added to the node's executor and only feeds the TF
-// buffer (which a reset does not replace). Pin that, so a reentrant group added
-// to the executor later fails here instead of racing a ping against the swap.
+// The only other groups are made by libraries for their own threads and are not
+// added to the node's executor: the tf2_ros::TransformListener's (/tf, /tf_static),
+// and, under use_sim_time, rclcpp's clock thread (/clock). Each only feeds a buffer
+// or the clock, neither of which a reset replaces. This pins both halves: the
+// executor spins exactly one mutually exclusive group, and every group NOT added to
+// the executor holds no service, client or timer and subscribes only to one of those
+// three topics (its waitables are those subscriptions' QoS event handlers), so a
+// callback group that is spun on a thread of its own and touches the sheet fails here
+// instead of racing a ping against the swap. Run with and without use_sim_time,
+// because the clock group exists only under it.
+// What the callback groups of a node hold, split by whether the node's own executor
+// spins them.
+struct GroupAudit
+{
+  int executor_groups = 0;       // spun with the node (automatically added)
+  int unspun_groups = 0;         // created for a thread of their own
+  bool all_exclusive = true;
+  bool executor_group_is_default = true;
+  std::set<std::string> unspun_topics;  // subscriptions in unspun groups
+  std::size_t unspun_services_clients_timers = 0;
+};
+
+GroupAudit auditGroups(CubeBathymetry & node)
+{
+  GroupAudit audit;
+  const auto base = node.get_node_base_interface();
+  base->for_each_callback_group(
+    [&](rclcpp::CallbackGroup::SharedPtr group) {
+      audit.all_exclusive = audit.all_exclusive &&
+      group->type() == rclcpp::CallbackGroupType::MutuallyExclusive;
+      if (group->automatically_add_to_executor_with_node()) {
+        ++audit.executor_groups;
+        audit.executor_group_is_default = audit.executor_group_is_default &&
+        group == base->get_default_callback_group();
+        return;
+      }
+      ++audit.unspun_groups;
+      group->collect_all_ptrs(
+        [&](const rclcpp::SubscriptionBase::SharedPtr & sub) {
+          audit.unspun_topics.insert(sub->get_topic_name());
+        },
+        [&](const rclcpp::ServiceBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
+        [&](const rclcpp::ClientBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
+        [&](const rclcpp::TimerBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
+        // The waitables are the QoS event handlers of those same subscriptions.
+        [](const rclcpp::Waitable::SharedPtr &) {});
+    });
+  return audit;
+}
+
 TEST_F(NodeLifecycle, AllCallbacksShareTheDefaultGroup)
+{
+  for (const bool sim_time : {false, true}) {
+    SCOPED_TRACE(sim_time ? "use_sim_time" : "wall clock");
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("use_sim_time", sim_time)}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    const auto audit = auditGroups(*node);
+    EXPECT_EQ(audit.executor_groups, 1)
+      << "the node's executor must spin exactly one callback group";
+    EXPECT_TRUE(audit.executor_group_is_default)
+      << "a group other than the default is spun by the node's executor";
+    EXPECT_TRUE(audit.all_exclusive) << "no reentrant callback group";
+    EXPECT_GE(audit.unspun_groups, 1) << "test setup: the TF listener's group was not found";
+    EXPECT_EQ(audit.unspun_services_clients_timers, 0u)
+      << "a group that is not in the executor holds a service, client or timer";
+    const std::set<std::string> allowed = {"/tf", "/tf_static", "/clock"};
+    for (const auto & topic : audit.unspun_topics) {
+      EXPECT_EQ(allowed.count(topic), 1u)
+        << "a callback group outside the executor holds a subscription to '" << topic
+        << "'; only /tf, /tf_static and /clock may be there";
+    }
+    EXPECT_EQ(audit.unspun_topics.count("/tf"), 1u);
+    if (sim_time) {
+      EXPECT_EQ(audit.unspun_topics.count("/clock"), 1u)
+        << "test setup: under use_sim_time the clock group should be present";
+    }
+    EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+}
+
+// The control for the audit above: groups of the kinds it exists to catch are
+// reported, so a clean result means something. A reentrant group and an extra
+// default-spun one are counted; a group outside the executor with a timer or a
+// subscription to another topic is named.
+TEST_F(NodeLifecycle, TheCallbackGroupAuditNoticesWhatItIsFor)
 {
   auto node = std::make_shared<CubeBathymetry>();
   ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
-  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
-  int executor_groups = 0;
-  bool all_exclusive = true;
-  node->get_node_base_interface()->for_each_callback_group(
-    [&](rclcpp::CallbackGroup::SharedPtr group) {
-      all_exclusive = all_exclusive &&
-      group->type() == rclcpp::CallbackGroupType::MutuallyExclusive;
-      if (group->automatically_add_to_executor_with_node()) {
-        ++executor_groups;
-        EXPECT_EQ(group, node->get_node_base_interface()->get_default_callback_group())
-          << "a group other than the default is spun by the node's executor";
-      }
-    });
-  EXPECT_EQ(executor_groups, 1)
-    << "the node's executor must spin exactly one callback group";
-  EXPECT_TRUE(all_exclusive) << "no reentrant callback group";
-  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  const auto clean = auditGroups(*node);
+  ASSERT_EQ(clean.executor_groups, 1);
+
+  auto reentrant = node->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  auto own_thread = node->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive, false);
+  auto timer = node->create_wall_timer(std::chrono::hours(1), [] {}, own_thread);
+  rclcpp::SubscriptionOptions options;
+  options.callback_group = own_thread;
+  auto sub = node->create_subscription<marine_interfaces::msg::SonarInfo>(
+    "/pings_on_my_own_thread", 1, [](marine_interfaces::msg::SonarInfo::ConstSharedPtr) {}, options);
+
+  const auto audit = auditGroups(*node);
+  EXPECT_EQ(audit.executor_groups, 2) << "an extra group spun by the executor is counted";
+  EXPECT_FALSE(audit.all_exclusive) << "a reentrant group is noticed";
+  EXPECT_EQ(audit.unspun_groups, clean.unspun_groups + 1);
+  EXPECT_GE(audit.unspun_services_clients_timers, 1u) << "a timer outside the executor is noticed";
+  EXPECT_EQ(audit.unspun_topics.count("/pings_on_my_own_thread"), 1u)
+    << "a subscription outside the executor is named";
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }

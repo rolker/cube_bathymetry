@@ -866,6 +866,15 @@ private:
 
   /// `~/reset` handler: the exception containment of `guarded`, with the reason
   /// returned to the caller as well as logged.
+  ///
+  /// The reset takes no mutex: every callback of this node's own entities (grids,
+  /// areas, the tick timer, this service) is in the one default mutually exclusive
+  /// callback group, which main() spins on a SingleThreadedExecutor, so none runs while
+  /// the handler empties the unions. The only other callback groups belong to
+  /// libraries on their own threads (the tf2_ros::TransformListener's /tf and
+  /// /tf_static, and under use_sim_time the clock's /clock); they feed the TF buffer
+  /// and the clock only. CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor
+  /// pins that.
   void onReset(std_srvs::srv::Trigger::Response * response)
   {
     response->success = false;

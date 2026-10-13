@@ -2059,9 +2059,11 @@ private:
   /// (pings, timers, subscriptions, this service) is in the node's default
   /// callback group, which is mutually exclusive, and main() spins a
   /// SingleThreadedExecutor (spinUntilStopped requires one by type). Either fact
-  /// alone means no other callback runs while this one swaps the sheet. (The one
-  /// other callback group is the tf2_ros::TransformListener's own, spun on its own
-  /// thread; it only writes the TF buffer, which a reset does not replace.) The
+  /// alone means no other callback runs while this one swaps the sheet. (The only
+  /// other callback groups belong to libraries and run on their own threads: the
+  /// tf2_ros::TransformListener's (/tf, /tf_static), and under use_sim_time rclcpp's
+  /// clock thread (/clock). They only feed the TF buffer and the clock, which a reset
+  /// does not replace; AllCallbacksShareTheDefaultGroup pins what they hold.) The
   /// cost is that the prime is a whole-store disk read that BLOCKS the executor
   /// for its duration while the node is active (unlike configure): the
   /// best-effort depth-5 ping subscription drops pings meanwhile.
