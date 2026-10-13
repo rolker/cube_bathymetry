@@ -1376,6 +1376,20 @@ TEST_F(NodeTest, ConfigureRefusesAMaxPassCellChecksBelowTheSourceCount)
     countLog("max_pass_cell_checks=1 must be at least the number of sources (2)"), 1u);
 }
 
+// 'grid' in namespace /tN and '/tN/grid' are one topic: two subscriptions to it
+// would credit one boat's coverage to two sources.
+TEST_F(NodeTest, ConfigureRefusesTwoGridTopicsThatResolveToOne)
+{
+  const std::string ns = "/t" + std::to_string(g_next_namespace++);
+  rclcpp::NodeOptions options;
+  options.arguments({"--ros-args", "-r", "__ns:=" + ns});
+  options.append_parameter_override(
+    "grid_topics", std::vector<std::string>{"grid", ns + "/grid"});
+  auto node = std::make_shared<CoverageAssessmentNode>(options);
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(countLog("which both resolve to '" + ns + "/grid'"), 1u);
+}
+
 TEST_F(NodeTest, ConfigureRefusesAMaxHeldCellsBelowOne)
 {
   rclcpp::NodeOptions options;
@@ -1568,7 +1582,7 @@ TEST_F(NodeTest, ConfigureFailsWithAReasonOnAnUnusableSourceList)
   {
     auto node = makeNode({"/x/grid", "/x/grid"}, {});
     EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
-    EXPECT_EQ(countLog("lists '/x/grid' twice"), 1u);
+    EXPECT_EQ(countLog("lists '/x/grid' and '/x/grid', which both resolve to '/x/grid'"), 1u);
     // A second attempt fails the same way and leaves nothing behind.
     EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
   }

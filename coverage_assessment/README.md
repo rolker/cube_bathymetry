@@ -52,7 +52,7 @@ and ignored. Set them from a launch file or YAML before the node starts.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `grid_topics` | `[]` (required) | CUBE `grid` topics, one per source; the order defines the order of `CoverageAssessment.sources`. Configure fails when empty, when it holds an empty entry, or when a topic is listed twice. |
+| `grid_topics` | `[]` (required) | CUBE `grid` topics, one per source; the order defines the order of `CoverageAssessment.sources`. Configure fails when empty, when it holds an empty entry, or when two entries resolve to the same topic (namespace expansion and remapping included: `grid` and `/<ns>/grid` are one topic, which would otherwise be credited as two sources). |
 | `source_names` | `[]` | Per-source label (platform name). Empty list, or an empty entry, falls back to that source's topic string. Same length as `grid_topics` or empty, else configure fails. Names must be unique, so a duplicate fails configure too. |
 | `survey_area_topic` | `survey_area` | `SurveyArea` input. |
 | `assessment_period` | `1.0` s | Timer period; 0.001 s to 86400 s, else configure fails. |

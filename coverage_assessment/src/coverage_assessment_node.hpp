@@ -402,16 +402,23 @@ private:
         "Configure refused: grid_topics is empty; give one CUBE grid topic per source.");
       return false;
     }
-    std::set<std::string> seen;
+    // Duplicates are judged on the RESOLVED names (namespace expansion and
+    // remapping): 'grid' and '/<ns>/grid' are one topic, which would otherwise be
+    // subscribed twice and its coverage credited to two sources.
+    std::map<std::string, std::string> seen;  // resolved -> as configured
     for (const auto & topic : topics) {
       if (topic.empty()) {
         RCLCPP_ERROR(get_logger(), "Configure refused: grid_topics holds an empty entry.");
         return false;
       }
-      if (!seen.insert(topic).second) {
+      const std::string resolved_topic =
+        get_node_topics_interface()->resolve_topic_name(topic);
+      const auto inserted = seen.emplace(resolved_topic, topic);
+      if (!inserted.second) {
         RCLCPP_ERROR(get_logger(),
-          "Configure refused: grid_topics lists '%s' twice; each source needs its own topic.",
-          topic.c_str());
+          "Configure refused: grid_topics lists '%s' and '%s', which both resolve to '%s'; each "
+          "source needs its own topic.", inserted.first->second.c_str(), topic.c_str(),
+          resolved_topic.c_str());
         return false;
       }
     }
