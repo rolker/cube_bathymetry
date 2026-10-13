@@ -21,6 +21,9 @@
 
 #include "coverage_assessment/area_registry.h"
 
+#include <stdexcept>
+#include <string>
+
 namespace coverage_assessment
 {
 
@@ -32,9 +35,15 @@ int64_t boxCells(const PolygonMask & mask)
 }
 }  // namespace
 
-AreaRegistry::AreaRegistry(double cell_size, int64_t max_cells, int64_t max_total_cells)
-: cell_size_(cell_size), max_cells_(max_cells), max_total_cells_(max_total_cells)
+AreaRegistry::AreaRegistry(
+  double cell_size, int64_t max_cells, int64_t max_cell_checks, int64_t source_count)
+: cell_size_(cell_size), max_cells_(max_cells), max_cell_checks_(max_cell_checks),
+  source_count_(source_count), max_total_cells_(0)
 {
+  if (source_count < 1) {
+    throw std::invalid_argument("AreaRegistry: source_count must be at least 1");
+  }
+  max_total_cells_ = max_cell_checks / source_count;
 }
 
 int64_t AreaRegistry::totalCells() const
@@ -64,9 +73,11 @@ bool AreaRegistry::exceedsTotal(
     return false;
   }
   *reason = "area '" + id + "': its " + std::to_string(added) +
-    "-cell raster would take the " + std::to_string(others) +
-    " cell(s) already held over the total budget of " +
-    std::to_string(max_total_cells_) + " cell(s) (parameter max_total_raster_cells)";
+    "-cell raster with the " + std::to_string(others) +
+    " cell(s) already held would take an assessment pass over its budget: a pass checks "
+    "every cell once per source, and " + std::to_string(source_count_) +
+    " source(s) allow at most " + std::to_string(max_total_cells_) +
+    " cell(s) under max_pass_cell_checks=" + std::to_string(max_cell_checks_);
   return true;
 }
 

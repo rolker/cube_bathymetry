@@ -115,19 +115,23 @@ namespace coverage_assessment
 public:
   /// `cell_size` is the lattice spacing; `max_cells` caps one area's bounding
   /// box in lattice cells (guards a swapped latitude/longitude);
-  /// `max_total_cells` caps the bounding boxes of all held areas together
-  /// (every assessment pass scans each held area's whole box once per source).
+  /// `max_cell_checks` caps the work of one assessment pass, which checks each
+  /// held area's whole bounding box once per source: the boxes of all held areas
+  /// together times `source_count` may not exceed it. `source_count` must be at
+  /// least 1 (std::invalid_argument otherwise).
     AreaRegistry(
       double cell_size, int64_t max_cells,
-      int64_t max_total_cells = std::numeric_limits < int64_t > ::max());
+      int64_t max_cell_checks = std::numeric_limits < int64_t > ::max(),
+      int64_t source_count = 1);
 
   /// Add, replace or refuse a definition. An id is replaced only when the new
   /// stamp is >= the held one (on an equal stamp the last received wins). A
   /// definition is refused, keeping any earlier one of the same id, when its
   /// polygon cannot be rasterised (fewer than 3 vertices, non-finite
   /// coordinates, zero area, over `max_cells`), or when holding it would take
-  /// the bounding boxes of all areas over `max_total_cells` (an update of a held
-  /// id is judged with that id's old box removed). The standard is never a reason
+  /// the bounding boxes of all areas times the source count over
+  /// `max_cell_checks` (an update of a held id is judged with that id's old box
+  /// removed). The standard is never a reason
   /// to refuse: SurveyStandard.msg defines a = b = 0, or a NaN, negative or
   /// infinite a or b, as "not set", and nothing will meet it -- an honest state
   /// to publish (area_meeting_standard 0).
@@ -148,6 +152,9 @@ private:
 
     double cell_size_;
     int64_t max_cells_;
+    int64_t max_cell_checks_;
+    int64_t source_count_;
+    /// max_cell_checks_ / source_count_: the most box cells all areas may hold.
     int64_t max_total_cells_;
     std::vector < RegisteredArea > areas_;
   };

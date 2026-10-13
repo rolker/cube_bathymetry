@@ -137,6 +137,10 @@ public:
   /// Allocated 64 x 64 blocks, for the memory log line.
     std::size_t blockCount() const {return blocks_.size();}
 
+  /// Lattice cells allocated (blocks times 64 x 64): what memory is held for,
+  /// set or not.
+    std::size_t allocatedCells() const {return blocks_.size() * kBlock * kBlock;}
+
   /// Approximate bytes held by the blocks.
     std::size_t memoryBytes() const;
 

@@ -101,6 +101,10 @@ struct NodeStats
   uint64_t withheld_no_earth = 0;
   /// map_frame <- earth moved after the raster georeference was captured
   uint64_t withheld_map_moved = 0;
+  /// the sources hold more than max_held_cells
+  uint64_t withheld_held_limit = 0;
+  /// placed grids not folded in because max_held_cells was reached
+  uint64_t grids_over_held_limit = 0;
   uint64_t skipped_surface_unavailable = 0;
   uint64_t skipped_surface_stale = 0;
   uint64_t skipped_surface_too_far = 0;
@@ -325,11 +329,19 @@ private:
       "max_raster_cells", 1000000,
       desc("Per-area raster cap, lattice cells (guards a swapped latitude/longitude)."));
     declare_parameter<int64_t>(
-      "max_total_raster_cells", 4000000,
-      desc("Bounding-box lattice cells of ALL held survey areas together; an area that would "
-      "take the total over it is refused with an ERROR (an update of a held id is judged with "
-      "its old size removed). Bounds the cost of an assessment pass, which scans every held "
-      "area's box once per source."));
+      "max_pass_cell_checks", 16000000,
+      desc("Work budget of one assessment pass, which checks every held survey area's whole "
+      "bounding box once per source: the boxes of ALL held areas, in lattice cells, times the "
+      "number of sources may not exceed it (16e6 = 4e6 cells with 4 sources). An area that "
+      "would take a pass over it is refused with an ERROR (an update of a held id is judged "
+      "with its old size removed). At least the number of sources."));
+    declare_parameter<int64_t>(
+      "max_held_cells", 100000000,
+      desc("Most lattice cells the node holds for all sources together (allocated in 64 x 64 "
+      "blocks, 8 bytes per cell: 1e8 is about 800 MB). Each source keeps every cell it has "
+      "mapped until reset, inside the survey areas or not. Once over it, no further grid is "
+      "folded in and nothing is published (coverage would be under-reported), with an ERROR, "
+      "until the node is reset (deactivate, cleanup, configure, activate)."));
     declare_parameter<int64_t>(
       "max_areas", 20,
       desc("Most survey areas held at once, 1 to 100; a new id beyond it is refused with an "
@@ -381,7 +393,8 @@ private:
     max_boat_distance_ = get_parameter("water_surface_max_boat_distance").as_double();
     max_surface_age_s_ = get_parameter("water_surface_max_age").as_double();
     max_raster_cells_ = get_parameter("max_raster_cells").as_int();
-    max_total_raster_cells_ = get_parameter("max_total_raster_cells").as_int();
+    max_pass_cell_checks_ = get_parameter("max_pass_cell_checks").as_int();
+    max_held_cells_ = get_parameter("max_held_cells").as_int();
     max_areas_ = get_parameter("max_areas").as_int();
 
     if (topics.empty()) {
@@ -437,10 +450,16 @@ private:
         static_cast<long>(max_raster_cells_));  // NOLINT(runtime/int)
       return false;
     }
-    if (max_total_raster_cells_ < 1) {
+    if (max_pass_cell_checks_ < static_cast<int64_t>(topics.size())) {
       RCLCPP_ERROR(get_logger(),
-        "Configure refused: max_total_raster_cells=%ld must be at least 1.",
-        static_cast<long>(max_total_raster_cells_));  // NOLINT(runtime/int)
+        "Configure refused: max_pass_cell_checks=%ld must be at least the number of sources "
+        "(%zu): a pass checks every cell once per source.",
+        static_cast<long>(max_pass_cell_checks_), topics.size());  // NOLINT(runtime/int)
+      return false;
+    }
+    if (max_held_cells_ < 1) {
+      RCLCPP_ERROR(get_logger(), "Configure refused: max_held_cells=%ld must be at least 1.",
+        static_cast<long>(max_held_cells_));  // NOLINT(runtime/int)
       return false;
     }
     if (max_areas_ < 1 || max_areas_ > kMaxAreasLimit) {
@@ -469,7 +488,8 @@ private:
     stats_ = NodeStats{};
     throttle_times_.clear();
     registry_ = std::make_unique<AreaRegistry>(
-      cell_size_, max_raster_cells_, max_total_raster_cells_);
+      cell_size_, max_raster_cells_, max_pass_cell_checks_,
+      static_cast<int64_t>(topics.size()));
     areas_.clear();
     area_order_.clear();
     areas_dirty_ = false;
@@ -477,6 +497,7 @@ private:
     force_assessment_ = false;
     have_georef_ = false;
     georef_moved_ = false;
+    held_limit_reached_ = false;
     have_last_surface_ = false;
     for (std::size_t i = 0; i < topics.size(); ++i) {
       sources_.push_back(std::make_unique<SourceState>(topics[i], resolved[i], cell_size_));
@@ -739,6 +760,16 @@ private:
     const Eigen::Isometry3d & source_from_raster)
   {
     injectFault("grid fold");
+    if (held_limit_reached_) {
+      // Over max_held_cells: nothing more is folded in (the tick withholds and
+      // says why). The grid is placed, so the source does not hold the
+      // assessment as unplaced on top of that.
+      ++stats_.grids_over_held_limit;
+      source.placement_failed = false;
+      source.failed_frame.clear();
+      source.unplaced_grid.reset();
+      return;
+    }
     const double resolution = grid.getResolution();
     const AddResult added = source.accumulator.add(grid, rasterToSourceAffine(source_from_raster));
     source.placement_failed = false;
@@ -764,6 +795,11 @@ private:
     ++stats_.grids_placed;
     source.have_grid = true;
     grids_changed_ = true;
+    // Checked after the fold, so memory stops at most one message footprint over
+    // the limit; from here on nothing more is folded in.
+    if (heldCells() > static_cast<std::size_t>(max_held_cells_)) {
+      held_limit_reached_ = true;
+    }
     if (!added.has_uncertainty_layer && !source.uncertainty_warned) {
       source.uncertainty_warned = true;
       RCLCPP_WARN(get_logger(),
@@ -1011,6 +1047,16 @@ private:
     return SurfaceStatus::kOk;
   }
 
+  /// Lattice cells allocated for all sources together (max_held_cells counts these).
+  std::size_t heldCells() const
+  {
+    std::size_t cells = 0;
+    for (const auto & source : sources_) {
+      cells += source->accumulator.allocatedCells();
+    }
+    return cells;
+  }
+
   void logStatus(const rclcpp::Time & now)
   {
     if ((now - last_status_log_).seconds() < kStatusLogPeriodSeconds) {
@@ -1025,25 +1071,29 @@ private:
     }
     auto n = [](uint64_t v) {return static_cast<unsigned long>(v);};  // NOLINT(runtime/int)
     RCLCPP_INFO(get_logger(),
-      "Holding %zu cell(s) with elevation over %zu source(s), %.1f MB; grids %lu received, %lu "
-      "placed, %lu unplaced, %lu rejected; areas %lu received, %lu rejected, %zu held.",
-      cells, sources_.size(), static_cast<double>(bytes) / 1.0e6, n(stats_.grids_received),
+      "Holding %zu cell(s) with elevation over %zu source(s), %zu allocated of max_held_cells "
+      "%ld, %.1f MB; grids %lu received, %lu placed, %lu unplaced, %lu rejected, %lu over "
+      "max_held_cells; areas %lu received, %lu rejected, %zu held.",
+      cells, sources_.size(), heldCells(),
+      static_cast<long>(max_held_cells_),  // NOLINT(runtime/int)
+      static_cast<double>(bytes) / 1.0e6, n(stats_.grids_received),
       n(stats_.grids_placed), n(stats_.grids_unplaced), n(stats_.grids_rejected),
-      n(stats_.areas_received), n(stats_.areas_rejected),
+      n(stats_.grids_over_held_limit), n(stats_.areas_received), n(stats_.areas_rejected),
       registry_ ? registry_->areas().size() : static_cast<std::size_t>(0));
     RCLCPP_INFO(get_logger(),
       "Assessments: %lu published; ticks without one: %lu waiting for an unplaced source, %lu "
-      "without earth, %lu with the map frame moved, %lu water surface unavailable, %lu stale, "
-      "%lu tide boat too far, %lu tide frame under earth; "
+      "without earth, %lu with the map frame moved, %lu over max_held_cells, %lu water surface "
+      "unavailable, %lu stale, %lu tide boat too far, %lu tide frame under earth; "
       "%zu cell(s) above the surface in the last assessment; %lu callback exception(s) caught; "
-      "last assessment pass %.3f s over %ld raster cell(s).",
+      "last assessment pass %.3f s over %ld raster cell(s) x %zu source(s).",
       n(stats_.assessments_published), n(stats_.withheld_unplaced_source),
-      n(stats_.withheld_no_earth), n(stats_.withheld_map_moved),
+      n(stats_.withheld_no_earth), n(stats_.withheld_map_moved), n(stats_.withheld_held_limit),
       n(stats_.skipped_surface_unavailable),
       n(stats_.skipped_surface_stale), n(stats_.skipped_surface_too_far),
       n(stats_.skipped_surface_misconfigured), stats_.cells_above_surface,
-        n(stats_.callback_exceptions), last_pass_seconds_,
-      static_cast<long>(registry_ ? registry_->totalCells() : 0));  // NOLINT(runtime/int)
+      n(stats_.callback_exceptions), last_pass_seconds_,
+      static_cast<long>(registry_ ? registry_->totalCells() : 0),  // NOLINT(runtime/int)
+      sources_.size());
   }
 
   void onTimer()
@@ -1068,6 +1118,19 @@ private:
     }
     if (checkGeorefMoved()) {
       ++stats_.withheld_map_moved;
+      return;
+    }
+    if (held_limit_reached_) {
+      // Fail closed: grids are no longer folded in, so a score would only ever
+      // under-report coverage from here on.
+      ++stats_.withheld_held_limit;
+      COVERAGE_LOG_THROTTLED(ERROR,
+        "Not assessing: the sources hold %zu lattice cells (%.0f MB), over max_held_cells=%ld. "
+        "No further grids are folded in, so coverage would be under-reported; nothing is "
+        "published until the node is reset (deactivate, cleanup, configure, activate) or "
+        "restarted with a larger max_held_cells.", heldCells(),
+        static_cast<double>(heldCells()) * 8.0 / 1.0e6,
+        static_cast<long>(max_held_cells_));  // NOLINT(runtime/int)
       return;
     }
     retryUnplacedSources();
@@ -1218,7 +1281,8 @@ private:
   double max_boat_distance_ = 1500.0;
   double max_surface_age_s_ = 30.0;
   int64_t max_raster_cells_ = 1000000;
-  int64_t max_total_raster_cells_ = 4000000;
+  int64_t max_pass_cell_checks_ = 16000000;
+  int64_t max_held_cells_ = 100000000;
   int64_t max_areas_ = 20;
   /// Wall time of the last assessment pass (assessAll), seconds; in the status line.
   double last_pass_seconds_ = 0.0;
@@ -1238,6 +1302,8 @@ private:
   /// The live map_frame <- earth has moved off the captured one: latched until a
   /// reconfigure.
   bool georef_moved_ = false;
+  /// Set when the sources' held cells pass max_held_cells; cleared by configure.
+  bool held_limit_reached_ = false;
   double moved_shift_m_ = 0.0;
   double moved_angle_rad_ = 0.0;
   double last_surface_ = 0.0;

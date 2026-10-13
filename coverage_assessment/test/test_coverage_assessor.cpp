@@ -667,7 +667,7 @@ TEST(AreaRegistry, TotalCellBudgetAcceptsUpToItRefusesBeyondAndJudgesAnUpdateWit
   d.id = "c";
   const RegistryResult refused = registry.update(d);  // one over
   EXPECT_EQ(refused.outcome, RegistryOutcome::kRejected);
-  EXPECT_NE(refused.reason.find("max_total_raster_cells"), std::string::npos) << refused.reason;
+  EXPECT_NE(refused.reason.find("max_pass_cell_checks"), std::string::npos) << refused.reason;
   EXPECT_NE(refused.reason.find("'c'"), std::string::npos) << refused.reason;
   EXPECT_EQ(registry.find("c"), nullptr);
   EXPECT_EQ(registry.totalCells(), 2 * box);
@@ -688,6 +688,35 @@ TEST(AreaRegistry, TotalCellBudgetAcceptsUpToItRefusesBeyondAndJudgesAnUpdateWit
   EXPECT_EQ(registry.update(d).outcome, RegistryOutcome::kRejected);
   EXPECT_EQ(registry.totalCells(), before);
   EXPECT_EQ(registry.find("a")->definition.stamp_ns, 20);
+}
+
+// The budget counts work, not cells: every pass checks each cell once per source.
+TEST(AreaRegistry, PassBudgetIsSharedBetweenTheSources)
+{
+  AreaRegistry probe(1.0, kBig);
+  AreaDefinition d;
+  d.id = "p";
+  d.polygon = square10();
+  d.standard = standard(0.5, 0.0);
+  ASSERT_EQ(probe.update(d).outcome, RegistryOutcome::kAdded);
+  const int64_t box = probe.totalCells();
+
+  // Two boxes of checks with two sources: room for one area, not two.
+  AreaRegistry two_sources(1.0, kBig, 2 * box, 2);
+  d.id = "a";
+  EXPECT_EQ(two_sources.update(d).outcome, RegistryOutcome::kAdded);
+  d.id = "b";
+  const RegistryResult refused = two_sources.update(d);
+  EXPECT_EQ(refused.outcome, RegistryOutcome::kRejected);
+  EXPECT_NE(refused.reason.find("2 source(s)"), std::string::npos) << refused.reason;
+  // Four boxes of checks with two sources: room for both.
+  AreaRegistry roomier(1.0, kBig, 4 * box, 2);
+  d.id = "a";
+  EXPECT_EQ(roomier.update(d).outcome, RegistryOutcome::kAdded);
+  d.id = "b";
+  EXPECT_EQ(roomier.update(d).outcome, RegistryOutcome::kAdded);
+
+  EXPECT_THROW(AreaRegistry(1.0, kBig, kBig, 0), std::invalid_argument);
 }
 
 TEST(AreaRegistry, UnsetStandardIsAcceptedAndReported)

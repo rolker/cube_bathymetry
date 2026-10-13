@@ -234,7 +234,8 @@ public:
     bool dynamic_tide = false;
     double boat_x = 10.0;
     int64_t max_areas = 0;  // 0: the node's default
-    int64_t max_total_cells = 0;  // 0: the node's default
+    int64_t max_pass_cell_checks = 0;  // 0: the node's default
+    int64_t max_held_cells = 0;  // 0: the node's default
     bool dynamic_boat = false;      // base_link comes from publishBoatNow(), stamped
     bool tide_under_earth = false;  // map_tide hangs directly off earth
     bool use_sim_time = false;      // node clock follows /clock (nobody publishes it)
@@ -272,8 +273,11 @@ public:
     if (opt_.use_sim_time) {
       options.append_parameter_override("use_sim_time", true);
     }
-    if (opt_.max_total_cells > 0) {
-      options.append_parameter_override("max_total_raster_cells", opt_.max_total_cells);
+    if (opt_.max_pass_cell_checks > 0) {
+      options.append_parameter_override("max_pass_cell_checks", opt_.max_pass_cell_checks);
+    }
+    if (opt_.max_held_cells > 0) {
+      options.append_parameter_override("max_held_cells", opt_.max_held_cells);
     }
     if (opt_.max_areas > 0) {
       options.append_parameter_override("max_areas", opt_.max_areas);
@@ -1279,11 +1283,11 @@ TEST_F(NodeTest, AnUnsetStandardIsScoredAndPublishedNotRefused)
   EXPECT_EQ(countLog("Rejecting SurveyArea"), 0u);
 }
 
-TEST_F(NodeTest, MaxTotalRasterCellsRefusesTheAreaThatWouldExceedItAndNamesTheBudget)
+TEST_F(NodeTest, MaxPassCellChecksRefusesTheAreaThatWouldExceedItAndNamesTheBudget)
 {
   Harness::Options opt;
-  opt.sources = {"A"};
-  opt.max_total_cells = 250;  // two 10 x 10 squares fit, a third does not
+  opt.sources = {"A", "B"};
+  opt.max_pass_cell_checks = 500;  // two sources: two 10 x 10 squares fit, a third does not
   Harness h(opt);
   h.publishCommonTf();
   h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
@@ -1297,8 +1301,49 @@ TEST_F(NodeTest, MaxTotalRasterCellsRefusesTheAreaThatWouldExceedItAndNamesTheBu
       [&]() {return h.latest_.count("a1") && h.latest_.count("a2");}, 20.0,
       [&]() {h.publishGrid("A", grid);}));
   EXPECT_EQ(h.node_->stats().areas_rejected, 1u);
-  EXPECT_EQ(countLog("max_total_raster_cells"), 1u);
+  EXPECT_EQ(countLog("max_pass_cell_checks=500"), 1u);
+  EXPECT_EQ(countLog("2 source(s) allow at most 250 cell(s)"), 1u);
   EXPECT_EQ(h.latest_.count("a3"), 0u);
+}
+
+// Every source keeps every cell it has mapped until reset. Past max_held_cells
+// nothing more is folded in and nothing is published (a score would only
+// under-report from there), with an ERROR naming the parameter.
+TEST_F(NodeTest, MaxHeldCellsStopsFoldingAndWithholdsWithAnError)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.max_held_cells = 8192;  // two 64 x 64 blocks
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("a1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+
+  // One block, then a second: at the limit, not over it, so scoring goes on.
+  const auto near = makeGrid("a/map", {0, 0, 10, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > 0;}, 20.0, [&]() {h.publishGrid("A", near);}));
+  const auto second = makeGrid("a/map", {200, 0, 210, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().grids_placed >= 2;}, 20.0,
+      [&]() {h.publishGrid("A", second);}));
+  EXPECT_EQ(h.node_->stats().withheld_held_limit, 0u);
+
+  // A third block takes the sources over: withheld from the next tick on.
+  const auto third = makeGrid("a/map", {400, 0, 410, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().withheld_held_limit > 0;}, 20.0,
+      [&]() {h.publishGrid("A", third);}));
+  const std::size_t published = h.node_->stats().assessments_published;
+  const auto fourth = makeGrid("a/map", {600, 0, 610, 10}, 1.0, flat(12.0f, 0.25f));
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().grids_over_held_limit > 0;}, 20.0,
+      [&]() {h.publishGrid("A", fourth);}));
+  h.spinFor(0.5);
+  EXPECT_EQ(h.node_->stats().assessments_published, published);
+  EXPECT_GE(countLog("over max_held_cells=8192"), 1u);
 }
 
 TEST_F(NodeTest, StatusLineReportsTheLastAssessmentPassDuration)
@@ -1319,15 +1364,27 @@ TEST_F(NodeTest, StatusLineReportsTheLastAssessmentPassDuration)
   EXPECT_GE(countLog(" s over "), 1u);
 }
 
-TEST_F(NodeTest, ConfigureRefusesAMaxTotalRasterCellsBelowOne)
+TEST_F(NodeTest, ConfigureRefusesAMaxPassCellChecksBelowTheSourceCount)
+{
+  rclcpp::NodeOptions options;
+  options.arguments({"--ros-args", "-r", "__ns:=/t" + std::to_string(g_next_namespace++)});
+  options.append_parameter_override("grid_topics", std::vector<std::string>{"/g", "/h"});
+  options.append_parameter_override("max_pass_cell_checks", static_cast<int64_t>(1));
+  auto node = std::make_shared<CoverageAssessmentNode>(options);
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(
+    countLog("max_pass_cell_checks=1 must be at least the number of sources (2)"), 1u);
+}
+
+TEST_F(NodeTest, ConfigureRefusesAMaxHeldCellsBelowOne)
 {
   rclcpp::NodeOptions options;
   options.arguments({"--ros-args", "-r", "__ns:=/t" + std::to_string(g_next_namespace++)});
   options.append_parameter_override("grid_topics", std::vector<std::string>{"/g"});
-  options.append_parameter_override("max_total_raster_cells", static_cast<int64_t>(0));
+  options.append_parameter_override("max_held_cells", static_cast<int64_t>(0));
   auto node = std::make_shared<CoverageAssessmentNode>(options);
   EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
-  EXPECT_EQ(countLog("max_total_raster_cells=0 must be at least 1"), 1u);
+  EXPECT_EQ(countLog("max_held_cells=0 must be at least 1"), 1u);
 }
 
 TEST_F(NodeTest, MaxAreasRefusesANewIdButStillUpdatesAHeldOne)
@@ -1561,7 +1618,7 @@ TEST_F(NodeTest, ParametersReadAtConfigureAreReadOnly)
   for (const char * name : {"cell_size", "map_frame", "grid_topics", "source_names",
       "survey_area_topic", "assessment_period", "water_surface_frame", "water_surface_boat_frame",
       "water_surface_max_boat_distance", "water_surface_max_age", "max_raster_cells",
-      "max_total_raster_cells", "max_areas"})
+      "max_pass_cell_checks", "max_held_cells", "max_areas"})
   {
     ASSERT_TRUE(node->has_parameter(name)) << name;
     EXPECT_TRUE(node->describe_parameter(name).read_only) << name;
