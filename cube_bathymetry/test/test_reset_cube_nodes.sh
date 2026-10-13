@@ -36,6 +36,7 @@
 #  14. a CUBE node that refuses (draft_dir; its message echoes "success=True"): the
 #      script stops at the first refusal, prints what was reset, leaves later nodes
 #      and the consumer alone, exits 1.
+#  14b. a refusal that echoes "(success=True," in its message is still a refusal.
 #  15. nodes with no service take the walk; a mixed fleet (two services, two walk,
 #      a consumer on a service) runs in the documented order.
 #  16. --allow-persistence sends every CUBE node down the walk, the consumer is
@@ -501,6 +502,16 @@ case "$out" in *"Re-running is safe"*) ;; *) fail "case 14: no re-run hint: $out
 grep -q "boat4\|coverage_assessment" "$work/log" && fail "case 14: went on past the refusal: $(cat "$work/log")"
 grep -q "boat4\|coverage_assessment" "$work/calls" && fail "case 14: called a node after the refusal: $(cat "$work/calls")"
 [ ! -e "$work/reads" ] || fail "case 14: reads on the service path: $(cat "$work/reads")"
+
+# 14b. a refusal whose message contains "(success=True," (a path the operator typed)
+# is still a refusal: the verdict is read from the start of the response line.
+setup_nodes
+mark_service "${cubes[@]}" /coverage_assessment
+echo "refused: draft_dir is '/data/(success=True,old)'; saved tiles would reload" > "$work/refuse__boat2_cube_bathymetry"
+out=$("$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 1 ] || fail "case 14b: a refusal echoing '(success=True,' was read as a success, exit $rc: $out"
+case "$out" in *"/boat2/cube_bathymetry: ~/reset answered: refused"*) ;; *) fail "case 14b: the refusal was not reported: $out" ;; esac
+grep -q "boat3\|boat4\|coverage_assessment" "$work/log" && fail "case 14b: went on past the refusal: $(cat "$work/log")"
 
 # --- 15. no service: the walk; mixed fleet in the documented order ------------------
 setup_nodes

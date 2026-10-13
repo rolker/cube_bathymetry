@@ -351,25 +351,27 @@ has_reset_service() {
 # a message may echo a user-supplied path, so a bare "success=True" substring means
 # nothing.
 service_reset() {
-  local node=$1 attempt=1 out rc line
+  local node=$1 attempt=1 out rc line verdict
   while true; do
     out=$(timeout --foreground "$call_timeout" ros2 service call "$node/reset" \
       std_srvs/srv/Trigger '{}' 2>/dev/null)
     rc=$?
     if [ "$rc" -eq 0 ]; then
       line=$(printf '%s\n' "$out" | grep -m1 '^std_srvs\.srv\.Trigger_Response(success=')
+      # The verdict is read from the START of the line only: the message after it
+      # may echo a user-supplied path, such as draft_dir='/data/(success=True,x)',
+      # and a match anywhere in the line would read that refusal as a success.
+      verdict=""
       case "$line" in
-        "std_srvs.srv.Trigger_Response(success=True,"* | \
-        "std_srvs.srv.Trigger_Response(success=False,"*)
-          svc_message=$(printf '%s\n' "$line" |
-            sed -E "s/^std_srvs\.srv\.Trigger_Response\(success=(True|False), message=(.*)\)\$/\2/" |
-            sed -E "s/^'(.*)'\$/\1/; s/^\"(.*)\"\$/\1/")
-          case "$line" in
-            *"(success=True,"*) return 0 ;;
-            *) return 1 ;;
-          esac
-          ;;
+        "std_srvs.srv.Trigger_Response(success=True,"*) verdict=0 ;;
+        "std_srvs.srv.Trigger_Response(success=False,"*) verdict=1 ;;
       esac
+      if [ -n "$verdict" ]; then
+        svc_message=$(printf '%s\n' "$line" |
+          sed -E "s/^std_srvs\.srv\.Trigger_Response\(success=(True|False), message=(.*)\)\$/\2/" |
+          sed -E "s/^'(.*)'\$/\1/; s/^\"(.*)\"\$/\1/")
+        return "$verdict"
+      fi
     fi
     [ "$attempt" -lt "$call_tries" ] || return 2
     attempt=$((attempt + 1))
