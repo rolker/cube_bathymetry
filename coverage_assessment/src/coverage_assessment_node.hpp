@@ -975,9 +975,13 @@ private:
   /// the old run's coverage would stay latched on both topics, and a scoreboard would
   /// keep showing it, for as long as that lasts. With nothing held, the result does not
   /// depend on the surface height, so none is needed. Only possible once the areas are
-  /// projected (the georeference exists and no definition is queued); otherwise the
-  /// first tick that can projects them, and publishes. The change flags are put back so
-  /// that tick still assesses with a real surface.
+  /// projected (the georeference exists and no definition is queued); otherwise it
+  /// returns without publishing. The next tick projects the queued definitions, but then
+  /// meets the same water surface check as any tick, and returns before assessing while
+  /// the surface is unavailable, stale or too far: the old result stays latched until a
+  /// tick can assess, so for a queued definition the empty result is NOT guaranteed
+  /// to be published. The change flags are put back so that tick still assesses with a
+  /// real surface.
   void publishEmptyAssessment()
   {
     if (!have_georef_ || areas_dirty_ || !registry_ || registry_->areas().empty() ||
