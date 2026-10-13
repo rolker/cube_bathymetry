@@ -91,3 +91,52 @@ Read cold as a dispatched sub-agent (independent). Checked against source: `cube
 | Principle alignment | Good | Transparency, consequences, test-what-breaks are met; the stats and georef items are gaps in the second |
 | ADR compliance | Good | Project ADR-0001 invariant preserved by the refusal; workspace ADR-0008 (ROS 2 conventions) followed |
 | ROS conventions | Needs work | Service lifecycle placement (create last), QoS drop wording, exec_depend |
+
+## Implementation
+**Status**: complete
+**When**: 2026-10-13 12:39 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Branch**: feature/issue-167 at `1298b98`
+**Plan**: `.agent/work-plans/issue-167/plan.md` (amended at `11237ac` for the plan review; synced to the code at `a660284`)
+
+Implements the plan as amended on 2026-10-13: all five must-fixes and all suggestions of the Plan Review folded in, the three open questions answered by the owner (partial reset accepted, assessor counters cumulative, live four-boat timing check run by the host). The live check is NOT done by this entry, see Open items.
+
+### Commits (oldest first, all on feature/issue-167, nothing pushed)
+- `11237ac` plan: fold in the plan-review must-fixes and suggestions
+- `eb33873` progress: correct the Plan Authored timestamp to the plan commit's author time (11:13 -04:00, from `git log`; the entry had said 11:25, later than the machine clock at review time)
+- `9a546a1` cube_bathymetry_node: split on_configure into buildSession and adoptSession (own commit, existing lifecycle tests unchanged and green before the service was added)
+- `0c0c1e4` cube_bathymetry_node: add the ~/reset in-RAM session service (+ `std_srvs`, 10 new tests)
+- `faf31f0` coverage_assessment: add the ~/reset in-RAM session service (+ `std_srvs`, held-limit and map-moved log texts, 8 new tests)
+- `83db5ee` reset_cube_nodes.sh: reset by ~/reset service, walk only where there is none (+ `ros2service` exec_depend, stub and cases 13-21, CMake case-group comment)
+- `2507499` docs: both READMEs and AGENTS.md (the owner-approved eviction bullet)
+- `a660284` plan: sync with what was implemented
+- `1298b98` style: wrap one comment line and align two lambda continuations for cpplint/uncrustify
+
+### Tests
+`./sensors_ws/build.sh cube_bathymetry coverage_assessment` then `./sensors_ws/test.sh cube_bathymetry coverage_assessment` at `1298b98`: **colcon summary 1069 tests, 0 errors, 0 failures, 110 skipped** (the skips are the existing ones; a first run at `2507499` had 6 lint failures, all mine: one cpplint line length and two uncrustify alignments, fixed in `1298b98`). gtest counts: `test_node_lifecycle` 29 (was 20), `test_coverage_assessment_node` 48 (was 40); `test_reset_cube_nodes` runs 21 case groups (was 12) and passes in about 30 s. Live checks beyond the unit tests, on a private ROS_DOMAIN_ID: the real `ros2 service call` / `ros2 service list` output of a Python Trigger server was captured and used as the stub format, and the final script was run against two such servers (success, refusal with exit 1 and the reset-before-this report, inactive with exit 4); no processes were killed by name.
+
+### Revert checks (each new test fails when its fix is reverted)
+Done with temporary, env-selected mutations in a throw-away build (removed again; nothing of them is committed).
+- cube node: dropping `refresh_tracker_.clear()` from `adoptSession` fails ResetServiceResetsTheSessionState, FailedResetLeavesTheOldSessionIntact (retry step) and the existing ReconfigureResetsTheSessionState; skipping `setCaptureSpacingScale` fails ResetKeepsSheetLevelSettings and ReadOnlyOverridesSurviveACycle; skipping the backscatter setter fails ResetKeepsSheetLevelSettings; moving the stored curve instead of copying fails ResetKeepsSheetLevelSettings on the SECOND reset only; no draft_dir refusal fails ResetIsRefusedWhileDraftDirIsSet; judging the draft_dir parameter instead of the member fails the same test's second half; creating the service before the sonar_info subscription fails ConfigureThatThrowsLeavesNoResetService; not releasing it on cleanup fails ResetServiceExistsOnlyWhileConfigured; building in place instead of aside fails FailedResetLeavesTheOldSessionIntact; skipping the prior prime fails ResetReprimesPriorStore; adding a reentrant group to the executor fails AllCallbacksShareTheDefaultGroup.
+- assessor: no `accumulator.clear()` fails the union test and the held-limit test; keeping the unplaced grid fails ResetDropsAKeptUnplacedGridSoItsCellsDoNotReturn; keeping the held-limit latch fails ResetClearsTheHeldLimitAndAssessmentsResume; checking the moved map frame without the `have_georef_` guard fails ResetBeforeTheFirstGeoreferenceIsNotRefused; not checking it at all fails both map-moved tests; zeroing `stats_` fails the counters assertions; dropping the forced assessment fails the union test; not releasing the service fails the presence test.
+- script (mutated copies of the script run through the same test): an empty `service list` treated as an answer (18b), bare-substring `success=True` parsing (14), the walk selected after a call timeout (19b), the lifecycle preflight skipped for consumers (4a, 20a), the call retry budget shared with reads (19b) or fixed at 1 (19a, 19b, 19c), exit 0 for an inactive node (21), refusal not stopping the script (14), a state listing for service nodes (13), `--allow-persistence` ignored (16a), no consumer fallback (17) and service-class nodes reset after a walk-class node left active (15b) each fail the case named.
+
+### Deviations from the plan (all also edited into the plan)
+- **Callback groups.** The plan said no callback group exists in either package. `tf2_ros::TransformListener` makes its own group for its own thread (not added to the node's executor; it only writes the TF buffer). `AllCallbacksShareTheDefaultGroup` therefore counts the groups the executor spins (exactly one, mutually exclusive) instead of all groups; the handler comment says why the swap is still safe.
+- **`FreshSession`** carries a `prior_status` string for the response instead of primed-tile counts.
+- **No "next ping builds a window" test.** `pingCallback` needs TF and the whole publish chain; the window is built from the sheet's grids, which ResetServiceResetsTheSessionState already pins (no cell of the old patch returns, new data accumulates).
+- **Assessor handler** has its own try/catch (with the containment of `guarded`) so the exception text reaches the caller; the fault-injector name is `"reset service"`. Test-only seams added: public `heldCellCount()` and a `CoverageAssessmentTestAccess` friend (assessor), `build_fault_injector_` and test-access methods (CUBE node).
+- **Script wording.** A refusal prints `<node>: ~/reset answered: <message>`; classification says which nodes take the walk before the preflight. Exit status 4 and the variables `RESET_CUBE_CALL_TIMEOUT` / `RESET_CUBE_CALL_TRIES` are as planned.
+- **A reset of the assessor before its first georeference is tested on a configured, not yet activated node** (TF present, no tick yet), which also covers the inactive response.
+- The plan edits made while coding went into the commit that caused them where it was clean, otherwise into `a660284`.
+
+### Audit of session-scoped members (plan step 4)
+Grepped every member written in `pingCallback`, `publishBounded`, the timers and `saveDirtyTiles`: nothing beyond the 11 fields in `staleFields`; no new field was needed in `adoptSession` or in the test accessor.
+
+### Open items
+- [ ] **Live four-boat timing check (issue work item, plan step 21): NOT done here, left unchecked as decided.** The host runs it: record the wall time of an all-service `reset_cube_nodes.sh --consumer /coverage_assessment` against the 318 to 324 s baseline. The README gives only an estimate from the call count (6 calls, about 18 to 48 s at 3 to 8 s per call) and says it is not a measurement. The PR body must list this as open and carry no closing keyword for #167 until it is done or waived; "Part of #164" only for the umbrella.
+- [ ] PR body: the exact new `AGENTS.md` sentence for the owner to see ("draft-tile eviction persists to the durable store *before* dropping from RAM. The live tile store is a derived product for the live view, not the record: the raw bags and offline processing are."); the statement that a boat with `draft_dir` set (`bizzyboat.yaml`) is not served until rolker/unh_marine_autonomy#391 and the 2026-08-27 operator request stays open.
+- [ ] Before pushing: run `/review-code` (pre-push mode) on this branch; nothing was pushed, no PR opened, the issue was not edited.
+- [ ] CI image: `std_srvs` and `ros2service` come from `ros-jazzy-ros-base`, so the Dockerfile needs no change; the prebaked deps image picks them up at its next weekly rebuild and the CI-time `rosdep install` covers the gap (per the Dockerfile's own comment). Not verified in hosted CI.
+- [ ] Agent-instruction candidates from the plan (proposals only, nothing written): a pitfall for a future `.agents/README.md` ("a lifecycle node's service is not state-gated: create it last in `on_configure` and release it in the shared release function"); for `ros2_cli_best_practices.md`: `ros2 service type` exits 1 with no output for an absent service while `ros2 service call` has no absence signal, and a cold daemon answers `ros2 service list` with an empty list the first time (observed); and the corrected fact that the `grid` stamp is the ROS-time stamp of the latest ping that changed a tile.
