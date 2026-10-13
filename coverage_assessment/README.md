@@ -279,9 +279,12 @@ or `b` means "not set" (above).
 
 Definitions are validated as they arrive and queued per id; the registry sees them in
 stamp order once `earth` is known. The checks that need no transform run on arrival: the
-vertex count and ranges, and the shape (zero area, collinear vertices), measured on a local
-equirectangular projection of the latitude/longitude ring (skipped within 5 degrees of a
-pole, where that projection collapses a ring into a line). So only shape-valid definitions
+vertex count and ranges, and the shape (zero area, collinear vertices), measured on the
+plane tangent to the WGS84 ellipsoid at the polygon's first vertex (latitude/longitude to
+ECEF to east/north: the same kind of plane as the map frame, anchored at the polygon because
+the map frame is not known yet; it holds at a pole and across the antimeridian). Points on
+one great circle are collinear; three points on one parallel are a thin real triangle, as
+in the real projection, where it rasterises to no cells. So only shape-valid definitions
 are queued, and a burst of degenerate ones cannot push a valid one out. The checks that
 depend on the map frame run when the definition is projected: the 1e7 m bound and
 `max_raster_cells`, which bounds the raster in the map frame (an east/north bounding box can

@@ -57,58 +57,52 @@ inline Point2 projectGeoPoint(
   return {map_pt.x(), map_pt.y()};
 }
 
-/// A geographic polygon (degrees) in local equirectangular metres about its mean
-/// latitude and first vertex, with no transform: east/north offsets from the first
-/// vertex, the longitude difference wrapped to +-180. NOT the assessment raster's
-/// frame (that needs map <- earth and is projectGeoPoint's job); it has the right
-/// size and shape to a fraction of a percent at survey scales, which is what the
-/// shape checks on arrival need (zero area, collinear, absurd extent).
+/// A geographic polygon (degrees) in metres on the plane tangent to the WGS84
+/// ellipsoid at its first vertex, with no transform: each vertex at ellipsoid
+/// height 0 to ECEF, then east/north of the first vertex. The same kind of plane
+/// as the assessment raster's map frame (an east-north-up tangent plane), but
+/// anchored at the polygon itself because the map frame needs map <- earth from
+/// TF, which is not there yet when a definition arrives (projectGeoPoint does the
+/// real projection later). Unlike a latitude/longitude grid it has no trouble at
+/// a pole or across the antimeridian, so the shape checks on arrival (zero area,
+/// collinear) hold everywhere.
 inline std::vector<Point2> localGeoPolygon(
   const std::vector<std::pair<double, double>> & lat_lon_deg)
 {
-  constexpr double kEarthRadius = 6371008.8;
   constexpr double kRadPerDeg = 3.14159265358979323846 / 180.0;
   std::vector<Point2> out;
   if (lat_lon_deg.empty()) {
     return out;
   }
-  double mean_lat = 0.0;
+  auto ecef = [](const std::pair<double, double> & p) {
+      const gz4d::GeoPointECEF e(gz4d::GeoPointLatLongDegrees(p.first, p.second, 0.0));
+      return Eigen::Vector3d(e.x(), e.y(), e.z());
+    };
+  const double lat0 = lat_lon_deg.front().first * kRadPerDeg;
+  const double lon0 = lat_lon_deg.front().second * kRadPerDeg;
+  const Eigen::Vector3d east(-std::sin(lon0), std::cos(lon0), 0.0);
+  const Eigen::Vector3d north(
+    -std::sin(lat0) * std::cos(lon0), -std::sin(lat0) * std::sin(lon0), std::cos(lat0));
+  const Eigen::Vector3d origin = ecef(lat_lon_deg.front());
   for (const auto & p : lat_lon_deg) {
-    mean_lat += p.first;
-  }
-  mean_lat /= static_cast<double>(lat_lon_deg.size());
-  const double cos_lat = std::max(std::cos(mean_lat * kRadPerDeg), 1.0e-3);
-  const double lat0 = lat_lon_deg.front().first;
-  const double lon0 = lat_lon_deg.front().second;
-  for (const auto & p : lat_lon_deg) {
-    double dlon = std::fmod(p.second - lon0, 360.0);
-    if (dlon > 180.0) {
-      dlon -= 360.0;
-    } else if (dlon < -180.0) {
-      dlon += 360.0;
-    }
-    out.push_back({dlon * kRadPerDeg * kEarthRadius * cos_lat,
-        (p.first - lat0) * kRadPerDeg * kEarthRadius});
+    const Eigen::Vector3d d = ecef(p) - origin;
+    out.push_back({east.dot(d), north.dot(d)});
   }
   return out;
 }
 
 /// Why a geographic polygon (degrees) cannot be a survey area, judged without TF,
 /// or an empty string when its shape is usable. Only true shape errors: zero area or
-/// collinear vertices, measured in localGeoPolygon's east/north metres. The cell cap
-/// (`max_raster_cells`) is deliberately NOT applied here: it bounds the raster in the
-/// map frame, and an east/north bounding box can be far larger than the map-frame one
-/// when map is rotated, so applying it on arrival would refuse valid areas. The real
-/// projection applies it. Near a pole the equirectangular approximation collapses a
-/// ring around the pole into a line, so the zero-area test is skipped there.
+/// collinear vertices, measured in localGeoPolygon's tangent-plane metres. The cell
+/// cap (`max_raster_cells`) is deliberately NOT applied here: it bounds the raster in
+/// the map frame, and an east/north bounding box can be far larger than the map-frame
+/// one when map is rotated, so applying it on arrival would refuse valid areas. The
+/// real projection applies it.
 inline std::string geoPolygonShapeError(
   const std::vector<std::pair<double, double>> & lat_lon_deg)
 {
-  constexpr double kPolarLatitude = 85.0;
-  for (const auto & p : lat_lon_deg) {
-    if (std::fabs(p.first) > kPolarLatitude) {
-      return "";
-    }
+  if (lat_lon_deg.size() < 3) {
+    return "fewer than 3 vertices";
   }
   const std::vector<Point2> pts = localGeoPolygon(lat_lon_deg);
   double twice_area = 0.0;
@@ -123,10 +117,14 @@ inline std::string geoPolygonShapeError(
     min_y = std::min(min_y, a.y);
     max_y = std::max(max_y, a.y);
   }
-  const double box = (max_x - min_x) * (max_y - min_y);
-  // Same relative test as rasterisePolygon, plus an absolute floor so a box of zero
-  // (all vertices on one line of latitude or longitude) is refused too.
-  if (!(std::fabs(twice_area) > 1e-12 * box) || !(std::fabs(twice_area) > 1e-9)) {
+  // Zero area relative to the polygon's size. The vertices come through ECEF
+  // (coordinates ~6.4e6 m), so points on one great circle land a few 1e-9 m off
+  // their common line; the tolerance absorbs that and nothing a survey would
+  // draw. Three points on one PARALLEL are not on a great circle and pass (their
+  // middle sags ~7 mm over 300 m at 43 N), as they do in the real projection,
+  // where such a sliver rasterises to no cells.
+  const double extent = std::max(max_x - min_x, max_y - min_y);
+  if (!(extent > 0.0) || !(std::fabs(twice_area) > 1e-9 * extent * extent)) {
     return "polygon has zero area";
   }
   return "";

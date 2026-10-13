@@ -255,19 +255,21 @@ TEST(FrameChain, ARotationAboveTheToleranceIsReportedInRadians)
 
 TEST(FrameChain, LocalGeoPolygonHasTheSizeAndShapeOfTheRing)
 {
-  // A 0.001 deg x 0.002 deg box at 43 N: about 111.2 m north-south and
-  // 2 * 111.2 * cos(43 deg) = 162.7 m east-west.
+  // A 0.001 deg x 0.002 deg box at 43 N on the WGS84 ellipsoid: 111.09 m
+  // north-south (meridian radius) and 163.08 m east-west (prime-vertical radius
+  // times cos 43 deg).
   const std::vector<std::pair<double, double>> ring = {
     {43.0, -70.0}, {43.0, -69.998}, {43.001, -69.998}, {43.001, -70.0}};
   const auto local = coverage_assessment::localGeoPolygon(ring);
   ASSERT_EQ(local.size(), 4u);
   EXPECT_NEAR(local[0].x, 0.0, 1e-9);
   EXPECT_NEAR(local[0].y, 0.0, 1e-9);
-  EXPECT_NEAR(local[1].x, 162.7, 0.5);
-  EXPECT_NEAR(local[2].y, 111.2, 0.2);
-  // The antimeridian: the difference of longitude is wrapped.
+  EXPECT_NEAR(local[1].x, 163.08, 0.01);
+  EXPECT_NEAR(local[2].y, 111.09, 0.01);
+  // Across the antimeridian: 0.002 deg of the equator, east of the first vertex.
   const auto wrapped = coverage_assessment::localGeoPolygon({{0.0, 179.999}, {0.0, -179.999}});
-  EXPECT_NEAR(wrapped[1].x, 222.4, 0.5);
+  EXPECT_NEAR(wrapped[1].x, 222.64, 0.01);
+  EXPECT_NEAR(wrapped[1].y, 0.0, 1e-6);
   EXPECT_TRUE(coverage_assessment::localGeoPolygon({}).empty());
 }
 
@@ -297,23 +299,50 @@ TEST(FrameChain, ArrivalShapeCheckDoesNotApplyTheCellCap)
 
 TEST(FrameChain, ArrivalShapeCheckRefusesZeroArea)
 {
-  // Exactly collinear in the local projection: one meridian. (Three points on a
-  // diagonal through geoAt are not: the projection's mean-latitude scale differs
-  // from geoAt's, which leaves a genuine sliver of non-zero area.)
+  // Exactly collinear on the ellipsoid: points on one great circle (a meridian,
+  // the equator), and one point repeated.
   const std::vector<std::pair<double, double>> one_meridian = {
     geoAt(0.0, 0.0), geoAt(0.0, 100.0), geoAt(0.0, 300.0)};
   EXPECT_EQ(
     coverage_assessment::geoPolygonShapeError(one_meridian), "polygon has zero area");
-  const std::vector<std::pair<double, double>> one_latitude = {
-    geoAt(0.0, 0.0), geoAt(100.0, 0.0), geoAt(300.0, 0.0)};
-  EXPECT_EQ(coverage_assessment::geoPolygonShapeError(one_latitude), "polygon has zero area");
+  const std::vector<std::pair<double, double>> equator = {
+    {0.0, 10.0}, {0.0, 10.001}, {0.0, 10.003}};
+  EXPECT_EQ(coverage_assessment::geoPolygonShapeError(equator), "polygon has zero area");
   const std::vector<std::pair<double, double>> repeated = {
     geoAt(5.0, 5.0), geoAt(5.0, 5.0), geoAt(5.0, 5.0)};
   EXPECT_EQ(coverage_assessment::geoPolygonShapeError(repeated), "polygon has zero area");
+  EXPECT_EQ(coverage_assessment::geoPolygonShapeError({{43.0, -70.0}, {43.0, -69.0}}),
+    "fewer than 3 vertices");
 }
 
-// Near a pole the equirectangular approximation collapses a ring into a line; the
-// check must not refuse a shape the real projection accepts.
+// A parallel is not a great circle: three points on one are a (very thin) real
+// triangle, which the real projection accepts too (it rasterises to no cells).
+TEST(FrameChain, ArrivalShapeCheckAcceptsThreePointsOnAParallel)
+{
+  const std::vector<std::pair<double, double>> one_latitude = {
+    geoAt(0.0, 0.0), geoAt(100.0, 0.0), geoAt(300.0, 0.0)};
+  EXPECT_EQ(coverage_assessment::geoPolygonShapeError(one_latitude), "");
+}
+
+// Degenerate shapes are refused at a pole as everywhere else (the arrival check
+// used to skip every polygon above 85 degrees).
+TEST(FrameChain, ArrivalShapeCheckRefusesZeroAreaAtAPole)
+{
+  const std::vector<std::pair<double, double>> repeated = {
+    {89.9, 30.0}, {89.9, 30.0}, {89.9, 30.0}};
+  EXPECT_EQ(coverage_assessment::geoPolygonShapeError(repeated), "polygon has zero area");
+  // Through the pole along one great circle (the 0 and 180 degree meridians).
+  const std::vector<std::pair<double, double>> through_pole = {
+    {89.9, 0.0}, {90.0, 0.0}, {89.9, 180.0}};
+  EXPECT_EQ(coverage_assessment::geoPolygonShapeError(through_pole), "polygon has zero area");
+  const std::vector<std::pair<double, double>> south = {
+    {-89.95, 45.0}, {-89.97, 45.0}, {-89.99, 45.0}};
+  EXPECT_EQ(coverage_assessment::geoPolygonShapeError(south), "polygon has zero area");
+}
+
+// A ring around the pole is a real polygon (a latitude/longitude grid would
+// collapse it into a line); the check must not refuse a shape the real projection
+// accepts.
 TEST(FrameChain, ArrivalShapeCheckAcceptsAPolarRing)
 {
   const std::vector<std::pair<double, double>> ring = {

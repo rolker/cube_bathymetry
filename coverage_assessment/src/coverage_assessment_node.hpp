@@ -596,8 +596,8 @@ private:
 
   /// Checks what can be checked on arrival with no transform and queues the
   /// definition for projection: vertex count, finite coordinates in range, and the
-  /// SHAPE (zero area, collinear, absurd extent) on a local equirectangular
-  /// projection of the latitude/longitude ring. A definition that fails them never
+  /// SHAPE (zero area, collinear) on the plane tangent to the ellipsoid at the
+  /// polygon's first vertex (localGeoPolygon). A definition that fails them never
   /// touches what is held, and stamp ordering is judged against the last definition
   /// the registry ACCEPTED, so neither a rejected update nor an unvalidated one can
   /// displace or outrank a good one; only shape-valid definitions are queued, so a

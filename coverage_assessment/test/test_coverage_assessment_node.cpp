@@ -1156,17 +1156,18 @@ TEST_F(NodeTest, DegenerateAreasBeforeTfNeverEvictTheOnlyValidDefinition)
   ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
 
   // No TF yet: one valid definition, then eight zero-area ones (three vertices
-  // each, valid coordinates, collinear) of the same id and newer stamps. The
-  // queue holds eight per id, so queuing them all evicted the valid one and every
-  // survivor then failed projection.
+  // each, valid coordinates, collinear: one meridian is a great circle; points on
+  // one parallel are not, they make a thin real triangle) of the same id and newer
+  // stamps. The queue holds eight per id, so queuing them all evicted the valid
+  // one and every survivor then failed projection.
   h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
   for (int k = 0; k < 8; ++k) {
     SurveyArea flat_area = makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 10 + k);
     flat_area.polygon.points.resize(3);
-    flat_area.polygon.points[1].latitude = flat_area.polygon.points[0].latitude;
-    flat_area.polygon.points[1].longitude = flat_area.polygon.points[0].longitude + 1.0e-4;
-    flat_area.polygon.points[2].latitude = flat_area.polygon.points[0].latitude;
-    flat_area.polygon.points[2].longitude = flat_area.polygon.points[0].longitude + 2.0e-4;
+    flat_area.polygon.points[1].latitude = flat_area.polygon.points[0].latitude + 1.0e-4;
+    flat_area.polygon.points[1].longitude = flat_area.polygon.points[0].longitude;
+    flat_area.polygon.points[2].latitude = flat_area.polygon.points[0].latitude + 2.0e-4;
+    flat_area.polygon.points[2].longitude = flat_area.polygon.points[0].longitude;
     h.publishArea(flat_area);
   }
   ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().areas_received == 9;}, 10.0));
@@ -1180,6 +1181,41 @@ TEST_F(NodeTest, DegenerateAreasBeforeTfNeverEvictTheOnlyValidDefinition)
   ASSERT_TRUE(h.first_.has_value());
   EXPECT_DOUBLE_EQ(h.first_->area_total, 100.0);
   EXPECT_EQ(h.first_->area.stamp.sec, 1);
+}
+
+// The same burst near a pole (Copilot review of PR #166): the arrival check used to
+// skip every polygon above 85 degrees, so degenerate polar definitions were queued
+// and could evict a valid one before `earth` was known. They are now refused on
+// arrival like any other, and nothing is evicted.
+TEST_F(NodeTest, DegeneratePolarAreasAreRefusedOnArrivalAndEvictNothing)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+
+  SurveyArea ring = makeArea("polar", {0, 0, 10, 10}, 0.5, 0.0, 1);
+  ring.polygon.points.resize(4);
+  const double lons[4] = {0.0, 90.0, 180.0, -90.0};
+  for (int k = 0; k < 4; ++k) {
+    ring.polygon.points[k].latitude = 89.5;
+    ring.polygon.points[k].longitude = lons[k];
+  }
+  h.publishArea(ring);
+  for (int k = 0; k < 8; ++k) {
+    SurveyArea point = makeArea("polar", {0, 0, 10, 10}, 0.5, 0.0, 10 + k);
+    point.polygon.points.resize(3);
+    for (auto & v : point.polygon.points) {
+      v.latitude = 89.9;
+      v.longitude = 30.0;
+    }
+    h.publishArea(point);
+  }
+  ASSERT_TRUE(h.spinUntil([&]() {return h.node_->stats().areas_received == 9;}, 10.0));
+  EXPECT_EQ(h.node_->stats().areas_rejected, 8u);
+  EXPECT_EQ(countLog("polygon has zero area"), 8u);
+  EXPECT_EQ(countLog("dropping the one with the lowest stamp"), 0u);
 }
 
 TEST_F(NodeTest, QueueOverflowDropsTheLowestStampAndSaysSo)
