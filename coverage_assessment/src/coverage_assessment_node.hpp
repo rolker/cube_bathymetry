@@ -210,7 +210,15 @@ public:
     timer_ = create_wall_timer(
       std::chrono::nanoseconds(static_cast<int64_t>(assessment_period_s_ * 1.0e9)),
       [this]() {guarded("assessment timer", [this]() {onTimer();});});
-    return LifecycleNode::on_activate(state);
+    const auto result = LifecycleNode::on_activate(state);
+    // A reset while inactive could not publish (the publishers were not activated),
+    // so the old run's result is still latched; publish the emptied one now that
+    // they are. After the base class: it is what activates the publishers.
+    if (result == CallbackReturn::SUCCESS && publish_empty_on_activate_) {
+      publish_empty_on_activate_ = false;
+      publishEmptyAssessment();
+    }
+    return result;
   }
 
   CallbackReturn on_deactivate(const rclcpp_lifecycle::State & state)
@@ -588,6 +596,7 @@ private:
   {
     // First: its handler reads the registry and the sources released below.
     reset_service_.reset();
+    publish_empty_on_activate_ = false;
     if (timer_) {
       timer_->cancel();
       timer_.reset();
@@ -906,8 +915,8 @@ private:
   /// also count areas received and rejected, which a reset that keeps the areas must
   /// not zero, and callback_exceptions is evidence of a fault. When active and the
   /// areas are projected, the emptied result is published at once
-  /// (publishEmptyAssessment). Refuses, changing
-  /// nothing, when the map frame has moved since the georeference was captured: the
+  /// (publishEmptyAssessment); when inactive, it does so on the next activation.
+  /// Refuses, changing nothing, when the map frame has moved since the georeference was captured: the
   /// service keeps the georeference, so that state needs the lifecycle walk, which
   /// captures it again.
   bool resetSession(std::string * message)
@@ -949,6 +958,9 @@ private:
     const bool active = get_current_state().label() == "active";
     if (active) {
       publishEmptyAssessment();
+    } else {
+      // Nothing can be published while inactive; the next activation does it.
+      publish_empty_on_activate_ = true;
     }
     *message = std::to_string(cells) + " cell(s) dropped from " +
       std::to_string(sources_.size()) + " source(s); " + std::to_string(areas_.size()) +
@@ -1480,6 +1492,9 @@ private:
   bool georef_moved_ = false;
   /// Set when the sources' held cells pass max_held_cells; cleared by configure.
   bool held_limit_reached_ = false;
+  /// A reset ran while the node was inactive: publish the emptied result on the next
+  /// activation, because the old run's is still latched on both topics.
+  bool publish_empty_on_activate_ = false;
   double moved_shift_m_ = 0.0;
   double moved_angle_rad_ = 0.0;
   double last_surface_ = 0.0;

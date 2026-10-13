@@ -2032,6 +2032,79 @@ TEST_F(NodeTest, ResetPublishesTheEmptyResultWhileTheWaterSurfaceIsStale)
   EXPECT_DOUBLE_EQ(late.at("area1").area_covered, 0.0);
 }
 
+// The same for a node that is INACTIVE at reset time: its publishers cannot publish,
+// so the old run's result stays latched, and the script then activates the node.
+// The emptied result goes out on that activation, again with the surface still stale
+// (so no tick assessed it).
+TEST_F(NodeTest, ResetWhileInactivePublishesTheEmptyResultOnActivation)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.dynamic_tide = true;
+  opt.max_age = 4.0;
+  Harness h(opt);
+  h.publishCommonTf();
+  h.publishSourceFrame("a/map", 0.0, 0.0, 0.0);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  h.publishArea(makeArea("area1", {0, 0, 10, 10}, 0.5, 0.0, 1));
+
+  bool tide_alive = true;
+  bool send_grids = true;
+  const auto small = makeGrid("a/map", {0, 0, 10, 4}, 1.0, flat(12.0f, 0.25f));
+  auto each = [&]() {
+      if (tide_alive) {
+        h.publishTideNow();
+      }
+      if (send_grids) {
+        h.publishGrid("A", small);
+      }
+    };
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {
+        return h.latest_.count("area1") && h.latest_.at("area1").area_covered == 40.0;
+      }, 20.0, each));
+  tide_alive = false;
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.node_->stats().skipped_surface_stale > 0;}, 30.0, each));
+  send_grids = false;
+  h.spinFor(0.5, each);
+  ASSERT_GT(h.node_->heldCellCount(), 0u);
+  ASSERT_EQ(h.node_->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  const std::size_t received = h.received_;
+  const auto grid_stamp = rclcpp::Time(h.last_coverage_grid_.header.stamp);
+
+  const auto [ok, message] = h.callReset();
+  ASSERT_TRUE(ok) << message;
+  EXPECT_NE(message.find("inactive"), std::string::npos) << message;
+  h.spinFor(0.5, each);
+  EXPECT_EQ(h.received_, received) << "an inactive node published";
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").area_covered, 40.0);
+
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  const uint64_t stale_at_activate = h.node_->stats().skipped_surface_stale;
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return h.received_ > received && h.latest_.at("area1").area_covered == 0.0;}, 10.0));
+  EXPECT_DOUBLE_EQ(h.latest_.at("area1").area_total, 100.0);
+  ASSERT_TRUE(h.spinUntil(
+      [&]() {return rclcpp::Time(h.last_coverage_grid_.header.stamp) > grid_stamp;}, 10.0));
+  grid_map::GridMap g;
+  ASSERT_TRUE(grid_map::GridMapRosConverter::fromMessage(h.last_coverage_grid_, g));
+  int ones = 0;
+  for (grid_map::GridMapIterator it(g); !it.isPastEnd(); ++it) {
+    ones += (g.at("meets_standard", *it) == 1.0f) ? 1 : 0;
+  }
+  EXPECT_EQ(ones, 0) << "the old run's coverage_grid is still latched";
+  h.spinFor(0.5, each);
+  EXPECT_GT(h.node_->stats().skipped_surface_stale, stale_at_activate)
+    << "the surface must still be stale, or this test shows nothing";
+  const auto late = h.lateJoiner();
+  ASSERT_EQ(late.count("area1"), 1u);
+  EXPECT_DOUBLE_EQ(late.at("area1").area_covered, 0.0);
+  EXPECT_EQ(h.node_->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
 // A source whose latest grid could not be placed keeps that grid, to fold it in
 // when its frame resolves. A reset that left it would bring the old session's
 // cells back on the next tick.

@@ -117,10 +117,12 @@ is not replayed either), the subscriptions, TF, the raster georeference, and the
 counters, which stay cumulative (they also count areas and faults, which a reset that keeps
 the areas must not zero; a one-line INFO logs what was dropped). It answers in `inactive` and
 `active`, and says which in the response; an inactive node assesses nothing until it is
-activated. A node that is inactive, or whose areas are not yet projected (no
-georeference yet, or a definition queued), publishes nothing at reset time; the first tick
-that can assess publishes. If the water surface is unavailable then, the old messages stay
-latched on both topics until that tick succeeds, because a tick returns before assessing.
+activated. An inactive node cannot publish, so it publishes the emptied result when it is
+next activated (the script activates it), again whatever the water surface is doing. A node
+whose areas are not yet projected (no georeference yet, or a definition queued) publishes
+nothing at reset time; the first tick that can assess publishes. If the water surface is
+unavailable then, the old messages stay latched on both topics until that tick succeeds,
+because a tick returns before assessing.
 
 **It refuses when the map frame has moved** since the raster georeference was captured
 (`success: false`, nothing changed), because the service keeps the georeference and so

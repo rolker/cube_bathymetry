@@ -155,9 +155,10 @@ emptied `coverage_assessment` and `coverage_grid` itself, so the zero shows at o
 old run's coverage does not stay latched on either topic; the next tick publishes again. It keeps the survey areas and their projections, the subscriptions, TF, **the raster
 georeference**, and the counters, which stay cumulative. Because it keeps the georeference
 it refuses when the map frame has moved: that state needs the lifecycle walk, which captures
-the georeference again, and the script falls back to the walk for that consumer. An inactive node,
-or one whose areas are not yet projected, publishes nothing at reset time; until its first
-tick that can assess, the old messages stay latched.
+the georeference again, and the script falls back to the walk for that consumer. An inactive node
+publishes the emptied result when it is next activated, which the script does right after
+the reset. A node whose areas are not yet projected publishes nothing at reset time; until its
+first tick that can assess, the old messages stay latched.
 
 ### The script
 
