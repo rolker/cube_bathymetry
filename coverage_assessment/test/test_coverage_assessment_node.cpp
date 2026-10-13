@@ -1368,6 +1368,19 @@ TEST_F(NodeTest, StatusLineReportsTheLastAssessmentPassDuration)
   EXPECT_GE(countLog(" s over "), 1u);
 }
 
+// Under use_sim_time with nobody publishing /clock the node clock stays at zero;
+// the status line is timed on the steady clock, so it still comes every 10 s.
+TEST_F(NodeTest, StatusLineComesUnderSimTimeBeforeTheClockStarts)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  opt.use_sim_time = true;
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(h.node_->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_TRUE(h.spinUntil([&]() {return countLog("Assessments:") >= 1;}, 20.0));
+}
+
 TEST_F(NodeTest, ConfigureRefusesAMaxPassCellChecksBelowTheSourceCount)
 {
   rclcpp::NodeOptions options;

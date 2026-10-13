@@ -197,7 +197,7 @@ public:
   {
     // The first tick assesses even when nothing changed since configure.
     force_assessment_ = true;
-    last_status_log_ = get_clock()->now();
+    last_status_log_ = std::chrono::steady_clock::now();
     timer_ = create_wall_timer(
       std::chrono::nanoseconds(static_cast<int64_t>(assessment_period_s_ * 1.0e9)),
       [this]() {guarded("assessment timer", [this]() {onTimer();});});
@@ -1081,9 +1081,16 @@ private:
     return cells;
   }
 
-  void logStatus(const rclcpp::Time & now)
+  /// The 10 s status lines. Timed on the steady clock, like the warning
+  /// throttles and the wall timer that calls this: under use_sim_time the node
+  /// clock stands still before /clock starts and while a simulation is paused,
+  /// which silenced the status line exactly when it was needed.
+  void logStatus()
   {
-    if ((now - last_status_log_).seconds() < kStatusLogPeriodSeconds) {
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration<double>(now - last_status_log_).count() <
+      kStatusLogPeriodSeconds)
+    {
       return;
     }
     last_status_log_ = now;
@@ -1126,7 +1133,7 @@ private:
       return;
     }
     const rclcpp::Time now = get_clock()->now();
-    logStatus(now);
+    logStatus();
 
     std::string no_earth;
     const bool have_georef = ensureGeoref(&no_earth);
@@ -1333,7 +1340,7 @@ private:
   double moved_angle_rad_ = 0.0;
   double last_surface_ = 0.0;
   bool have_last_surface_ = false;
-  rclcpp::Time last_status_log_{0, 0, RCL_ROS_TIME};
+  std::chrono::steady_clock::time_point last_status_log_{};
   NodeStats stats_;
   std::function<void(const char *)> fault_injector_;
   /// Last time each throttled call site logged (see COVERAGE_LOG_THROTTLED).
