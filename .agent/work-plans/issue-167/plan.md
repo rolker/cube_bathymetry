@@ -50,7 +50,8 @@ Facts verified in source that shape the design:
    parameter). `bs_mode_` and `bs_applied_curve_` already exist. These plus `cell_size_`, `prior_store_dir_`,
    `draft_dir_`, `max_resident_tiles_` are everything the builder needs.
 2. **Extract `buildSession()` from `on_configure`.** It constructs a candidate (`struct FreshSession { sheet,
-   evicted_indices, catalog_builder, primed-tile counts, notes }`), entirely local: new `GeoMapSheet(cell_size_)`,
+   evicted_indices, catalog_builder, prior_status }`, the last being the text the reset response reports about
+   `prior_store_dir`), entirely local: new `GeoMapSheet(cell_size_)`,
    `setCaptureSpacingScale(capture_spacing_scale_)`, `setBackscatterCorrection(bs_mode_, bs_applied_curve_ ...)`
    (a COPY of the stored curve's points, never a move: configure moves from a local copy, and moving the member would
    blank `bs_applied_curve_` on the second reset; never re-reading the file or the topic), the `prior_store_dir` prime,
@@ -227,6 +228,7 @@ Facts verified in source that shape the design:
       expect `success=false`, same sheet object, dirtied fields untouched, tiles still resident.
     - `ResetReprimesPriorStore`: a small prior store with one Reference tile (builder helpers as in
       `test_store_import.cpp`); the message reports primed tiles and the new sheet's predicted surface is seeded.
+    - `ResetWhileInactiveSaysSo`: an inactive node is reset and the response says it publishes no grid until activated.
     - `ConfigureThatThrowsLeavesNoResetService`: a configure that fails after the sonar_info subscription would have
       been created (invalid `sonar_info_topic`) leaves the node UNCONFIGURED with no `~/reset` service in the graph.
     - `AllCallbacksShareTheDefaultGroup`: exactly one callback group is spun by the node's executor (the default,
@@ -241,8 +243,10 @@ Facts verified in source that shape the design:
     counters stay cumulative (`stats()` unchanged by the reset, `callback_exceptions` survives); refused with the
     map-moved reason when `georef_moved_` is set (and also when the live transform has moved but the latch is not yet
     set), with the union untouched; **a reset before the first georeference capture succeeds and does not latch
-    `georef_moved_` or refuse** (fails if `checkGeorefMoved()` runs without the `have_georef_` guard); refused when
-    unconfigured; a grid arriving after the reset is folded in normally.
+    `georef_moved_` or refuse** (fails if `checkGeorefMoved()` runs without the `have_georef_` guard); the service
+    exists only while configured and the handler refuses when unconfigured; an exception injected at the handler is
+    contained, counted and returned as the reason with the state unchanged; a reset of an inactive node says so; a grid
+    arriving after the reset is folded in normally.
 20. **`test_reset_cube_nodes.sh`**: extend the stub with `service list` (prints a per-test list of services; flaky, hang
     and empty switches like the existing ones) and `service call` (sets state counters, prints the **real jazzy
     output format** captured from a live `ros2 service call` of a `Trigger` service during implementation --
@@ -372,3 +376,8 @@ five must-fixes and all suggestions). The plan text above is edited in place; th
   with exit 4 rather than reading as "done, publishing".
 - `~/reset` is created last in `on_configure` because a configure that throws returns to UNCONFIGURED without
   `on_cleanup`.
+- `AllCallbacksShareTheDefaultGroup` counts the groups the node's executor spins, not all groups: `tf2_ros::
+  TransformListener` makes a second group for its own thread, which only feeds the TF buffer and is not auto-added to
+  the executor. (The plan first said no group existed at all; the test run showed two.)
+- The first georeference-capture test needs TF present but the node not yet ticked, so it resets a configured but
+  not yet activated node; it also covers the inactive response.
