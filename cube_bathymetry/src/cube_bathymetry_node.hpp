@@ -235,7 +235,8 @@ public:
     prior_store_dir_ = declareOnce<std::string>("prior_store_dir", "");
 
     // Draft-tile persistence (#21). draft_dir empty (default) disables it; set
-    // it per deployment to opt in. The warm-start prime from it is buildSession()'s. Tiles are written as marine_bathymetry_store
+    // it per deployment to opt in. The warm-start prime from it is
+    // buildSession()'s. Tiles are written as marine_bathymetry_store
     // `draft/` GeoTIFFs (single fused grid, no per-day epochs,
     // unh_marine_autonomy#221) so the costmap layer (#164) and sim live loop
     // (#77) read exactly what CUBE writes.

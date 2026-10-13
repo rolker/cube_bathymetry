@@ -1097,7 +1097,7 @@ TEST_F(NodeLifecycle, ResetReprimesPriorStore)
   }
   // Cells of the prior that end with a settled deep (< -100 m) estimate.
   auto deepAtPrimedCells = [&tiles](const std::shared_ptr<cube::GeoMapSheet> & sheet,
-      std::size_t & primed_cells) {
+    std::size_t & primed_cells) {
       std::size_t deep = 0;
       primed_cells = 0;
       for (const auto & gt : tiles) {

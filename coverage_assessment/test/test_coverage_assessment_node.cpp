@@ -1937,7 +1937,7 @@ TEST_F(NodeTest, ResetClearsTheHeldLimitAndAssessmentsResume)
   ASSERT_TRUE(h.spinUntil(
       [&]() {
         return h.node_->stats().assessments_published > published &&
-        h.latest_.count("a1") && h.latest_.at("a1").area_covered == 100.0;
+               h.latest_.count("a1") && h.latest_.at("a1").area_covered == 100.0;
       }, 20.0, [&]() {h.publishGrid("A", near);}));
 }
 
