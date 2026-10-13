@@ -1,2 +1,12 @@
 .vscode
 build
+
+# Cross-model review artifacts written by the workspace review-code skill
+# (cross_model_review.sh); local working files, never committed.
+.agent/work-plans/*/review-*-prompt.md
+.agent/work-plans/*/review-*-findings.md
+.agent/work-plans/*/.cross-model-review.lock
+
+# Python bytecode
+__pycache__/
+*.pyc

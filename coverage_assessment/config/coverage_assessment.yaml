@@ -1,0 +1,33 @@
+# Example parameters for one coverage_assessment node scoring the four boats of
+# the unh_marine_simulation demo (CUBE grids at <boat>/sensors/mbes/grid, frames
+# <boat>/map). Copy and edit; grid_topics is required. The README lists every
+# parameter. Verify the topic and frame names against the running graph
+# (`ros2 topic list | grep grid`, `ros2 run tf2_tools view_frames`).
+/**/coverage_assessment:
+  ros__parameters:
+    grid_topics:
+      - /bluefin/sensors/mbes/grid
+      - /clownfish/sensors/mbes/grid
+      - /urchin/sensors/mbes/grid
+      - /beluga/sensors/mbes/grid
+    source_names:
+      - bluefin
+      - clownfish
+      - urchin
+      - beluga
+    survey_area_topic: /survey_area
+    cell_size: 1.0
+    assessment_period: 1.0
+    # The raster frame. Each boat's grid arrives in its own <boat>/map and is
+    # transformed into this one through earth.
+    map_frame: bluefin/map
+    # ONE boat's tide is applied to every source.
+    water_surface_frame: bluefin/map_tide
+    water_surface_boat_frame: bluefin/base_link
+    water_surface_max_boat_distance: 1500.0
+    water_surface_max_age: 30.0
+    max_raster_cells: 1000000
+    max_pass_cell_checks: 16000000
+    max_held_cells: 100000000
+    max_area_vertices: 10000
+    max_areas: 20

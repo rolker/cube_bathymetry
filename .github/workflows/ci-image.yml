@@ -20,6 +20,7 @@ on:
       - '.github/workflows/ci-image.yml'
       - 'upstream.repos'
       - 'cube_bathymetry/package.xml'
+      - 'coverage_assessment/package.xml'
 
 jobs:
   build-and-push:

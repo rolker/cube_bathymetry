@@ -40,6 +40,15 @@
 # `draft_dir` set loads the saved tiles), so an unresponsive node fails the script
 # instead of hanging it with boats half reset.
 #
+# A READ (`ros2 lifecycle get`, `ros2 param get`) that fails or times out is retried,
+# RESET_CUBE_GET_TRIES attempts in all (default 3) with RESET_CUBE_RETRY_PAUSE
+# seconds between them (default 2): under a heavily loaded system one parameter
+# service can miss its turn once and answer the next. Reads change nothing, so a
+# retry is always safe. A transition is NEVER retried: it fails fast, because a
+# repeated configure or cleanup is not the same operation as the one that failed.
+# Only after every attempt has failed does a read fail the script, and the
+# preflight reads do so before anything has been changed.
+#
 # SIGHUP and SIGPIPE are ignored: an ssh drop or a closed pipe must not kill the
 # script between the quiesce and the bring-up. Run it under tmux or nohup anyway if
 # the link is unreliable.
@@ -54,6 +63,8 @@ set -u -o pipefail
 prog=$(basename "$0")
 get_timeout=${RESET_CUBE_GET_TIMEOUT:-30}
 set_timeout=${RESET_CUBE_SET_TIMEOUT:-300}
+get_tries=${RESET_CUBE_GET_TRIES:-3}
+retry_pause=${RESET_CUBE_RETRY_PAUSE:-2}
 
 usage() {
   sed -n '/^# Usage:/,/^# Exit status/p' "$0" | sed 's/^# \{0,1\}//' >&2
@@ -123,9 +134,21 @@ changed=0
 probing=""
 
 # Read-only `ros2` call: stdout only (a stderr warning must not be parsed as
-# data), bounded.
+# data), each attempt bounded, retried up to $get_tries attempts in all. Never used
+# for a transition.
 ros2_get() {
-  timeout --foreground "$get_timeout" ros2 "$@" 2>/dev/null
+  local attempt=1 out rc
+  while true; do
+    out=$(timeout --foreground "$get_timeout" ros2 "$@" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    [ "$attempt" -lt "$get_tries" ] || return "$rc"
+    attempt=$((attempt + 1))
+    sleep "$retry_pause"
+  done
 }
 
 # First word of `ros2 lifecycle get`, e.g. "active [3]" -> active.

@@ -342,3 +342,212 @@ Context for the work (2026-10-12): live checks on the PR build, `.agent/scratchp
 - [x] (suggestion) stop log overcounted written tiles (Lens A) — flushForStop wording
 - [x] (suggestion) single-threaded executor is load-bearing for the no-race flush, undocumented (Lens B) — signature now takes SingleThreadedExecutor, comment added
 - [ ] (suggestion, OUT OF SCOPE) tile writes are not atomic, and one unreadable tile makes the configure-time load fail whole, after which saves overwrite earlier sessions' data in good tiles (Lens B; reproduced live, `.agent/scratchpad/cube164_live/corrupt_tile_probe.sh`: patch A's 260 cells gone after a session-2 write) — marine_tiled_raster_store saveTile (unh_marine_autonomy) + this node's load fallback; raised with the owner, needs its own issue
+
+## Implementation
+
+### Spike (B1)
+
+Throwaway scripts (not committed): `.agent/scratchpad/cube164b_spike/`. Run 2026-10-12 on the four-boat `demo_boats_launch.py enable_joysticks:=false`, ROS_DOMAIN_ID=61, driven with fake `sensor_msgs/Joy` on `<boat>/joy` (axes[1]=throttle, axes[3]=rudder; beluga left stationary). Grid topic is `<boat>/sensors/mbes/grid` (layers `elevation`, `uncertainty`). Two recordings of 60 s each, 11-12 grid messages per boat (slow 35 % throttle, then full speed).
+
+#### B0: merged #406 messages vs plan text (marine_interfaces on jazzy)
+- `CoverageAssessment`: header, `area` (SurveyArea), `cell_size`, `area_total`, `area_covered`, `area_meeting_standard` (plan prose and brief say "meets"; actual name `area_meeting_standard`), `sources[]` of `CoverageContribution{source, area_covered, area_meeting_standard, area_unique}`. All m^2, doubles. Per-source credit including `area_unique` is present.
+- `SurveyArea`: `id`, `stamp` (builtin_interfaces/Time, present), `polygon` (GeoPolygon, vertices in `polygon.points`, geographic_msgs/GeoPoint), `standard` (SurveyStandard{name,a,b}), `priority` (int16, not in plan). The polygon field is `polygon`, vertices at `area.polygon.points`.
+- Plan CONTRADICTED by message text (wrapper must follow the messages):
+  1. Covered = finite elevation (plan) vs finite **depth >= 0** (message). A cell above the surface is not covered. The plan's "negative depth evaluated at 0, counted and warned" (covered, evaluated at 0) conflicts: per #406 such a cell is uncovered. The warn count can stay as a diagnostic.
+  2. Competing sources for the standard: plan "smallest finite uncertainty across sources", message "only sources with finite depth >= 0 AND finite uncertainty >= 0 compete" (negative/infinite/nodata-sentinel excluded); ties go to the **shallower depth** (fail closed), plan says earlier configured source.
+  3. Covered but no competing source: does not meet (same as plan); but a per-source meeting needs that source's own finite depth >= 0 and uncertainty >= 0.
+  4. Standard fails closed: a=b=0, or a/b NaN/negative/infinite, means "not set", nothing meets (checked first). Plan only validates `SurveyArea` a/b at registry (reject negative/non-finite) and does not mention the all-zero default.
+  5. Frames: message says if ANY source frame has no georeference the whole assessment for that area fails (no CoverageAssessment, no coverage_grid for it); plan says a message without a transform is skipped with a WARN and the other sources are still scored. Reconcile (the plan's skip-and-count is per message from a source that has had transforms; a source never resolvable needs the "publish nothing" rule).
+  6. `sources[].source` = platform name if known else grid topic, unique within a message, stable order. Plan `source_names` falls back to topic: consistent.
+  7. `header.stamp` = assessment time; `cell_size` is a message field (plan has the parameter); area_total can be 0.
+- Invariants to test in B5: meeting <= covered <= total; per-source unique <= covered; sum of unique <= assessment covered; each source covered <= assessment covered.
+
+#### B1(a): h_surface - elevation
+`h_surface` = geodetic altitude (pyproj EPSG:4978 -> 4979) of the origin of `earth <- <boat>/map_tide`; `<boat>/map` origin altitude comes out -0.000 (altitude forced 0, as the plan says).
+- h_surface: -28.29..-28.36 m (the sim's tide, drifts ~0.05 m/min at tide_speed_factor 10). It is NOT the 48.88 m of bizzyboat.yaml (that is the Massabesic config); this is Portsmouth. The four boats' map_tide altitudes agree within 0.01 m.
+- Elevation of finite cells: -41 to -47.6 m (negative, ellipsoid height, below the surface at -28.3).
+- `h_surface - elevation` is POSITIVE everywhere: slow run last message min/p5/median/p95/max, bluefin 12.8/13.9/15.2/16.9/17.9, clownfish 12.7/15.0/16.4/17.6/19.3, urchin 13.0/14.1/15.5/17.2/18.9, beluga 14.6/15.9/16.7/17.2/17.6 m. Full-speed run (up to 33k cells per message): range 12.4..23.4 m. Cells with depth < 0: 0; < -1 m: 0 (all sources, both runs).
+- Against the ground-truth chart grid (US5NH02M.tiff via mbes_sim.bathy_grid, positive down) at the same cells (cell centre -> map -> earth -> lat/lon): (h_surface-elevation) minus chart depth has median +0.13..+0.19 m, p5..p95 about -0.7..+1.0 m; correlation 0.57-0.99 (lowest for beluga, which sits on a flat 1.5k-cell patch). So the sign is confirmed and the surface height is right to ~0.2 m (tide not removed from the chart, so the offset is not purely error).
+- Boat distance from its own map origin reached 247-323 m, so d^2/2R is about 5-8 mm here, consistent with the plan bound.
+
+#### B1(b): frames
+- Every grid `header.frame_id` = `<boat>/map` (bluefin/map, clownfish/map, urchin/map, beluga/map). `outer_start_index`/`inner_start_index` are 0 in every message. Layout: dim0 `column_index`, dim1 `row_index`, column-major; the grid centre is `info.pose.position`, cell (i,j) centre x = px + lx/2 - (i+0.5)*res.
+- `lookupTransform` among the four `<boat>/map` frames and `<boat>/map <- earth`: 20 of 20 succeed (latest time). Origins are 40.05, 80.14 and 120.22 m east of bluefin/map, relative rotation 0.0003..0.001 degrees, up offset < 1 mm. `earth` is not visible in the TF buffer for the first ~10 s after launch.
+
+#### B1(c): pinholes and the union
+- Pinhole share (NaN cell with finite neighbours on both sides in x or y, over finite+pinhole), per message: slow run 0.0-0.2 %; full speed 0.1-0.4 %. Looser definition (NaN with >=5 of 8 neighbours finite): 0.1-0.5 %. Real but tiny; no fill needed at this scale.
+- Stationary boat (beluga): the message geometry is identical every time (59x58, edge phase x 0.6265 y 0.4743 of the 1 m cell, in every one of 12 messages), so the same lattice repeats; its pinhole share is 0-0.4 %. Moving boats change phase every message (bluefin edge x phase 0.46..0.95).
+- Direct count (union of the finite 1 m cells painted on a 0.25 m lattice, in bluefin/map) vs pull-resampled latched 1 m union (my throwaway Python, lattice anchored in bluefin/map, every source taken through the real earth transforms), area in m^2 direct / pull: slow run bluefin 13362/13430, clownfish 14303/14280, urchin 13462/13491, beluga 1554/1554; full speed 31964/32012, 34093/33921, 33220/33220, 2691/2741. Ratio 0.995..1.019. Single message: pulled count equals the finite count exactly in every sampled message (ratio 1.000).
+- Caveat: the 200 m window never rolled during these runs (the boats stayed within ~330 m of start; each message contained essentially the whole survey), so the latched union was not exercised by a moving window here; the plan's B4 moving-window unit test remains the check.
+- Also seen: beluga (not driven) grew from 1554 to 2690 finite cells between runs; not investigated (its Joy axes were zero in both runs).
+
+#### Decisions touched by B1
+- Depth sign (`h_surface - elevation` positive down): CONFIRMED (0 negative cells; matches chart depth to ~0.2 m median).
+- Water surface read from `earth <- <ns>/map_tide` origin altitude: CONFIRMED (-28.3 m here, boats agree within 1 cm; one tide boat is enough in this sim).
+- Frame handling (per-source `<ns>/map`, one transform per message through earth): CONFIRMED (frame_ids are as predicted, all lookups work, relative rotations negligible, origins 40 m apart so the transform matters).
+- Pull resampling and union: CONFIRMED (within 2 % of a direct fine-lattice union).
+- Pinhole fill needed: CONTRADICTED for this sim (0.1-0.4 % at most): not needed for the event; a stationary boat repeats the same phase as predicted, but the share is too small to matter.
+- Covered = finite elevation, negative depth evaluated at 0: CONTRADICTED by #406 text (covered needs depth >= 0); see B0 items 1-2 for the plan edits before B2.
+
+## Implementation
+
+### PR (b) steps B2-B6: the coverage_assessment core library (2026-10-12 11:50 -04:00)
+
+Built `coverage_assessment/` (plain C++ over grid_map_core + std, no ROS, no message types, no TF), five commits on feature/issue-164: skeleton + CI image plumbing; polygon_raster; source_accumulator; coverage_assessor + area_registry; assessment_raster.
+
+- **Skeleton and CI (B2):** package.xml lists the full dependency set the plan names (grid_map_core/ros/msgs, rclcpp, rclcpp_lifecycle, tf2 family, marine_autonomy, marine_interfaces) so the CI image bakes them; only `grid_map_core` is found by CMake so far. Dockerfile: COPY of the new package.xml and `coverage_assessment` added to BOTH `--from-paths` (rosdep check and install); `ci-image.yml` path trigger added. Lint setup as cube_bathymetry (ament_lint_auto, CPPLINT.cfg copied).
+- **polygon_raster (B3):** scanline even-odd fill at cell-centre rows; centre on a lower/left edge is in, on an upper/right edge is out, so a w-metre rectangle holds w/cell_size columns at any lattice offset and polygons sharing an edge partition the cells. Rejects <3 distinct vertices, non-finite input, zero area, bounding box over `max_cells` (counted in double before any int conversion). A polygon smaller than a cell is valid with 0 cells. 14 tests.
+- **source_accumulator (B4):** per-source lattice in the raster frame, 64x64 paged blocks of (elevation, uncertainty) floats, pull resampling through a horizontal `Affine2` (raster -> source), never-erases per field. `add()` returns a status (missing elevation layer, bad geometry incl. singular/non-finite affine or footprint > 1e8 cells) and whether the uncertainty layer exists. 17 tests incl. phase shift, 90 degree rotation+translation cell-by-cell, 30 degree rotation, moving window (union 400 -> 700 -> 1000, never decreasing, all-NaN window erases nothing), per-field never-erases, clear.
+- **coverage_assessor + area_registry (B5):** exactly the merged message rules (covered = finite depth >= 0; competing = finite depth >= 0 and finite uncertainty >= 0; smallest uncertainty supplies the depth, shallower on a tie, in either source order; not-set standard checked first; per-source judged on its own grid; area_unique). `assessArea` also returns a per-cell verdict array (outside / not covered / below / meets) used by the raster, and `cells_above_surface` = cells inside the polygon where some source has depth < -1 m (strict). It throws `std::invalid_argument` for a non-finite `h_surface`, a null source or a source on another cell size (caller bugs; scoring zero would read as "uncovered"). Registry: replace-by-id on stamp >= held (equal stamp: last wins), stale ignored, invalid keeps the old definition and does not add a new id; a = b = 0 is ACCEPTED (published as "not set"); NaN/inf/negative a or b rejected. 25 tests (assessor + registry + standard), all exact numbers; a mutation check (tie rule flipped, standard-set check dropped) made the tests fail.
+- **assessment_raster (B6):** `buildCoverageGrid` -> layer `meets_standard` over the bounding box of all area masks, centred on the lattice; NaN not covered/outside, 0 below, 1 meets, overlap = 1 only if every containing area is met; fails with a reason when nothing to draw or the union box exceeds `max_cells`. 6 tests.
+
+**Test totals** (`./sensors_ws/test.sh coverage_assessment`): `Summary: 134 tests, 0 errors, 0 failures, 15 skipped`. That is 62 gtest cases (14 + 17 + 25 + 6) plus ament linters; the 15 skipped are cppcheck (skips itself in this environment). uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8-free all pass.
+
+**Plan deviations:** none to plan.md (not edited). Two small things worth knowing: (1) the `coverage_assessment_core` CMake target arrived with the first component (B3) rather than in the B2 skeleton commit, because an empty library cannot be declared; (2) `AreaAssessment.cells_above_surface` counts only cells inside the polygon (a count outside the area would not describe a verdict).
+
+**Placement state stays in the wrapper (B7), by the plan's split:** "no grid yet -> scores zero" is already what an empty `SourceAccumulator` does in `assessArea` (its slot is kept, zeros). "Latest grid could not be placed -> withhold every area's assessment and coverage_grid" needs TF knowledge, so the wrapper keeps a per-source flag and simply does not call `assessAll` / does not publish while any flag is set.
+
+**Notes for B7:**
+- Core structs: `AreaDefinition{id, stamp_ns, polygon (raster metres), standard}` fed to `AreaRegistry(cell_size, max_cells).update()`; re-project and call `update` again with the same stamp when the earth->map transform changes (equal stamp replaces). Read `RegistryResult.reason` for the ERROR log. `RegisteredArea` caches the mask.
+- `SourceAccumulator::add(msg, raster_to_source)`: the affine must map RASTER metres into the MESSAGE frame (horizontal only); compose it from `lookupTransform(message_frame <- map_frame)`. Warn once per source when `has_uncertainty_layer` is false or `cell_size != message.getResolution()` (the accumulator does not check resolution).
+- `assessAll(registry, sources, h_surface)`: sources must be in `grid_topics` order; every accumulator must have the registry's cell size; h_surface must be finite (wrapper refuses stale/too-far tide first).
+- `buildCoverageGrid(assessed, cell_size, map_frame, max_cells)`: the result's GridMap goes through `grid_map::GridMapRosConverter`; it carries only `meets_standard`.
+- Message fields: `area_meeting_standard` (not "meets"); `CoverageContribution.area_unique`; `header.stamp` is assessment time. `cells_above_surface` is the count to log (throttled) with the surface height used.
+- Unit numbers are all doubles m^2 = cells x cell_size^2.
+- Core headers are `.h` under `include/coverage_assessment/` (installed); test fixtures in `test/message_fixtures.h`. Note ament_uncrustify here indents namespace contents (that is what cube_bathymetry's files look like too) and cpplint wants two spaces before trailing comments, so member docs go on the line above.
+
+## Implementation
+
+### PR (b) steps B7-B9: the ROS wrapper, its tests, the docs (2026-10-12 12:23 -04:00)
+
+Built on the B2-B6 core (unchanged). Seven commits on feature/issue-164, none pushed:
+
+- `5896ca7` lifecycle node (`src/coverage_assessment_node.hpp`, thin `main`), `src/frame_chain.hpp`, launch file, example YAML, install rules, exec depends
+- `94fc044` `test_frame_chain` (B8 i)
+- `ef40e62` per-source warning throttles (found by the withholding test)
+- `2c97c16` `test_coverage_assessment_node` (B8 ii-v + refusals + read_only + resolution warning)
+- `48f1524` status line carries skip reasons and above-surface count
+- `99ab44d` test race fix (startup)
+- `43aac99` docs: `coverage_assessment/README.md`, top-level Nodes row + parameter section, reset text
+
+**What was built.** Lifecycle node `coverage_assessment`: all 11 parameters `read_only`, declared once in the constructor (so no re-declare on a second configure; a wrong-typed override fails at construction, loudly, rather than being swallowed in a transition). Configure fails with a reason on empty/empty-entry/duplicate `grid_topics`, a `source_names` of a different length, duplicate resolved names, and non-usable numeric parameters; whatever was created before a failure is released. Placement state in the wrapper as the plan says (no grid yet = zero; latest grid unplaced = flag, withhold everything with a WARN naming every unplaced source and frame, resume when placed). Water surface = altitude of the origin of `earth <- water_surface_frame`; refusals: stale (static transforms, stamp 0, have no age), unavailable, boat beyond the bound (distance = horizontal distance of `water_surface_boat_frame` from the origin of the tide frame's TF parent via `BufferCore::_getParent`; fail closed when parent or boat frame is missing). Outputs, QoS and frame as the plan's Output decision. Release order: timer, subs, publishers, TF listener, TF buffer, sources, registry, areas. Counters (`stats()`) back the tests and the 10 s status line.
+
+**Tests.** `./sensors_ws/test.sh coverage_assessment`: `Summary: 173 tests, 0 errors, 0 failures, 20 skipped` (cppcheck cases skip themselves; uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257 pass). `./sensors_ws/test.sh cube_bathymetry`: `Summary: 994 tests, 0 errors, 0 failures, 115 skipped`. New gtest cases: 3 in `test_frame_chain`, 9 in `test_coverage_assessment_node` (own ROS_DOMAIN_ID 86, localhost-only). Exact numbers in the node test: area map [5,25]x[0,10] = 200 cells, standard a=0.5; source A (frame a/map, 10 m east) covers 150 / meets 50 / unique 100; source B (frame b/map, moved (30,5) and yawed 90 degrees) covers 100 / meets 100 / unique 50; union covered 200, meeting 150; coverage_grid 20x10 with 150 ones, 50 zeros, 0 NaN. Mutation checks (not committed): not withholding on an unplaced source, using an identity source transform, and skipping the age check each make the matching tests fail. The node test was run 8 times in a row after the last fix with no failure.
+
+**Deviations from the plan, and why.**
+1. `coverage_assessment` publisher depth is a fixed 100 (the same as `survey_area`), not "number of areas held": a publisher's depth cannot follow a changing count without recreating the publisher. A late consumer therefore receives up to the last 100 assessments, oldest first, possibly with older repeats of an area before the newest; documented in the README.
+2. `test_frame_chain` needs the built cube_bathymetry package: `package.xml` has `test_depend cube_bathymetry`, CMake uses `find_package(cube_bathymetry QUIET)` and, if it is missing, warns and registers a FAILING test (never a silent skip). `./sensors_ws/build.sh coverage_assessment` alone in a fresh worktree therefore needs `cube_bathymetry` built first (colcon `--packages-up-to` does it). Hosted CI builds the repo so the order is automatic; `.github/ci/Dockerfile` already carries both packages.
+3. Parameters are declared in the constructor (plan: "declared in the constructor"), not through `declareOnce` in configure as in `cube_bathymetry`; same effect, one declaration.
+4. Placement flag: only "transform unavailable" sets it. A grid with no elevation layer, unusable geometry or that cannot be converted is dropped with a throttled ERROR and counted, but does not withhold (the earlier union is still valid).
+5. Timer-WARN throttles are per source for per-message warnings; the withholding WARN is one call-site throttle (10 s) listing all unplaced sources.
+
+**For B10's live sim check.**
+- Launch with `config/coverage_assessment.yaml`: its topics (`/<boat>/sensors/mbes/grid`), frames (`bluefin/map`, `bluefin/map_tide`, `bluefin/base_link`) and boat names come from the B1 spike and the YAML header, NOT verified in this step. Check `ros2 topic list`, that `bluefin/base_link` exists (otherwise the node withholds with "cannot measure the distance"), and that `survey_area_topic` matches what the scorer publishes.
+- `earth` absent for ~10 s: expect the "not assessing" WARNs and no outputs for that long, then outputs.
+- Depth sign and plausibility across the four boats; the status line (every 10 s) must show `0 cell(s) above the surface`.
+- With all four boats driving: union cells and MB in the status line; time one assessment pass at event scale (not measured here; the `assessAll` cost is the per-area mask times sources).
+- Reset: `reset_cube_nodes.sh --consumer /coverage_assessment ...` then confirm areas return from the latched topic and coverage restarts at 0.
+- Late joiner: start the scoreboard after a few assessments and confirm it gets every area.
+- `ros2 launch` was smoke-tested for configure+activate only (domain 63, no sim); one SIGINT to `ros2 launch` did not stop it within 4 s, a second one did (not investigated; the node itself exits cleanly on SIGINT).
+- Not yet done in this PR: full-scope `ci_local.sh`, `git diff -- upstream.repos` check, the `.agents/README.md` checklist item, and marking the PR ready only after #406 is on `jazzy`.
+
+## Implementation
+
+### B10 live sim check (2026-10-12 13:00 -04:00)
+
+Report-only run of the `coverage_assessment` node against the four-boat sim (`demo_boats_launch.py enable_joysticks:=false`, ROS_DOMAIN_ID=64, default discovery), boats driven with fake Joy by the B1 spike's `drive.py`. Scratch: `.agent/scratchpad/cube164b_b10/` (not committed). No code changed.
+
+1. **Names match.** Example YAML topics (`/<boat>/sensors/mbes/grid`) and frames (`bluefin/map`, `bluefin/map_tide`, `bluefin/base_link`, `earth` -> `<boat>/map`) all exist; no corrected params needed. CUBE nodes are `/<boat>/sensors/mbes/cube_bathymetry`. PASS.
+2. **Assessments.** One area (500 x 500 m ENU box round the bluefin/map origin, a=0.5 b=0.013) published latched, bluefin, clownfish, urchin driven ~4 min. 164 messages: meeting <= covered <= total, per-source meeting <= covered, unique <= covered, sum of unique <= covered held in every one; union covered never decreased. area_total 250500 constant. Covered grew 6084 -> 17554 (t+67 s) -> 41711 (t+142 s) -> 52120 (end); meeting 3076 -> 44025. Final per source (covered/meeting/unique): bluefin 20757/18532/16806, clownfish 22628/18894/17462, urchin 16674/10106/8107, beluga (not driven) 1650/378/1178. Status lines: "0 cell(s) above the surface" in all 124 lines. PASS.
+3. **Startup** (fresh sim, assessor launched 1.5 s later, areas already latched): configured at +5.4 s after sim start, one "Not scoring: water surface unavailable" WARN at +7.4 s (throttled to one per 10 s, so one line, not a stream), 6 ticks skipped, first assessment at +12.8 s, no restart. PASS.
+4. **coverage_grid**: frame bluefin/map, 501 x 500 (250500 cells = area_total), layer meets_standard only; NaN 198380 / 0: 8095 / 1: 44025, no other values; 8095+44025 = covered 52120 and 44025 = meeting. PASS.
+5. **Timing** (gdb breakpoint timing of the real node, 40 s, four boats publishing, 250k-cell area): assessAll mean 153 ms (p95 168, max 176), assessAndPublish mean 171 ms (p95 185, max 192), onGrid mean 56 ms (p95 132). Node CPU (top, 5 s samples, 45 samples): mean ~10 % of one core, max 16.6 %; RSS 104 -> 110 MB over 8 min; 119k cells held, 2.7 MB. perf is unavailable (perf_event_paranoid=4). PASS (well under the 1 s period).
+6. **Reset** with the standalone executable (`ros2 run`, manual configure/activate): script reset all four CUBE nodes and the consumer; coverage 19121 -> 0 in the next assessment, area_total stayed 250500 (area came back from the latched topic), grew again from 0. PASS. **DEFECT with the launch file, see below.**
+7. **Late subscriber** (two areas A, B): a fresh transient_local subscriber got a burst of exactly 100 messages (50 + 50), oldest first, the newest of each area last; so older repeats arrive first, as the README says. PASS.
+8. **SIGINT**: not reproduced. `ros2 launch` exit after SIGINT: 0.31-1.83 s over 22 trials (kill -INT to the launch pid, and Ctrl-C through a pty at 1..20 s after start, with and without a sim in the domain); the executable alone: 0.15 s. The only slowness seen is a SIGINT during startup, which prints "Abandoning wait for the change_state service response" (1.8 s). NOT REPRODUCED.
+
+### Defects
+- **D1 (real): `reset_cube_nodes.sh --consumer /coverage_assessment` fails when the assessor was started by `coverage_assessment_launch.py`.** The launch's `OnStateTransition(goal_state='inactive')` handler re-activates the node on EVERY transition to inactive, including the script's deactivate. Result: script aborts "transition 'deactivate' failed (state is 'active', expected 'inactive')" with all four CUBE nodes left `unconfigured` (boats publish no grid until the script is re-run, which fails the same way), and the assessor kept its old union. Reproduce: launch sim + `ros2 launch coverage_assessment coverage_assessment_launch.py`, then run the script with `--consumer /coverage_assessment` and the four cube nodes. Launch log shows a second "coverage_assessment configured, activating" at the deactivate. Fix idea: activate only on the first inactive (handler removes itself / matches previous_state 'configuring'), or document that the reset needs a node started without the launch handler.
+- D2 (minor, not a defect in the node): reset_cube_nodes.sh with 4 nodes + consumer took ~3 min here (each `ros2 lifecycle` CLI call 3-8 s).
+
+## Implementation
+
+Address-findings round. Review findings for PR (b), the `coverage_assessment` package, all 16 items fixed in this PR (owner-approved; item 7 map-origin policy and item 14 `max_areas` are owner decisions). Nothing pushed.
+
+| # | Item | Result | Commit | Test evidence |
+|---|---|---|---|---|
+| 1 | Default build type | done: RelWithDebInfo block copied from cube_bathymetry | 69a3928 | build log shows the default message |
+| 2 | Exception containment | done: guarded() on grid/area/timer callbacks (std::exception and `...`), throttled ERROR, `callback_exceptions` in the status line; main() try/catch logs FATAL, returns 1. Test seam `setFaultInjectorForTest` | 04c62dd | node test ExceptionsInCallbacksAreContained... throws std::runtime_error from grid and timer, `int` from survey_area |
+| 3 | Launch re-activation | done: OnStateTransition start_state='configuring' | 7dc385d | new launch_testing test: fails (3 != 2) on the old handler, passes now |
+| 4 | Unset standard | done: registry no longer rejects, node no longer rejects, README fixed | fe47736, ad4f197 | registry test with NaN/neg/inf; node test AnUnsetStandardIsScored... (areas_rejected 0, meeting 0) |
+| 5 | Area arrival ordering | done: arrival validation, per-id pending queue in stamp order, last accepted + stamp kept | ad4f197 | node test ARejectedNewerArea... (4 messages before any TF) |
+| 6 | Numeric bounds | done: 1e7 m coordinate and 1e12 lattice-index bounds in polygon_raster and the accumulator, new statuses with reasons; footprint cap 4e6 with WARN | ed2dfa9, e87aaf2 | boundary tests (at/just over bound, 1e16, 1e300, tiny cell size, cap 3.996e6 vs 4.002e6); node test with a far map frame |
+| 7 | Map-origin lock | done: georeference captured at first lookup, used for polygons and placement, tick compares (1 cm / 1e-6 rad), ERROR + withhold until reconfigure | e87aaf2 | node tests MapFrameMovingAfterTheCapture... (moved 5 m, withheld counter, reconfigure recaptures, overlap 50 m^2) and a 5 mm non-movement test |
+| 8 | Negative uncertainty | done: u_ok requires u >= 0 | ed2dfa9 | accumulator test |
+| 9 | Boundary in float | done: SurveyStandard::meets rounds allowed to float | fe47736 | assessor test a=0.1, u=0.1f meets, nextafter fails |
+| 10 | Placement retry | done: per-tick retry; the kept unplaced grid is folded in (deviation: not only the flag clears) | e87aaf2 | node test SilentUnplacedSourceIsRetried... |
+| 11 | Boat transform age | done | 9369eb1 | node test StaleTideBoatTransformSkipsScoringToo |
+| 12 | Tide frame under earth | done: explicit ERROR, own counter | 9369eb1 | node test TideFrameDirectlyUnderEarth... |
+| 13 | Incompatible QoS | done: ERROR naming the topic on survey_area and grid subscriptions | 04c62dd | node test IncompatibleQosPublishers... |
+| 14 | max_areas | done: read_only, default 20, 1..100 at configure, new id beyond it refused | ad4f197 | node tests MaxAreasRefuses..., ConfigureRefusesAMaxAreas... |
+| 15 | Tests | done: start-index circular-buffer accumulator test (ed2dfa9); positive withheld checks, stale tide 4 s bound (bdd0a41). Also made the throttled log lines per node, since rclcpp *_THROTTLE state is per call site for the process and hid a log line across tests | ed2dfa9, bdd0a41 | node tests pass 3 of 3 repeated runs |
+| 16 | README | done: unsent-source zero, tide-boat-only bound, wall timer vs node clock / use_sim_time, georeference lock, max_areas, startup wait for earth | 068f925 | n/a |
+
+Plan: PR (b) section gained a "Review fixes" note (items 7 and 14 as owner decisions, plus deviations) in 068f925. Lint fixes in 2412679.
+
+Results: coverage_assessment 181 xunit tests, 0 failures, 0 errors (20 cppcheck skipped, cppcheck not installed); cube_bathymetry 782, 0 failures. Lint (uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257) all pass.
+
+Open: the pre-existing uncommitted edits to `.agent/work-plans/issue-164/review-*` files were left alone. B10-style live re-check of the fixes (launch with reset_cube_nodes.sh --consumer on the real sim) was not run; the launch behaviour is covered by the launch_testing test only.
+
+## Implementation
+
+Fix round 3 for PR (b), the `coverage_assessment` package, plus one fix in the merged reset script. Owner-approved; nothing pushed. Each test below was run against the previous code (or a temporary revert of the line) and failed there.
+
+| # | Item | Result | Commit | Test evidence |
+|---|---|---|---|---|
+| 1 | Launch activation not one-shot | done: the `OnStateTransition` matcher (configuring -> inactive) fires once, then never | f3b18aa | `test_launch_lifecycle.py` now runs deactivate, cleanup, configure, asserts `inactive` for 5 s, then activate; failed on the old handler |
+| 2 | Map-move check | done: `mapFrameMovement()` compares map origins in earth coordinates (inverse translations) for the 1 cm test and the relative rotation angle for 1e-6 rad | 557586d | node test ATinyRotation... (1.6e-9 rad about the origin, no withhold; failed on the old subtraction); frame tests: tiny rotation, 5 m move reads 5 m, 2e-6 rad rotation reads above tolerance |
+| 3 | Footprint cap off-by-one | done: cap = 2001 x 2001 = 4,004,001 indices, header and README say what it admits (axis-aligned 200 m at 0.1 m, any alignment) | 2c5f392 | accumulator boundary test: 2000 x 2000 passes (footprint exactly the cap), 2000 x 2001 refused; failed before |
+| 4 | Pending queue overflow | done: shape check on arrival with a TF-free local equirectangular ring (`localGeoPolygon` + `rasterisePolygon`); overflow drops the lowest stamp with a throttled WARN naming id and stamp; accepted definition held apart | 881626e | node tests DegenerateAreasBeforeTf... (one valid + eight zero-area, Codex's scenario) and QueueOverflowDropsTheLowestStamp...; both failed on the old code; frame test for localGeoPolygon |
+| 5 | Startup reporting | done: `have_georef` checked first, "waiting for <map_frame> <- earth", `withheld_no_earth` counts, kept grids not counted as unplaced and not flagged; they become unplaced only once the georeference exists and their frame does not | 881626e | node test GridsBeforeEarthReportTheWait...; failed before |
+| 6 | failed_frame logging, fold ordering | done: frame passed by value; kept grid and placement flag released only after `accumulator.add` returns | 881626e | node tests ARejectedKeptGridIsLoggedWithItsFrame (failed before) and AFailedFoldOfAKeptGrid... (injected throw at "grid fold"; failed with the clear-before-add order) |
+| 7 | State ordering | done: `areas_` emplace before `area_order_` push (erased again if the push throws); `areas_dirty_` cleared after `projectAreas` | 881626e | node tests AThrowWhileProjectingAreas... (failed with the old order) and AThrowWhileRegisteringANewArea... (injected throw at "area registration"; pins the invariant, new seam so it cannot fail on code without the seam) |
+| 8 | Stale-definition WARN | done: throttled per node | 881626e | covered by ARejectedNewerArea... (log still seen once) |
+| 9 | README nit | done: moved-georeference case is an ERROR; every README statement I touched re-checked against the code (launch, move test, footprint cap, queue, earth wait, tests list) | 557586d, f3b18aa, 2c5f392, 881626e | n/a |
+| 10 | Committed .pyc | done: `git rm --cached`, `__pycache__/` and `*.pyc` in `.gitignore` | 3addf40 | `git ls-files | grep pyc` empty |
+| 11 | Reset script retries | done: read-only `ros2` calls retried (3 attempts, 2 s pause, `RESET_CUBE_GET_TRIES` / `RESET_CUBE_RETRY_PAUSE`), transitions never; header and README updated | 7a53fa1 | test case 12: reads failing twice then answering (12a), param and state reads failing every time (exactly 3 attempts, nothing changed, 12b/12c), failed transition run once (12d); 12a-c fail on the old script |
+
+Results: coverage_assessment 194 xunit tests, 0 failures, 0 errors (20 skipped: cppcheck not installed); cube_bathymetry 782, 0 failures (90 skipped). Lint in both: uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257 all pass (they run as colcon tests).
+
+Not run: a live sim re-check of `reset_cube_nodes.sh --consumer /coverage_assessment` with the launch file; the launch behaviour and the script's retries are covered by the launch test and the stub-ros2 test.
+
+## Implementation
+
+### Live reset re-check after fix round 3 (2026-10-12)
+
+Report-only run on the real four-boat sim (`demo_boats_launch.py enable_joysticks:=false`, ROS_DOMAIN_ID=69, default discovery), assessor started WITH `coverage_assessment_launch.py`, one latched SurveyArea (500 x 500 m box round the bluefin/map origin, a=0.5 b=0.013, area_total 250000). Scratch: `.agent/scratchpad/cube164b_reset3/`. No code changed.
+
+| Check | Result |
+|---|---|
+| Reset 1: `reset_cube_nodes.sh --consumer /coverage_assessment` + 4 CUBE nodes | PASS, exit 0, 317.5 s; coverage before 9741 -> 10835 (last before), first assessment after 0 / 0 meeting, area_total 250000 unchanged |
+| Reset 2 (back to back, ~5 min later) | PASS, exit 0, 324.1 s; coverage before ~4671, first assessment after 0, total 250000 |
+| End states | all four CUBE nodes and `/coverage_assessment` `active` after both resets (script's own state table, plus `ros2 lifecycle get` after reset 2) |
+| Launch log "activating" | exactly ONE across the whole run (startup), both resets: PASS (round 2 saw a second one at the deactivate) |
+| Coverage grows again | 0 -> 4505 within ~125 s after reset 1, 0 -> 5499 after reset 2: PASS |
+| Status line | "0 callback exception(s) caught" and "0 cell(s) above the surface" in the last line: PASS |
+| Read retries logged | none (reset logs hold no retry text); durations are dominated by `ros2 lifecycle` CLI calls (~3 min per run as in B10 D2) |
+| Startup notice (assessor launched BEFORE the sim) | PASS: "Not assessing: waiting for 'bluefin/map' <- 'earth' ..." (2 WARNs, 'Grids and survey areas are kept meanwhile'), 'ticks without one: ... 9 without earth', then georeference captured, one "water surface unavailable" WARN, assessments from ~+20 s; no unplaced-source warning (0 unplaced) |
+
+Caveat: my own `drive.py` launch failed (bad path in my wrapper, no process ran), so the boats were not driven by the script. Coverage was still non-zero and grew on its own, so the sim boats move without the joystick feed; the reset checks do not depend on it.
+
+Everything started was stopped (process groups of my own launches, plus the domain-69 ros2 daemon).
+
+## Implementation
+
+**Copilot review fixes** (PR #166, all three findings valid)
+
+- 1dbbb26: the core target's export set was never registered. Added `ament_export_dependencies(grid_map_core)` and `ament_export_targets(... HAS_LIBRARY_TARGET)`. Proved with a throwaway downstream CMake project that does `find_package(coverage_assessment)`, includes `coverage_assessment/polygon_raster.h` and links `coverage_assessment::coverage_assessment_core` (builds and links).
+- f293ae6: the throttle used ROS time zero as "never logged". Now a `LogThrottle` (logged flag + steady_clock). New test holds the node clock at zero (`use_sim_time`, no /clock): 8 ticks give 1 log line (old code: 8).
+- edec637: new read_only `max_total_raster_cells` (default 4000000, >= 1), enforced in `AreaRegistry::update` on bounding-box cells (an update of a held id is judged with its old box removed); refusal is an ERROR naming the budget. Status line reports last pass duration and cells held. Tests: registry (accept to the budget, refuse beyond, update of a held id), node (refusal logged once), configure < 1 refused, read_only list, status line. README tables and plan updated.
+
+Tests: coverage_assessment 202 tests, 0 failures; cube_bathymetry 782 tests, 0 failures. Lint tests (uncrustify, cpplint, copyright, lint_cmake, xmllint, flake8, pep257) part of those: clean.

@@ -10,6 +10,7 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 |---|---|---|---|
 | `detections_to_pointcloud` | `detections` (`marine_acoustic_msgs/SonarDetections`), `odom` (`nav_msgs/Odometry`) | `soundings` (`sensor_msgs/PointCloud2`) | Turns each beam detection into a sounding in the **sonar frame** (x/y/z from travel-time + beam angles) and attaches **per-sounding TPU** (`vertical_uncertainty`, `horizontal_uncertainty`) computed by `cube::ErrorModel`. Lifecycle node. |
 | `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; `elevation` is the seabed's **WGS84 ellipsoid height in metres, positive up** (a seabed lies below the water surface's ellipsoid height, so it is negative only where that surface is near or below the ellipsoid), see *The `grid` `elevation` convention* below; note the OPPOSITE convention to `soundings` below — `uncertainty` is a 95 % (1.96 sigma) confidence half-width in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
+| `coverage_assessment_node` (package `coverage_assessment`) | one or more CUBE `grid` topics (`grid_topics`), `survey_area` (`marine_interfaces/SurveyArea`, transient_local), TF | `coverage_assessment` (`marine_interfaces/CoverageAssessment`, one per area, transient_local), `coverage_grid` (`grid_map_msgs/GridMap`, layer `meets_standard`, transient_local) | Scores how much of each target polygon the sources' grids cover and how much of that meets the area's survey standard, with credit per source. Keeps the union over time of every source's `grid`, so the 200 m window does not matter. Lifecycle node; see *Coverage assessment* below and `coverage_assessment/README.md`. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
 `soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
@@ -80,8 +81,9 @@ that for any number of nodes:
 ros2 run cube_bathymetry reset_cube_nodes.sh \
   /boat1/cube_bathymetry /boat2/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry
 
-# with a downstream node that accumulates state derived from `grid`
-# (for example the coverage assessor):
+# with a downstream node that accumulates state derived from `grid`: the
+# coverage assessor (`coverage_assessment_node`, which keeps the union of every
+# grid it has seen) is exactly that, and must be named as a `--consumer`:
 ros2 run cube_bathymetry reset_cube_nodes.sh --consumer /coverage_assessment \
   /boat1/cube_bathymetry /boat2/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry
 ```
@@ -109,7 +111,12 @@ After the first change, a failure also prints every node's state and says to re-
 running it again is safe (a node that is already reset is simply cycled again). Every
 `ros2` call is bounded by `timeout` (`RESET_CUBE_GET_TIMEOUT`, default 30 s, for reads;
 `RESET_CUBE_SET_TIMEOUT`, default 300 s, for transitions), so an unresponsive node
-fails the script instead of hanging it with boats half reset. The calls run under
+fails the script instead of hanging it with boats half reset. A read (`ros2 lifecycle
+get`, `ros2 param get`) that fails or times out is retried, 3 attempts in all
+(`RESET_CUBE_GET_TRIES`) with a 2 s pause (`RESET_CUBE_RETRY_PAUSE`), because under a heavy
+load one parameter service can miss its turn and answer the next time; only when every
+attempt fails does the read fail the script, and the preflight reads do that before
+anything has changed. A transition is never retried. The calls run under
 `timeout --foreground`, so Ctrl-C still reaches `ros2`. The script ignores SIGHUP and
 SIGPIPE so a dropped ssh session cannot kill it between the quiesce and the
 bring-up; run it under `tmux` or `nohup` anyway if the link is unreliable, because a
@@ -226,6 +233,34 @@ producer, not the consumer, carries the guarantee.
 diagonal survey line's dirty bounding box still degrades toward the full tile;
 fixed-size chunking is what cube_bathymetry#112 actually asks for and it
 remains open.
+
+## Coverage assessment (`coverage_assessment`)
+
+The `coverage_assessment` package, next to this one, scores target areas against a
+survey standard from one or more `grid` topics. Design, rules, frames and the
+water-surface assumption are in [`coverage_assessment/README.md`](coverage_assessment/README.md);
+every parameter is `read_only` (set it from YAML or a launch file):
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `grid_topics` | `[]` (required) | One CUBE `grid` topic per source; the order defines `sources` in every message. Empty or duplicated fails configure. |
+| `source_names` | `[]` | Per-source label; an empty entry or list falls back to the topic. Same length as `grid_topics` or empty. |
+| `survey_area_topic` | `survey_area` | `SurveyArea` input (transient_local). |
+| `assessment_period` | `1.0` s | Timer period. |
+| `cell_size` | `1.0` m | Assessment lattice; should equal this node's `cell_size`. |
+| `map_frame` | `map` | Frame of the assessment raster and of both outputs; sources in other frames are transformed into it. |
+| `water_surface_frame` | `map_tide` | One boat's tide frame (e.g. `boat1/map_tide`); applied to every source. |
+| `water_surface_boat_frame` | `base_link` | That boat's base frame, for the distance bound. |
+| `water_surface_max_boat_distance` | `1500.0` m | Beyond this, scoring is skipped with a WARN. |
+| `water_surface_max_age` | `30.0` s | Older than this, the tide (or the tide boat's frame) is refused and scoring is skipped with a WARN. |
+| `max_raster_cells` | `1000000` | Per-area raster cap. |
+| `max_pass_cell_checks` | `16000000` | Work budget of one pass: the bounding-box cells of all held areas times the number of sources; an area that would exceed it is refused with an ERROR. |
+| `max_held_cells` | `100000000` | Most cells held for all sources together (about 800 MB); once over it nothing more is folded in and nothing is published, with an ERROR, until reset. |
+| `max_area_vertices` | `10000` | Most vertices in one area polygon; a definition with more is refused on arrival with an ERROR. |
+| `max_areas` | `20` | Most areas held at once (1 to 100); a new id beyond it is refused with an ERROR. |
+
+Because it keeps a union over time, a CUBE reset must also reset the assessor: pass it
+to `reset_cube_nodes.sh` as `--consumer` (see *Starting a fresh sheet without restarting*).
 
 ## Exported libraries for other repos
 

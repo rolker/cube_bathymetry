@@ -1,6 +1,6 @@
 # Prebaked CI dependency image for cube_bathymetry (Tier C, deps-only).
 #
-# Bakes the rosdep system deps for cube_bathymetry + its upstream source
+# Bakes the rosdep system deps for cube_bathymetry + coverage_assessment + its upstream source
 # workspace so the per-PR industrial_ci run (DOCKER_IMAGE=this image) skips the
 # apt dependency install — the slowest non-cacheable part of the warm build.
 #
@@ -28,11 +28,12 @@ RUN rosdep init 2>/dev/null || true
 RUN rosdep update --rosdistro jazzy
 
 # Clone the same upstream source deps CI uses (this MUST match cube's CI
-# upstream.repos) plus this package's own manifest, then bake every resolvable
+# upstream.repos) plus this repo's package manifests, then bake every resolvable
 # rosdep system dep.
 WORKDIR /tmp/dep-bake
 COPY upstream.repos ./upstream.repos
 COPY cube_bathymetry/package.xml ./cube_bathymetry/package.xml
+COPY coverage_assessment/package.xml ./coverage_assessment/package.xml
 RUN mkdir -p src && vcs import src < upstream.repos
 
 # `rosdep install` is all-or-nothing on key resolution: a single unresolvable
@@ -45,11 +46,11 @@ RUN mkdir -p src && vcs import src < upstream.repos
 # cloned upstream automatically (e.g. nlohmann-json-dev now resolves on its own
 # after unh_marine_autonomy#228 — no explicit deb install needed).
 RUN apt-get update \
-    && skip_keys="$(rosdep check --from-paths src cube_bathymetry --ignore-src --rosdistro jazzy 2>&1 \
+    && skip_keys="$(rosdep check --from-paths src cube_bathymetry coverage_assessment --ignore-src --rosdistro jazzy 2>&1 \
           | sed -n 's/.*Cannot locate rosdep definition for \[\([^]]*\)\].*/\1/p' \
           | sort -u | tr '\n' ' ' | sed 's/  *$//')" ; \
     echo "dep bake: skipping unresolvable keys: ${skip_keys:-<none>}" ; \
-    rosdep install --from-paths src cube_bathymetry --ignore-src -y --rosdistro jazzy \
+    rosdep install --from-paths src cube_bathymetry coverage_assessment --ignore-src -y --rosdistro jazzy \
         ${skip_keys:+--skip-keys "$skip_keys"} ; \
     rm -rf /tmp/dep-bake /var/lib/apt/lists/*
 
