@@ -1870,12 +1870,17 @@ struct GroupAudit
   bool executor_group_is_default = true;
   std::set<std::string> unspun_topics;
   std::size_t unspun_services_clients_timers = 0;
+  /// Waitables in groups outside the executor that are not a QoS event handler of one
+  /// of the subscriptions in those groups.
+  std::size_t unspun_foreign_waitables = 0;
 };
 
 GroupAudit auditGroups(CoverageAssessmentNode & node)
 {
   GroupAudit audit;
   const auto base = node.get_node_base_interface();
+  std::set<const rclcpp::Waitable *> event_handlers;
+  std::vector<const rclcpp::Waitable *> waitables;
   base->for_each_callback_group(
     [&](rclcpp::CallbackGroup::SharedPtr group) {
       audit.all_exclusive = audit.all_exclusive &&
@@ -1890,15 +1895,35 @@ GroupAudit auditGroups(CoverageAssessmentNode & node)
       group->collect_all_ptrs(
         [&](const rclcpp::SubscriptionBase::SharedPtr & sub) {
           audit.unspun_topics.insert(sub->get_topic_name());
+          for (const auto & entry : sub->get_event_handlers()) {
+            event_handlers.insert(entry.second.get());
+          }
         },
         [&](const rclcpp::ServiceBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
         [&](const rclcpp::ClientBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
         [&](const rclcpp::TimerBase::SharedPtr &) {++audit.unspun_services_clients_timers;},
-        // The waitables are the QoS event handlers of those same subscriptions.
-        [](const rclcpp::Waitable::SharedPtr &) {});
+        // A waitable (an action server, say) is told apart from the QoS event handlers
+        // of the subscriptions in the same groups, which are the only ones allowed.
+        [&](const rclcpp::Waitable::SharedPtr & waitable) {
+          waitables.push_back(waitable.get());
+        });
     });
+  for (const auto * waitable : waitables) {
+    if (event_handlers.count(waitable) == 0) {
+      ++audit.unspun_foreign_waitables;
+    }
+  }
   return audit;
 }
+
+// A waitable of no use: stands for an action server or any other waitable that a
+// callback group outside the executor could hold.
+class InertWaitable : public rclcpp::Waitable
+{
+public:
+  std::shared_ptr<void> take_data() override {return nullptr;}
+  void execute(const std::shared_ptr<void> &) override {}
+};
 }  // namespace
 
 TEST_F(NodeTest, CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor)
@@ -1918,6 +1943,9 @@ TEST_F(NodeTest, CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor)
     EXPECT_TRUE(audit.all_exclusive) << "no reentrant callback group";
     EXPECT_GE(audit.unspun_groups, 1) << "test setup: the TF listener's group was not found";
     EXPECT_EQ(audit.unspun_services_clients_timers, 0u);
+    EXPECT_EQ(audit.unspun_foreign_waitables, 0u)
+      << "a group outside the executor holds a waitable that is not a QoS event handler "
+         "of one of its subscriptions";
     const std::set<std::string> allowed = {"/tf", "/tf_static", "/clock"};
     for (const auto & topic : audit.unspun_topics) {
       EXPECT_EQ(allowed.count(topic), 1u)
@@ -1958,6 +1986,14 @@ TEST_F(NodeTest, TheCallbackGroupAuditNoticesWhatItIsFor)
   EXPECT_EQ(audit.unspun_groups, clean.unspun_groups + 1);
   EXPECT_GE(audit.unspun_services_clients_timers, 1u);
   EXPECT_EQ(audit.unspun_topics.count("/grids_on_my_own_thread"), 1u);
+  EXPECT_EQ(audit.unspun_foreign_waitables, 0u)
+    << "the QoS event handlers of a subscription are not foreign";
+
+  // A waitable that is not a subscription's event handler is reported.
+  auto waitable = std::make_shared<InertWaitable>();
+  h.node_->get_node_waitables_interface()->add_waitable(waitable, own_thread);
+  EXPECT_EQ(auditGroups(*h.node_).unspun_foreign_waitables, 1u)
+    << "a waitable outside the executor was not noticed";
   EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
