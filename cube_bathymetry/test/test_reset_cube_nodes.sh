@@ -6,7 +6,7 @@
 # lifecycle state per node (cube_bathymetry#164, #167). The stub also serves
 # `service list` and `service call <node>/reset` in the output format of a real
 # jazzy `ros2 service call` of a std_srvs/Trigger service. Cases 1-12 run on the
-# walk path (the stub's default `service list` holds no `/reset`); 13-22 are the
+# walk path (the stub's default `service list` holds no `/reset`); 13-23 are the
 # service path of cube_bathymetry#167. Cases:
 #   1. consumer ordering: every CUBE node is quiesced before a consumer is touched,
 #      and the consumer is back up before any CUBE node is configured.
@@ -55,6 +55,7 @@
 #      decide the node's state; the last clause does.
 #  22. re-running the same command recovers a node that a failed walk, or a failed
 #      probe of a never-configured node, left inactive.
+#  23. a `/reset` of another type than std_srvs/srv/Trigger is not called; the node walks.
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -137,11 +138,21 @@ case "$1 $2" in
     [ -e "$STUB_DIR/hang_list" ] && exec sleep 30
     [ -e "$STUB_DIR/empty_list" ] && exit 0   # a cold daemon: exit 0, nothing listed
     # A real graph always lists the parameter services of every node.
-    echo /some_other_node/get_parameters
-    echo /some_other_node/set_parameters
-    for m in "$STUB_DIR"/svc_*; do
-      if [ -e "$m" ]; then cat "$m"; fi
-    done
+    # The script must ask for the types (`-t`): `<name> [<type>]` per line, as the
+    # real verb prints; without it the bare names.
+    if [ "${3:-}" = "-t" ]; then
+      echo "/some_other_node/get_parameters [rcl_interfaces/srv/GetParameters]"
+      echo "/some_other_node/set_parameters [rcl_interfaces/srv/SetParameters]"
+      for m in "$STUB_DIR"/svc_*; do
+        if [ -e "$m" ]; then cat "$m"; fi
+      done
+    else
+      echo /some_other_node/get_parameters
+      echo /some_other_node/set_parameters
+      for m in "$STUB_DIR"/svc_*; do
+        if [ -e "$m" ]; then sed 's/ \[.*//' "$m"; fi
+      done
+    fi
     exit 0
     ;;
   "service call")
@@ -219,7 +230,9 @@ cubes=(/boat1/cube_bathymetry /boat2/cube_bathymetry /boat3/cube_bathymetry /boa
 
 # Make nodes serve `<node>/reset` (the stub lists them and answers the call).
 nkey() { echo "${1//\//_}"; }
-mark_service() { local n; for n in "$@"; do echo "$n/reset" > "$work/svc_$(nkey "$n")"; done; }
+mark_service() { local n; for n in "$@"; do echo "$n/reset [std_srvs/srv/Trigger]" > "$work/svc_$(nkey "$n")"; done; }
+# A node that serves a `/reset` of another type.
+mark_service_type() { echo "$1/reset [$2]" > "$work/svc_$(nkey "$1")"; }
 
 # --- 1. consumer ordering, four nodes, one of them already inactive -----------
 setup_nodes
@@ -771,6 +784,20 @@ out=$("$script" "${cubes[@]}" 2>&1); rc=$?
 for n in "${cubes[@]}"; do
   [ "$(cat "$work/state/${n//\//_}")" = active ] || fail "case 22b: $n is not active after the re-run"
 done
+
+# --- 23. classification matches the type, not only the name ---------------------------------
+setup_nodes
+mark_service /boat1/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry
+mark_service_type /boat2/cube_bathymetry example_interfaces/srv/SetBool
+mark_service_type /coverage_assessment example_interfaces/srv/SetBool
+out=$("$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 23: exit $rc: $out"
+grep -q "boat2\|coverage_assessment" "$work/calls" && fail "case 23: a /reset of another type was called with a Trigger request: $(cat "$work/calls")"
+[ -n "$(line_of "/boat2/cube_bathymetry cleanup")" ] || fail "case 23: boat2 did not take the walk: $(cat "$work/log")"
+[ -n "$(line_of "/coverage_assessment cleanup")" ] || fail "case 23: the consumer did not take the walk: $(cat "$work/log")"
+[ -n "$(line_of "/boat1/cube_bathymetry reset-service")" ] || fail "case 23: a Trigger service was not used"
+bare=$(grep -c ' service list$' "$work/timeout_calls")
+[ "$bare" -eq 0 ] || fail "case 23: service list was asked without -t: $(cat "$work/timeout_calls")"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

@@ -148,8 +148,10 @@ assessing).
 once: a node given twice, or as both a CUBE node and a `--consumer` (`/a/b`, `a/b` and
 `/a/b/` are the same node), is refused before anything is touched. In order:
 
-1. **classifies** every node with one `ros2 service list`: a node that lists
-   `<node>/reset` is reset by service, any other node takes the walk. An empty or failed
+1. **classifies** every node with one `ros2 service list -t`: a node that lists
+   `<node>/reset [std_srvs/srv/Trigger]` is reset by service, any other node takes the walk
+   (a `/reset` of another type is not called: a `Trigger` request to it would hang the
+   client or mean something else). An empty or failed
    list is retried and then stops the script before any change; it is never read as "no
    node has a service". `--allow-persistence` sends every CUBE node down the walk;
 2. **checks everything that can refuse**, before the first service call: every walk-class

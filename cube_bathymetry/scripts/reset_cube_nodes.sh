@@ -26,9 +26,11 @@
 #                         Every CUBE node then takes the lifecycle walk (the service
 #                         refuses while draft_dir is set); consumers are unaffected.
 #
-# Order. (0) Classify, changing nothing: ONE `ros2 service list` tells which nodes
-# serve `<node>/reset`. A node that is in a non-empty list is `service` class; a node
-# that is not is `walk` class (older binary, never-configured node, a mistyped name,
+# Order. (0) Classify, changing nothing: ONE `ros2 service list -t` tells which nodes
+# serve `<node>/reset` as a std_srvs/srv/Trigger. A node whose `<node>/reset [std_srvs/srv/Trigger]`
+# is in a non-empty list is `service` class; a node that is not (including one whose
+# `/reset` has another type: calling it with a Trigger request would hang the client)
+# is `walk` class (older binary, never-configured node, a mistyped name,
 # or discovery lag, which is safe: the node merely takes the walk). An empty list or
 # a failed call is "indeterminate", retried like a read and, if it stays so, the
 # script stops before any change; it is never read as "no node has a service".
@@ -58,7 +60,7 @@
 #
 # `ros2` calls (each is a CLI start-up, 3 to 8 s under load, which is where the time
 # goes; the transitions themselves are quick):
-#   classification                          1  `service list`, shared by all nodes
+#   classification                          1  `service list -t`, shared by all nodes
 #   a service node (CUBE or consumer)       1  `service call`; no `lifecycle get`, no
 #                                              `param get`, no final state listing:
 #                                              the service refuses on draft_dir itself
@@ -333,7 +335,7 @@ to_active() {
   done
 }
 
-# One `ros2 service list`, retried like a read. An EMPTY answer is indeterminate
+# One `ros2 service list -t`, retried like a read. An EMPTY answer is indeterminate
 # (a cold daemon starts with an empty graph; a real graph always lists at least the
 # parameter services of every node), so it is retried and, if it stays empty, fails:
 # it must never be read as "no node has a reset service".
@@ -341,7 +343,7 @@ service_list=""
 load_service_list() {
   local attempt=1 out rc
   while true; do
-    out=$(timeout --foreground "$get_timeout" ros2 service list 2>/dev/null)
+    out=$(timeout --foreground "$get_timeout" ros2 service list -t 2>/dev/null)
     rc=$?
     if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
       service_list=$out
@@ -353,8 +355,11 @@ load_service_list() {
   done
 }
 
+# True only for `<node>/reset [std_srvs/srv/Trigger]`: the name alone is not enough,
+# a `/reset` of another type would hang the Trigger client, or be called blindly
+# with a meaning it does not have.
 has_reset_service() {
-  printf '%s\n' "$service_list" | grep -Fxq -- "$1/reset"
+  printf '%s\n' "$service_list" | grep -Fxq -- "$1/reset [std_srvs/srv/Trigger]"
 }
 
 # service_reset NODE: one `ros2 service call NODE/reset std_srvs/srv/Trigger '{}'`.
