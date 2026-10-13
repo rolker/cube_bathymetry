@@ -57,6 +57,8 @@
 #      probe of a never-configured node, left inactive.
 #  23. a `/reset` of another type than std_srvs/srv/Trigger is not called; the node walks.
 #  24. the usage text says a refusing consumer is walked (exit 1 is a CUBE node's refusal).
+#  25. a `service list -t` answer far over a pipe buffer (~64 KB) still classifies a node
+#      that serves ~/reset as a service node (one call each, no lifecycle walk).
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -144,9 +146,17 @@ case "$1 $2" in
     if [ "${3:-}" = "-t" ]; then
       echo "/some_other_node/get_parameters [rcl_interfaces/srv/GetParameters]"
       echo "/some_other_node/set_parameters [rcl_interfaces/srv/SetParameters]"
+      # A big graph (case 25): ~100 KB of other nodes' services before the matches and
+      # ~100 KB after, so the whole answer is far over a pipe buffer.
+      if [ -e "$STUB_DIR/big_list" ]; then
+        awk 'BEGIN { for (i = 0; i < 1500; i++) printf "/filler_a_%04d/get_parameters [rcl_interfaces/srv/GetParameters]\n", i }'
+      fi
       for m in "$STUB_DIR"/svc_*; do
         if [ -e "$m" ]; then cat "$m"; fi
       done
+      if [ -e "$STUB_DIR/big_list" ]; then
+        awk 'BEGIN { for (i = 0; i < 1500; i++) printf "/filler_b_%04d/get_parameters [rcl_interfaces/srv/GetParameters]\n", i }'
+      fi
     else
       echo /some_other_node/get_parameters
       echo /some_other_node/set_parameters
@@ -219,7 +229,7 @@ fail() { echo "FAIL: $*"; failures=$((failures + 1)); }
 setup_nodes() {
   rm -f "$work"/log "$work"/fail_* "$work"/hang_* "$work"/noise "$work"/slow \
     "$work"/timeout_calls "$work"/reads "$work"/flaky_* "$work"/onconfigure_* "$work"/state/* "$work"/param/* \
-    "$work"/svc_* "$work"/refuse_* "$work"/prior_* "$work"/calls "$work"/list_calls "$work"/empty_list
+    "$work"/svc_* "$work"/refuse_* "$work"/prior_* "$work"/calls "$work"/list_calls "$work"/empty_list "$work"/big_list
   for n in boat1 boat2 boat3 boat4; do
     echo active > "$work/state/_${n}_cube_bathymetry"
     printf '' > "$work/param/_${n}_cube_bathymetry_draft_dir"
@@ -808,6 +818,23 @@ bare=$(grep -c ' service list$' "$work/timeout_calls")
 help_out=$("$script" --help 2>&1)
 case "$help_out" in *"a consumer that refuses is walked instead"*) ;; *) fail "case 24: the exit status text does not say a refusing consumer is walked: $help_out" ;; esac
 case "$help_out" in *"4 reset done"*) fail "case 24: the usage still documents the retired exit 4: $help_out" ;; esac
+
+# --- 25. a service list over a pipe buffer --------------------------------------------------
+# 3000 filler lines of ~70 bytes are about 200 KB. A `printf | grep -q` classification
+# fails here (grep exits on the match, printf gets EPIPE under pipefail), so every node
+# would take the walk.
+setup_nodes
+mark_service "${cubes[@]}" /coverage_assessment
+touch "$work/big_list"
+out=$("$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 25: exit $rc: $out"
+case "$out" in *"no ~/reset service"*) fail "case 25: a node that serves ~/reset was classified as having none: $out" ;; esac
+[ -n "$(line_of "/boat1/cube_bathymetry reset-service")" ] || fail "case 25: boat1 was not reset by service: $(cat "$work/log")"
+grep -qE ' (deactivate|cleanup|configure|activate)$' "$work/log" &&
+  fail "case 25: a lifecycle transition ran although every node serves ~/reset: $(cat "$work/log")"
+[ "$(wc -l < "$work/log")" -eq 5 ] || fail "case 25: expected 5 resets in the log: $(cat "$work/log")"
+[ "$(wc -l < "$work/timeout_calls")" -eq 6 ] ||
+  fail "case 25: expected 6 ros2 calls (1 list + 5 service calls), got: $(cat "$work/timeout_calls")"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

@@ -363,9 +363,12 @@ load_service_list() {
 
 # True only for `<node>/reset [std_srvs/srv/Trigger]`: the name alone is not enough,
 # a `/reset` of another type would hang the Trigger client, or be called blindly
-# with a meaning it does not have.
+# with a meaning it does not have. The list is a here-string, not a pipe: under
+# `pipefail` with SIGPIPE ignored, `printf | grep -q` fails when grep exits on the match
+# while printf still has more than a pipe buffer (about 64 KB, a multi-boat graph) to
+# write, and a node that serves ~/reset would be classified as having none.
 has_reset_service() {
-  printf '%s\n' "$service_list" | grep -Fxq -- "$1/reset [std_srvs/srv/Trigger]"
+  grep -Fxq -- "$1/reset [std_srvs/srv/Trigger]" <<<"$service_list"
 }
 
 # service_reset NODE: one `ros2 service call NODE/reset std_srvs/srv/Trigger '{}'`.
@@ -384,7 +387,7 @@ service_reset() {
       std_srvs/srv/Trigger '{}' 2>/dev/null)
     rc=$?
     if [ "$rc" -eq 0 ]; then
-      line=$(printf '%s\n' "$out" | grep -m1 '^std_srvs\.srv\.Trigger_Response(success=')
+      line=$(grep -m1 '^std_srvs\.srv\.Trigger_Response(success=' <<<"$out")
       # The verdict is read from the START of the line only: the message after it
       # may echo a user-supplied path, such as draft_dir='/data/(success=True,x)',
       # and a match anywhere in the line would read that refusal as a success.
