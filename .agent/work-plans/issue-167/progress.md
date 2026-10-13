@@ -36,3 +36,19 @@ One PR is realistic (two services, one script change, tests, README). The items 
 | Capture decisions | Watch | Superseding the "product of record" wording is a design change; record it in the README and the PR, not an ADR (the world-store ADR belongs to #391) |
 | ADR-0008 (ROS 2 conventions, workspace) | Watch | `std_srvs/Trigger`, private service name, lifecycle-aware creation and release |
 | Project ADR-0001 (eviction / draft store) | Watch | Eviction invariant (persist before drop) is untouched because the service refuses with `draft_dir` set |
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-10-13 11:25 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-167/plan.md` at `9b00f3f`
+**Branch**: feature/issue-167 at `9b00f3f`
+**Phases**: single
+
+All eight Issue Review actions are folded in (sheet-level settings re-applied from stored members, one shared `buildSession`/`adoptSession` path with a parity test, build aside then swap, service name/states/refusal/response text, assessor reset scope and map-moved refusal, script call counts and `service type` absent-vs-timeout rule, honest ordering-race text, `std_srvs` in both packages, `AGENTS.md:54` edit, no closing keyword for #164). Two findings beyond the review: the `grid` stamp is steady-clock so the suggested stale-grid guard in the assessor is not possible, and the node's default mutually exclusive callback group (not only the single-threaded executor) is what makes the swap safe, with a test that pins it.
+
+### Open questions
+- [ ] Partial reset when one boat refuses (`draft_dir` set): accept and report (plan default, 2 calls per node) or keep an all-or-nothing preflight with a `param get` per node (about 12 to 30 s more).
+- [ ] Assessor reset zeroes `NodeStats` for parity with configure (previous totals logged first); keep cumulative instead? Low stakes.
+- [ ] The live four-boat timing check needs the simulation stack; who runs it if the implementation session cannot?
