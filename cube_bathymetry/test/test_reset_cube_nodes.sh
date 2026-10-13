@@ -576,6 +576,8 @@ for n in "${cubes[@]}"; do
   [ -n "$(line_of "$n cleanup")" ] || fail "case 16a: $n was not walked"
 done
 [ -n "$(line_of "/coverage_assessment reset-service")" ] || fail "case 16a: the consumer was not classified normally"
+case "$out" in *"lifecycle walk (--allow-persistence"*"): /boat1/cube_bathymetry /boat2/cube_bathymetry"*) ;; *) fail "case 16a: the classification line does not name --allow-persistence as the reason: $out" ;; esac
+case "$out" in *"no ~/reset service"*) fail "case 16a: says nodes that serve ~/reset have no such service: $out" ;; esac
 setup_nodes
 mark_service "${cubes[@]}"
 out=$("$script" --allow-persistence "${cubes[@]}" 2>&1); rc=$?

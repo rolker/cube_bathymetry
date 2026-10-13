@@ -447,7 +447,14 @@ for i in "${!consumers[@]}"; do
   [ "${consumer_class[i]}" = walk ] && walk_consumers+=("${consumers[i]}")
 done
 walked=("${walk_cube[@]}" "${walk_consumers[@]}")
-if [ "${#walked[@]}" -gt 0 ]; then
+# Say why each node walks: with --allow-persistence the CUBE nodes walk whether or not
+# they serve ~/reset (the service refuses while draft_dir is set).
+if [ "$allow_persistence" -eq 1 ] && [ "${#walk_cube[@]}" -gt 0 ]; then
+  echo "$prog: lifecycle walk (--allow-persistence, the service would refuse a draft_dir): ${walk_cube[*]}"
+  if [ "${#walk_consumers[@]}" -gt 0 ]; then
+    echo "$prog: lifecycle walk (no ~/reset service): ${walk_consumers[*]}"
+  fi
+elif [ "${#walked[@]}" -gt 0 ]; then
   echo "$prog: lifecycle walk (no ~/reset service): ${walked[*]}"
 fi
 
