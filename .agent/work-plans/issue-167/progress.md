@@ -106,7 +106,7 @@ Implements the plan as amended on 2026-10-13: all five must-fixes and all sugges
 - `11237ac` plan: fold in the plan-review must-fixes and suggestions
 - `eb33873` progress: correct the Plan Authored timestamp to the plan commit's author time (11:13 -04:00, from `git log`; the entry had said 11:25, later than the machine clock at review time)
 - `9a546a1` cube_bathymetry_node: split on_configure into buildSession and adoptSession (own commit, existing lifecycle tests unchanged and green before the service was added)
-- `0c0c1e4` cube_bathymetry_node: add the ~/reset in-RAM session service (+ `std_srvs`, 10 new tests)
+- `0c0c1e4` cube_bathymetry_node: add the ~/reset in-RAM session service (+ `std_srvs`, 9 new tests)
 - `faf31f0` coverage_assessment: add the ~/reset in-RAM session service (+ `std_srvs`, held-limit and map-moved log texts, 8 new tests)
 - `83db5ee` reset_cube_nodes.sh: reset by ~/reset service, walk only where there is none (+ `ros2service` exec_depend, stub and cases 13-21, CMake case-group comment)
 - `2507499` docs: both READMEs and AGENTS.md (the owner-approved eviction bullet)
@@ -114,7 +114,7 @@ Implements the plan as amended on 2026-10-13: all five must-fixes and all sugges
 - `1298b98` style: wrap one comment line and align two lambda continuations for cpplint/uncrustify
 
 ### Tests
-`./sensors_ws/build.sh cube_bathymetry coverage_assessment` then `./sensors_ws/test.sh cube_bathymetry coverage_assessment` at `1298b98`: **colcon summary 1069 tests, 0 errors, 0 failures, 110 skipped** (the skips are the existing ones; a first run at `2507499` had 6 lint failures, all mine: one cpplint line length and two uncrustify alignments, fixed in `1298b98`). gtest counts: `test_node_lifecycle` 29 (was 20), `test_coverage_assessment_node` 48 (was 40); `test_reset_cube_nodes` runs 21 case groups (was 12) and passes in about 30 s. Live checks beyond the unit tests, on a private ROS_DOMAIN_ID: the real `ros2 service call` / `ros2 service list` output of a Python Trigger server was captured and used as the stub format, and the final script was run against two such servers (success, refusal with exit 1 and the reset-before-this report, inactive with exit 4); no processes were killed by name.
+`./sensors_ws/build.sh cube_bathymetry coverage_assessment` then `./sensors_ws/test.sh cube_bathymetry coverage_assessment` at `1298b98`: **colcon summary 1069 tests, 0 errors, 0 failures, 110 skipped** (all 110 are the cppcheck lint tests, 90 + 20, reported as skipped; a first run at `2507499` had 6 lint failures, all mine: one cpplint line length and two uncrustify alignments, fixed in `1298b98`). gtest counts: `test_node_lifecycle` 29 (was 20), `test_coverage_assessment_node` 48 (was 40); `test_reset_cube_nodes` runs 21 case groups (was 12) and passes in about 30 s. Live checks beyond the unit tests, on a private ROS_DOMAIN_ID: the real `ros2 service call` / `ros2 service list` output of a Python Trigger server was captured and used as the stub format, and the final script was run against two such servers (success, refusal with exit 1 and the reset-before-this report, inactive with exit 4); no processes were killed by name.
 
 ### Revert checks (each new test fails when its fix is reverted)
 Done with temporary, env-selected mutations in a throw-away build (removed again; nothing of them is committed).
