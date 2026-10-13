@@ -290,9 +290,9 @@ Facts verified in source that shape the design:
     of cases and the "12 case groups" comment at `CMakeLists.txt:407` are updated with it.
 21. **Live check** on the four-boat simulation (work-list item): record the wall time of the all-service reset against
     the 318 to 324 s baseline, and note it in the PR. **Owner decision 2026-10-13: the host
-    runs this check after implementation, not the implementation session.** The work item stays UNCHECKED, the PR body
-    lists it as an open item, and the PR carries no closing keyword for #167 until it is done or the owner waives it.
-    Done 2026-10-13 14:52 -04:00: 19.2 s and 17.7 s, see the Open Questions entry.
+    runs this check after implementation, not the implementation session.** Until it was done the work item stayed
+    unchecked and the PR was to carry no closing keyword for #167.
+    Done 2026-10-13 14:52 -04:00: 19.2 s and 17.7 s, see the Open Questions entry; the PR may close #167.
 
 ## Files to Change
 
