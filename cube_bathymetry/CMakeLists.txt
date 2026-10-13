@@ -40,6 +40,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(rosbag2_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)  # ~/reset Trigger service (#167)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -265,6 +266,7 @@ target_link_libraries(cube_bathymetry_node_link INTERFACE
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
   ${sensor_msgs_TARGETS}
+  ${std_srvs_TARGETS}  # ~/reset (#167)
   tf2_eigen::tf2_eigen
   tf2_geometry_msgs::tf2_geometry_msgs
   tf2_sensor_msgs::tf2_sensor_msgs

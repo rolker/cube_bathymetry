@@ -40,6 +40,7 @@
   <depend>rosbag2_transport</depend>
   <depend>rclcpp_lifecycle</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>  <!-- ~/reset Trigger service (#167) -->
   <depend>tf2</depend>  <!-- DetectionsProjector: tf2::BufferCore + getEulerYPR -->
   <depend>tf2_geometry_msgs</depend>
   <depend>tf2_ros</depend>

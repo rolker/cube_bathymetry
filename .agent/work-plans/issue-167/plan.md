@@ -27,9 +27,11 @@ Facts verified in source that shape the design:
   lives in `bs_applied_curve_`; the subscription survives a reset, so it is not redelivered.
 - `trimResidentToBudget()` writes the member `evicted_indices_` and `refresh_tracker_`, and the draft prime fills the
   member `catalog_builder_`: building a sheet aside needs those three to be candidate-local until the swap.
-- Every callback of the node (pings, timers, subscriptions) lives in the node's default callback group, which is
-  mutually exclusive, and no callback group is created anywhere in either package (grep). `main` also uses a
-  `SingleThreadedExecutor`. Either fact alone makes a swap inside a callback safe without a mutex.
+- Every callback of the node's own entities (pings, timers, subscriptions) lives in the node's default callback
+  group, which is mutually exclusive, and no package code creates a callback group (grep). The one other group is
+  made by `tf2_ros::TransformListener` for its own dedicated thread (`automatically_add_to_executor_with_node` is
+  false, so the node's executor never spins it); it only writes the TF buffer, which a reset does not replace.
+  `main` also uses a `SingleThreadedExecutor`. Either fact alone makes a swap inside a callback safe without a mutex.
 - The `grid` header stamp is `GeoMapSheet::lastUpdateTime()` (`stampGrid`): the header stamp (ROS time) of the latest
   ping that changed a tile, carried as `epoch + header.stamp` in a `steady_clock` type (`pingCallback` ->
   `addSoundings` -> `last_update_time_`), and 0 on a sheet with no insert yet. A guard "drop grids stamped before the
@@ -204,7 +206,9 @@ Facts verified in source that shape the design:
     - `ResetServiceResetsTheSessionState`: dirty the 11 fields (plus any step 4 adds), call the service, expect every
       name from `staleFields` clean, new sheet object (old `weak_ptr` expires), `catalogSize()==0`, node still active.
     - the fresh-sheet test of `EmptyStartWithoutPersistence` through the service (no finite cell, no dirty grids), and
-      the next ping builds a window with none of the old cells.
+      the new sheet accumulates only new data (no cell of the old patch returns). The "next ping builds a window"
+      form is not tested: `pingCallback` needs TF and the whole publish chain, and the window is built from the
+      sheet's grids, which this test already pins.
     - `ResetKeepsSheetLevelSettings`: launch override `capture_spacing_scale=0.9` and a curve delivered through
       `sonarInfoCallback`; after reset `sheet()->parameters()` has the same scale, mode, curve, `tl_removed` and
       absorption as before (fails if a bare `make_shared<GeoMapSheet>` is used). A second `sonar_info` heartbeat with the
@@ -222,8 +226,10 @@ Facts verified in source that shape the design:
       `test_store_import.cpp`); the message reports primed tiles and the new sheet's predicted surface is seeded.
     - `ConfigureThatThrowsLeavesNoResetService`: a configure that fails after the sonar_info subscription would have
       been created (invalid `sonar_info_topic`) leaves the node UNCONFIGURED with no `~/reset` service in the graph.
-    - `AllCallbacksShareTheDefaultGroup`: the node has exactly one callback group, so the swap-safety argument cannot
-      be broken silently by someone adding a reentrant group.
+    - `AllCallbacksShareTheDefaultGroup`: exactly one callback group is spun by the node's executor (the default,
+      mutually exclusive one) and no group is reentrant, so the swap-safety argument cannot be broken silently by
+      someone adding a reentrant group. (The `TransformListener`'s own group is not auto-added to the executor and is
+      excluded by that criterion.)
 19. **`test_coverage_assessment_node.cpp`** (harness as in `ReconfigureEmptiesTheUnion`): reset service empties the
     union and the next tick publishes `area_covered == 0`; areas, their projections and the georeference are kept
     (`area_total` unchanged, no new `Raster georeference captured` line); a kept unplaced grid does not return after

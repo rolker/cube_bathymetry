@@ -37,27 +37,42 @@
 //
 // The tests drive the public LifecycleNode transitions directly (no executor
 // needed: configure/activate create entities but no callback has to run).
+//
+// The `~/reset` service (cube_bathymetry#167) starts the same fresh session in
+// RAM with no lifecycle round trip. Its tests call it through a real
+// std_srvs/Trigger client against an in-process SingleThreadedExecutor and share
+// one assertion helper with ReconfigureResetsTheSessionState, so a session field
+// that one path forgets fails in both.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
+#include <utility>
 #include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "lifecycle_msgs/msg/state.hpp"
+#include "marine_bathymetry_store/bathymetry_store.hpp"
+#include "marine_bathymetry_store/tile_io.hpp"
+#include "marine_interfaces/msg/sonar_info.hpp"
 #include "marine_interfaces/msg/tile_catalog.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "tf2_msgs/msg/tf_message.hpp"
 
 #include "cube_bathymetry/geo_sounding.h"
+#include "cube_bathymetry/store_import.h"
 #include "cube_bathymetry_node.hpp"
 #include "marine_autonomy/gz4d_geo.h"
 
@@ -90,6 +105,31 @@ struct CubeBathymetryTestAccess
     // "went out whole": a fresh tracker would call this tile due (never sent).
     n.refresh_tracker_.notePublished(probeIndex(), 1.0, true);
     n.catalog_builder_.update(probeIndex(), 5);
+  }
+
+  /// `~/reset` handler called directly (no service, no executor): what a null
+  /// sheet answers, and what a released service cannot be asked.
+  static std::pair<bool, std::string> callResetHandler(CubeBathymetry & n)
+  {
+    auto response = std::make_shared<std_srvs::srv::Trigger::Response>();
+    n.resetService(std::make_shared<std_srvs::srv::Trigger::Request>(), response);
+    return {response->success, response->message};
+  }
+
+  /// Make buildSession() throw once the candidate sheet exists.
+  static void setBuildFault(CubeBathymetry & n, std::function<void()> fault)
+  {
+    n.build_fault_injector_ = std::move(fault);
+  }
+
+  static void deliverSonarInfo(CubeBathymetry & n, const marine_interfaces::msg::SonarInfo & info)
+  {
+    n.sonarInfoCallback(info);
+  }
+  static bool curveApplied(const CubeBathymetry & n) {return n.bs_curve_applied_;}
+  static std::size_t storedCurvePoints(const CubeBathymetry & n)
+  {
+    return n.bs_applied_curve_.points.size();
   }
 
   static double catalogInterval(const CubeBathymetry & n) {return n.catalog_interval_s_;}
@@ -157,6 +197,113 @@ bool hasFiniteCell(const std::shared_ptr<cube::GeoMapSheet> & sheet)
     }
   }
   return false;
+}
+
+// Nothing of the previous session may be left (the 11 fields of staleFields),
+// whichever way the fresh session was started. Shared by the lifecycle-walk test
+// and the `~/reset` tests.
+void expectNoStaleSessionState(const CubeBathymetry & node, const std::string & how)
+{
+  const auto stale = CubeBathymetryTestAccess::staleFields(node);
+  for (const auto & name : stale) {
+    ADD_FAILURE() << name << " survived " << how;
+  }
+  EXPECT_TRUE(stale.empty());
+  EXPECT_EQ(node.catalogSize(), 0u) << "the catalog survived " << how;
+}
+
+// Files under @p dir as {path, size, mtime}: equal before and after means nothing
+// on disk was created, written, touched or removed.
+std::vector<std::string> listing(const std::filesystem::path & dir)
+{
+  std::vector<std::string> out;
+  for (const auto & entry : std::filesystem::recursive_directory_iterator(dir)) {
+    std::string line = entry.path().string();
+    if (entry.is_regular_file()) {
+      line += " " + std::to_string(entry.file_size());
+    }
+    line += " " + std::to_string(entry.last_write_time().time_since_epoch().count());
+    out.push_back(line);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// A real std_srvs/Trigger client against the node's `~/reset`, with the node and
+// the client spun by one in-process SingleThreadedExecutor (what main() runs).
+class ResetCaller
+{
+public:
+  explicit ResetCaller(const std::shared_ptr<CubeBathymetry> & node)
+  : node_(node),
+    helper_(std::make_shared<rclcpp::Node>("reset_caller_" + std::to_string(counter()++))),
+    client_(helper_->create_client<std_srvs::srv::Trigger>(
+        std::string(node->get_fully_qualified_name()) + "/reset"))
+  {
+    exe_.add_node(node_->get_node_base_interface());
+    exe_.add_node(helper_);
+  }
+
+  // The node's graph entry for `reset`, polled: graph updates arrive
+  // asynchronously after a service is created or destroyed.
+  bool serviceInGraph() const
+  {
+    const auto services = helper_->get_service_names_and_types_by_node(
+      node_->get_name(), node_->get_namespace());
+    return services.count(std::string(node_->get_fully_qualified_name()) + "/reset") > 0;
+  }
+
+  bool waitForGraph(bool present, std::chrono::milliseconds limit = std::chrono::seconds(5)) const
+  {
+    const auto end = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < end) {
+      if (serviceInGraph() == present) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return serviceInGraph() == present;
+  }
+
+  // {success, message}; fails the test when the service does not answer.
+  std::pair<bool, std::string> call()
+  {
+    if (!client_->wait_for_service(std::chrono::seconds(5))) {
+      ADD_FAILURE() << "~/reset is not available";
+      return {false, ""};
+    }
+    auto future = client_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+    if (exe_.spin_until_future_complete(future, std::chrono::seconds(30)) !=
+      rclcpp::FutureReturnCode::SUCCESS)
+    {
+      ADD_FAILURE() << "~/reset did not answer";
+      return {false, ""};
+    }
+    const auto response = future.get();
+    return {response->success, response->message};
+  }
+
+private:
+  static int & counter()
+  {
+    static int n = 0;
+    return n;
+  }
+
+  std::shared_ptr<CubeBathymetry> node_;
+  std::shared_ptr<rclcpp::Node> helper_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client_;
+  rclcpp::executors::SingleThreadedExecutor exe_;
+};
+
+marine_interfaces::msg::SonarInfo tier2Curve()
+{
+  marine_interfaces::msg::SonarInfo info;
+  info.angular_response_angle_deg = {0.5f, 30.5f};
+  info.angular_response_db_rel_nadir = {0.0f, -12.0f};
+  info.angular_response_tl = marine_interfaces::msg::SonarInfo::ANGULAR_RESPONSE_TL_REMOVED;
+  info.angular_response_absorption_db_per_m = 0.00025f;
+  return info;
 }
 
 class NodeLifecycle : public ::testing::Test
@@ -639,11 +786,7 @@ TEST_F(NodeLifecycle, ReconfigureResetsTheSessionState)
   // Dirty it again: cleanup does not reset the cursor fields, configure must.
   CubeBathymetryTestAccess::dirtySessionState(*node);
   ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
-  const auto stale = CubeBathymetryTestAccess::staleFields(*node);
-  for (const auto & name : stale) {
-    ADD_FAILURE() << name << " survived the reconfigure";
-  }
-  EXPECT_TRUE(stale.empty());
+  expectNoStaleSessionState(*node, "the reconfigure");
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
@@ -678,5 +821,377 @@ TEST_F(NodeLifecycle, ReadOnlyOverridesSurviveACycle)
     << "read_only must still refuse runtime sets after a cycle";
   EXPECT_FALSE(
     node->set_parameter(rclcpp::Parameter("publish_dirty_subwindow", true)).successful);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// ---- `~/reset` (cube_bathymetry#167) ----
+
+// The service starts the same fresh session as a reconfigure: every one of the
+// session fields the lifecycle test dirties is back at its fresh value, the sheet
+// and catalog are new, and the node stays active. Same assertion helper as
+// ReconfigureResetsTheSessionState.
+TEST_F(NodeLifecycle, ResetServiceResetsTheSessionState)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  ResetCaller caller(node);
+
+  std::weak_ptr<cube::GeoMapSheet> old_sheet = node->sheet();
+  const auto old_ptr = node->sheet().get();
+  addPatch(node->sheet(), -12.5);
+  ASSERT_TRUE(hasFiniteCell(node->sheet())) << "test setup: CUBE produced no estimate";
+  CubeBathymetryTestAccess::dirtySessionState(*node);
+  ASSERT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u)
+    << "test setup: every field should be dirty before the reset";
+  ASSERT_EQ(node->catalogSize(), 1u);
+
+  const auto [ok, message] = caller.call();
+  EXPECT_TRUE(ok) << message;
+  EXPECT_NE(message.find("tile(s) dropped from RAM"), std::string::npos) << message;
+  EXPECT_NE(message.find("node is active"), std::string::npos) << message;
+  EXPECT_NE(message.find("nothing on disk was changed"), std::string::npos) << message;
+
+  expectNoStaleSessionState(*node, "the reset service");
+  EXPECT_EQ(stateId(*node), State::PRIMARY_STATE_ACTIVE);
+  ASSERT_TRUE(node->sheet());
+  EXPECT_NE(node->sheet().get(), old_ptr) << "the service must build a new sheet";
+  EXPECT_TRUE(old_sheet.expired()) << "nothing may keep the old sheet alive";
+  // The fresh-sheet claim of EmptyStartWithoutPersistence, through the service.
+  EXPECT_TRUE(node->sheet()->grids().empty());
+  EXPECT_FALSE(hasFiniteCell(node->sheet()));
+  EXPECT_TRUE(node->sheet()->dirtyGrids().empty());
+
+  // The new sheet accumulates only new data.
+  addPatch(node->sheet(), -20.0);
+  ASSERT_TRUE(hasFiniteCell(node->sheet()));
+  for (const auto & grid : node->sheet()->grids()) {
+    for (const auto & v : grid->values()) {
+      if (std::isfinite(v.depth)) {
+        EXPECT_LT(v.depth, -15.0f) << "a cell of the old session came back";
+      }
+    }
+  }
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// An inactive node has a sheet too. Resetting it is harmless, and the response
+// says the node publishes nothing, so a caller cannot read "reset" as "publishing".
+TEST_F(NodeLifecycle, ResetWhileInactiveSaysSo)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ResetCaller caller(node);
+  const auto [ok, message] = caller.call();
+  EXPECT_TRUE(ok) << message;
+  EXPECT_NE(message.find("node is inactive: no grid until activated"), std::string::npos)
+    << message;
+  EXPECT_EQ(stateId(*node), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// The sheet-level settings come from the stored configuration, not from a bare
+// GeoMapSheet: the capture-spacing scale (a launch override here), and the
+// backscatter curve that arrived on the latched sonar_info topic and is NOT
+// redelivered to the surviving subscription. Twice in a row, so a curve that is
+// moved out of the stored member instead of copied is caught on the second reset.
+TEST_F(NodeLifecycle, ResetKeepsSheetLevelSettings)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("capture_spacing_scale", 0.9)}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, tier2Curve());
+  ASSERT_TRUE(CubeBathymetryTestAccess::curveApplied(*node));
+
+  const auto before = node->sheet()->parameters();
+  ASSERT_FLOAT_EQ(before.capture_spacing_scale, 0.9f);
+  ASSERT_EQ(before.angular_response_curve.size(), 2u) << "test setup: the curve was not applied";
+  ASSERT_TRUE(before.backscatter_tl_removed);
+
+  ResetCaller caller(node);
+  for (int round = 1; round <= 2; ++round) {
+    const auto [ok, message] = caller.call();
+    ASSERT_TRUE(ok) << message;
+    const auto after = node->sheet()->parameters();
+    EXPECT_FLOAT_EQ(after.capture_spacing_scale, 0.9f) << "reset " << round;
+    EXPECT_EQ(after.backscatter_angle_correction, before.backscatter_angle_correction)
+      << "reset " << round;
+    EXPECT_EQ(after.angular_response_curve, before.angular_response_curve) << "reset " << round;
+    EXPECT_EQ(after.backscatter_tl_removed, before.backscatter_tl_removed) << "reset " << round;
+    EXPECT_FLOAT_EQ(
+      after.backscatter_absorption_db_per_m, before.backscatter_absorption_db_per_m)
+      << "reset " << round;
+    // The stored curve is intact, so the next heartbeat with the same curve is
+    // recognised as the same (silent) and the next reset can use it again.
+    EXPECT_TRUE(CubeBathymetryTestAccess::curveApplied(*node)) << "reset " << round;
+    EXPECT_EQ(CubeBathymetryTestAccess::storedCurvePoints(*node), 2u) << "reset " << round;
+  }
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, tier2Curve());  // a heartbeat
+  EXPECT_EQ(node->sheet()->parameters().angular_response_curve, before.angular_response_curve);
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// With draft_dir set the saved tiles would reload (ADR-0001), so the sheet would
+// not be fresh, and dropping the unsaved ones would break "persist before drop":
+// the service refuses, says why, and changes NOTHING -- not the sheet, not the
+// resident tiles, not a byte on disk.
+TEST_F(NodeLifecycle, ResetIsRefusedWhileDraftDirIsSet)
+{
+  const auto dir = makeTempDir();
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    addPatch(node->sheet(), -12.5);
+    ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);  // flushes to disk
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    const auto saved = listing(dir);
+    ASSERT_FALSE(saved.empty()) << "test setup: nothing was written to the draft store";
+    const auto sheet_before = node->sheet();
+    const auto resident_before = sheet_before->residentTileCount();
+    ASSERT_GT(resident_before, 0u);
+    CubeBathymetryTestAccess::dirtySessionState(*node);
+
+    ResetCaller caller(node);
+    auto [ok, message] = caller.call();
+    EXPECT_FALSE(ok);
+    EXPECT_NE(message.find(dir.string()), std::string::npos) << "names the directory: " << message;
+    EXPECT_NE(message.find("saved tiles would reload"), std::string::npos) << message;
+    EXPECT_NE(message.find("--allow-persistence"), std::string::npos) << message;
+    EXPECT_EQ(node->sheet().get(), sheet_before.get()) << "a refusal must keep the sheet";
+    EXPECT_EQ(node->sheet()->residentTileCount(), resident_before);
+    EXPECT_TRUE(hasFiniteCell(node->sheet()));
+    EXPECT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u)
+      << "a refusal must not touch the session state";
+    EXPECT_EQ(listing(dir), saved) << "a refusal must not change the draft directory";
+
+    // The member decides, not the writable parameter: clearing the parameter after
+    // configure does not turn persistence off, so the refusal stands.
+    ASSERT_TRUE(node->set_parameter(rclcpp::Parameter("draft_dir", std::string(""))).successful);
+    std::tie(ok, message) = caller.call();
+    EXPECT_FALSE(ok) << "draft_dir cleared at runtime must not unlock the reset: " << message;
+    EXPECT_EQ(node->sheet().get(), sheet_before.get());
+    EXPECT_EQ(listing(dir), saved);
+    EXPECT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+  }
+  std::filesystem::remove_all(dir);
+
+  // The other way round: configured with no draft_dir, a path set afterwards is a
+  // configuration the node is not running with, so it does not refuse -- and the
+  // reset creates nothing there.
+  const auto later = makeTempDir();
+  {
+    auto node = std::make_shared<CubeBathymetry>();
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    ASSERT_TRUE(
+      node->set_parameter(rclcpp::Parameter("draft_dir", later.string())).successful);
+    ResetCaller caller(node);
+    const auto [ok, message] = caller.call();
+    EXPECT_TRUE(ok) << message;
+    EXPECT_TRUE(std::filesystem::is_empty(later)) << "the reset must not write to disk";
+    EXPECT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+  }
+  std::filesystem::remove_all(later);
+}
+
+// "Service absent" reads "not configured": the service is created by configure,
+// answers in inactive and active, and is gone after cleanup and after shutdown.
+// A service is not state-gated, so the handler itself refuses on a null sheet.
+TEST_F(NodeLifecycle, ResetServiceExistsOnlyWhileConfigured)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ResetCaller caller(node);
+  EXPECT_TRUE(caller.waitForGraph(false)) << "no service before configure";
+
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(caller.waitForGraph(true)) << "inactive";
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_TRUE(caller.waitForGraph(true)) << "active";
+  ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_TRUE(caller.waitForGraph(false)) << "no service after cleanup";
+
+  const auto [ok, message] = CubeBathymetryTestAccess::callResetHandler(*node);
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("not configured"), std::string::npos) << message;
+
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(caller.waitForGraph(true)) << "back after a second configure";
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  ASSERT_EQ(node->shutdown().id(), State::PRIMARY_STATE_FINALIZED);
+  EXPECT_TRUE(caller.waitForGraph(false)) << "no service after shutdown";
+}
+
+// A configure that throws after the service would have been created returns the
+// node to UNCONFIGURED without on_cleanup. The service is created last, so the
+// failed configure leaves none behind and "no service" still means "not configured".
+TEST_F(NodeLifecycle, ConfigureThatThrowsLeavesNoResetService)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("sonar_info_topic", std::string("not a valid topic"))}));
+  ResetCaller caller(node);
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_FALSE(caller.waitForGraph(true, std::chrono::milliseconds(500)))
+    << "a failed configure must not leave ~/reset in the graph";
+}
+
+// The session is built aside and swapped in only when complete: when building it
+// fails, the running session is exactly as it was and the service says so.
+TEST_F(NodeLifecycle, FailedResetLeavesTheOldSessionIntact)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  addPatch(node->sheet(), -12.5);
+  CubeBathymetryTestAccess::dirtySessionState(*node);
+  const auto sheet_before = node->sheet();
+  const auto resident_before = sheet_before->residentTileCount();
+  ASSERT_GT(resident_before, 0u);
+
+  CubeBathymetryTestAccess::setBuildFault(*node, [] {throw std::runtime_error("disk on fire");});
+  ResetCaller caller(node);
+  auto [ok, message] = caller.call();
+  EXPECT_FALSE(ok);
+  EXPECT_NE(message.find("disk on fire"), std::string::npos) << message;
+  EXPECT_NE(message.find("unchanged"), std::string::npos) << message;
+  EXPECT_EQ(node->sheet().get(), sheet_before.get());
+  EXPECT_EQ(node->sheet()->residentTileCount(), resident_before);
+  EXPECT_TRUE(hasFiniteCell(node->sheet()));
+  EXPECT_EQ(CubeBathymetryTestAccess::staleFields(*node).size(), 11u)
+    << "a failed reset must leave every session field as it was";
+  EXPECT_EQ(node->catalogSize(), 1u);
+  EXPECT_EQ(stateId(*node), State::PRIMARY_STATE_ACTIVE);
+
+  // And the node is not wedged: without the fault the same call succeeds.
+  CubeBathymetryTestAccess::setBuildFault(*node, nullptr);
+  std::tie(ok, message) = caller.call();
+  EXPECT_TRUE(ok) << message;
+  expectNoStaleSessionState(*node, "the retried reset");
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// The prior store is read again by every reset: the new sheet's predicted surface
+// is seeded, so the blunder gate is active from the first ping of the new session.
+// Control: the same false-deep patch is accepted at those cells by a sheet with no
+// prior. (Only the cells the prior covers are gated; the deep patch's wide capture
+// radius also reaches cells it does not cover, so the check is per primed cell.)
+TEST_F(NodeLifecycle, ResetReprimesPriorStore)
+{
+  const auto dir = makeTempDir();
+  auto source = std::make_shared<cube::GeoMapSheet>(1.0f);
+  addPatch(source, -10.0);
+  auto tiles = cube::mapSheetToTiles(*source);
+  ASSERT_FALSE(tiles.empty());
+  {
+    auto store = marine_bathymetry_store::BathymetryStore::fromCellSize(
+      1.0f, /*reference_writable=*/true);
+    store.importTiles(marine_bathymetry_store::SourceLayer::Reference, tiles);
+    ASSERT_GT(marine_bathymetry_store::save(store, dir.string()), 0u);
+  }
+  // Cells of the prior that end with a settled deep (< -100 m) estimate.
+  auto deepAtPrimedCells = [&tiles](const std::shared_ptr<cube::GeoMapSheet> & sheet,
+      std::size_t & primed_cells) {
+      std::size_t deep = 0;
+      primed_cells = 0;
+      for (const auto & gt : tiles) {
+        auto grid = sheet->gridAt(gt.first);
+        if (!grid) {
+          continue;
+        }
+        const auto vals = grid->values();
+        const auto & depth = gt.second.depthBand();
+        gggs::CellAreaIterator it(gt.first);
+        std::size_t k = 0;
+        for (; it.valid() && k < depth.size() && k < vals.size(); it.next(), ++k) {
+          if (std::isnan(depth[k])) {
+            continue;
+          }
+          ++primed_cells;
+          if (std::isfinite(vals[k].depth) && vals[k].depth < -100.0f) {
+            ++deep;
+          }
+        }
+      }
+      return deep;
+    };
+  std::size_t primed_cells = 0;
+  {
+    // Control: no prior, so the deep blunder is accepted at the same cells.
+    auto bare = std::make_shared<CubeBathymetry>();
+    ASSERT_EQ(bare->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    addPatch(bare->sheet(), -150.0);
+    std::size_t accepted = 0;
+    for (const auto & grid : bare->sheet()->grids()) {
+      for (const auto & v : grid->values()) {
+        accepted += (std::isfinite(v.depth) && v.depth < -100.0f) ? 1 : 0;
+      }
+    }
+    ASSERT_GT(accepted, 0u) << "control: without a prior the deep patch must be accepted";
+    EXPECT_EQ(bare->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("prior_store_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    ASSERT_FALSE(node->sheet()->grids().empty()) << "test setup: the prior was not primed";
+    addPatch(node->sheet(), -10.0);
+
+    ResetCaller caller(node);
+    const auto [ok, message] = caller.call();
+    ASSERT_TRUE(ok) << message;
+    EXPECT_NE(message.find("prior_store_dir primed"), std::string::npos) << message;
+    EXPECT_NE(message.find("Reference"), std::string::npos) << message;
+
+    EXPECT_FALSE(node->sheet()->grids().empty()) << "the prior tiles are primed again";
+    EXPECT_TRUE(node->sheet()->dirtyGrids().empty()) << "priming must not mark tiles dirty";
+    EXPECT_FALSE(hasFiniteCell(node->sheet())) << "the prior gates; it never fills";
+    addPatch(node->sheet(), -150.0);
+    const auto deep = deepAtPrimedCells(node->sheet(), primed_cells);
+    EXPECT_GT(primed_cells, 0u) << "the re-primed sheet must carry the prior's cells";
+    EXPECT_EQ(deep, 0u)
+      << "the false-deep patch must be rejected at every cell the prior covers";
+    EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  std::filesystem::remove_all(dir);
+}
+
+// The swap in the service handler has no mutex. That is safe because every
+// callback of the node's own entities (pings, timers, subscriptions, the service)
+// is in the ONE default mutually exclusive callback group that the node's
+// SingleThreadedExecutor spins, so none can run while the handler swaps the sheet.
+// The only other group is the one the tf2_ros::TransformListener makes for its own
+// dedicated thread; it is not added to the node's executor and only feeds the TF
+// buffer (which a reset does not replace). Pin that, so a reentrant group added
+// to the executor later fails here instead of racing a ping against the swap.
+TEST_F(NodeLifecycle, AllCallbacksShareTheDefaultGroup)
+{
+  auto node = std::make_shared<CubeBathymetry>();
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  int executor_groups = 0;
+  bool all_exclusive = true;
+  node->get_node_base_interface()->for_each_callback_group(
+    [&](rclcpp::CallbackGroup::SharedPtr group) {
+      all_exclusive = all_exclusive &&
+      group->type() == rclcpp::CallbackGroupType::MutuallyExclusive;
+      if (group->automatically_add_to_executor_with_node()) {
+        ++executor_groups;
+        EXPECT_EQ(group, node->get_node_base_interface()->get_default_callback_group())
+          << "a group other than the default is spun by the node's executor";
+      }
+    });
+  EXPECT_EQ(executor_groups, 1)
+    << "the node's executor must spin exactly one callback group";
+  EXPECT_TRUE(all_exclusive) << "no reentrant callback group";
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }

@@ -49,6 +49,7 @@
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "cube_bathymetry/coverage_refresh.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/grid_projection.h"
@@ -554,6 +555,17 @@ public:
       std::bind(&CubeBathymetry::applyRefreshParameters, this,
       std::placeholders::_1));
 
+    // `~/reset` (cube_bathymetry#167): created as the VERY LAST entity. A
+    // configure that throws returns the node to UNCONFIGURED without on_cleanup,
+    // so a service created earlier would outlive the failed configure and "no
+    // service" would no longer mean "not configured" to a caller reading the
+    // graph. Reset first for the same reason a retry replaces the other handles.
+    reset_service_.reset();
+    reset_service_ = create_service<std_srvs::srv::Trigger>(
+      "~/reset",
+      std::bind(&CubeBathymetry::resetService, this, std::placeholders::_1,
+      std::placeholders::_2));
+
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
 
@@ -749,6 +761,8 @@ private:
   /// with any of them already released.
   void releaseConfiguredEntities()
   {
+    // First: the service handler reads the sheet and the members released below.
+    reset_service_.reset();
     // The timers are normally cancelled on_deactivate; a shutdown from ACTIVE, or
     // a cleanup reached by another path, arrives with them still running.
     if (save_timer_) {
@@ -1789,6 +1803,9 @@ private:
     session.sheet->setBackscatterCorrection(
       bs_mode_, bs_applied_curve_.points,
       bs_applied_curve_.tl_removed, bs_applied_curve_.absorption_db_per_m);
+    if (build_fault_injector_) {
+      build_fault_injector_();
+    }
 
     // Prior-store predicted-surface prime (#91 -- the live half of the
     // chart-gate gap; the offline half is seedNewTile's Chart rung, #119).
@@ -2017,6 +2034,73 @@ private:
     // Last: the swap itself, which destroys the old sheet.
     geo_map_sheet_ = std::move(fresh.sheet);
   }
+
+  /// `~/reset` (std_srvs/Trigger): start a new live session in RAM, nothing on
+  /// disk changed (cube_bathymetry#167). Refuses while the node was configured
+  /// with a draft_dir: saved tiles would reload (ADR-0001), so the sheet would not
+  /// be fresh, and dropping the unsaved ones would break "persist before drop".
+  /// On-disk session identity belongs to unh_marine_autonomy#391.
+  ///
+  /// Why the swap needs no mutex: every callback of this node's own entities
+  /// (pings, timers, subscriptions, this service) is in the node's default
+  /// callback group, which is mutually exclusive, and main() spins a
+  /// SingleThreadedExecutor (spinUntilStopped requires one by type). Either fact
+  /// alone means no other callback runs while this one swaps the sheet. (The one
+  /// other callback group is the tf2_ros::TransformListener's own, spun on its own
+  /// thread; it only writes the TF buffer, which a reset does not replace.) The
+  /// cost is that the prime is a whole-store disk read that BLOCKS the executor
+  /// for its duration while the node is active (unlike configure): the
+  /// best-effort depth-5 ping subscription drops pings meanwhile. Not for use
+  /// underway.
+  void resetService(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    response->success = false;
+    response->message = resetSession(response->success);
+    if (response->success) {
+      RCLCPP_INFO(get_logger(), "Reset: %s", response->message.c_str());
+    } else {
+      RCLCPP_WARN(get_logger(), "Reset refused or failed: %s", response->message.c_str());
+    }
+  }
+
+  /// The reset itself; returns the response message and sets @p success.
+  std::string resetSession(bool & success)
+  {
+    success = false;
+    if (!geo_map_sheet_) {
+      return "node is not configured (no sheet to reset)";
+    }
+    // The configured member, not the writable parameter: it can change between
+    // cycles, and it is what on_cleanup flushes against.
+    if (!draft_dir_.empty()) {
+      return "refused: draft_dir is '" + draft_dir_ + "'; saved tiles would reload, so "
+             "the sheet would not be fresh. Point draft_dir at a NEW empty directory and "
+             "use the lifecycle walk (reset_cube_nodes.sh --allow-persistence). "
+             "Nothing was changed.";
+    }
+    FreshSession fresh;
+    try {
+      fresh = buildSession();
+    } catch (const std::exception & e) {
+      return std::string("failed, the running session is unchanged: ") + e.what();
+    }
+    const std::size_t dropped = geo_map_sheet_->residentTileCount();
+    const std::string prior = fresh.prior_status;
+    adoptSession(std::move(fresh));
+    const bool active = get_current_state().id() ==
+      lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+    success = true;
+    return std::to_string(dropped) + " tile(s) dropped from RAM; prior_store_dir " + prior +
+           "; node is " + (active ? "active" : "inactive: no grid until activated") +
+           "; nothing on disk was changed";
+  }
+
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
+  /// Test seam: called by buildSession() once the candidate sheet exists, so a
+  /// test can make a build fail part way.
+  std::function<void()> build_fault_injector_;
 
   // Vessel lat/lon from earth <- base_link (translation = the ECEF position of
   // the base_link origin).
