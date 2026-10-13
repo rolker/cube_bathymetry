@@ -106,16 +106,21 @@ ros2 service call /coverage_assessment/reset std_srvs/srv/Trigger '{}'
 
 The service empties the union of every source, together with a grid it kept because its
 frame could not be resolved (otherwise the old cells would return on the next tick), and
-clears the `max_held_cells` latch and the change flags. The next tick then publishes, even
-if the water surface did not change, so a scoreboard sees zero at once. It **keeps** the
+clears the `max_held_cells` latch and the change flags. When the node is active and the
+areas are projected, it publishes the emptied result itself, before it answers: the
+`coverage_assessment` messages and the latched `coverage_grid` show nothing covered at once,
+whatever the water surface is doing (with nothing held the result does not depend on the
+surface height). The next tick then publishes again, even if the water surface did not
+change. It **keeps** the
 survey areas and their projections (they are not re-sent: the latched `survey_area` topic
 is not replayed either), the subscriptions, TF, the raster georeference, and the
 counters, which stay cumulative (they also count areas and faults, which a reset that keeps
 the areas must not zero; a one-line INFO logs what was dropped). It answers in `inactive` and
 `active`, and says which in the response; an inactive node assesses nothing until it is
-activated. If the water surface is unavailable after the reset, the old
-`coverage_assessment` messages stay latched on the topic until the first successful
-assessment, because the tick returns before assessing.
+activated. A node that is inactive, or whose areas are not yet projected (no
+georeference yet, or a definition queued), publishes nothing at reset time; the first tick
+that can assess publishes. If the water surface is unavailable then, the old messages stay
+latched on both topics until that tick succeeds, because a tick returns before assessing.
 
 **It refuses when the map frame has moved** since the raster georeference was captured
 (`success: false`, nothing changed), because the service keeps the georeference and so

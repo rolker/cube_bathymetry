@@ -895,7 +895,9 @@ private:
   /// the registry, the subscriptions, TF, and the raster georeference (the map must
   /// not move under the areas), and the counters, which stay cumulative -- they
   /// also count areas received and rejected, which a reset that keeps the areas must
-  /// not zero, and callback_exceptions is evidence of a fault. Refuses, changing
+  /// not zero, and callback_exceptions is evidence of a fault. When active and the
+  /// areas are projected, the emptied result is published at once
+  /// (publishEmptyAssessment). Refuses, changing
   /// nothing, when the map frame has moved since the georeference was captured: the
   /// service keeps the georeference, so that state needs the lifecycle walk, which
   /// captures it again.
@@ -936,11 +938,39 @@ private:
     have_last_surface_ = false;
     throttle_times_.clear();
     const bool active = get_current_state().label() == "active";
+    if (active) {
+      publishEmptyAssessment();
+    }
     *message = std::to_string(cells) + " cell(s) dropped from " +
       std::to_string(sources_.size()) + " source(s); " + std::to_string(areas_.size()) +
       " area(s), the georeference and the counters kept; node is " +
       (active ? "active" : "inactive: nothing is assessed until activated");
     return true;
+  }
+
+  /// Publish the result for the emptied unions now (the assessment and the
+  /// `coverage_grid`, both latched), instead of waiting for a tick. A tick returns
+  /// before assessing whenever the water surface is unavailable, stale or too far, so
+  /// the old run's coverage would stay latched on both topics, and a scoreboard would
+  /// keep showing it, for as long as that lasts. With nothing held, the result does not
+  /// depend on the surface height, so none is needed. Only possible once the areas are
+  /// projected (the georeference exists and no definition is queued); otherwise the
+  /// first tick that can projects them, and publishes. The change flags are put back so
+  /// that tick still assesses with a real surface.
+  void publishEmptyAssessment()
+  {
+    if (!have_georef_ || areas_dirty_ || !registry_ || registry_->areas().empty() ||
+      !assessment_publisher_ || !grid_publisher_)
+    {
+      return;
+    }
+    try {
+      assessAndPublish(0.0, get_clock()->now());
+    } catch (const std::exception & e) {
+      RCLCPP_WARN(get_logger(), "Reset: could not publish the empty assessment now: %s", e.what());
+    }
+    force_assessment_ = true;
+    have_last_surface_ = false;
   }
 
   // ---- raster georeference ----------------------------------------------------

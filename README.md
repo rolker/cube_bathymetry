@@ -144,14 +144,14 @@ evict, so RAM grows).
 
 **`coverage_assessment_node`.** It empties every source's union (and a grid it kept because
 its frame could not be resolved: otherwise the old cells would come back on the next tick),
-clears the `max_held_cells` latch, and forces the next tick to publish, so the zero shows
-at once. It keeps the survey areas and their projections, the subscriptions, TF, **the raster
+clears the `max_held_cells` latch, and (when active, with the areas projected) publishes the
+emptied `coverage_assessment` and `coverage_grid` itself, so the zero shows at once and the
+old run's coverage does not stay latched on either topic; the next tick publishes again. It keeps the survey areas and their projections, the subscriptions, TF, **the raster
 georeference**, and the counters, which stay cumulative. Because it keeps the georeference
 it refuses when the map frame has moved: that state needs the lifecycle walk, which captures
-the georeference again, and the script falls back to the walk for that consumer. If the
-water surface is unavailable after a reset, the old `coverage_assessment` messages stay
-latched on the topic until the first successful assessment (the tick returns before
-assessing).
+the georeference again, and the script falls back to the walk for that consumer. An inactive node,
+or one whose areas are not yet projected, publishes nothing at reset time; until its first
+tick that can assess, the old messages stay latched.
 
 ### The script
 
