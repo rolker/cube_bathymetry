@@ -50,8 +50,9 @@ Robustness is not optional.
   produced sign bugs before; intensity statistics ride Welford accumulators
   where order-independence and merge semantics matter.
 - **Eviction that bounds memory must never lose survey data**: draft-tile
-  eviction persists to the durable store *before* dropping from RAM; the
-  tile store is the product of record for live coverage.
+  eviction persists to the durable store *before* dropping from RAM. The live
+  tile store is a derived product for the live view, not the record: the raw
+  bags and offline processing are.
 - **CI is industrial_ci with a prebaked GHCR deps image**:
   `.github/workflows/ci.yml` (build/test), `.github/workflows/ci-image.yml`
   (image publish), and `.github/ci/Dockerfile` must stay in sync —
