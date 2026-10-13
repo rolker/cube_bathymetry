@@ -6,7 +6,7 @@
 # lifecycle state per node (cube_bathymetry#164, #167). The stub also serves
 # `service list` and `service call <node>/reset` in the output format of a real
 # jazzy `ros2 service call` of a std_srvs/Trigger service. Cases 1-12 run on the
-# walk path (the stub's default `service list` holds no `/reset`); 13-23 are the
+# walk path (the stub's default `service list` holds no `/reset`); 13-24 are the
 # service path of cube_bathymetry#167. Cases:
 #   1. consumer ordering: every CUBE node is quiesced before a consumer is touched,
 #      and the consumer is back up before any CUBE node is configured.
@@ -56,6 +56,7 @@
 #  22. re-running the same command recovers a node that a failed walk, or a failed
 #      probe of a never-configured node, left inactive.
 #  23. a `/reset` of another type than std_srvs/srv/Trigger is not called; the node walks.
+#  24. the usage text says a refusing consumer is walked (exit 1 is a CUBE node's refusal).
 #
 # Usage: test_reset_cube_nodes.sh /path/to/reset_cube_nodes.sh
 
@@ -800,6 +801,13 @@ grep -q "boat2\|coverage_assessment" "$work/calls" && fail "case 23: a /reset of
 [ -n "$(line_of "/boat1/cube_bathymetry reset-service")" ] || fail "case 23: a Trigger service was not used"
 bare=$(grep -c ' service list$' "$work/timeout_calls")
 [ "$bare" -eq 0 ] || fail "case 23: service list was asked without -t: $(cat "$work/timeout_calls")"
+
+# --- 24. the usage text states what exit 1 covers --------------------------------------------
+# A consumer whose service refuses is walked and can still exit 0; only a CUBE node's
+# refusal is exit 1. The usage block (--help) is what an operator reads.
+help_out=$("$script" --help 2>&1)
+case "$help_out" in *"a consumer that refuses is walked instead"*) ;; *) fail "case 24: the exit status text does not say a refusing consumer is walked: $help_out" ;; esac
+case "$help_out" in *"4 reset done"*) fail "case 24: the usage still documents the retired exit 4: $help_out" ;; esac
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failure(s)"

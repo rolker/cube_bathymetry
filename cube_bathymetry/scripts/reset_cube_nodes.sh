@@ -136,7 +136,8 @@
 # reads the prior store (pings arriving meanwhile are dropped).
 #
 # Exit status: 0 reset done, every node active; 1 a transition, read or service call
-# failed, or a CUBE node refused (a consumer that refuses is walked instead); 2 usage.
+# failed, or a CUBE node refused; 2 usage.
+# (A consumer whose service refuses is not an exit 1: a consumer that refuses is walked instead.)
 
 set -u -o pipefail
 
@@ -149,7 +150,7 @@ call_timeout=${RESET_CUBE_CALL_TIMEOUT:-$set_timeout}
 call_tries=${RESET_CUBE_CALL_TRIES:-2}
 
 usage() {
-  sed -n '/^# Usage:/,/^# Exit status/p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '/^# Usage:/,/^set -u/{/^#/p}' "$0" | sed 's/^# \{0,1\}//' >&2
 }
 
 allow_persistence=0
