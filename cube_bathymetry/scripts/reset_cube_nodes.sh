@@ -510,8 +510,11 @@ service_node() {
     0)
       reset_done+=("$node")
       echo "$node: reset: $svc_message"
-      case "$svc_message" in
-        *"node is inactive"*)
+      # The node reports its state in the LAST "; node is <state>" clause of the
+      # message. An earlier clause can be text the node echoes (a prior_store_dir
+      # path, an exception message), so match the tail, never the whole message.
+      case "${svc_message##*; node is }" in
+        "inactive"*)
           # Configured but not activated: reset, and now activated, so that this
           # command leaves it publishing and a re-run after a failure recovers it.
           echo "$prog: $node was inactive (not publishing): reset, now activating it" >&2

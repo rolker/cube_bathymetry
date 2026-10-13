@@ -51,6 +51,8 @@
 #      consumer, a finalized walk-class node, a draft_dir on a walk-class node.
 #  21. a node that answers "inactive" is reset and then activated (exit 0); a failing
 #      activation is a failure with the re-run hint.
+#  21c. text the node echoes ("; node is inactive" inside prior_store_dir) does not
+#      decide the node's state; the last clause does.
 #  22. re-running the same command recovers a node that a failed walk, or a failed
 #      probe of a never-configured node, left inactive.
 #
@@ -171,10 +173,13 @@ case "$1 $2" in
     else
       s=$(cat "$STUB_DIR/state/$k")
       echo "$node reset-service" >> "$STUB_DIR/log"
+      # prior_<node>: text the node echoes into the message (a path, an exception).
+      prior=unset
+      [ -e "$STUB_DIR/prior_$k" ] && prior=$(cat "$STUB_DIR/prior_$k")
       if [ "$s" = active ]; then
-        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir unset; node is active; nothing on disk was changed')"
+        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir $prior; node is active; nothing on disk was changed')"
       else
-        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir unset; node is inactive: no grid until activated; nothing on disk was changed')"
+        echo "std_srvs.srv.Trigger_Response(success=True, message='3 tile(s) dropped from RAM; prior_store_dir $prior; node is inactive: no grid until activated; nothing on disk was changed')"
       fi
     fi
     echo
@@ -202,7 +207,7 @@ fail() { echo "FAIL: $*"; failures=$((failures + 1)); }
 setup_nodes() {
   rm -f "$work"/log "$work"/fail_* "$work"/hang_* "$work"/noise "$work"/slow \
     "$work"/timeout_calls "$work"/reads "$work"/flaky_* "$work"/onconfigure_* "$work"/state/* "$work"/param/* \
-    "$work"/svc_* "$work"/refuse_* "$work"/calls "$work"/list_calls "$work"/empty_list
+    "$work"/svc_* "$work"/refuse_* "$work"/prior_* "$work"/calls "$work"/list_calls "$work"/empty_list
   for n in boat1 boat2 boat3 boat4; do
     echo active > "$work/state/_${n}_cube_bathymetry"
     printf '' > "$work/param/_${n}_cube_bathymetry_draft_dir"
@@ -700,6 +705,22 @@ out=$("$script" "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 1 ] || fail "case 21b: expected exit 1, got $rc: $out"
 case "$out" in *"/boat2/cube_bathymetry"*"activate"*"failed"*) ;; *) fail "case 21b: message: $out" ;; esac
 case "$out" in *"states:"*"/boat2/cube_bathymetry: inactive"*"Re-run"*) ;; *) fail "case 21b: no state listing and re-run hint: $out" ;; esac
+
+# 21c. text the node echoes into its message does not decide the state: an ACTIVE node
+# whose prior_store_dir text says "; node is inactive" is not activated, and an
+# INACTIVE node is activated whatever the earlier text says.
+setup_nodes
+mark_service "${cubes[@]}"
+echo "could not be loaded: /data/x; node is inactive: y (continuing ungated)" > "$work/prior__boat2_cube_bathymetry"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$rc" -eq 0 ] || fail "case 21c: an active node was treated as inactive, exit $rc: $out"
+[ -z "$(line_of "/boat2/cube_bathymetry activate")" ] || fail "case 21c: an active node was sent an activate: $(cat "$work/log")"
+case "$out" in *"activated after the reset"*) fail "case 21c: the summary names an active node: $out" ;; esac
+case "$out" in *"was inactive"*) fail "case 21c: an active node was reported as inactive: $out" ;; esac
+echo inactive > "$work/state/_boat2_cube_bathymetry"
+echo "ok; node is active" > "$work/prior__boat2_cube_bathymetry"
+out=$("$script" "${cubes[@]}" 2>&1); rc=$?
+[ "$(cat "$work/state/_boat2_cube_bathymetry")" = active ] || fail "case 21c: an inactive node was not activated: $out"
 
 # --- 22. re-running the same command recovers a node that a failure left inactive ---------
 # 22a. a walk failed at cleanup: boat1 is unconfigured, boat2 inactive. A configured node
