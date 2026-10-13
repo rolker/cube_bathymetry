@@ -406,12 +406,17 @@ if(BUILD_TESTING)
   set_tests_properties(test_node_lifecycle PROPERTIES
     ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
 
-  # reset_cube_nodes.sh against a stub `ros2` on PATH (#164), 12 case groups:
+  # reset_cube_nodes.sh against a stub `ros2` on PATH (#164, #167), 21 case groups:
   # consumer ordering, refusal on a non-empty draft_dir, fail-fast, preflight,
   # flag parsing, the never-configured probe, timeouts, stderr noise,
-  # `timeout --foreground` / SIGHUP / SIGPIPE, probe-failure reporting, and each
-  # node named once, and the bounded retry of reads (never of transitions). The
-  # stub never talks to DDS; the environment is blanked anyway so a future case
+  # `timeout --foreground` / SIGHUP / SIGPIPE, probe-failure reporting, each
+  # node named once, the bounded retry of reads (never of transitions), and the
+  # service path: an all-service fleet and its call count, a refusal stopping at
+  # the first node, the walk for nodes without a service and a mixed fleet,
+  # --allow-persistence, a consumer falling back to the walk, an indeterminate
+  # `service list` and a timed-out `service call` (retried, never the walk), every
+  # refusing check running before the first service call, and the inactive case.
+  # The stub never talks to DDS; the environment is blanked anyway so a future case
   # that does cannot reach live boats (same variables as the mru_transform test).
   add_test(NAME test_reset_cube_nodes
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/test/test_reset_cube_nodes.sh
