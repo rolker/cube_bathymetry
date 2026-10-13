@@ -505,6 +505,7 @@ out=$("$script" --consumer /coverage_assessment "${cubes[@]}" 2>&1); rc=$?
 case "$out" in *"/boat3/cube_bathymetry: ~/reset answered: refused"*"/data/draft"*) ;; *) fail "case 14: message does not name node, refusal and directory: $out" ;; esac
 case "$out" in *"reset before this: /boat1/cube_bathymetry /boat2/cube_bathymetry"*) ;; *) fail "case 14: does not say which nodes were already reset: $out" ;; esac
 case "$out" in *"Re-running is safe"*) ;; *) fail "case 14: no re-run hint: $out" ;; esac
+case "$out" in *"may have reached it"*) fail "case 14: a refusal is a definite answer, but the script says the request may have reached the node: $out" ;; esac
 [ -n "$(line_of "/boat1/cube_bathymetry reset-service")" ] && [ -n "$(line_of "/boat2/cube_bathymetry reset-service")" ] ||
   fail "case 14: the boats before the refusal were not reset"
 grep -q "boat4\|coverage_assessment" "$work/log" && fail "case 14: went on past the refusal: $(cat "$work/log")"
@@ -653,6 +654,18 @@ out=$(RESET_CUBE_SET_TIMEOUT=1 "$script" "${cubes[@]}" 2>&1); rc=$?
 [ "$rc" -eq 1 ] || fail "case 19d: a hung call: expected exit 1, got $rc: $out"
 [ $((SECONDS - start)) -lt 20 ] || fail "case 19d: the default call timeout is not the set timeout"
 [ "$(grep -c '^call /boat1/cube_bathymetry$' "$work/calls")" -eq 1 ] || fail "case 19d: a timed-out call was repeated: $(cat "$work/calls")"
+
+# 19e. the hang is on the FIRST service-class node: nothing is recorded as reset, but
+# the request may have reached it, so the script must not say "nothing was changed".
+case "$out" in *"nothing was changed"*) fail "case 19e: claims nothing was changed although the call to boat1 may have reached it: $out" ;; esac
+case "$out" in *"/boat1/cube_bathymetry: the ~/reset request may have reached it"*) ;; *) fail "case 19e: does not name the node that may have been reset: $out" ;; esac
+case "$out" in *"reset before this"*) fail "case 19e: lists a node as reset before the first one: $out" ;; esac
+# ...and with a node before it, both are said
+setup_nodes
+mark_service "${cubes[@]}"
+touch "$work/hang_call__boat2_cube_bathymetry"
+out=$(RESET_CUBE_CALL_TIMEOUT=1 "$script" "${cubes[@]}" 2>&1); rc=$?
+case "$out" in *"reset before this: /boat1/cube_bathymetry"*"/boat2/cube_bathymetry: the ~/reset request may have reached it"*) ;; *) fail "case 19e: boat1 reset and boat2 uncertain are not both said: $out" ;; esac
 
 # --- 20. everything that can refuse runs before the first service call -----------------
 setup_nodes

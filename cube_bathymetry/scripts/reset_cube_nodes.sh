@@ -215,6 +215,10 @@ probing=""
 # Service resets done so far (node names), and what the last service call said.
 reset_done=()
 svc_message=""
+# The node whose ~/reset call is in flight or gave no usable answer: its request may
+# have reached it (a timeout says nothing about that), so `die` must not claim that
+# nothing was changed. Empty once a call has been answered.
+calling=""
 # Nodes that take (or fell back to) the lifecycle walk: the ones whose state is
 # listed at the end and after a failure. A service node's state is its own message.
 walked=()
@@ -264,13 +268,16 @@ die() {
   if [ "${#reset_done[@]}" -gt 0 ]; then
     echo "$prog: reset before this: ${reset_done[*]}" >&2
   fi
+  if [ -n "$calling" ]; then
+    echo "$prog: $calling: the ~/reset request may have reached it, so it may or may not be reset." >&2
+  fi
   if [ "$changed" -eq 1 ]; then
     print_states >&2
     echo "$prog: the reset did not finish. Re-run the same command to continue (a node that is already reset is simply reset or cycled again; a node left 'inactive' is reset and then activated); a CUBE node that is not 'active' is not publishing grid." >&2
   elif [ -n "$probing" ]; then
     print_states >&2
     echo "$prog: no CUBE node was reset, but $probing was being probed and may have been left 'inactive' (configured). Re-run the same command: a configured node serves ~/reset, so the re-run resets it by service and then activates it." >&2
-  elif [ "${#reset_done[@]}" -gt 0 ]; then
+  elif [ "${#reset_done[@]}" -gt 0 ] || [ -n "$calling" ]; then
     echo "$prog: nothing else was changed. Re-running is safe: a service reset only replaces RAM state." >&2
   else
     echo "$prog: nothing was changed." >&2
@@ -360,6 +367,7 @@ has_reset_service() {
 # nothing.
 service_reset() {
   local node=$1 attempt=1 out rc line verdict
+  calling=$node
   while true; do
     out=$(timeout --foreground "$call_timeout" ros2 service call "$node/reset" \
       std_srvs/srv/Trigger '{}' 2>/dev/null)
@@ -378,6 +386,7 @@ service_reset() {
         svc_message=$(printf '%s\n' "$line" |
           sed -E "s/^std_srvs\.srv\.Trigger_Response\(success=(True|False), message=(.*)\)\$/\2/" |
           sed -E "s/^'(.*)'\$/\1/; s/^\"(.*)\"\$/\1/")
+        calling=""
         return "$verdict"
       fi
     fi

@@ -212,7 +212,8 @@ CLI exits non-zero, or answers with no `Trigger` response) is retried too, with 
 budget of 2 attempts (`RESET_CUBE_CALL_TRIES`): a reset only replaces RAM state, so
 repeating it is harmless. A call that **times out is not retried**: its request is still
 queued in the node, and a second one would run a second whole-store prior load behind it
-with the executor blocked again. The script stops and says the node may have been reset.
+with the executor blocked again. The script stops, names the node and says it may or may not have been reset
+(the first node's timeout does not read "nothing was changed").
 Whether a node has the service is decided only by the classification, never by the outcome
 of a call, so a slow node is never walked after it already reset. A transition is never retried: a repeated configure or cleanup is not the
 same operation as the one that failed. The script ignores SIGHUP and SIGPIPE so a dropped
