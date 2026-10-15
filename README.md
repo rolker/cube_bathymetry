@@ -9,8 +9,8 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | Node | Subscribes | Publishes | Purpose |
 |---|---|---|---|
 | `detections_to_pointcloud` | `detections` (`marine_acoustic_msgs/SonarDetections`), `odom` (`nav_msgs/Odometry`) | `soundings` (`sensor_msgs/PointCloud2`) | Turns each beam detection into a sounding in the **sonar frame** (x/y/z from travel-time + beam angles) and attaches **per-sounding TPU** (`vertical_uncertainty`, `horizontal_uncertainty`) computed by `cube::ErrorModel`. Lifecycle node. |
-| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; `elevation` is the seabed's **WGS84 ellipsoid height in metres, positive up** (a seabed lies below the water surface's ellipsoid height, so it is negative only where that surface is near or below the ellipsoid), see *The `grid` `elevation` convention* below; note the OPPOSITE convention to `soundings` below — `uncertainty` is a 95 % (1.96 sigma) confidence half-width in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. |
-| `coverage_assessment_node` (package `coverage_assessment`) | one or more CUBE `grid` topics (`grid_topics`), `survey_area` (`marine_interfaces/SurveyArea`, transient_local), TF | `coverage_assessment` (`marine_interfaces/CoverageAssessment`, one per area, transient_local), `coverage_grid` (`grid_map_msgs/GridMap`, layer `meets_standard`, transient_local) | Scores how much of each target polygon the sources' grids cover and how much of that meets the area's survey standard, with credit per source. Keeps the union over time of every source's `grid`, so the 200 m window does not matter. Lifecycle node; see *Coverage assessment* below and `coverage_assessment/README.md`. |
+| `cube_bathymetry_node` | `soundings` (`sensor_msgs/PointCloud2`) | `grid` (`grid_map_msgs/GridMap`, layers `elevation` + `uncertainty`; `elevation` is the seabed's **WGS84 ellipsoid height in metres, positive up** (a seabed lies below the water surface's ellipsoid height, so it is negative only where that surface is near or below the ellipsoid), see *The `grid` `elevation` convention* below; note the OPPOSITE convention to `soundings` below — `uncertainty` is a 95 % (1.96 sigma) confidence half-width in **metres**, not a variance) | Transforms soundings into `map_frame` via TF, runs the live CUBE estimator, and emits the gridded surface consumed by CAMP / rviz. Lifecycle node. Service `~/reset` (`std_srvs/Trigger`) starts a fresh session in RAM, see *Starting a fresh sheet without restarting*. |
+| `coverage_assessment_node` (package `coverage_assessment`) | one or more CUBE `grid` topics (`grid_topics`), `survey_area` (`marine_interfaces/SurveyArea`, transient_local), TF | `coverage_assessment` (`marine_interfaces/CoverageAssessment`, one per area, transient_local), `coverage_grid` (`grid_map_msgs/GridMap`, layer `meets_standard`, transient_local) | Scores how much of each target polygon the sources' grids cover and how much of that meets the area's survey standard, with credit per source. Keeps the union over time of every source's `grid`, so the 200 m window does not matter. Lifecycle node; service `~/reset` (`std_srvs/Trigger`) empties the unions; see *Coverage assessment* below and `coverage_assessment/README.md`. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
 `soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
@@ -72,84 +72,221 @@ needs better must bound `d` or model the surface.
 
 ## Starting a fresh sheet without restarting
 
-The sheet is rebuilt on every `configure`, so a node can start a new survey without
-being restarted by walking it through `deactivate` -> `cleanup` -> `configure` ->
-`activate`. `scripts/reset_cube_nodes.sh` (installed to `lib/cube_bathymetry`) does
-that for any number of nodes:
+A running node can start a new live session in two ways, and
+`scripts/reset_cube_nodes.sh` (installed to `lib/cube_bathymetry`) picks the right one
+for each node:
+
+| Way | What it does | `ros2` calls |
+|---|---|---|
+| the `~/reset` service (`std_srvs/Trigger`) | replaces the session state in RAM; the node keeps its lifecycle state; **no tile is written to disk** (loading a prior store can rename a legacy `survey/` directory in it to `processed/`, exactly as `configure` does) | 1 `service call` per node, plus 1 `service list` for all of them |
+| the lifecycle walk | `deactivate` -> `cleanup` -> `configure` -> `activate` | about 17 per CUBE node, about 14 per consumer |
+
+The time goes into the `ros2` command-line start-up (3 to 8 s per call under load), not
+into the transitions, which is why the service path is faster: four boats and the
+assessor take 6 calls instead of about 80. Measured on the four-boat simulation on
+2026-10-13 (the full stack running on one host), two back-to-back resets took 19.2 s and
+17.7 s (about 3 s per call), where the walk took 318 to 324 s.
 
 ```bash
-ros2 run cube_bathymetry reset_cube_nodes.sh \
-  /boat1/cube_bathymetry /boat2/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry
-
-# with a downstream node that accumulates state derived from `grid`: the
-# coverage assessor (`coverage_assessment_node`, which keeps the union of every
-# grid it has seen) is exactly that, and must be named as a `--consumer`:
+# the common case: services where the nodes have them, the walk where they do not
 ros2 run cube_bathymetry reset_cube_nodes.sh --consumer /coverage_assessment \
   /boat1/cube_bathymetry /boat2/cube_bathymetry /boat3/cube_bathymetry /boat4/cube_bathymetry
+
+# or one node by hand
+ros2 service call /boat1/cube_bathymetry/reset std_srvs/srv/Trigger '{}'
 ```
 
-or by hand, one node at a time (`ros2 lifecycle set <node> deactivate`, `cleanup`,
-`configure`, `activate`). Name each node once: a node given twice, or as both a CUBE
-node and a `--consumer` (`/a/b`, `a/b` and `/a/b/` are the same node), is refused
-before anything is touched. The script:
+### The `~/reset` services
 
-1. checks everything first: every node and `--consumer` must answer and be in a
-   state the script can walk (`active`, `inactive` or `unconfigured`; a mistyped
-   name or a finalized node stops the run here), and it **refuses** if any CUBE
-   node has a `draft_dir` set (see below). These checks change nothing, with one
-   exception: a CUBE node that was never configured is configured and cleaned up
-   to read its `draft_dir` (described below), and if that probe fails part way the
+| Node | Service | Answers in | Refuses (`success: false`, nothing changed) when |
+|---|---|---|---|
+| `cube_bathymetry_node` | `~/reset`, e.g. `/boat1/cube_bathymetry/reset` | `inactive`, `active` | the node was configured with a `draft_dir`; or the running session primed prior tiles and the rebuild primes none (the prior directory is missing, unmounted, empty or of the wrong level); or the prior cannot be loaded; or nothing is configured |
+| `coverage_assessment_node` | `~/reset`, e.g. `/coverage_assessment/reset` | `inactive`, `active` | the map frame has moved since the raster georeference was captured; or nothing is configured |
+
+A service exists only while its node is configured (it is created last in `configure` and
+released with the other entities), so a missing service means an unconfigured or finalized
+node, or an older binary. The response says what was reset, for example
+`3 tile(s) dropped from RAM; prior_store_dir unset; node is active; no tile written to disk (loading a prior store renames a legacy survey/ directory, as configure does)`;
+an `inactive` node is reset too, and the message says it publishes no `grid` until it is
+activated (`reset_cube_nodes.sh` then activates it, see below).
+
+**`cube_bathymetry_node`.** It builds the new session aside and swaps it in only when
+complete, so a failure (the response says why) leaves the running session untouched. The
+new session has the same sheet-level settings as the old one (`capture_spacing_scale`, the
+backscatter curve that arrived on `sonar_info`, which is not redelivered) and re-reads
+`prior_store_dir`, so the blunder gate is active from the first ping. A prior that cannot be
+loaded **fails the reset** (the running session, which has the gate, is kept and the response
+says why), whereas a `configure` only warns and runs ungated: replacing a gated session
+with an ungated one is worse than keeping the old one. The same holds for a prior that
+loads **without error but primes nothing** (the directory is missing or unmounted, empty,
+or holds only tiles of another level): the node remembers how many prior tiles the running
+session primed, and when that is more than zero and the rebuild primes none, the reset
+is refused and the running session kept. A node whose prior never primed anything (an
+unset `prior_store_dir`, or one that was already empty at `configure`) has no gate to lose
+and is reset as usual. Like `configure`, it
+starts a new sheet and tile catalog and clears the evicted-tile markers, the disk-serve
+queue, the refresh tracker, the saving ledger and the publish cursor. Publishers,
+subscriptions, timers and parameters are not touched. The prime is a whole-store disk read
+that **blocks the node's executor while it runs**, with the node active (a `configure` does
+not): pings that arrive meanwhile are dropped once five are queued (the subscription is
+best-effort, depth 5). That is one reason not to reset underway. Two more: a reset while
+the node is `active` makes the next collision-avoidance `grid` window hold only the new
+session's cells, and unknown cells in the window are `NaN`, which the costmap treats as
+lethal (`unsurveyed_is_lethal`) around the vessel; and the **peak RAM** is the old sheet, plus
+the whole prior store, plus the new sheet, all at once. With `draft_dir` empty, the only case
+the service serves, the old sheet never evicts, so it is at its largest exactly when a reset
+is wanted. (The old sheet is not dropped first, because a failed build must leave it
+intact; running out of memory while loading the prior fails the reset and keeps the old
+session.)
+
+**On a boat with `draft_dir` set, the service does not help.** It refuses, because the saved
+tiles would reload (the sheet would not be fresh) and dropping the unsaved ones would break
+"persist before drop". Real-boat configurations are of this kind
+(`bizzyboat_project11/config/bizzyboat.yaml` sets `draft_dir: /home/field/data/world/depths`),
+so the 2026-08-27 operator request to start a new live session on a boat stays open
+until the on-disk session work in rolker/unh_marine_autonomy#391 lands. The service serves
+the simulation and the demo (no `draft_dir`) and boats run without persistence (which never
+evict, so RAM grows).
+
+**`coverage_assessment_node`.** It empties every source's union (and a grid it kept because
+its frame could not be resolved: otherwise the old cells would come back on the next tick),
+clears the `max_held_cells` latch, and (when active, with the areas projected) publishes the
+emptied `coverage_assessment` and `coverage_grid` itself, so the zero shows at once and the
+old run's coverage does not stay latched on either topic; the next tick publishes again. It keeps the survey areas and their projections, the subscriptions, TF, **the raster
+georeference**, and the counters, which stay cumulative. Because it keeps the georeference
+it refuses when the map frame has moved: that state needs the lifecycle walk, which captures
+the georeference again, and the script falls back to the walk for that consumer. An inactive node
+publishes the emptied result when it is next activated, which the script does right after
+the reset. A node whose areas are not yet projected publishes nothing at reset time; until its
+first tick that can assess, the old messages stay latched.
+
+### The script
+
+`reset_cube_nodes.sh [--allow-persistence] [--consumer NODE]... NODE...`. Name each node
+once: a node given twice, or as both a CUBE node and a `--consumer` (`/a/b`, `a/b` and
+`/a/b/` are the same node), is refused before anything is touched. In order:
+
+1. **classifies** every node with one `ros2 service list -t`: a node that lists
+   `<node>/reset [std_srvs/srv/Trigger]` is reset by service, any other node takes the walk
+   (a `/reset` of another type is not called: a `Trigger` request to it would hang the
+   client or mean something else). An empty or failed
+   list is retried and then stops the script before any change; it is never read as "no
+   node has a service". `--allow-persistence` sends every CUBE node down the walk;
+2. **checks everything that can refuse**, before the first service call: every walk-class
+   node and `--consumer` must answer and be in a state the script can walk (`active`,
+   `inactive` or `unconfigured`; a mistyped name or a finalized node stops the run here),
+   and a walk-class CUBE node with a `draft_dir` is refused (see below). These checks
+   change nothing, with one exception: a walk-class CUBE node that was never configured is
+   configured and cleaned up to read its `draft_dir`, and if that probe fails part way the
    node can be left `inactive`;
-2. walks every CUBE node to `unconfigured` (an already-inactive node is fine);
-3. walks each `--consumer` node to `unconfigured` and back to `active`, while no
-   CUBE node is publishing, so a consumer cannot absorb a stale window from a node
-   that has not been reset yet;
-4. configures and activates every CUBE node, and prints the final states.
+3. **resets the CUBE nodes that have the service**, in the order given. The service
+   refuses inside the node, so a boat with a `draft_dir` is found when the script reaches
+   it: boats before it are already reset (a reset only replaces RAM state, so this
+   costs nothing), the script stops at the first refusal, prints which nodes were reset and
+   which refused, touches nothing after it and exits 1. Re-running is safe;
+4. walks the other CUBE nodes to `unconfigured`;
+5. resets each `--consumer`, by service or by the walk (`unconfigured` and back to
+   `active`). A consumer whose service refuses (the map frame moved) falls back to the walk,
+   after printing the reason;
+6. configures and activates the walked CUBE nodes, and prints the states of the walked
+   nodes. A service node is reported by its own response, with no extra call.
 
-It stops at the first failed transition and names the node and the transition.
-After the first change, a failure also prints every node's state and says to re-run;
-running it again is safe (a node that is already reset is simply cycled again). Every
-`ros2` call is bounded by `timeout` (`RESET_CUBE_GET_TIMEOUT`, default 30 s, for reads;
-`RESET_CUBE_SET_TIMEOUT`, default 300 s, for transitions), so an unresponsive node
-fails the script instead of hanging it with boats half reset. A read (`ros2 lifecycle
-get`, `ros2 param get`) that fails or times out is retried, 3 attempts in all
-(`RESET_CUBE_GET_TRIES`) with a 2 s pause (`RESET_CUBE_RETRY_PAUSE`), because under a heavy
-load one parameter service can miss its turn and answer the next time; only when every
-attempt fails does the read fail the script, and the preflight reads do that before
-anything has changed. A transition is never retried. The calls run under
-`timeout --foreground`, so Ctrl-C still reaches `ros2`. The script ignores SIGHUP and
-SIGPIPE so a dropped ssh session cannot kill it between the quiesce and the
-bring-up; run it under `tmux` or `nohup` anyway if the link is unreliable, because a
-script killed midway leaves boats without `grid` until it is run again. The preflight
-warns for every CUBE node that is not `active` (an earlier run may have stopped part
-way), and a failing probe of a never-configured node (below) is reported as a failed
-probe, not as a failed reset. A node that was never
-configured has no readable `draft_dir` yet (parameters are declared at configure), so
-once every other check has passed the script configures it, reads the parameters and
-puts it back to `unconfigured`, one node at a time; a refusal at that point has still
-reset nothing. If a transition or a read fails during that probe, the node may be
-left `inactive` (configured); the script says so, and re-running the same command
-reads it normally.
+A node whose service answers `inactive` (configured but not activated, as a failed run
+can leave it) was reset but would publish nothing, so the script **activates it right after
+its reset**, names it, and ends with `reset done; activated after the reset (they were
+inactive): <nodes>`. That makes the command converge: a node that a failed walk or a failed
+probe left `inactive` is configured, so it serves `~/reset`, and re-running the same command
+resets it and activates it. If the activation fails, the script fails (exit 1) with the
+state listing and the re-run hint.
 
-**Do not run it underway.** Between step 2 and step 4 the named boats publish no
-`grid`, which is the collision-avoidance grid, and each `ros2` call takes seconds, so
-the gap is not short.
+Exit status: 0 reset done, every node active; 1 a transition, read or service call failed,
+or a CUBE node refused (a consumer that refuses is walked instead, step 5); 2 usage.
 
-**What a fresh sheet is.** `configure` builds a new `GeoMapSheet` and resets the
-tile catalog, the sub-window refresh tracker, the evicted-tile markers, the
+**Ordering, honestly.** The walk quiesced every CUBE node before the consumer was reset,
+so no `grid` crossed the reset in either direction. With services the CUBE nodes keep
+publishing. A `grid` that an old sheet published just before its reset, and that is still
+queued in the assessor's subscription (reliable, depth 10, at most about one per node per
+5 s), would be folded into the emptied union and stay, because unions only grow. In the
+other direction, cells a reset CUBE node accumulates before the assessor is reset are wiped
+from the union and come back only through that node's next 200 m window (about 5 s later),
+so cells outside the window are lost. Both windows are the gap between the CUBE call and the
+consumer call. The script resets the consumer only after every CUBE node has answered, which
+bounds the first, and relies on the boats **not being underway**, which makes the second
+harmless. A guard on the assessor against the first is possible (it would drop grids stamped
+before its reset) but is not made: the `grid` stamp is the stamp of the latest ping that
+changed a tile, so the guard would need the sonar stamps and the assessor's clock to share a
+time base across hosts, and it does nothing for the second. A consumer that takes the walk is
+immune: its subscription is destroyed.
+
+**Time bounds and retries.** Every `ros2` call is bounded by `timeout --foreground` (so
+Ctrl-C still reaches `ros2`): `RESET_CUBE_GET_TIMEOUT` (default 30 s) for reads,
+`RESET_CUBE_SET_TIMEOUT` (default 300 s) for transitions, and `RESET_CUBE_CALL_TIMEOUT`
+for a service call, because the reset reads the prior store from disk. The call timeout
+defaults to the transition timeout, so a prior store that a `configure` can load within
+its bound is not failed by the service path. A
+read (`ros2 service list`, `ros2 lifecycle get`, `ros2 param get`) that fails or times out is
+retried, 3 attempts in all (`RESET_CUBE_GET_TRIES`) with a 2 s pause
+(`RESET_CUBE_RETRY_PAUSE`); only when every attempt fails does it fail the script, and the
+preflight reads do that before anything has changed. A service call that fails fast (the
+CLI exits non-zero, or answers with no `Trigger` response) is retried too, with its own
+budget of 2 attempts (`RESET_CUBE_CALL_TRIES`): a reset only replaces RAM state, so
+repeating it is harmless. A call that **times out is not retried**: its request is still
+queued in the node, and a second one would run a second whole-store prior load behind it
+with the executor blocked again. The script stops, names the node and says it may or may not have been reset
+(the first node's timeout does not read "nothing was changed").
+Whether a node has the service is decided only by the classification, never by the outcome
+of a call, so a slow node is never walked after it already reset. A transition is never retried: a repeated configure or cleanup is not the
+same operation as the one that failed. The script ignores SIGHUP and SIGPIPE so a dropped
+ssh session cannot kill it between the quiesce and the bring-up; run it under `tmux` or
+`nohup` anyway if the link is unreliable, because a script killed midway leaves walked boats
+without `grid` until it is run again.
+
+### The lifecycle walk
+
+The sheet is also rebuilt on every `configure`, so any node can start a new survey by being
+walked through `deactivate` -> `cleanup` -> `configure` -> `activate`, by hand (`ros2
+lifecycle set <node> deactivate`, `cleanup`, `configure`, `activate`) or by the script. It
+is the fallback for a node without the service (an older binary, a node that was never
+configured), the way to reload `draft_dir` deliberately (`--allow-persistence`), and the
+only way to recover an assessor whose map frame moved. The script stops at the first failed
+transition and names the node and the transition. After the first change, a failure also
+prints the state of every walked node and says to re-run; running it again is safe (a node
+that is already reset is simply reset or cycled again) and recovers a node the failure left
+`inactive`: it is configured, so the re-run resets it by service and activates it. The preflight warns for every walked
+CUBE node that is not `active` (an earlier run may have stopped part way), and a failing
+probe of a never-configured node is reported as a failed probe, not as a failed reset. A
+node that was never configured has no readable `draft_dir` yet (parameters are declared at
+configure), so once every other check has passed the script configures it, reads the
+parameters and puts it back to `unconfigured`, one node at a time; a refusal at that point
+has still reset nothing. If a transition or a read fails during that probe, the node may be
+left `inactive` (configured); the script says so. A configured node serves `~/reset`, so
+re-running the same command resets it by service and activates it.
+
+**Do not run it underway.** On the walk, between the quiesce and the bring-up the walked
+boats publish no `grid`, which is the collision-avoidance grid, and each `ros2` call takes
+seconds, so the gap is not short. A service reset blocks the node's executor for as long as
+the prior store takes to read, and the ordering note above assumes stationary boats.
+
+**What a fresh sheet is.** The service and `configure` both build a new `GeoMapSheet` and
+reset the tile catalog, the sub-window refresh tracker, the evicted-tile markers, the
 disk-serve queue and the publish cursor (last publish time, cached `map <- earth`
-transform and vessel fix). `cleanup` also releases the publishers, subscriptions and
-the TF listener and buffer, so nothing of the old configuration keeps running. With
-`draft_dir` and `prior_store_dir` empty, the first `grid` after the reset contains
-none of the previous window's cells (`test_node_lifecycle`).
+transform and vessel fix). The walk's `cleanup` also releases the publishers,
+subscriptions and the TF listener and buffer, so nothing of the old configuration keeps
+running. With `draft_dir` and `prior_store_dir` empty, the first `grid` after the reset
+contains none of the previous window's cells (`test_node_lifecycle`). Both paths run the same
+two functions (`buildSession` and `adoptSession`), and `test_node_lifecycle` checks the
+same list of session fields after each, so a field one path forgets fails in both.
 
 **What is not cleared.**
 
 - **Saved tiles when `draft_dir` is set.** `deactivate` and `cleanup` flush the
   dirty tiles to `<draft_dir>/draft/`, and `configure` reloads everything saved
-  there (and under `processed/`) into the new sheet. That is deliberate (the draft
-  store is the product of record, ADR-0001), and it means the sheet is **not** fresh.
-  The script refuses to run when `draft_dir` is set. For a fresh sheet that keeps
+  there (and under `processed/`) into the new sheet. That is deliberate (ADR-0001: never
+  lose survey data), and it means the sheet is **not** fresh. The live tile store is a
+  derived product for the live view, not the record: the raw bags and offline
+  processing are the authoritative path, which supersedes the ADR's wording that the store
+  is the product of record. How a session is identified on disk is rolker/unh_marine_autonomy#391.
+  The service and the script refuse when `draft_dir` is set. For a fresh sheet that keeps
   persistence and eviction on, point `draft_dir` at a NEW, empty directory
   (`ros2 param set <node> draft_dir /path/to/new/empty/dir`; it is writable, and the
   next `configure` reads it) and run the script with `--allow-persistence`: `cleanup`
@@ -157,7 +294,9 @@ none of the previous window's cells (`test_node_lifecycle`).
   in the new one. Do **not** set it to `''`. An empty `draft_dir` means no persistence
   and no eviction, so the new sheet's RAM grows without bound on a long survey, and
   `cleanup` flushes against the directory the node was *configured with*, not the
-  value set afterwards, so it can still write to (and be refused by) the old one.
+  value set afterwards, so it can still write to (and be refused by) the old one. (The
+  service likewise judges the directory the node was configured with, so clearing the
+  parameter does not unlock it.)
   Nothing on disk is ever deleted by a reset. If the final flush fails (disk full,
   permissions), `cleanup` fails and the node stays `inactive` with its sheet, rather
   than discard tiles that were never written; fix the cause and run the script again. While the cleanup
@@ -179,22 +318,25 @@ none of the previous window's cells (`test_node_lifecycle`).
   an empty `draft_dir` the node also never evicts cold tiles, so RAM grows for as long
   as the survey runs.
 - **`prior_store_dir`.** It seeds a predicted surface for the blunder gate, not
-  coverage, and is reloaded on every configure. The script only prints a note.
+  coverage, and is read again on every configure and on every `~/reset`. The script only
+  prints a note for a walked node; a reset by service reports what was primed in its
+  response.
 
 **Parameters between cycles.** Parameters are declared once and survive `cleanup`,
 so the value a `configure` reads is the one set last, whether by launch file or by
 `ros2 param set` between cycles. `read_only` parameters keep refusing runtime sets,
 so a wrong `capture_spacing_scale` or `publish_dirty_subwindow` cannot be corrected
-by a reset: it takes a restart of the node with the right launch value.
+by a reset: it takes a restart of the node with the right launch value. The service reads
+no parameter again: it re-applies the values the last `configure` read.
 
 **Event and demo configurations.** Some project11 configurations set `draft_dir` for
 the CUBE node: `bizzyboat_project11/config/bizzyboat.yaml` sets
 `draft_dir: /home/field/data/world/depths` under `/**/cube_bathymetry`, and
 `bizzyboat_sim_core_launch.py` layers that file, so a launch that loads it will
-reload the saved tiles on every reset. A demo that wants a fresh sheet between runs
-must leave `draft_dir` empty for the CUBE nodes (the script's refusal tells you when
-it is not), which is fine for a short demo but never evicts, or give each run a new
-empty `draft_dir` as described above.
+reload the saved tiles on every walked reset and refuse the service. A demo that wants a
+fresh sheet between runs must leave `draft_dir` empty for the CUBE nodes (the refusal tells
+you when it is not), which is fine for a short demo but never evicts, or give each run a
+new empty `draft_dir` and use `--allow-persistence`, as described above.
 
 ## Live coverage stream parameters (`cube_bathymetry_node`)
 
@@ -255,12 +397,15 @@ every parameter is `read_only` (set it from YAML or a launch file):
 | `water_surface_max_age` | `30.0` s | Older than this, the tide (or the tide boat's frame) is refused and scoring is skipped with a WARN. |
 | `max_raster_cells` | `1000000` | Per-area raster cap. |
 | `max_pass_cell_checks` | `16000000` | Work budget of one pass: the bounding-box cells of all held areas times the number of sources; an area that would exceed it is refused with an ERROR. |
-| `max_held_cells` | `100000000` | Most cells held for all sources together (about 800 MB); once over it nothing more is folded in and nothing is published, with an ERROR, until reset. |
+| `max_held_cells` | `100000000` | Most cells held for all sources together (about 800 MB); once over it nothing more is folded in and nothing is published, with an ERROR, until reset (the `~/reset` service, or the lifecycle walk). |
 | `max_area_vertices` | `10000` | Most vertices in one area polygon; a definition with more is refused on arrival with an ERROR. |
 | `max_areas` | `20` | Most areas held at once (1 to 100); a new id beyond it is refused with an ERROR. |
 
 Because it keeps a union over time, a CUBE reset must also reset the assessor: pass it
-to `reset_cube_nodes.sh` as `--consumer` (see *Starting a fresh sheet without restarting*).
+to `reset_cube_nodes.sh` as `--consumer` (see *Starting a fresh sheet without restarting*),
+or call its `~/reset` service (`std_srvs/Trigger`, e.g. `/coverage_assessment/reset`), which
+empties the unions and keeps the areas, the raster georeference and the counters, and
+refuses when the map frame has moved.
 
 ## Exported libraries for other repos
 

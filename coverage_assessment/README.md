@@ -31,6 +31,10 @@ converts messages and frames into the core's structs.
 Relative names resolve in the node's namespace. `header.frame_id` of both outputs is
 `map_frame`; `header.stamp` is the assessment time.
 
+| Service | Type | Purpose |
+|---|---|---|
+| `~/reset` (e.g. `/coverage_assessment/reset`) | `std_srvs/Trigger` | Starts a new assessment session in RAM, with no lifecycle round trip; see *Starting a fresh assessment between runs* below. Exists while the node is configured (inactive or active). |
+
 `coverage_assessment` is latched so a scoreboard that starts late gets the areas. The
 publisher's history is the last 100 messages (a fixed depth, like `survey_area`'s), not
 one per area: a late consumer receives up to the last 100 assessments, oldest first, so
@@ -64,7 +68,7 @@ and ignored. Set them from a launch file or YAML before the node starts.
 | `water_surface_max_age` | `30.0` s | Oldest acceptable transform, for both the water-surface frame and the tide boat's frame (the distance bound). |
 | `max_raster_cells` | `1000000` | Per-area raster cap in lattice cells; guards a swapped latitude/longitude. A union of areas that exceeds it cannot be drawn as `coverage_grid` (WARN). |
 | `max_pass_cell_checks` | `16000000` | Work budget of one assessment pass (read_only, at least the number of sources). A pass checks every held area's whole bounding box once per source, so the boxes of **all** held areas, in lattice cells, times the number of sources may not exceed it: 16e6 is 4e6 cells with 4 sources, or 1e6 with 16. At the measured ~0.1 s per 1e6 cells x 4 sources that keeps a pass near 0.4 s, where 20 areas of `max_raster_cells` each would take ~12 s and block the single-threaded node. An area that would take a pass over it is refused with an ERROR naming the budget, the source count and the cells already held; when the per-pass allowance (this over the source count) is smaller than `max_raster_cells`, it is also the cap the area's raster is built against, so an area too large for a pass is refused before its mask is allocated; an update of a held id is judged with its old size removed. The 10 s status line reports the last pass duration, the cells held and the source count. |
-| `max_held_cells` | `100000000` | Most lattice cells held for all sources together (read_only, at least 1), counted as allocated: 64 x 64 blocks, 8 bytes per cell, so 1e8 is about 800 MB. Each source keeps every cell it has mapped until the node is reset, inside the survey areas or not, so the memory grows with the area surveyed. Once over it (by at most one grid message), no further grid is folded in and **nothing is published**, with a throttled ERROR naming the parameter, until the node is reset (deactivate, cleanup, configure, activate) or restarted with a larger value: from there a score could only under-report coverage. The 10 s status line reports the allocated cells against the limit. |
+| `max_held_cells` | `100000000` | Most lattice cells held for all sources together (read_only, at least 1), counted as allocated: 64 x 64 blocks, 8 bytes per cell, so 1e8 is about 800 MB. Each source keeps every cell it has mapped until the node is reset, inside the survey areas or not, so the memory grows with the area surveyed. Once over it (by at most one grid message), no further grid is folded in and **nothing is published**, with a throttled ERROR naming the parameter, until the node is reset (the `~/reset` service, or deactivate, cleanup, configure, activate) or restarted with a larger value: from there a score could only under-report coverage. The 10 s status line reports the allocated cells against the limit. |
 | `max_area_vertices` | `10000` | Most vertices in one SurveyArea polygon (read_only, at least 3). A definition with more is refused on arrival with an ERROR: filling a polygon scans every edge on every row, and queued definitions keep every vertex. |
 | `max_areas` | `20` | Most survey areas held at once; 1 to 100, else configure fails. A SurveyArea with a **new** id beyond it is refused with an ERROR (an update of a held id still applies). Bounds the cost of an assessment pass and keeps the 100-deep latched history holding the newest assessment of every area. |
 
@@ -89,13 +93,46 @@ by a second activation; `test_launch_lifecycle.py` runs that sequence). `config/
 the four-boat simulation (it needs editing for anything else; `grid_topics` is
 required). It is not part of the `unh_marine_simulation` demo launch.
 
-Starting a fresh assessment between runs: the assessor is the `--consumer` of
-`reset_cube_nodes.sh` (see the `cube_bathymetry` README, *Starting a fresh sheet without
-restarting*), `--consumer /coverage_assessment`. The sequence deactivate, cleanup,
-configure, activate releases everything (the union of every source, the areas, the
-subscriptions, TF) and starts empty. The areas come back from the latched
-`survey_area` topic; nothing else is replayed. A consumer that is not reset keeps the
-old union and would score the previous run's coverage.
+### Starting a fresh assessment between runs
+
+Call the `~/reset` service (`std_srvs/Trigger`), or let `reset_cube_nodes.sh
+--consumer /coverage_assessment` do it after the CUBE nodes (see the `cube_bathymetry`
+README, *Starting a fresh sheet without restarting*, which also says what order the two
+resets rely on: boats not underway, the assessor reset after every CUBE node):
+
+```bash
+ros2 service call /coverage_assessment/reset std_srvs/srv/Trigger '{}'
+```
+
+The service empties the union of every source, together with a grid it kept because its
+frame could not be resolved (otherwise the old cells would return on the next tick), and
+clears the `max_held_cells` latch and the change flags. When the node is active and the
+areas are projected, it publishes the emptied result itself, before it answers: the
+`coverage_assessment` messages and the latched `coverage_grid` show nothing covered at once,
+whatever the water surface is doing (with nothing held the result does not depend on the
+surface height). The next tick then publishes again, even if the water surface did not
+change. It **keeps** the
+survey areas and their projections (they are not re-sent: the latched `survey_area` topic
+is not replayed either), the subscriptions, TF, the raster georeference, and the
+counters, which stay cumulative (they also count areas and faults, which a reset that keeps
+the areas must not zero; a one-line INFO logs what was dropped). It answers in `inactive` and
+`active`, and says which in the response; an inactive node assesses nothing until it is
+activated. An inactive node cannot publish, so it publishes the emptied result when it is
+next activated (the script activates it), again whatever the water surface is doing. A node
+whose areas are not yet projected (no georeference yet, or a definition queued) publishes
+nothing at reset time; the first tick that can assess publishes. If the water surface is
+unavailable then, the old messages stay latched on both topics until that tick succeeds,
+because a tick returns before assessing.
+
+**It refuses when the map frame has moved** since the raster georeference was captured
+(`success: false`, nothing changed), because the service keeps the georeference and so
+cannot undo the move. That state, and a node that is not configured, are recovered by the
+lifecycle walk: deactivate, cleanup, configure, activate releases everything (the union of
+every source, the areas, the subscriptions, TF), captures the georeference again and
+starts empty; the areas come back from the latched `survey_area` topic and nothing else is
+replayed. `reset_cube_nodes.sh` falls back to the walk for a consumer whose service
+refuses. A consumer that is not reset keeps the old union and would score the previous
+run's coverage.
 
 ## How it works
 
@@ -147,7 +184,8 @@ translation) against 1 cm, and the rotation between them against 1e-6 rad. If ei
 exceeded, the node logs an ERROR naming
 the frame and the shift and **withholds** everything (no `CoverageAssessment`, no
 `coverage_grid`, counted as `withheld_map_moved`) until it is reconfigured
-(deactivate, cleanup, configure, activate), which recaptures. Nothing is re-projected
+(deactivate, cleanup, configure, activate), which recaptures; the `~/reset` service keeps
+the georeference, so it refuses in this state. Nothing is re-projected
 silently: cells already accumulated cannot be moved with the frame. Grids keep
 accumulating in the captured frame meanwhile. A live lookup that fails is not movement;
 the captured transform stays in use.
@@ -334,7 +372,9 @@ runs the real node over a static TF broadcaster and synthetic grids on its own
 `ROS_DOMAIN_ID` (86) with localhost-only discovery and checks exact numbers, two sources
 in different (one rotated) frames, withholding for an unplaced source, a silent source,
 a stale tide and a stale tide boat, a tide boat beyond the bound, a tide frame under
-`earth`, the reset, the map frame moving after the capture, the retry of a silent
+`earth`, the reset by lifecycle walk and by the `~/reset` service (the union, a kept unplaced grid,
+the held-limit latch, the cumulative counters, the refusals for a moved map frame, before
+the first georeference and when unconfigured), the map frame moving after the capture, the retry of a silent
 unplaced source, the startup wait for `earth`, area arrival ordering and queue overflow, unset standards, `max_areas`, injected callback
 exceptions, incompatible QoS, the configure refusals and the read-only parameters. The
 launch file has its own `launch_testing` test (`test_launch_lifecycle.py`, own

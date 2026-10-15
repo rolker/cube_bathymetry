@@ -20,6 +20,7 @@
   <depend>grid_map_msgs</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
+  <depend>std_srvs</depend>  <!-- ~/reset Trigger service (#167) -->
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_eigen</depend>

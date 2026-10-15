@@ -31,6 +31,7 @@
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -48,6 +49,7 @@
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "cube_bathymetry/coverage_refresh.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/grid_projection.h"
@@ -123,9 +125,6 @@ public:
         "960x960 cells (#21). Remove it from the launch config.", grid_cell_count_);
     }
 
-    geo_map_sheet_ =
-      std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
-
     // Node capture gate (cube_bathymetry#143). Calder's hard-coded 0.5 m floor
     // is gone; the spacing term replaces it, so the live node's gate moved just
     // as the offline tools' did. Both offline tools expose the multiplier as
@@ -147,56 +146,8 @@ public:
     // publish_dirty_subwindow. Launch/YAML overrides are unaffected:
     // read_only only rejects a set after declaration.
     spacing_desc.read_only = true;
-    const double capture_spacing_scale =
+    capture_spacing_scale_ =
       declareOnce<double>("capture_spacing_scale", 0.71, spacing_desc);
-    try {
-      geo_map_sheet_->setCaptureSpacingScale(static_cast<float>(capture_spacing_scale));
-    } catch (const std::invalid_argument & e) {
-      RCLCPP_ERROR(get_logger(), "capture_spacing_scale: %s", e.what());
-      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
-    }
-    RCLCPP_INFO(
-      get_logger(), "Capture distance: max(%.3f x |depth|, %.3f x %.3f m node spacing)",
-      geo_map_sheet_->parameters().capture_distance_scale,
-      geo_map_sheet_->parameters().capture_spacing_scale,
-      geo_map_sheet_->distanceScale());
-    // Fresh sheet on (re)configure: drop any evicted-tile markers from a prior
-    // configure cycle so a stale index can't trigger a spurious reload (#70 r2).
-    evicted_indices_.clear();
-    // Cursor/cache state that describes the PREVIOUS sheet's session (#164). A
-    // reconfigure is a fresh sheet, so none of it may leak: the publish throttle
-    // would suppress the first window, and a cached map<-earth transform or
-    // vessel fix would be reused as if it belonged to this cycle.
-    last_grid_publish_time_ = rclcpp::Time();
-    have_publish_tf_ = false;
-    last_publish_tf_ = geometry_msgs::msg::TransformStamped();
-    have_vessel_pos_ = false;
-    last_vessel_lat_ = 0.0;
-    last_vessel_lon_ = 0.0;
-    // Same defense-in-depth for the disk-serve queue (#106 review r1):
-    // deactivate/cleanup already clear it on the normal path, but a stale
-    // queued index from a prior configure cycle must never survive into a
-    // fresh sheet's serving.
-    disk_serve_queue_.clear();
-    disk_serve_queued_.clear();
-    // The refresh queue describes a SHEET that is about to be replaced. Carried
-    // across a reconfigure it would claim tiles had been sent whole when the new
-    // sheet has never sent them at all, suppressing the heal for exactly the
-    // tiles a restart is most likely to have left a consumer stale on.
-    // Handle first, then the state it reads: the callback must be unregistered
-    // before the tracker it reconfigures is cleared, so a set arriving
-    // mid-teardown cannot reconfigure a tracker that is about to be reset.
-    refresh_parameters_handle_.reset();
-    refresh_tracker_.clear();
-    // The saving ledger describes one sheet's traffic too; carried across a
-    // reconfigure it would report a ratio over two different configurations.
-    saving_report_last_s_ = 0.0;
-    report_window_cells_ = 0;
-    report_full_cells_ = 0;
-    report_refresh_cells_ = 0;
-    // Reset the tile-version registry too (#78): a fresh sheet must not advertise
-    // phantom tiles from a prior configure cycle in the catalog (ADR-0008 D4).
-    catalog_builder_ = marine_tiled_raster_store::TileCatalogBuilder{};
 
     // Backscatter angular-response correction (cube_bathymetry#81, #102).
     // Default "auto": a curve arriving via SonarInfo (or an explicit file)
@@ -262,9 +213,6 @@ public:
       }
     }
     bs_applied_curve_ = bs_curve;  // kept for mid-run change comparison (#102)
-    geo_map_sheet_->setBackscatterCorrection(
-      bs_mode, std::move(bs_curve.points),
-      bs_curve.tl_removed, bs_curve.absorption_db_per_m);
 
     // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
     // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
@@ -281,93 +229,14 @@ public:
     ca_window_radius_m_ = declareOnce<double>("ca_window_radius_m", 200.0);
     base_link_frame_ = declareOnce<std::string>("base_link_frame", "base_link");
 
-    // Coherence WARN (ADR-0001): the resident budget must cover the CA window's
-    // tile span, else a window tile could be evicted and render as a NaN/lethal
-    // hole inside the avoidance window. gridsInCaWindow() selects tiles within
-    // R + one tile span (the boundary-straddle margin), so the budget must cover
-    // that same R + span extent -- not just R.
-    const double tile_span_m =
-      geo_map_sheet_->nominalCellSizeMeters() * gggs::GridIndex::cellRowCount();
-    if (tile_span_m > 0.0) {
-      const double per_axis = std::ceil(
-        (2.0 * (ca_window_radius_m_ + tile_span_m)) / tile_span_m) + 1.0;
-      const std::size_t window_tiles =
-        static_cast<std::size_t>(per_axis * per_axis);
-      if (max_resident_tiles_ < window_tiles) {
-        RCLCPP_WARN(get_logger(),
-          "max_resident_tiles=%zu is smaller than the ~%zu tiles spanning the "
-          "%.0fm CA window (tile span ~%.0fm); window tiles may be evicted and "
-          "show as lethal holes. Raise max_resident_tiles or shrink "
-          "ca_window_radius_m.", max_resident_tiles_, window_tiles,
-          ca_window_radius_m_, tile_span_m);
-      }
-    }
+    // (The coherence WARN against the CA window runs once the sheet is built.)
 
-    // Prior-store predicted-surface prime (#91 -- the live half of the
-    // chart-gate gap; the offline half is seedNewTile's Chart rung, #119).
-    // Seeds CUBE's predicted surface from the prior store's Chart + Reference
-    // layers (Chart first, Reference overwrites -- store priority order,
-    // exact-survey-level tiles only) so the blunder gate rejects false-deep
-    // detections live. Predicted-only (seed_settled=false): the prior gates
-    // but never fills -- no survey or co-estimated-backscatter contamination
-    // (cube#89; gates-not-fills reaffirmed in ADR-0008).
-    //
-    // Side-effect (#59): a primed predicted surface also activates LIVE
-    // slope-corrected depth via the touchdown interpolation in
-    // Grid/GeoGrid::insert -- this parameter is what turns that on afloat.
-    //
-    // Runs BEFORE the draft warm-start below so an already-surveyed cell ends
-    // with its finer draft-derived predicted depth (the draft prime overwrites).
-    //
-    // Prior-primed tiles are clean and dataless, so this trim (and the draft
-    // prime's trim below) may evict them; a revisit re-primes the gate from
-    // prior_store_dir in reloadEvictedTile (#118), so eviction costs one
-    // windowed disk read on return, never the gate.
-    //
-    // A lifecycle node WARNS and continues ungated on a missing/bad/empty
-    // prior -- a misconfigured prior must never take down live perception.
+    // Prior-store predicted-surface prime (#91): read by buildSession().
     prior_store_dir_ = declareOnce<std::string>("prior_store_dir", "");
-    if (!prior_store_dir_.empty()) {
-      try {
-        marine_bathymetry_store::BathymetryStore prior =
-          marine_bathymetry_store::BathymetryStore::fromCellSize(
-          static_cast<float>(cell_size_));
-        marine_bathymetry_store::load(prior, prior_store_dir_);
-        const cube::PriorLayerPrimeResult primed =
-          cube::primeFromPriorLayers(prior, *geo_map_sheet_);
-        if (primed.total() == 0) {
-          RCLCPP_WARN(get_logger(),
-            "prior_store_dir='%s' primed no tiles (%zu level-mismatched "
-            "skipped); predicted surface NOT seeded -- blunder gate and live "
-            "slope correction INACTIVE. Check the path and that the store has "
-            "reference/ or chart/ tiles at the survey level.",
-            prior_store_dir_.c_str(), primed.level_mismatched);
-        } else {
-          RCLCPP_INFO(get_logger(),
-            "Primed predicted surface from prior store '%s': %zu Reference + "
-            "%zu Chart tile(s), %zu level-mismatched skipped. Blunder gate "
-            "active (#91); live slope correction active (#59).",
-            prior_store_dir_.c_str(), primed.reference_tiles,
-            primed.chart_tiles, primed.level_mismatched);
-          // Bound the prime to the resident budget (#70 pattern, same as the
-          // draft prime below). Evicted prior-primed tiles get their gate
-          // re-primed on revisit (reloadEvictedTile, #118); bounded RAM wins
-          // on a long survey. As with the draft prime, the WHOLE store is
-          // loaded before this trim, so a very large prior spikes RAM
-          // transiently at configure -- point prior_store_dir at a
-          // region-scoped store (a windowed prime needs a startup position
-          // not available at on_configure; same known limitation).
-          trimResidentToBudget();
-        }
-      } catch (const std::exception & e) {
-        RCLCPP_WARN(get_logger(),
-          "Could not load prior store from '%s': %s (continuing ungated).",
-          prior_store_dir_.c_str(), e.what());
-      }
-    }
 
     // Draft-tile persistence (#21). draft_dir empty (default) disables it; set
-    // it per deployment to opt in. Tiles are written as marine_bathymetry_store
+    // it per deployment to opt in. The warm-start prime from it is
+    // buildSession()'s. Tiles are written as marine_bathymetry_store
     // `draft/` GeoTIFFs (single fused grid, no per-day epochs,
     // unh_marine_autonomy#221) so the costmap layer (#164) and sim live loop
     // (#77) read exactly what CUBE writes.
@@ -398,129 +267,62 @@ public:
       declareOnce<double>("save_interval", 30.0, save_interval_desc);
     save_interval_s_ = usableIntervalOrDefault("save_interval", save_interval_s_, 30.0);
 
-    if (!draft_dir_.empty()) {
-      // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
-      // slope correction warm-starts on previously-surveyed areas and the settled
-      // depths round-trip through values() (lossless reload, ADR-0001).
-      try {
-        marine_bathymetry_store::BathymetryStore store =
-          marine_bathymetry_store::BathymetryStore::fromCellSize(
-          static_cast<float>(cell_size_));
-        marine_bathymetry_store::load(store, draft_dir_);
-        // The live node WRITES the `draft` layer (ADR-0010 D8), but it PRIMES
-        // from Processed union Draft. On a boat's first boot after co-land, load()
-        // auto-migrates a legacy `survey/` dir to `processed/` (ADR-0010 D8), so
-        // priming from draft alone would warm-start from an empty layer and lose
-        // both the GeoMapSheet seed and the disk-serve catalog.
-        //
-        // Processed must WIN per cell where the two layers overlap (it is the
-        // authoritative surface; the store's own query walks `Processed > Draft`).
-        // Seeding order alone does NOT deliver that: two settled 1-sample
-        // hypotheses tie-break in CUBE's chooseHypothesis to the FIRST-seeded, so a
-        // Draft-then-Processed prime would report Draft on overlap. Instead seed
-        // Processed FULLY first, then layer Draft with a per-cell filter that SKIPS
-        // any cell Processed already covers (loadDraftSkippingProcessed) -- the
-        // overlapped cell then carries only the Processed hypothesis, deterministic
-        // regardless of the tie-break.
-        const auto & processed_tiles =
-          store.tiles(marine_bathymetry_store::SourceLayer::Processed);
-        const auto & draft_tiles =
-          store.tiles(marine_bathymetry_store::SourceLayer::Draft);
-        if (!processed_tiles.empty() || !draft_tiles.empty()) {
-          cube::loadIntoSheet(
-            store, marine_bathymetry_store::SourceLayer::Processed, *geo_map_sheet_);
-          cube::loadDraftSkippingProcessed(store, *geo_map_sheet_);
-          RCLCPP_INFO(get_logger(),
-            "Primed GeoMapSheet from %zu processed + %zu draft tiles under %s",
-            processed_tiles.size(), draft_tiles.size(), draft_dir_.c_str());
-          // Seed the tile-version registry from ALL persisted tiles BEFORE the
-          // trim (#106): the catalog advertises the full on-disk store, so
-          // tiles evicted by the trim below stay advertised and disk-servable.
-          // (Seeding from grids() AFTER the trim -- the previous order -- lost
-          // the just-evicted tiles from the catalog, and the consumer's
-          // prune-on-absence deleted valid coverage, ADR-0008 D4.)
-          //
-          // Seed from BOTH layers (each under its own dir for the mtime) so
-          // migrated `processed/` coverage is advertised too; catalog_builder_ is
-          // newest-wins per index, so a grid present in both takes the fresher
-          // file mtime.
-          //
-          // Version = the tile FILE's mtime, not now() (#106 review r1):
-          // stamping the prime time made every reboot advertise the whole
-          // store as fresh, so a warm consumer re-pulled everything over the
-          // link. mtime is stable across restarts and bumps only when a tile
-          // is re-saved (genuinely newer data); tiles carry no per-cell time
-          // raster since uma#248, so the file stamp is the durable version
-          // source. A stat failure falls back to now() -- worst case is one
-          // redundant refresh of that tile, never loss.
-          const std::int64_t fallback_version = now().nanoseconds();
-          const auto seed_catalog =
-            [&](marine_bathymetry_store::SourceLayer layer, const auto & tiles) {
-              const std::string layer_dir = draft_dir_ + "/" +
-                marine_bathymetry_store::layerDirName(layer);
-              for (const auto & entry : tiles) {
-                const auto & tile_index = entry.first;  // tile payload unused here
-                std::int64_t version = fallback_version;
-                struct stat st;
-                const std::string tile_path = layer_dir + "/" +
-                  marine_bathymetry_store::tileFilename(tile_index);
-                if (::stat(tile_path.c_str(), &st) == 0) {
-                  version = static_cast<std::int64_t>(st.st_mtim.tv_sec) *
-                    1000000000LL + st.st_mtim.tv_nsec;
-                }
-                catalog_builder_.update(tile_index, version);
-              }
-            };
-          seed_catalog(marine_bathymetry_store::SourceLayer::Draft, draft_tiles);
-          seed_catalog(
-            marine_bathymetry_store::SourceLayer::Processed, processed_tiles);
-          // Bound the prime to the resident budget (must-fix): the fused prime
-          // loads the WHOLE store, so without this a restart mid-long-survey
-          // re-creates the unbounded RAM #70 prevents. Primed tiles are clean and
-          // already on disk, so dropping the cold ones is lossless; they reload on
-          // revisit. (The transient peak before the trim is now the TWO-layer union:
-          // `store` holds BOTH the Processed AND the Draft tiles fully resident, and
-          // the sheet holds the fused Processed-over-Draft surface on top of them --
-          // higher than a single-layer prime. A windowed prime would bound it but
-          // needs a startup position not available at on_configure; tracked as a
-          // follow-up.)
-          trimResidentToBudget();
-        }
-      } catch (const std::exception & e) {
-        // Explicit decision on an AMBIGUOUS/refused store (ADR-0010 D8), symmetric
-        // with the importer's loud abort: if a legacy `survey/` layer dir PERSISTS,
-        // load() threw because the auto-migration REFUSED the store (symlinked
-        // `survey/`, both `survey/` and `processed/` present, or an uncommittable
-        // rename) -- a permanent, whole-store condition, not a transient read glitch.
-        // Silently starting empty here would give the boat operator a COLD start
-        // (no warm-start seed, no disk-serve catalog) with no signal that the store
-        // needs manual attention, and every reboot would repeat it. Fail configure
-        // LOUDLY instead so the operator learns the store must be fixed by hand --
-        // the same loud failure import_bag raises rather than emitting a near-empty
-        // result.
-        if (cube::legacySurveyDirPersists(draft_dir_)) {
-          RCLCPP_ERROR(get_logger(),
-            "Refusing to configure: store '%s' still has a legacy 'survey/' layer "
-            "dir after the ADR-0010 D8 auto-migration refused it (it is symlinked, "
-            "the store also has a 'processed/' dir, or the rename could not commit): "
-            "%s. This is permanent -- starting empty would silently lose warm-start "
-            "and the disk-serve catalog. Resolve by hand (replace a symlink with a "
-            "real dir, or merge/remove one of 'survey/' and 'processed/') and "
-            "re-configure.", draft_dir_.c_str(), e.what());
-          return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::
-                 CallbackReturn::FAILURE;
-        }
-        // A missing/empty store dir is normal on a first run; a genuine transient
-        // load error must not block configure -- log and continue with an empty sheet.
-        RCLCPP_WARN(get_logger(),
-          "Could not load existing draft tiles from %s: %s (starting empty)",
-          draft_dir_.c_str(), e.what());
-      }
+    // Build the new session aside, then swap it in: buildSession() constructs the
+    // sheet with every sheet-level setting, primes it and trims it, and
+    // adoptSession() installs it and clears the session state of the previous
+    // sheet. The `~/reset` service runs the same two functions, so the two paths
+    // cannot drift (cube_bathymetry#167). Every parameter the builder reads has
+    // been declared and stored in its member above.
+    FreshSession fresh;
+    try {
+      fresh = buildSession();
+    } catch (const InvalidCaptureSpacingScale & e) {
+      RCLCPP_ERROR(get_logger(), "capture_spacing_scale: %s", e.what());
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+    } catch (const LegacyStoreRefused &) {
+      // buildSession() has logged the reason.
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+    }
+    RCLCPP_INFO(
+      get_logger(), "Capture distance: max(%.3f x |depth|, %.3f x %.3f m node spacing)",
+      fresh.sheet->parameters().capture_distance_scale,
+      fresh.sheet->parameters().capture_spacing_scale,
+      fresh.sheet->distanceScale());
 
+    // Coherence WARN (ADR-0001): the resident budget must cover the CA window's
+    // tile span, else a window tile could be evicted and render as a NaN/lethal
+    // hole inside the avoidance window. gridsInCaWindow() selects tiles within
+    // R + one tile span (the boundary-straddle margin), so the budget must cover
+    // that same R + span extent -- not just R.
+    const double tile_span_m =
+      fresh.sheet->nominalCellSizeMeters() * gggs::GridIndex::cellRowCount();
+    if (tile_span_m > 0.0) {
+      const double per_axis = std::ceil(
+        (2.0 * (ca_window_radius_m_ + tile_span_m)) / tile_span_m) + 1.0;
+      const std::size_t window_tiles =
+        static_cast<std::size_t>(per_axis * per_axis);
+      if (max_resident_tiles_ < window_tiles) {
+        RCLCPP_WARN(get_logger(),
+          "max_resident_tiles=%zu is smaller than the ~%zu tiles spanning the "
+          "%.0fm CA window (tile span ~%.0fm); window tiles may be evicted and "
+          "show as lethal holes. Raise max_resident_tiles or shrink "
+          "ca_window_radius_m.", max_resident_tiles_, window_tiles,
+          ca_window_radius_m_, tile_span_m);
+      }
+    }
+
+    // The refresh-parameter callback must be unregistered before the tracker it
+    // reconfigures is cleared by adoptSession(), so a set arriving mid-teardown
+    // cannot reconfigure a tracker that is about to be reset. It is registered
+    // again at the end of this function.
+    refresh_parameters_handle_.reset();
+    adoptSession(std::move(fresh));
+
+    if (!draft_dir_.empty()) {
       // The periodic save timer is created on_activate and cancelled
       // on_deactivate (below) so draft tiles are written only while the node is
       // ACTIVE (surveying) -- a deactivated node must not keep touching disk.
-      // The on-load prime above stays in on_configure.
+      // The on-load prime stays in buildSession().
       RCLCPP_INFO(get_logger(),
         "Draft-tile persistence enabled: dir=%s interval=%.1fs "
         "(saves run while ACTIVE; single fused draft grid)",
@@ -754,6 +556,17 @@ public:
       std::bind(&CubeBathymetry::applyRefreshParameters, this,
       std::placeholders::_1));
 
+    // `~/reset` (cube_bathymetry#167): created as the VERY LAST entity. A
+    // configure that throws returns the node to UNCONFIGURED without on_cleanup,
+    // so a service created earlier would outlive the failed configure and "no
+    // service" would no longer mean "not configured" to a caller reading the
+    // graph. Reset first for the same reason a retry replaces the other handles.
+    reset_service_.reset();
+    reset_service_ = create_service<std_srvs::srv::Trigger>(
+      "~/reset",
+      std::bind(&CubeBathymetry::resetService, this, std::placeholders::_1,
+      std::placeholders::_2));
+
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
 
@@ -949,6 +762,8 @@ private:
   /// with any of them already released.
   void releaseConfiguredEntities()
   {
+    // First: the service handler reads the sheet and the members released below.
+    reset_service_.reset();
     // The timers are normally cancelled on_deactivate; a shutdown from ACTIVE, or
     // a cleanup reached by another path, arrives with them still running.
     if (save_timer_) {
@@ -1030,6 +845,10 @@ private:
   // Cached so the startup prime and revisit-reload can rebuild a GeoMapSheet /
   // scratch store with the configured geometry.
   double cell_size_ = 1.0;
+  // Sheet-level settings kept so a fresh sheet can be built at any time, not
+  // only inside on_configure (see buildSession). bs_mode_ and bs_applied_curve_
+  // are the other two.
+  double capture_spacing_scale_ = 0.71;
   int grid_cell_count_ = 25;
   rclcpp::Time last_grid_publish_time_;
 
@@ -1193,6 +1012,11 @@ private:
   // revisit. GridIndex is tiny (~level+row+col) so this set is negligible next to
   // the 920k-cell grids it lets us drop; it is the revisit-detection signal.
   std::set<gggs::GridIndex> evicted_indices_;
+
+  // How many prior-store tiles primed the running sheet's predicted surface; zero
+  // means the session runs without the prior's blunder gate. Describes the session,
+  // so adoptSession() sets it; the reset service compares it with the rebuild's.
+  std::size_t prior_tiles_primed_ = 0;
 
   // Draft-tile persistence (#21). draft_dir_ empty = disabled. Tiles are written
   // to a single fused `draft/` grid (no per-day epochs, unh_marine_autonomy#221);
@@ -1890,14 +1714,25 @@ private:
   // evictColdTiles after its flush.
   void trimResidentToBudget()
   {
-    const std::set<gggs::GridIndex> still_dirty = geo_map_sheet_->dirtyGrids();
+    trimToBudget(*geo_map_sheet_, evicted_indices_, &refresh_tracker_);
+  }
+
+  // The trim itself, on any sheet / evicted set / refresh tracker, so a session
+  // built aside (buildSession) trims its own candidate without touching the live
+  // members. @p tracker may be null: a session that has not published anything
+  // owes no whole-tile refresh.
+  void trimToBudget(
+    cube::GeoMapSheet & sheet, std::set<gggs::GridIndex> & evicted,
+    cube::CoverageRefreshTracker * tracker)
+  {
+    const std::set<gggs::GridIndex> still_dirty = sheet.dirtyGrids();
     std::size_t owing = 0;
-    for (const auto & index : geo_map_sheet_->coldTiles(max_resident_tiles_)) {
+    for (const auto & index : sheet.coldTiles(max_resident_tiles_)) {
       if (still_dirty.count(index)) {
         continue;  // unsaved -- never drop (would lose data); retry next cycle
       }
-      geo_map_sheet_->dropTile(index);
-      evicted_indices_.insert(index);
+      sheet.dropTile(index);
+      evicted.insert(index);
       // A tile that leaves RAM can no longer be quantized, so a whole-tile
       // refresh it still owed is unpayable from here. Discharge the record at
       // the moment of eviction rather than leaving it for the drain to reap:
@@ -1910,9 +1745,9 @@ private:
       //  - and this is the last moment anything knows the tile existed, so it
       //    is the only place the operator can be TOLD. The consumer keeps
       //    whatever gap it has until the tile is revisited.
-      if (refresh_tracker_.owesRefresh(index)) {
+      if (tracker != nullptr && tracker->owesRefresh(index)) {
         ++owing;
-        refresh_tracker_.forget(index);
+        tracker->forget(index);
       }
     }
     if (owing > 0) {
@@ -1923,6 +1758,453 @@ private:
         "store, as a TileRequest already is -- #106)", owing);
     }
   }
+
+  // Thrown by buildSession(): the sheet rejected capture_spacing_scale.
+  struct InvalidCaptureSpacingScale : public std::invalid_argument
+  {
+    using std::invalid_argument::invalid_argument;
+  };
+
+  // Thrown by buildSession(): the draft store has a legacy `survey/` layer the
+  // ADR-0010 D8 auto-migration refused. Permanent and whole-store; configure
+  // fails on it. (The reason has been logged by buildSession().)
+  struct LegacyStoreRefused : public std::runtime_error
+  {
+    using std::runtime_error::runtime_error;
+  };
+
+  /// Everything that makes a session "fresh", built entirely aside from the live
+  /// members so a failure leaves the running session untouched.
+  struct FreshSession
+  {
+    std::shared_ptr<cube::GeoMapSheet> sheet;
+    std::set<gggs::GridIndex> evicted_indices;
+    marine_tiled_raster_store::TileCatalogBuilder catalog_builder;
+    /// What became of prior_store_dir, for the reset response.
+    std::string prior_status;
+    /// How many prior tiles (Reference + Chart) primed this sheet's predicted surface.
+    /// Zero means the session has no blunder gate from the prior. The reset compares
+    /// the running session's count with the rebuild's (see resetSession).
+    std::size_t prior_tiles_primed = 0;
+  };
+
+  /// Build a fresh sheet from the stored configuration: the same sheet-level
+  /// settings as configure (capture-spacing scale and backscatter correction,
+  /// the latter from the STORED curve -- the sonar_info subscription survives a
+  /// reset and does not redeliver), then the prior-store prime, the draft-store
+  /// warm start and catalog seed, and the trim to the resident budget. Reads the
+  /// members declared by on_configure and writes none of the session members.
+  /// @param prior_must_load  false (configure): a prior store that cannot be loaded
+  ///        only warns and the node runs ungated, because a misconfigured prior must
+  ///        never take down live perception at start-up. true (the reset service):
+  ///        the same failure throws, so the reset fails and the running session, which
+  ///        has the blunder gate, is kept rather than replaced by an ungated one.
+  /// @throws InvalidCaptureSpacingScale, LegacyStoreRefused (configure maps both
+  ///         to FAILURE), or any other std::exception (the reset service maps it
+  ///         to success=false).
+  FreshSession buildSession(bool prior_must_load = false)
+  {
+    FreshSession session;
+    session.prior_status = prior_store_dir_.empty() ? "unset" : "not loaded";
+    session.sheet =
+      std::make_shared<cube::GeoMapSheet>(static_cast<float>(cell_size_));
+    try {
+      session.sheet->setCaptureSpacingScale(static_cast<float>(capture_spacing_scale_));
+    } catch (const std::invalid_argument & e) {
+      throw InvalidCaptureSpacingScale(e.what());
+    }
+    // A COPY of the stored curve: configure moved from a local, but moving the
+    // member would blank bs_applied_curve_ for the next reset.
+    session.sheet->setBackscatterCorrection(
+      bs_mode_, bs_applied_curve_.points,
+      bs_applied_curve_.tl_removed, bs_applied_curve_.absorption_db_per_m);
+    if (build_fault_injector_) {
+      build_fault_injector_();
+    }
+
+    // Prior-store predicted-surface prime (#91 -- the live half of the
+    // chart-gate gap; the offline half is seedNewTile's Chart rung, #119).
+    // Seeds CUBE's predicted surface from the prior store's Chart + Reference
+    // layers (Chart first, Reference overwrites -- store priority order,
+    // exact-survey-level tiles only) so the blunder gate rejects false-deep
+    // detections live. Predicted-only (seed_settled=false): the prior gates
+    // but never fills -- no survey or co-estimated-backscatter contamination
+    // (cube#89; gates-not-fills reaffirmed in ADR-0008).
+    //
+    // Side-effect (#59): a primed predicted surface also activates LIVE
+    // slope-corrected depth via the touchdown interpolation in
+    // Grid/GeoGrid::insert -- this parameter is what turns that on afloat.
+    //
+    // Runs BEFORE the draft warm-start below so an already-surveyed cell ends
+    // with its finer draft-derived predicted depth (the draft prime overwrites).
+    //
+    // Prior-primed tiles are clean and dataless, so this trim (and the draft
+    // prime's trim below) may evict them; a revisit re-primes the gate from
+    // prior_store_dir in reloadEvictedTile (#118), so eviction costs one
+    // windowed disk read on return, never the gate.
+    //
+    // A lifecycle node WARNS and continues ungated on a missing/bad/empty
+    // prior -- a misconfigured prior must never take down live perception.
+    if (!prior_store_dir_.empty()) {
+      try {
+        marine_bathymetry_store::BathymetryStore prior =
+          marine_bathymetry_store::BathymetryStore::fromCellSize(
+          static_cast<float>(cell_size_));
+        marine_bathymetry_store::load(prior, prior_store_dir_);
+        const cube::PriorLayerPrimeResult primed =
+          cube::primeFromPriorLayers(prior, *session.sheet);
+        session.prior_tiles_primed = primed.total();
+        if (primed.total() == 0) {
+          RCLCPP_WARN(get_logger(),
+            "prior_store_dir='%s' primed no tiles (%zu level-mismatched "
+            "skipped); predicted surface NOT seeded -- blunder gate and live "
+            "slope correction INACTIVE. Check the path and that the store has "
+            "reference/ or chart/ tiles at the survey level.",
+            prior_store_dir_.c_str(), primed.level_mismatched);
+          session.prior_status =
+            "primed no tiles (blunder gate and slope correction INACTIVE)";
+        } else {
+          RCLCPP_INFO(get_logger(),
+            "Primed predicted surface from prior store '%s': %zu Reference + "
+            "%zu Chart tile(s), %zu level-mismatched skipped. Blunder gate "
+            "active (#91); live slope correction active (#59).",
+            prior_store_dir_.c_str(), primed.reference_tiles,
+            primed.chart_tiles, primed.level_mismatched);
+          session.prior_status = "primed " + std::to_string(primed.reference_tiles) +
+            " Reference + " + std::to_string(primed.chart_tiles) + " Chart tile(s)";
+          // Bound the prime to the resident budget (#70 pattern, same as the
+          // draft prime below). Evicted prior-primed tiles get their gate
+          // re-primed on revisit (reloadEvictedTile, #118); bounded RAM wins
+          // on a long survey. As with the draft prime, the WHOLE store is
+          // loaded before this trim, so a very large prior spikes RAM
+          // transiently at configure -- point prior_store_dir at a
+          // region-scoped store (a windowed prime needs a startup position
+          // not available at on_configure; same known limitation).
+          trimToBudget(*session.sheet, session.evicted_indices, nullptr);
+        }
+      } catch (const std::exception & e) {
+        if (prior_must_load) {
+          throw std::runtime_error(
+            "prior_store_dir '" + prior_store_dir_ + "' could not be loaded: " + e.what() +
+            " (a reset would run ungated, so none was done)");
+        }
+        RCLCPP_WARN(get_logger(),
+          "Could not load prior store from '%s': %s (continuing ungated).",
+          prior_store_dir_.c_str(), e.what());
+        session.prior_status = std::string("could not be loaded: ") + e.what() +
+          " (continuing ungated)";
+      }
+    }
+    if (!draft_dir_.empty()) {
+      // On startup, prime the fresh GeoMapSheet from the persisted draft grid so
+      // slope correction warm-starts on previously-surveyed areas and the settled
+      // depths round-trip through values() (lossless reload, ADR-0001).
+      try {
+        marine_bathymetry_store::BathymetryStore store =
+          marine_bathymetry_store::BathymetryStore::fromCellSize(
+          static_cast<float>(cell_size_));
+        marine_bathymetry_store::load(store, draft_dir_);
+        // The live node WRITES the `draft` layer (ADR-0010 D8), but it PRIMES
+        // from Processed union Draft. On a boat's first boot after co-land, load()
+        // auto-migrates a legacy `survey/` dir to `processed/` (ADR-0010 D8), so
+        // priming from draft alone would warm-start from an empty layer and lose
+        // both the GeoMapSheet seed and the disk-serve catalog.
+        //
+        // Processed must WIN per cell where the two layers overlap (it is the
+        // authoritative surface; the store's own query walks `Processed > Draft`).
+        // Seeding order alone does NOT deliver that: two settled 1-sample
+        // hypotheses tie-break in CUBE's chooseHypothesis to the FIRST-seeded, so a
+        // Draft-then-Processed prime would report Draft on overlap. Instead seed
+        // Processed FULLY first, then layer Draft with a per-cell filter that SKIPS
+        // any cell Processed already covers (loadDraftSkippingProcessed) -- the
+        // overlapped cell then carries only the Processed hypothesis, deterministic
+        // regardless of the tie-break.
+        const auto & processed_tiles =
+          store.tiles(marine_bathymetry_store::SourceLayer::Processed);
+        const auto & draft_tiles =
+          store.tiles(marine_bathymetry_store::SourceLayer::Draft);
+        if (!processed_tiles.empty() || !draft_tiles.empty()) {
+          cube::loadIntoSheet(
+            store, marine_bathymetry_store::SourceLayer::Processed, *session.sheet);
+          cube::loadDraftSkippingProcessed(store, *session.sheet);
+          RCLCPP_INFO(get_logger(),
+            "Primed GeoMapSheet from %zu processed + %zu draft tiles under %s",
+            processed_tiles.size(), draft_tiles.size(), draft_dir_.c_str());
+          // Seed the tile-version registry from ALL persisted tiles BEFORE the
+          // trim (#106): the catalog advertises the full on-disk store, so
+          // tiles evicted by the trim below stay advertised and disk-servable.
+          // (Seeding from grids() AFTER the trim -- the previous order -- lost
+          // the just-evicted tiles from the catalog, and the consumer's
+          // prune-on-absence deleted valid coverage, ADR-0008 D4.)
+          //
+          // Seed from BOTH layers (each under its own dir for the mtime) so
+          // migrated `processed/` coverage is advertised too; catalog_builder_ is
+          // newest-wins per index, so a grid present in both takes the fresher
+          // file mtime.
+          //
+          // Version = the tile FILE's mtime, not now() (#106 review r1):
+          // stamping the prime time made every reboot advertise the whole
+          // store as fresh, so a warm consumer re-pulled everything over the
+          // link. mtime is stable across restarts and bumps only when a tile
+          // is re-saved (genuinely newer data); tiles carry no per-cell time
+          // raster since uma#248, so the file stamp is the durable version
+          // source. A stat failure falls back to now() -- worst case is one
+          // redundant refresh of that tile, never loss.
+          const std::int64_t fallback_version = now().nanoseconds();
+          const auto seed_catalog =
+            [&](marine_bathymetry_store::SourceLayer layer, const auto & tiles) {
+              const std::string layer_dir = draft_dir_ + "/" +
+                marine_bathymetry_store::layerDirName(layer);
+              for (const auto & entry : tiles) {
+                const auto & tile_index = entry.first;  // tile payload unused here
+                std::int64_t version = fallback_version;
+                struct stat st;
+                const std::string tile_path = layer_dir + "/" +
+                  marine_bathymetry_store::tileFilename(tile_index);
+                if (::stat(tile_path.c_str(), &st) == 0) {
+                  version = static_cast<std::int64_t>(st.st_mtim.tv_sec) *
+                    1000000000LL + st.st_mtim.tv_nsec;
+                }
+                session.catalog_builder.update(tile_index, version);
+              }
+            };
+          seed_catalog(marine_bathymetry_store::SourceLayer::Draft, draft_tiles);
+          seed_catalog(
+            marine_bathymetry_store::SourceLayer::Processed, processed_tiles);
+          // Bound the prime to the resident budget (must-fix): the fused prime
+          // loads the WHOLE store, so without this a restart mid-long-survey
+          // re-creates the unbounded RAM #70 prevents. Primed tiles are clean and
+          // already on disk, so dropping the cold ones is lossless; they reload on
+          // revisit. (The transient peak before the trim is now the TWO-layer union:
+          // `store` holds BOTH the Processed AND the Draft tiles fully resident, and
+          // the sheet holds the fused Processed-over-Draft surface on top of them --
+          // higher than a single-layer prime. A windowed prime would bound it but
+          // needs a startup position not available at on_configure; tracked as a
+          // follow-up.)
+          trimToBudget(*session.sheet, session.evicted_indices, nullptr);
+        }
+      } catch (const std::exception & e) {
+        // Explicit decision on an AMBIGUOUS/refused store (ADR-0010 D8), symmetric
+        // with the importer's loud abort: if a legacy `survey/` layer dir PERSISTS,
+        // load() threw because the auto-migration REFUSED the store (symlinked
+        // `survey/`, both `survey/` and `processed/` present, or an uncommittable
+        // rename) -- a permanent, whole-store condition, not a transient read glitch.
+        // Silently starting empty here would give the boat operator a COLD start
+        // (no warm-start seed, no disk-serve catalog) with no signal that the store
+        // needs manual attention, and every reboot would repeat it. Fail configure
+        // LOUDLY instead so the operator learns the store must be fixed by hand --
+        // the same loud failure import_bag raises rather than emitting a near-empty
+        // result.
+        if (cube::legacySurveyDirPersists(draft_dir_)) {
+          RCLCPP_ERROR(get_logger(),
+            "Refusing to configure: store '%s' still has a legacy 'survey/' layer "
+            "dir after the ADR-0010 D8 auto-migration refused it (it is symlinked, "
+            "the store also has a 'processed/' dir, or the rename could not commit): "
+            "%s. This is permanent -- starting empty would silently lose warm-start "
+            "and the disk-serve catalog. Resolve by hand (replace a symlink with a "
+            "real dir, or merge/remove one of 'survey/' and 'processed/') and "
+            "re-configure.", draft_dir_.c_str(), e.what());
+          throw LegacyStoreRefused(e.what());
+        }
+        // A missing/empty store dir is normal on a first run; a genuine transient
+        // load error must not block configure -- log and continue with an empty sheet.
+        RCLCPP_WARN(get_logger(),
+          "Could not load existing draft tiles from %s: %s (starting empty)",
+          draft_dir_.c_str(), e.what());
+      }
+    }
+    return session;
+  }
+
+  /// Install a built session and clear the state that describes the previous
+  /// sheet's session (#164). The ONE list of that state: on_configure and the
+  /// `~/reset` service both end here, so a field added to the session is added
+  /// once. The old sheet is destroyed last, after everything else is swapped.
+  void adoptSession(FreshSession && fresh)
+  {
+    // Cursor/cache state that describes the PREVIOUS sheet's session. A fresh
+    // sheet must not inherit any of it: the publish throttle would suppress the
+    // first window, and a cached map<-earth transform or vessel fix would be
+    // reused as if it belonged to this session.
+    last_grid_publish_time_ = rclcpp::Time();
+    have_publish_tf_ = false;
+    last_publish_tf_ = geometry_msgs::msg::TransformStamped();
+    have_vessel_pos_ = false;
+    last_vessel_lat_ = 0.0;
+    last_vessel_lon_ = 0.0;
+    // The disk-serve queue names tiles of the previous sheet (#106 review r1).
+    disk_serve_queue_.clear();
+    disk_serve_queued_.clear();
+    // The refresh queue describes a SHEET that is being replaced. Carried across
+    // it would claim tiles had been sent whole when the new sheet has never sent
+    // them at all, suppressing the heal for exactly the tiles a restart is most
+    // likely to have left a consumer stale on. clear() keeps the configured
+    // interval and budget.
+    refresh_tracker_.clear();
+    // The saving ledger describes one sheet's traffic too; carried across it
+    // would report a ratio over two different configurations.
+    saving_report_last_s_ = 0.0;
+    report_window_cells_ = 0;
+    report_full_cells_ = 0;
+    report_refresh_cells_ = 0;
+    // Evicted-tile markers and the tile-version registry belong to the sheet: a
+    // stale index would trigger a spurious reload (#70 r2) and a stale registry
+    // would advertise phantom tiles in the catalog (#78, ADR-0008 D4).
+    evicted_indices_ = std::move(fresh.evicted_indices);
+    catalog_builder_ = std::move(fresh.catalog_builder);
+    // Last: the swap itself, which destroys the old sheet.
+    prior_tiles_primed_ = fresh.prior_tiles_primed;
+    geo_map_sheet_ = std::move(fresh.sheet);
+  }
+
+  /// `~/reset` (std_srvs/Trigger): start a new live session in RAM; no tile is
+  /// written to disk (cube_bathymetry#167). Loading the prior store can rename a
+  /// legacy `survey/` layer directory in it to `processed/` (the ADR-0010 D8
+  /// one-time migration), exactly as configure does, so "nothing on disk" is not
+  /// claimed without that qualification. Refuses while the node was configured
+  /// with a draft_dir: saved tiles would reload (ADR-0001), so the sheet would not
+  /// be fresh, and dropping the unsaved ones would break "persist before drop".
+  /// On-disk session identity belongs to unh_marine_autonomy#391.
+  ///
+  /// Why the swap needs no mutex: every callback of this node's own entities
+  /// (pings, timers, subscriptions, this service) is in the node's default
+  /// callback group, which is mutually exclusive, and main() spins a
+  /// SingleThreadedExecutor (spinUntilStopped requires one by type). Either fact
+  /// alone means no other callback runs while this one swaps the sheet. (The only
+  /// other callback groups belong to libraries and run on their own threads: the
+  /// tf2_ros::TransformListener's (/tf, /tf_static), and under use_sim_time rclcpp's
+  /// clock thread (/clock). They only feed the TF buffer and the clock, which a reset
+  /// does not replace; AllCallbacksShareTheDefaultGroup pins what they hold.) The
+  /// cost is that the prime is a whole-store disk read that BLOCKS the executor
+  /// for its duration while the node is active (unlike configure): the
+  /// best-effort depth-5 ping subscription drops pings meanwhile.
+  ///
+  /// A reset also refuses when the running session primed prior-store tiles (it has
+  /// the blunder gate) and the rebuild primes none: load() does not throw for a prior
+  /// directory that is missing, unmounted, empty or of the wrong level, so the check
+  /// is on the count. A node whose prior never primed anything is not locked out.
+  ///
+  /// Not for use underway, for two more reasons. A reset while ACTIVE makes the next
+  /// collision-avoidance window hold only the new session's cells, and unknown
+  /// cells in the window are NaN, which the costmap treats as lethal under
+  /// unsurveyed_is_lethal, around the vessel. And the peak RAM is the old sheet, plus
+  /// the whole prior store, plus the new sheet, all at once: with draft_dir empty
+  /// (the only case served) the old sheet never evicts, so it is at its largest
+  /// exactly when a reset is wanted. The old sheet is not dropped first because a
+  /// failed build must leave it intact; a bad_alloc while loading the prior fails
+  /// the reset and keeps the old session.
+  void resetService(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+  {
+    // The whole handler is contained, not just the build: the copies, the message
+    // concatenation and the logging below run at the documented RAM peak, and an
+    // exception that escapes a service callback ends the process. Everything that
+    // can throw in resetSession happens before the swap, so success=false here is
+    // true: the old session is the running one.
+    response->success = false;
+    try {
+      bool success = false;
+      response->message = resetSession(success);
+      response->success = success;
+    } catch (const std::exception & e) {
+      response->success = false;
+      setFailureMessage(*response, "failed, the running session is unchanged: ", e.what());
+      return;
+    } catch (...) {
+      response->success = false;
+      setFailureMessage(*response,
+        "failed with an unknown exception, the running session is unchanged", "");
+      return;
+    }
+    try {
+      if (response->success) {
+        RCLCPP_INFO(get_logger(), "Reset: %s", response->message.c_str());
+      } else {
+        RCLCPP_WARN(get_logger(), "Reset refused or failed: %s", response->message.c_str());
+      }
+    } catch (...) {
+      // Logging must not undo a reset that has been done.
+    }
+  }
+
+  /// Set a failure message without letting a second allocation failure escape the
+  /// catch block that calls it.
+  static void setFailureMessage(
+    std_srvs::srv::Trigger::Response & response, const char * text, const char * detail)
+  {
+    try {
+      response.message = std::string(text) + detail;
+    } catch (...) {
+      response.message.clear();
+    }
+  }
+
+  /// The reset itself; returns the response message and sets @p success.
+  std::string resetSession(bool & success)
+  {
+    success = false;
+    if (!geo_map_sheet_) {
+      return "node is not configured (no sheet to reset)";
+    }
+    // The configured member, not the writable parameter: it can change between
+    // cycles, and it is what on_cleanup flushes against.
+    if (!draft_dir_.empty()) {
+      return "refused: draft_dir is '" + draft_dir_ + "'; saved tiles would reload, so "
+             "the sheet would not be fresh. Point draft_dir at a NEW empty directory and "
+             "use the lifecycle walk (reset_cube_nodes.sh --allow-persistence). "
+             "Nothing was changed.";
+    }
+    FreshSession fresh;
+    try {
+      // A prior that cannot be read fails the reset: replacing a gated session with
+      // an ungated one is worse than keeping the old one (configure keeps its
+      // warn-and-continue; there is no running session to protect there).
+      fresh = buildSession(/*prior_must_load=*/true);
+    } catch (const std::exception & e) {
+      return std::string("failed, the running session is unchanged: ") + e.what();
+    } catch (...) {
+      // A non-std throw must not escape a service callback (it would end the
+      // process); the assessor's handler contains it the same way.
+      return "failed with an unknown exception, the running session is unchanged";
+    }
+    // A running session that has the prior's blunder gate is not replaced by a rebuild
+    // that primed nothing: load() does not throw for a missing, unmounted, empty or
+    // all-level-mismatched store, so that case reaches here as a clean build with zero
+    // tiles. A node whose prior never primed anything (prior_tiles_primed_ == 0) is
+    // not locked out: there is no gate to lose.
+    if (prior_tiles_primed_ > 0 && fresh.prior_tiles_primed == 0) {
+      return "failed, the running session is unchanged: prior_store_dir '" +
+             prior_store_dir_ + "' primed no tiles this time, so a reset would replace "
+             "the session that has the blunder gate (it primed " +
+             std::to_string(prior_tiles_primed_) + " tile(s)) with one "
+             "that has none; check the path and that the store is mounted, or use the "
+             "lifecycle walk";
+    }
+    if (reset_fault_injector_) {
+      reset_fault_injector_();
+    }
+    // The whole message is built BEFORE the swap, so nothing that can throw runs
+    // after the old session is gone.
+    const bool active = get_current_state().id() ==
+      lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+    std::string message = std::to_string(geo_map_sheet_->residentTileCount()) +
+      " tile(s) dropped from RAM; prior_store_dir " + fresh.prior_status +
+      "; node is " + (active ? "active" : "inactive: no grid until activated") +
+      "; no tile written to disk (loading a prior store renames a legacy survey/ "
+      "directory, as configure does)";
+    adoptSession(std::move(fresh));
+    success = true;
+    return message;
+  }
+
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
+  /// Test seam: called by buildSession() once the candidate sheet exists, so a
+  /// test can make a build fail part way.
+  std::function<void()> build_fault_injector_;
+  /// Test seam: called by resetSession() after the build and the gate check, before
+  /// the swap, outside the build's own try block.
+  std::function<void()> reset_fault_injector_;
 
   // Vessel lat/lon from earth <- base_link (translation = the ECEF position of
   // the base_link origin).
