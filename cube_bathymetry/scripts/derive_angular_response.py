@@ -35,24 +35,55 @@ bin is ~0 and off-nadir bins are <= 0; the estimator subtracts this column from
 each beam's raw dB. NaN/inf intensities and beams flagged bad are skipped.
 
 Tier-2 (cube_bathymetry#87): with ``--remove-tl`` the per-beam 2-way
-transmission loss ``TL = 40*log10(R) + 2*alpha*R`` (R = ``twtt*c/2`` per beam,
-alpha = freshwater Francois-Garrison absorption from ``--water-temp-c`` and the
-per-ping frequency) is compensated -- ADDED BACK -- for each beam BEFORE binning
-(a distant return lost more energy, so it is boosted to recover range-independent
-backscatter, TVG-style), so the curve becomes a TL-removed residual that is
-depth/range transferable. The CSV columns
-are unchanged; the header records ``tl_removed``/``absorption_db_per_m`` so the
-C++ estimator applies the identical TL (and never recomputes alpha).
+transmission loss ``TL = 40*log10(R) + 2*alpha*R`` (R = ``twtt*c/2`` per beam)
+is compensated -- ADDED BACK -- for each beam BEFORE binning (a distant return
+lost more energy, so it is boosted to recover range-independent backscatter,
+TVG-style), so the curve becomes a TL-removed residual that is depth/range
+transferable. The CSV columns are unchanged; the header records
+``tl_removed``/``absorption_db_per_m`` so the C++ estimator applies the
+identical TL (and never recomputes alpha).
+
+The absorption alpha (cube_bathymetry#170) is computed with the full
+Francois-Garrison (1982) model -- boric acid, MgSO4 and pure water -- from
+``--water-temp-c``, ``--salinity`` (psu, default 0 = fresh water), ``--ph``
+(default 8.0), ``--depth-m`` and the median per-ping frequency. Take T and S
+from casts at the site, not from the boat's surface temperature alone; in salt
+water salinity is the dominant term.
 
 Usage:
     derive_angular_response.py <bag> [<bag> ...] -t <topic> -o <out.csv>
     derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
         --remove-tl --water-temp-c 24.0
+    derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
+        --remove-tl --water-temp-c 15.5 --salinity 31
 """
 
 import argparse
 import math
 import sys
+
+DEFAULT_PH = 8.0
+
+# Plausibility bounds for the absorption inputs. They are wider than the
+# Francois-Garrison fit's validity range (T -2..22 C, S 30..35 psu, pH 7.7..8.3)
+# so lakes, estuaries and warm water still compute, but narrow enough to catch a
+# unit slip -- degF for degC, a dropped decimal point in a salinity or pH.
+TEMP_C_RANGE = (-2.0, 40.0)
+SALINITY_PSU_RANGE = (0.0, 50.0)
+PH_RANGE = (6.0, 10.0)
+DEPTH_M_RANGE = (0.0, 12000.0)
+
+
+def check_absorption_inputs(temp_c, salinity_psu, ph, depth_m):
+    """Raise ValueError naming the first non-finite or implausible input."""
+    for name, value, (lo, hi) in (
+            ('--water-temp-c', temp_c, TEMP_C_RANGE),
+            ('--salinity', salinity_psu, SALINITY_PSU_RANGE),
+            ('--ph', ph, PH_RANGE),
+            ('--depth-m', depth_m, DEPTH_M_RANGE)):
+        if not math.isfinite(value) or not lo <= value <= hi:
+            raise ValueError('%s %r is outside the plausible range [%g, %g]'
+                             % (name, value, lo, hi))
 
 
 def parse_args(argv):
@@ -73,42 +104,98 @@ def parse_args(argv):
                         '40*log10(R) + 2*alpha*R before binning (cube#87)')
     p.add_argument('--water-temp-c', type=float, default=None,
                    help='water temperature, degC (REQUIRED with --remove-tl); '
-                        'feeds the freshwater absorption alpha')
-    p.add_argument('--salinity', type=float, default=0.0,
-                   help='salinity, psu (default 0.0 = fresh water). Non-zero '
-                        'seawater absorption is out of scope for cube#87.')
+                        'feeds the absorption alpha. Use a cast value '
+                        'representative of the water column, not the surface '
+                        'temperature alone')
+    p.add_argument('--salinity', type=float, default=None,
+                   help='salinity, psu (default 0 = fresh water); feeds the '
+                        'Francois-Garrison boric-acid and MgSO4 terms. Take it '
+                        'from a CTD cast at the site')
+    p.add_argument('--ph', type=float, default=None,
+                   help='pH for the boric-acid term (default %g; it has no '
+                        'effect at salinity 0)' % DEFAULT_PH)
     p.add_argument('--depth-m', type=float, default=0.0,
-                   help='nominal depth for the absorption pressure term D '
-                        '(default 0.0 -> P3=1 at lake depth)')
+                   help='nominal depth for the absorption pressure terms D '
+                        '(default 0.0 -> P2=P3=1)')
     args = p.parse_args(argv)
     if args.remove_tl and args.water_temp_c is None:
         p.error('--water-temp-c is required when --remove-tl is set')
-    if args.remove_tl and args.salinity > 0.0:
-        p.error('--salinity > 0 (seawater) is out of scope for cube#87 '
-                '(freshwater pure-water absorption only); omit --salinity')
+    if not args.remove_tl:
+        ignored = [flag for flag, value in (('--salinity', args.salinity),
+                                            ('--ph', args.ph))
+                   if value is not None]
+        if ignored:
+            print('warning: %s only feed(s) the tier-2 absorption and is '
+                  'ignored without --remove-tl' % ', '.join(ignored),
+                  file=sys.stderr)
+    if args.salinity is None:
+        args.salinity = 0.0
+    if args.ph is None:
+        args.ph = DEFAULT_PH
+    if args.remove_tl:
+        try:
+            check_absorption_inputs(
+                args.water_temp_c, args.salinity, args.ph, args.depth_m)
+        except ValueError as e:
+            p.error(str(e))
     return args
 
 
-def freshwater_absorption_db_per_m(freq_khz, temp_c, depth_m=0.0):
+def francois_garrison_absorption_db_per_m(
+        freq_khz, temp_c, salinity_psu=0.0, depth_m=0.0, ph=DEFAULT_PH):
     """
-    Francois-Garrison pure-water (freshwater) absorption alpha, dB/m.
+    Francois-Garrison (1982) sound absorption alpha in sea or fresh water, dB/m.
 
-    Only the pure-water term is needed in fresh water (the boric-acid and
-    MgSO4 seawater terms vanish at salinity 0):
+    Sum of the boric-acid, magnesium-sulphate and pure-water relaxation terms
+    (f in kHz, T in degC, S in psu, D in metres, c in m/s), each in dB/km:
 
-        alpha_w(dB/km) = A3 * P3 * f_kHz**2
+        c       = 1412 + 3.21 T + 1.19 S + 0.0167 D
+        boric   = A1 P1 f1 f**2 / (f1**2 + f**2)
+                  A1 = 8.86 / c * 10**(0.78 pH - 5),  P1 = 1
+                  f1 = 2.8 sqrt(S / 35) 10**(4 - 1245 / (273 + T))
+        MgSO4   = A2 P2 f2 f**2 / (f2**2 + f**2)
+                  A2 = 21.44 S / c (1 + 0.025 T)
+                  P2 = 1 - 1.37e-4 D + 6.2e-9 D**2
+                  f2 = 8.17 10**(8 - 1990 / (273 + T)) / (1 + 0.0018 (S - 35))
+        water   = A3 P3 f**2
+                  A3 = temperature-split cubic (T <= 20 / T > 20)
+                  P3 = 1 - 3.83e-5 D + 4.9e-10 D**2
 
-    with the temperature-split A3 and the pressure term P3 (D in metres).
-    Returns alpha in dB/m (= alpha_w / 1000). Sanity: f=500 kHz, T=24 C,
-    D=0 -> ~0.049 dB/m.
+    At S = 0 both chemical terms are exactly zero (f1 = 0 and A2 = 0), so the
+    result is the pure-water term alone, bit-for-bit the freshwater value the
+    tool computed before cube_bathymetry#170 (f=500 kHz, T=24 C, D=0 ->
+    0.0489736 dB/m). Sanity in salt water: f=500 kHz, T=15 C, S=32, pH 8, D=0
+    -> ~0.126 dB/m. Returns alpha_dB/km / 1000.
     """
+    if not math.isfinite(freq_khz) or freq_khz <= 0.0:
+        raise ValueError('frequency must be finite and > 0 kHz, got %r' % freq_khz)
     t = temp_c
+    s = salinity_psu
+    d = depth_m
+    f2_khz2 = freq_khz ** 2
+    c = 1412.0 + 3.21 * t + 1.19 * s + 0.0167 * d
+
+    # Boric acid (dominant below ~1 kHz; small at multibeam frequencies).
+    a1 = 8.86 / c * 10.0 ** (0.78 * ph - 5.0)
+    f1 = 2.8 * math.sqrt(s / 35.0) * 10.0 ** (4.0 - 1245.0 / (273.0 + t))
+    boric = a1 * f1 * f2_khz2 / (f1 ** 2 + f2_khz2)
+
+    # Magnesium sulphate (dominant from ~10 to a few hundred kHz).
+    a2 = 21.44 * s / c * (1.0 + 0.025 * t)
+    p2 = 1.0 - 1.37e-4 * d + 6.2e-9 * d ** 2
+    f2 = 8.17 * 10.0 ** (8.0 - 1990.0 / (273.0 + t)) / (1.0 + 0.0018 * (s - 35.0))
+    mgso4 = a2 * p2 * f2 * f2_khz2 / (f2 ** 2 + f2_khz2)
+
+    # Pure water. Written exactly as the pre-#170 freshwater function so S = 0
+    # reproduces its floating-point result (and therefore its CSV rows).
     if t > 20.0:
         a3 = (3.964e-4 - 1.146e-5 * t + 1.45e-7 * t ** 2 - 6.5e-10 * t ** 3)
     else:
         a3 = (4.937e-4 - 2.590e-5 * t + 9.110e-7 * t ** 2 - 1.500e-8 * t ** 3)
-    p3 = 1.0 - 3.83e-5 * depth_m + 4.9e-10 * depth_m ** 2
-    alpha_db_per_km = a3 * p3 * freq_khz ** 2
+    p3 = 1.0 - 3.83e-5 * d + 4.9e-10 * d ** 2
+    water = a3 * p3 * freq_khz ** 2
+
+    alpha_db_per_km = boric + mgso4 + water
     return alpha_db_per_km / 1000.0
 
 
@@ -282,10 +369,12 @@ def main(argv=None):
             raise SystemExit(
                 'error: --remove-tl needs a finite ping_info.frequency; none found')
         freq_khz = median(freqs) / 1000.0
-        alpha = freshwater_absorption_db_per_m(
-            freq_khz, args.water_temp_c, args.depth_m)
-        print('tier-2: median frequency %.1f kHz, T=%.1f C, D=%.1f m -> '
-              'alpha=%.6g dB/m' % (freq_khz, args.water_temp_c, args.depth_m, alpha))
+        alpha = francois_garrison_absorption_db_per_m(
+            freq_khz, args.water_temp_c, args.salinity, args.depth_m, args.ph)
+        print('tier-2: median frequency %.1f kHz, T=%.1f C, S=%g psu, pH=%g, '
+              'D=%.1f m -> alpha=%.6g dB/m'
+              % (freq_khz, args.water_temp_c, args.salinity, args.ph,
+                 args.depth_m, alpha))
 
     n_rows = write_csv(
         bins, args.bin_width_deg, args.output,
