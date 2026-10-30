@@ -772,14 +772,21 @@ the way `import_bag` georeferences:
   never later than the time the bag recorded that transform plus its frame's
   clock offset, so a transform stamped further ahead of its recording time
   than its frame usually is does not release pings early. A frame's offset is
-  the stamp minus the bag time of its first transform, so a recorder whose
-  clock lags or leads the publisher's (relayed topics, unsynchronised hosts)
-  works as if the clocks agreed.
+  the stamp minus the bag time of its first accepted transform, so a recorder
+  whose clock lags or leads the publisher's (relayed topics, unsynchronised
+  hosts) works as if the clocks agreed. Only a transform within 1 h of its
+  bag time, either way, can set a frame's offset; one further off before the
+  frame has an offset (a glitch, such as a stamp from a node whose clock was
+  not set yet) is left out, and the offset is taken from the next transform
+  within the bound.
   Transforms tf2 would reject (NaN, zero quaternion, bad frame names, more
-  than 60 s older than the newest of their frame) and transforms whose stamp
-  jumps more than 60 s further ahead of the bag time than their frame's
-  offset (which would push the real ones out of the buffer) are left out; a
-  warning counts them instead of tf2 printing a line for each.
+  than 60 s older than the newest of their frame), dynamic transforms with an
+  unset (zero) stamp, those more than 1 h off their bag time before their
+  frame has an offset, and transforms whose stamp jumps more than 60 s
+  further ahead of the bag time than their frame's offset (which would push
+  the real ones out of the buffer) are left out; a warning counts them
+  instead of tf2 printing a line for each. A transform left out moves no
+  frontier, so it costs no pings of another frame.
 - The ECEF position of the sensor is converted to latitude/longitude.
 - Pings waiting for the TF stream are held in memory, about 13 bytes per beam
   (7 KB for a 512-beam ping). Normally that is the last few seconds of pings,

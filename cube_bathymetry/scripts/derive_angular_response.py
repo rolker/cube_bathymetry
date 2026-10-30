@@ -92,11 +92,14 @@ georeferences it:
   Pings still waiting when the bags end are looked up against what was read.
   The TF stream's progress is the newest accepted dynamic transform stamp,
   never later than the time the bag recorded it plus its frame's clock offset
-  (stamp minus bag time of the frame's first transform, so a recorder whose
-  clock lags or leads the publisher's works). Transforms tf2 would reject
-  (NaN, zero quaternion, bad frame names, older than the 60 s buffer) or
-  whose stamp jumps more than 60 s further ahead of the bag time than their
-  frame's offset are left out and counted.
+  (stamp minus bag time of the frame's first accepted transform, so a
+  recorder whose clock lags or leads the publisher's works; only a transform
+  within 1 h of its bag time can set it). Transforms tf2 would reject (NaN,
+  zero quaternion, bad frame names, older than the 60 s buffer), dynamic
+  transforms with an unset (zero) stamp, transforms whose stamp jumps more
+  than 60 s further ahead of the bag time than their frame's offset, and,
+  while a frame has no offset yet, transforms more than 1 h off their bag
+  time are left out and counted; they move no frontier.
 
 The ECEF translation of the sensor origin is converted to latitude/longitude in
 closed form; a translation that is not a geocentric position (more than 50 km
@@ -341,8 +344,9 @@ class PingLocator:
         self._release_ns = self._cache_ns - self._guard_ns
         self._newest_ns = {}   # child frame -> newest dynamic stamp inserted
         # child frame -> stamp minus bag time of its first accepted dynamic
-        # transform: the clock offset between that frame's publisher and the
-        # recorder, against which later transforms of the frame are judged.
+        # transform (within future_limit_sec of its bag time): the clock offset
+        # between that frame's publisher and the recorder, against which later
+        # transforms of the frame are judged.
         self._offset_ns = {}
         # Transforms not given to tf2, by reason (see TF_REJECT_REASONS).
         self.tf_rejected = collections.Counter()
@@ -423,16 +427,22 @@ class PingLocator:
 
         ``'invalid'``: what tf2 itself rejects (and prints an error for) -- an
         empty or self-referencing frame name, a NaN or infinite value, or a
-        zero quaternion (tf2 normalises any other). Dynamic transforms only:
-        ``'old'``, more than the cache length older than the newest transform
-        of the same child frame (tf2's TF_OLD_DATA); ``'future'``, a stamp
-        minus ``bag_ns`` more than the cache length above that of the frame's
-        first accepted transform, which tf2 would accept and then prune every
-        real transform of that frame against. The first transform of a frame
-        sets that reference whatever its offset, so a constant clock offset
-        between publisher and recorder passes; a frame whose very first
-        transform is a glitch keeps it as reference, and its real transforms
-        are then left out as 'old', as tf2 itself would refuse them.
+        zero quaternion (tf2 normalises any other) -- and, for a dynamic
+        transform, an unset (zero) or negative stamp, as push treats it for
+        pings. Dynamic transforms only: ``'old'``, more than the cache length
+        older than the newest transform of the same child frame (tf2's
+        TF_OLD_DATA); ``'future'``, a stamp minus ``bag_ns`` more than the
+        cache length above the frame's clock reference, which tf2 would accept
+        and then prune every real transform of that frame against. The
+        reference is the stamp minus ``bag_ns`` of the frame's first accepted
+        transform, so a constant clock offset between publisher and recorder
+        passes. Only a transform whose offset is within ``future_limit_sec``
+        (1 h) of its bag time, either way, can become the reference: one
+        further off while the frame has none yet (a glitch) is also left out
+        as 'future', and the reference stays unset until a transform within
+        the bound arrives. A rejected transform never enters tf2, never
+        becomes a reference and never moves any frontier, so a glitch on one
+        frame costs no pings of another.
         """
         tr = t.transform.translation
         q = t.transform.rotation
@@ -446,10 +456,15 @@ class PingLocator:
         if is_static:
             return None
         ns = stamp_ns(t.header.stamp)
+        if ns <= 0:
+            return 'invalid'
         offset = self._offset_ns.get(t.child_frame_id)
-        if (bag_ns is not None and offset is not None
-                and ns - bag_ns > offset + self._cache_ns):
-            return 'future'
+        if bag_ns is not None:
+            if offset is None:
+                if abs(ns - bag_ns) > self._future_limit_ns:
+                    return 'future'
+            elif ns - bag_ns > offset + self._cache_ns:
+                return 'future'
         newest = self._newest_ns.get(t.child_frame_id)
         if newest is not None and newest > ns + self._cache_ns:
             return 'old'
@@ -580,10 +595,11 @@ BOX_DROP_REASONS = (
 
 # Transforms PingLocator keeps out of the tf2 buffer, in report order.
 TF_REJECT_REASONS = (
-    ('invalid', 'invalid (NaN, zero quaternion or bad frame names)'),
+    ('invalid', 'invalid (NaN, zero quaternion, bad frame names or unset stamp)'),
     ('old', 'more than %g s older than the newest of their frame' % TF_CACHE_SEC),
     ('future', 'stamped more than %g s further ahead of the bag time than '
-               'their frame' % TF_CACHE_SEC),
+               'their frame, or more than %g s off it before their frame had '
+               'a clock reference' % (TF_CACHE_SEC, PING_FUTURE_LIMIT_SEC)),
 )
 
 

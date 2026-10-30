@@ -1415,6 +1415,47 @@ def test_ping_locator_future_jump_is_judged_per_frame():
     assert [(r[0], r[2]) for r in loc.drain(flush=True)] == [(ping, 'extrapolation')]
 
 
+BAG_SEC = 1700000000   # a realistic epoch, so a near-zero stamp is far off it
+
+
+@pytest.mark.parametrize('first_sec, reason', [
+    (0.0, 'invalid'),                 # unset stamp
+    (0.0001, 'future'),               # positive, but decades behind the bag time
+    (BAG_SEC + 86400.0, 'future'),    # a day ahead
+])
+def test_ping_locator_glitched_first_transform_is_not_a_clock_reference(first_sec, reason):
+    """
+    A first transform far off its bag time is left out and sets no reference.
+
+    Its frame takes the offset of its next transform instead, and the glitch
+    moves no frontier, so neither its own pings nor those of a second,
+    healthy frame (earth -> buoy -> mbes2) are lost.
+    """
+    from tf2_msgs.msg import TFMessage
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(TFMessage(transforms=[_transform('buoy', 'mbes2', 0.0, (0.0, 0.0, 0.0))]),
+               True)
+    loc.add_tf(_link_tf('earth', 'base_link', first_sec, inside), False, _ns(BAG_SEC))
+    assert loc.tf_rejected == {reason: 1}
+    assert loc.chain_frontier('mbes') is None   # nothing accepted for base_link
+    tokens = []
+    got = []
+    for k in range(1, 30):
+        sec = BAG_SEC + k
+        loc.add_tf(_link_tf('earth', 'base_link', float(sec), inside), False, _ns(sec))
+        if k % 5 == 0:
+            tokens.append(_push(loc, sec - 2, 0))
+            tokens.append(_push(loc, sec + 1, 0, frame_id='mbes2'))
+        got += [(r[0], r[2]) for r in loc.drain()]
+        loc.add_tf(_link_tf('earth', 'buoy', float(sec), inside), False, _ns(sec))
+        got += [(r[0], r[2]) for r in loc.drain()]
+    got += [(r[0], r[2]) for r in loc.drain(flush=True)]
+    assert loc.tf_rejected == {reason: 1}
+    assert sorted(got) == sorted((token, None) for token in tokens)
+
+
 def _link_tf(parent, child, t_sec, xyz=(0.0, 0.0, 0.0)):
     """Return a TFMessage holding one parent -> child transform at t_sec."""
     from tf2_msgs.msg import TFMessage
