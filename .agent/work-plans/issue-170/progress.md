@@ -213,3 +213,27 @@ Compared with `derive_angular_response.py` before #170:
 
 ### Next
 review-code (re-review) on the branch at `ed40753`. Nothing pushed.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-10-30 12:10 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-170 at `87d90e9` (code at `ed40753`)
+**Mode**: pre-push
+**Depth**: Standard, targeted (reason: round 4 reviews only the round-3 fix commits, `git diff c21463e..ed40753`, 4 files, +415 -56)
+**Must-fix**: 2 | **Suggestions**: 1
+**Round**: 4 | **Ship**: continue — 2 must-fixes, both regressions this fix pass introduced (the per-frame clock offset and the overall-frontier release bound let one bad frame cost every ping of a good one), each reproduced with a PingLocator script; both need a small design choice, not just a guard, so one more targeted check after the fix
+
+Specialists: static analysis (ament_flake8 and ament_pep257 on both Python files: clean); one Claude adversarial pass, done inline with reproduction scripts against this commit and against the round-3 code (`c21463e`); cross-model off (as asked); local model off; plan drift skipped (no plan.md). `./sensors_ws/test.sh cube_bathymetry`: 1241 tests, 0 errors, 0 failures, 90 skipped. Freshwater byte-identity tests and the new offset, chain, release and read-only-directory tests pass (`pytest -k`, 14 passed).
+
+The 3 round-3 findings are resolved as described: the +90/+57/-30 s offset tests pass and a constant offset common to every frame changes nothing; the slow-link gate holds a ping until `earth -> map` passes it and the 57 s bound releases a stalled one; a writable file in a read-only directory is written in place with a warning, through a symlink too, and a new file there, a missing directory or a failed replace is a one-line error. Chain discovery from accepted transforms, the all-static chain (ready at once), the unconnected frame and the parent loop (both fall back to the overall frontier) behave as documented. The heap head-of-line wait is bounded by the 57 s release and documented in `drain`.
+
+### Findings
+- [ ] (must-fix) A frame's first accepted transform becomes its clock reference whatever its stamp, and a glitch there loses every ping on that chain. Reproduced: a first `earth -> base_link` stamped 0 (an unset stamp, as a node publishing before its clock is set does) makes every later transform of that frame fail the 'future' test, 29 of 29 rejected, and every `mbes` ping drops as 'extrapolation'. The round-3 code (`c21463e`) kept all of them. A first transform one day ahead is kept as reference, its real transforms are refused as 'old', and it also moves the overall frontier a day ahead, so the 57 s release fires at once and the pings of an unrelated, healthy frame (`buoy -> mbes2`) drop too; `c21463e` refused that one transform as 'future' and kept every ping. The docstring at :432-436 says the real transforms are then left out as 'old', which is wrong for a low glitch (they are counted as 'future') and does not mention the spill-over to other frames. Fix: do not adopt a reference offset outside a sane bound (for example `future_limit_sec`, 1 h, which still passes the +90/-30 s cases): reject such a transform (count it as 'future', or treat a zero or negative stamp as 'invalid', as `push` already does for pings) and leave the reference unset until a transform within the bound arrives. Add tests for a zero-stamp and a day-ahead first transform, each with a second healthy frame. Then correct the docstring and README. — `cube_bathymetry/scripts/derive_angular_response.py:390` (and :450, :432)
+- [ ] (must-fix) The 57 s release bound uses the overall frontier, the newest stamp of any frame, and with per-frame offsets that frontier can run ahead of a chain by the offset difference between frames. Reproduced: `earth -> base_link` at 1 Hz with offset 0 beside `earth -> buoy` at 10 Hz whose stamps lead the bag time by 90 s (a relayed buoy or another host whose clock is ahead, which the README now says is handled per frame) drops all 40 `mbes` pings as 'extrapolation'; at a 30 s lead it drops none. Before this pass the buoy's transforms were refused as 'future' and the vessel's pings survived. The same overall frontier feeds the unconnected-frame fallback in `chain_frontier`. Fix: release against the chain's own links, since tf2 prunes per frame: release a ping once the newest frontier among its chain's dynamic links is `cache - guard` past it (the fast link that is about to prune), keeping the overall frontier only for a chain that does not reach earth. Add a test with two frames whose offsets differ by more than 57 s. — `cube_bathymetry/scripts/derive_angular_response.py:507` (and :412)
+- [ ] (suggestion) The in-place fallback's error after a failed write (`_write_in_place`) says only "cannot write <path>"; when `open` succeeded and the write failed part-way the file is now truncated, and the earlier warning is the only hint. Add "it may be truncated" to the error when the fallback path was taken. — `cube_bathymetry/scripts/derive_angular_response.py` `_write_in_place`
+
+### Next
+address-findings for the 2 must-fixes, then a targeted round-5 check of `PingLocator` only. Nothing pushed.
