@@ -686,6 +686,83 @@ the scanned topic, default = the detections topic's sibling `sonar_info`).
 See
 `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
 
+### Deriving a curve (`derive_angular_response.py`)
+
+`ros2 run cube_bathymetry derive_angular_response.py` bins each beam's
+intensity by `|rx_angle|` over one or more bags and writes the curve CSV that
+`--backscatter-curve` (and the SonarInfo curve delivery) consumes. With
+`--remove-tl` (tier-2, #87) each beam's two-way transmission loss
+`40 log10(R) + 2 alpha R` is added back before binning, so the residual curve
+transfers across depths, and alpha is written into the header for the
+estimator to apply verbatim.
+
+```bash
+# fresh water (a lake): alpha from the full Francois-Garrison model at S = 0
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --remove-tl --water-temp-c 24
+
+# salt water: give the salinity too (pH defaults to 8.0)
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --remove-tl --water-temp-c 15.5 --salinity 31
+
+# or a path-averaged alpha worked out from the site's casts
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --remove-tl --absorption-db-per-m 0.130
+
+# only the pings inside a site box, from bags that also hold transit
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --box 42.95 -70.65 43.00 -70.58 --remove-tl --water-temp-c 15.5 --salinity 31
+```
+
+**Choosing the absorption (#170).** alpha matters at multibeam frequencies: at
+500 kHz fresh water at 24 C gives 0.049 dB/m, while the Isles of Shoals water
+in August 2026 (about 31 psu, 11 to 20 C) gave 0.12 to 0.14 dB/m. Using the
+freshwater value there under-compensates the two-way loss by about 3 dB at
+20 m slant range, so the swath edges in deeper water render dark. Salinity is
+the dominant term in salt water; temperature is second order.
+
+- `--salinity` (psu, default 0 = fresh water), `--ph` (default 8.0, no effect
+  in fresh water), `--water-temp-c` and `--depth-m` feed the full
+  Francois-Garrison (1982) model: boric acid, MgSO4 and pure water. At
+  salinity 0 it gives exactly the freshwater value earlier versions computed,
+  so an existing freshwater invocation writes the same data rows.
+- Take temperature and salinity from CTD or sound-speed casts at the site,
+  not from the boat's surface temperature alone. In a stratified water column
+  work out a path-averaged alpha over the depths surveyed and pass it with
+  `--absorption-db-per-m`. The override needs `--remove-tl` and cannot be
+  combined with `--salinity`, `--ph` or `--depth-m`; `--water-temp-c` is then
+  optional and only recorded.
+- Derive a curve for each site from that site's own bags, and use `--box` when
+  those bags also cover transit or another site. A freshwater curve applied to
+  a salt-water survey carries the wrong alpha in its header, and the estimator
+  applies whatever alpha the header says.
+
+**`--box LATMIN LONMIN LATMAX LONMAX`** (WGS84 degrees) keeps only pings whose
+sensor position is inside the box. Positions come from the bag's own TF tree,
+the way `import_bag` georeferences: `/tf` and `/tf_static` (any namespace) are
+read in the same pass as the detections, `earth -> <detections frame>` is
+looked up at the ping stamp (or the latest transform if it is within 1 s of
+the stamp), and the ECEF position is converted to latitude/longitude. The run
+prints how many pings were kept and how many were dropped for being outside
+the box, having no earth transform, or having one more than 1 s away. A box
+with no pings in it is an error. A box across the antimeridian is not
+supported.
+
+**Header provenance.** Every line above the CSV column row is a
+`# key: value` comment. The loader (and the marine_tools SonarInfo mirror)
+reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:
+
+| Key | Written | Meaning |
+|---|---|---|
+| `tl_removed` | always | `true` for a tier-2 curve |
+| `absorption_db_per_m` | tier-2 | the alpha the estimator applies |
+| `absorption_source` | tier-2 | `computed` (Francois-Garrison) or `override` |
+| `water_temp_c` | tier-2, when known | temperature used or recorded |
+| `salinity_psu`, `ph`, `depth_m`, `frequency_khz` | computed alpha | the model inputs (frequency = median per-ping `ping_info.frequency`) |
+| `tl_model` | tier-2 | the TL formula |
+| `box` | with `--box` | `LATMIN LONMIN LATMAX LONMAX` |
+| `source_bags` | always | comma-separated basenames of the input bags |
+
 ## Live prior-gate prime (`prior_store_dir`)
 
 `cube_bathymetry_node` accepts an optional **`prior_store_dir`** parameter (empty

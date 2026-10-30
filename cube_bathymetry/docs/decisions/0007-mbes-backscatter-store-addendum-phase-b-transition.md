@@ -155,8 +155,13 @@ Design decisions:
    the `Sounding` detections ctor; the live node recovers R as the norm of the
    sensor-frame `/soundings` point (no new cloud field). A NaN / non-positive R
    skips the TL term (no log of a non-positive range).
-4. **Fresh water only.** The salinity (boric-acid + MgSO₄) seawater absorption
-   terms are out of scope for this issue; `--salinity > 0` is rejected by the tool.
+4. **Fresh water only.** (Superseded by cube_bathymetry#170: the tool now
+   computes the full Francois-Garrison absorption from `--salinity`/`--ph`, or
+   takes an explicit `--absorption-db-per-m`, and records `absorption_source`,
+   the model inputs and the source bags in the header. The C++ side is
+   unchanged: it still applies the header's alpha verbatim.) The salinity
+   (boric-acid + MgSO₄) seawater absorption terms are out of scope for this
+   issue; `--salinity > 0` is rejected by the tool.
 5. **Multi-bag derivation.** `derive_angular_response.py` now accepts multiple
    bags (`nargs='+'`) and merges the per-bin sums — a real survey calibration
    spans many bags.
