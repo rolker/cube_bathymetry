@@ -88,6 +88,7 @@ Usage:
 """
 
 import argparse
+import heapq
 import math
 import os
 import sys
@@ -204,7 +205,7 @@ def is_tf_topic(name):
 
 class PingLocator:
     """
-    Position pings from one bag's own TF tree (``earth -> sensor frame``).
+    Position pings from the bags' own TF tree (``earth -> sensor frame``).
 
     Feed every ``/tf`` and ``/tf_static`` message with add_tf as it is read, in
     bag order; locate then looks the ping up at its stamp, falling back to the
@@ -438,10 +439,35 @@ def open_reader(bag_path):
     return reader
 
 
-def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs,
+def merged_messages(readers):
+    """
+    Yield ``(reader_index, topic, data, t_ns)`` from every reader in time order.
+
+    A k-way merge on each message's bag timestamp, so several bags -- split
+    files of one recording, or bags recorded side by side -- are read as one
+    chronological stream, as import_bag's BagReaders does. Ties go to the
+    reader given first.
+    """
+    heap = []
+    for i, reader in enumerate(readers):
+        if reader.has_next():
+            name, data, t_ns = reader.read_next()
+            heap.append((t_ns, i, name, data))
+    heapq.heapify(heap)
+    while heap:
+        # (t_ns, i) is unique: each reader has at most one message in the heap.
+        t_ns, i, name, data = heapq.heappop(heap)
+        yield i, name, data, t_ns
+        reader = readers[i]
+        if reader.has_next():
+            name, data, t_ns = reader.read_next()
+            heapq.heappush(heap, (t_ns, i, name, data))
+
+
+def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
                box=None, box_stats=None):
     """
-    Accumulate per-bin sums on `topic` into `bins` (merged across bags).
+    Accumulate per-bin sums on `topic` over every reader into `bins`.
 
     Each bin slot is ``[sum_adjusted, sum_R, count]``:
 
@@ -451,107 +477,132 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs,
       (the spreading term ``40*log10(R)``) is compensated (added back) inline, so
       ``sum_adjusted`` is ``sum(db + 40*log10(R))`` and ``sum_R`` is ``sum(R)``. The
       absorption term ``2*alpha*R`` is added in write_csv once alpha is known from the
-      median frequency -- a single pass over the bag.
+      median frequency -- a single pass over the bags.
 
     `freqs` collects each ping's ``ping_info.frequency`` (Hz) for the median.
 
-    With `box` (latmin, lonmin, latmax, lonmax) the reader is filtered to the
-    detections topic plus every /tf and /tf_static topic in this bag, read in
-    one time-ordered pass: TF messages feed a PingLocator, and each ping is
-    binned only if its sensor position lies inside the box. `box_stats` (see
-    new_box_stats) counts kept and dropped pings across bags; pings that are
-    dropped contribute neither samples nor a frequency.
+    Without `box` the readers are read one after another; the binned sums do not
+    depend on the order.
+
+    With `box` (latmin, lonmin, latmax, lonmax) each reader is filtered to the
+    detections topic plus every /tf and /tf_static topic in it, and all readers
+    are merged into ONE time-ordered pass (merged_messages) feeding ONE
+    PingLocator, as import_bag does: a /tf_static recorded only in the first
+    split file still positions the pings of the later splits, and a bag holding
+    only TF positions the pings of a bag recorded beside it. Each ping is binned
+    only if its sensor position lies inside the box. `box_stats` (see
+    new_box_stats) counts kept and dropped pings; pings that are dropped
+    contribute neither samples nor a frequency.
     Returns the number of messages read on `topic`.
     """
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
 
-    type_map = {t.name: t.type for t in reader.get_all_topics_and_types()}
-    if topic not in type_map:
-        raise SystemExit(
-            "error: topic '%s' not in bag (have: %s)"
-            % (topic, ', '.join(sorted(type_map)) or 'none'))
-    msg_type = get_message(type_map[topic])
+    type_maps = []
+    for reader in readers:
+        type_map = {t.name: t.type for t in reader.get_all_topics_and_types()}
+        if topic not in type_map:
+            raise SystemExit(
+                "error: topic '%s' not in bag (have: %s)"
+                % (topic, ', '.join(sorted(type_map)) or 'none'))
+        type_maps.append(type_map)
+    msg_types = [get_message(type_map[topic]) for type_map in type_maps]
 
-    locator = None
-    tf_topics = {}
-    if box is not None:
-        import rosbag2_py
-
-        tf_topics = {name: kind for name, type_name in type_map.items()
-                     for kind in (is_tf_topic(name),)
-                     if kind is not None and type_name == 'tf2_msgs/msg/TFMessage'}
-        reader.set_filter(rosbag2_py.StorageFilter(topics=[topic] + sorted(tf_topics)))
-        tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
-        locator = PingLocator()
+    def add_ping(msg):
+        bin_ping(msg, bin_width_deg, remove_tl, bins, freqs)
 
     n_msgs = 0
-    while reader.has_next():
-        name, data, _stamp = reader.read_next()
-        if name in tf_topics:
-            locator.add_tf(deserialize_message(data, tf_msg_type),
-                           tf_topics[name] == 'tf_static')
+    if box is None:
+        for i, reader in enumerate(readers):
+            while reader.has_next():
+                name, data, _stamp = reader.read_next()
+                if name != topic:
+                    continue
+                n_msgs += 1
+                add_ping(deserialize_message(data, msg_types[i]))
+        return n_msgs
+
+    import rosbag2_py
+
+    tf_topics = []    # per reader: {topic name: 'tf' | 'tf_static'}
+    for reader, type_map in zip(readers, type_maps):
+        kinds = {name: kind for name, type_name in type_map.items()
+                 for kind in (is_tf_topic(name),)
+                 if kind is not None and type_name == 'tf2_msgs/msg/TFMessage'}
+        reader.set_filter(rosbag2_py.StorageFilter(topics=[topic] + sorted(kinds)))
+        tf_topics.append(kinds)
+    tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
+    locator = PingLocator()   # one buffer for every bag on the command line
+
+    for i, name, data, _t_ns in merged_messages(readers):
+        kind = tf_topics[i].get(name)
+        if kind is not None:
+            locator.add_tf(deserialize_message(data, tf_msg_type), kind == 'tf_static')
             continue
         if name != topic:
             continue
-        msg = deserialize_message(data, msg_type)
+        msg = deserialize_message(data, msg_types[i])
         n_msgs += 1
-        if locator is not None:
-            position, reason = locator.locate(msg.header.frame_id, msg.header.stamp)
-            if position is None:
-                box_stats[reason] += 1
-                continue
-            if not in_box(position[0], position[1], box):
-                box_stats['outside'] += 1
-                continue
-            box_stats['kept'] += 1
-        intensities = msg.intensities
-        rx_angles = msg.rx_angles
-        twtt = msg.two_way_travel_times
-        sound_speed = msg.ping_info.sound_speed
-        freq = msg.ping_info.frequency
-        if remove_tl and math.isfinite(freq) and freq > 0.0:
-            freqs.append(freq)  # only needed for the tier-2 absorption alpha
-        flags = getattr(msg, 'flags', None)
-        count = min(len(intensities), len(rx_angles))
-        for i in range(count):
-            db = intensities[i]
-            if not math.isfinite(db):
-                continue
-            # Skip beams flagged bad (flag != 0) when flags are present and aligned.
-            if flags is not None and i < len(flags):
-                flag_val = getattr(flags[i], 'flag', 0)
-                if flag_val != 0:
-                    continue
-            ang = rx_angles[i]
-            if not math.isfinite(ang):
-                continue
-
-            range_m = 0.0
-            if remove_tl:
-                # R = twtt * c / 2; skip beams with a non-positive / NaN range
-                # (log10 undefined) so they never poison the residual. NOTE: this
-                # DROPS such beams from the derivation entirely, whereas the C++
-                # estimator RETAINS them and just skips the TL term (tier-1 fallback
-                # for that beam) -- an intentional asymmetry: a beam with no valid
-                # range can't inform the TL-removed residual, but its raw value is
-                # still a usable backscatter sample at apply time.
-                if i >= len(twtt):
-                    continue
-                range_m = twtt[i] * sound_speed / 2.0
-                if not math.isfinite(range_m) or range_m <= 0.0:
-                    continue
-                adjusted = db + 40.0 * math.log10(range_m)
-            else:
-                adjusted = db
-
-            abs_deg = abs(math.degrees(ang))
-            idx = int(abs_deg // bin_width_deg)
-            slot = bins.setdefault(idx, [0.0, 0.0, 0])
-            slot[0] += adjusted
-            slot[1] += range_m
-            slot[2] += 1
+        position, reason = locator.locate(msg.header.frame_id, msg.header.stamp)
+        if position is None:
+            box_stats[reason] += 1
+            continue
+        if not in_box(position[0], position[1], box):
+            box_stats['outside'] += 1
+            continue
+        box_stats['kept'] += 1
+        add_ping(msg)
     return n_msgs
+
+
+def bin_ping(msg, bin_width_deg, remove_tl, bins, freqs):
+    """Add one SonarDetections ping's beams to `bins` (see accumulate)."""
+    intensities = msg.intensities
+    rx_angles = msg.rx_angles
+    twtt = msg.two_way_travel_times
+    sound_speed = msg.ping_info.sound_speed
+    freq = msg.ping_info.frequency
+    if remove_tl and math.isfinite(freq) and freq > 0.0:
+        freqs.append(freq)  # only needed for the tier-2 absorption alpha
+    flags = getattr(msg, 'flags', None)
+    count = min(len(intensities), len(rx_angles))
+    for i in range(count):
+        db = intensities[i]
+        if not math.isfinite(db):
+            continue
+        # Skip beams flagged bad (flag != 0) when flags are present and aligned.
+        if flags is not None and i < len(flags):
+            flag_val = getattr(flags[i], 'flag', 0)
+            if flag_val != 0:
+                continue
+        ang = rx_angles[i]
+        if not math.isfinite(ang):
+            continue
+
+        range_m = 0.0
+        if remove_tl:
+            # R = twtt * c / 2; skip beams with a non-positive / NaN range
+            # (log10 undefined) so they never poison the residual. NOTE: this
+            # DROPS such beams from the derivation entirely, whereas the C++
+            # estimator RETAINS them and just skips the TL term (tier-1 fallback
+            # for that beam) -- an intentional asymmetry: a beam with no valid
+            # range can't inform the TL-removed residual, but its raw value is
+            # still a usable backscatter sample at apply time.
+            if i >= len(twtt):
+                continue
+            range_m = twtt[i] * sound_speed / 2.0
+            if not math.isfinite(range_m) or range_m <= 0.0:
+                continue
+            adjusted = db + 40.0 * math.log10(range_m)
+        else:
+            adjusted = db
+
+        abs_deg = abs(math.degrees(ang))
+        idx = int(abs_deg // bin_width_deg)
+        slot = bins.setdefault(idx, [0.0, 0.0, 0])
+        slot[0] += adjusted
+        slot[1] += range_m
+        slot[2] += 1
 
 
 def bag_basenames(bag_paths):
@@ -684,12 +735,10 @@ def main(argv=None):
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)
     box_stats = new_box_stats() if args.box is not None else None
-    n_msgs = 0
-    for bag_path in args.bag:
-        reader = open_reader(bag_path)
-        n_msgs += accumulate(
-            reader, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
-            box=args.box, box_stats=box_stats)
+    readers = [open_reader(bag_path) for bag_path in args.bag]
+    n_msgs = accumulate(
+        readers, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
+        box=args.box, box_stats=box_stats)
     if box_stats is not None:
         print('box %s: kept %d of %d pings; dropped %d outside the box, %d with '
               'no earth transform, %d with an earth transform more than %g s '

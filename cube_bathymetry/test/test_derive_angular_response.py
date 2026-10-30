@@ -526,18 +526,22 @@ def _ping(t_sec, frame_id, intensity):
     return msg
 
 
-def write_synthetic_bag(path):
-    """
-    Bag with earth TF and four pings.
+def _earth_tf(t_sec, xyz):
+    """Return a TFMessage holding earth -> base_link at t_sec."""
+    from tf2_msgs.msg import TFMessage
+    return TFMessage(transforms=[_transform('earth', 'base_link', t_sec, xyz)])
 
-      ping 1, t=100.5: inside the box (latest-transform fallback, 0.5 s old)
-      ping 2, t=102.5: outside (logged after the 103 s TF -> exact lookup)
-      ping 3, t=200.0: latest earth TF is 97 s old -> stale_tf
-      ping 4, t=101.0: frame with no earth transform -> no_tf
-    """
+
+def _mbes_static():
+    """Return the /tf_static TFMessage base_link -> mbes."""
+    from tf2_msgs.msg import TFMessage
+    return TFMessage(transforms=[_transform('base_link', 'mbes', 0.0, (0.0, 0.0, -0.5))])
+
+
+def write_bag(path, events):
+    """Write ``(t_sec, topic, msg)`` events to an mcap bag at ``path``."""
     import rosbag2_py
     from rclpy.serialization import serialize_message
-    from tf2_msgs.msg import TFMessage
 
     writer = rosbag2_py.SequentialWriter()
     writer.open(rosbag2_py.StorageOptions(uri=str(path), storage_id='mcap'),
@@ -547,16 +551,25 @@ def write_synthetic_bag(path):
             ('/bizzy/tf_static', 'tf2_msgs/msg/TFMessage'),
             (TOPIC, 'marine_acoustic_msgs/msg/SonarDetections')]):
         writer.create_topic(rosbag2_py.TopicMetadata(i, name, type_name, 'cdr'))
+    for t_sec, topic, msg in events:
+        writer.write(topic, serialize_message(msg), int(round(t_sec * 1e9)))
+    del writer
 
+
+def write_synthetic_bag(path):
+    """
+    Bag with earth TF and four pings.
+
+      ping 1, t=100.5: inside the box (latest-transform fallback, 0.5 s old)
+      ping 2, t=102.5: outside (logged after the 103 s TF -> exact lookup)
+      ping 3, t=200.0: latest earth TF is 97 s old -> stale_tf
+      ping 4, t=101.0: frame with no earth transform -> no_tf
+    """
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
     outside = geodetic_to_ecef(OUTSIDE[0], OUTSIDE[1], 0.0)
-
-    def earth(t_sec, xyz):
-        return TFMessage(transforms=[_transform('earth', 'base_link', t_sec, xyz)])
-
+    earth = _earth_tf
     events = [
-        (99.0, '/bizzy/tf_static',
-         TFMessage(transforms=[_transform('base_link', 'mbes', 0.0, (0.0, 0.0, -0.5))])),
+        (99.0, '/bizzy/tf_static', _mbes_static()),
         (100.0, '/bizzy/tf', earth(100.0, inside)),
         (100.5, TOPIC, _ping(100.5, 'mbes', -30.0)),
         (101.0, '/bizzy/tf', earth(101.0, inside)),
@@ -566,9 +579,7 @@ def write_synthetic_bag(path):
         (103.2, TOPIC, _ping(102.5, 'mbes', -32.0)),
         (200.0, TOPIC, _ping(200.0, 'mbes', -33.0)),
     ]
-    for t_sec, topic, msg in events:
-        writer.write(topic, serialize_message(msg), int(round(t_sec * 1e9)))
-    del writer
+    write_bag(path, events)
 
 
 def run_main(tmp_path, extra, capsys):
@@ -639,3 +650,50 @@ def test_end_to_end_box_with_no_site_pings_fails(tmp_path, capsys):
                   '--box', '10', '10', '11', '11'])
     assert 'no pings inside --box' in str(exc.value)
     assert not (tmp_path / 'x.csv').exists()
+
+
+def write_split_bags(tmp_path):
+    """
+    One recording split in two files; /tf_static is only in the first.
+
+    Every ping is inside the box and bracketed by earth transforms, and the last
+    ping of split 0 is bracketed by a transform recorded in split 1.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    split0 = tmp_path / 'survey_0'
+    split1 = tmp_path / 'survey_1'
+    write_bag(split0, [
+        (99.0, '/bizzy/tf_static', _mbes_static()),
+        (100.0, '/bizzy/tf', _earth_tf(100.0, inside)),
+        (100.5, TOPIC, _ping(100.5, 'mbes', -30.0)),
+        (101.0, '/bizzy/tf', _earth_tf(101.0, inside)),
+        (101.5, TOPIC, _ping(101.5, 'mbes', -30.0)),
+    ])
+    write_bag(split1, [
+        (102.0, '/bizzy/tf', _earth_tf(102.0, inside)),
+        (102.5, TOPIC, _ping(102.5, 'mbes', -30.0)),
+        (103.0, '/bizzy/tf', _earth_tf(103.0, inside)),
+        (103.5, TOPIC, _ping(103.5, 'mbes', -30.0)),
+        (104.0, '/bizzy/tf', _earth_tf(104.0, inside)),
+        (107.0, '/bizzy/tf', _earth_tf(107.0, inside)),
+    ])
+    return split0, split1
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_end_to_end_box_over_split_bags_shares_one_tf_buffer(tmp_path, capsys, reverse):
+    """
+    Split files share one TF buffer and are read as one chronological stream.
+
+    The /tf_static in split 0 positions split 1's pings, and the order the
+    files are given on the command line does not matter.
+    """
+    bags = [str(b) for b in write_split_bags(tmp_path)]
+    if reverse:
+        bags.reverse()
+    out = tmp_path / 'curve.csv'
+    assert dar.main(bags + ['-t', TOPIC, '-o', str(out), '--box'] + TEST_BOX) == 0
+    assert 'kept 4 of 4 pings' in capsys.readouterr().out
+    assert counts_by_angle(out) == {1.0: 4, 31.0: 4}
+    hd = header_dict([ln for ln in out.read_text().splitlines() if ln.startswith('#')])
+    assert hd['source_bags'] == ','.join(os.path.basename(b) for b in bags)
