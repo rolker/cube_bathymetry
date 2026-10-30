@@ -1012,7 +1012,7 @@ def test_end_to_end_box_tf_only_bag_positions_a_detections_bag(tmp_path, capsys)
 
 def write_clock_offset_bag(path, offset_sec):
     """
-    A 150 s bag whose header stamps run ``offset_sec`` ahead of its bag times.
+    Write a 150 s bag whose header stamps run ``offset_sec`` ahead of its bag times.
 
     earth -> base_link at 1 Hz, inside the box, and a ping every 0.5 s; every
     message is recorded at its stamp minus ``offset_sec``, as by a recorder
@@ -1351,7 +1351,11 @@ def test_ping_locator_future_transform_cannot_purge_the_buffer():
 
 
 def test_ping_locator_frontier_never_passes_the_bag_time():
-    """A transform stamped further ahead of its bag time than its frame moves the frontier only to that time."""
+    """
+    A transform stamped further ahead of its bag time than its frame is moves the frontier less.
+
+    Only to that bag time plus the frame's offset.
+    """
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
     loc = dar.PingLocator()
     loc.add_tf(_mbes_static(), True)
@@ -1419,7 +1423,7 @@ def _link_tf(parent, child, t_sec, xyz=(0.0, 0.0, 0.0)):
 
 def _feed_slow_earth_chain(loc, until_sec):
     """
-    earth -> map at 0.1 Hz (100 s, 110 s, ...) and map -> base_link at 10 Hz.
+    Feed earth -> map at 0.1 Hz (100 s, 110 s, ...) and map -> base_link at 10 Hz.
 
     Also earth -> buoy at 10 Hz, an unrelated frame. Fed in time order up to,
     but not including, ``until_sec``.
