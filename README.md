@@ -759,6 +759,11 @@ the way `import_bag` georeferences:
   fallback to the latest transform. Pings still waiting when the bags end are
   looked up against what was read.
 - The ECEF position of the sensor is converted to latitude/longitude.
+- Pings waiting for the TF stream are held in memory, about 13 bytes per beam
+  (7 KB for a 512-beam ping). Normally that is the last few seconds of pings;
+  the report prints the most that waited at once. A run whose bags have no
+  `/tf` topic at all is refused before reading, since every ping would wait
+  until the end.
 
 The run prints how many pings were kept and how many were dropped, by reason:
 outside the box, no earth transform for their frame, a stamp outside the

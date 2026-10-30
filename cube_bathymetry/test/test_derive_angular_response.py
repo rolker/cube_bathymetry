@@ -805,7 +805,8 @@ def test_end_to_end_box_keeps_only_site_pings(tmp_path, capsys):
     assert ('kept 2 of 7 pings; dropped 1 outside the box, 1 with no earth '
             'transform for their frame, 2 outside the earth TF coverage at '
             'their stamp, 1 with an unset (zero) header stamp, 0 with an earth '
-            'transform that is not a geocentric position') in stdout
+            'transform that is not a geocentric position; at most 4 waited '
+            'for TF') in stdout
     lines = out.read_text().splitlines()
     hd = header_dict([ln for ln in lines if ln.startswith('#')])
     assert hd['box'] == '42.95 -70.65 43 -70.58'
@@ -959,6 +960,34 @@ def test_without_box_a_bag_without_the_topic_is_an_error(tmp_path):
     assert "topic '%s' not in bag" % TOPIC in str(exc.value)
 
 
+def test_box_without_dynamic_tf_fails_before_reading(tmp_path):
+    """With --box and no /tf topic in any bag the run stops up front."""
+    _tf_bag, det_bag = write_tf_and_detection_bags(tmp_path)
+    static_only = tmp_path / 'static_only'
+    write_bag(static_only, [(99.0, '/bizzy/tf_static', _mbes_static())],
+              topics=BAG_TOPICS[1:2])
+    for bags in ([det_bag], [det_bag, static_only]):
+        with pytest.raises(SystemExit) as exc:
+            dar.main([str(b) for b in bags]
+                     + ['-t', TOPIC, '-o', str(tmp_path / 'x.csv'), '--box'] + TEST_BOX)
+        assert 'no bag has a /tf topic' in str(exc.value)
+    assert not (tmp_path / 'x.csv').exists()
+
+
+def test_ping_record_keeps_only_the_binning_fields():
+    """A queued ping holds the beam arrays and flag bytes, not the message."""
+    from marine_acoustic_msgs.msg import DetectionFlag
+    msg = _ping(100.0, 'mbes', -30.0)
+    msg.flags = [DetectionFlag(flag=0), DetectionFlag(flag=2)]
+    rec = dar.PingRecord(msg)
+    assert not hasattr(rec, '__dict__') and not hasattr(rec, 'header')
+    assert rec.flags == bytes([0, 2])
+    assert (rec.sound_speed, rec.frequency) == (1500.0, 500000.0)
+    bins, freqs = {}, []
+    dar.bin_ping(rec, 2.0, False, bins, freqs)
+    assert bins == {0: [-30.0, 0.0, 1]}   # beam 1 is flagged bad
+
+
 def test_box_with_no_bag_holding_the_topic_is_an_error(tmp_path):
     """With --box at least one bag must carry the detections topic."""
     tf_bag, _det_bag = write_tf_and_detection_bags(tmp_path)
@@ -1076,12 +1105,16 @@ def test_corrupt_messages_are_skipped_and_counted(tmp_path, capsys, box):
     assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
 
 
-def _bare_ping(sec, nanosec, frame_id='mbes'):
-    """Return a header-only stand-in for a ping (all PingLocator reads)."""
-    from builtin_interfaces.msg import Time
-    from types import SimpleNamespace
-    return SimpleNamespace(header=SimpleNamespace(
-        frame_id=frame_id, stamp=Time(sec=sec, nanosec=nanosec)))
+def _ns(sec, nanosec=0):
+    """Return integer nanoseconds for a (sec, nanosec) stamp."""
+    return sec * 1000000000 + nanosec
+
+
+def _push(loc, sec, nanosec, frame_id='mbes'):
+    """Queue a ping at (sec, nanosec) and return the token drain yields for it."""
+    token = (sec, nanosec, frame_id)
+    loc.push(_ns(sec, nanosec), frame_id, token)
+    return token
 
 
 def _earth_tf_at(sec, nanosec, xyz):
@@ -1105,10 +1138,8 @@ def test_ping_locator_guard_edge_and_exact_interpolation():
     loc.add_tf(_mbes_static(), True)
     loc.add_tf(_earth_tf_at(100, 0, south), False)
     loc.add_tf(_earth_tf_at(103, 0, north), False)
-    edge = _bare_ping(101, 0)    # stamp == frontier - guard once TF 104 is in
-    late = _bare_ping(101, 1)    # one nanosecond later
-    loc.push(edge)
-    loc.push(late)
+    edge = _push(loc, 101, 0)    # stamp == frontier - guard once TF 104 is in
+    late = _push(loc, 101, 1)    # one nanosecond later
     assert list(loc.drain()) == []           # frontier 103: nothing is ready
     loc.add_tf(_earth_tf_at(104, 0, north), False)
     ready = list(loc.drain())
@@ -1130,11 +1161,9 @@ def test_ping_locator_flush_and_no_latest_fallback():
     loc.add_tf(_mbes_static(), True)
     loc.add_tf(_earth_tf_at(100, 0, inside), False)
     loc.add_tf(_earth_tf_at(101, 0, inside), False)
-    within = _bare_ping(100, 500000000)
-    after = _bare_ping(101, 1)       # a nanosecond past the last transform
-    orphan = _bare_ping(100, 500000000, frame_id='orphan')
-    for ping in (within, after, orphan):
-        loc.push(ping)
+    within = _push(loc, 100, 500000000)
+    after = _push(loc, 101, 1)       # a nanosecond past the last transform
+    orphan = _push(loc, 100, 500000000, frame_id='orphan')
     assert list(loc.drain()) == []   # frontier 101 < 100.5 + guard
     got = [(r[0], r[2]) for r in loc.drain(flush=True)]
     assert got == [(within, None), (after, 'extrapolation'), (orphan, 'no_tf')]
@@ -1146,8 +1175,8 @@ def test_ping_locator_rejects_unset_stamp():
     loc = dar.PingLocator()
     loc.add_tf(_mbes_static(), True)
     loc.add_tf(_earth_tf_at(100, 0, inside), False)
-    assert loc.locate('mbes', _bare_ping(0, 0).header.stamp) == (None, 'bad_stamp')
-    assert loc.locate('mbes', _bare_ping(100, 0).header.stamp)[1] is None
+    assert loc.locate('mbes', 0) == (None, 'bad_stamp')
+    assert loc.locate('mbes', _ns(100))[1] is None
 
 
 @pytest.mark.parametrize('xyz', [
@@ -1203,4 +1232,4 @@ def test_ping_locator_drops_non_geocentric_earth_transform():
     loc = dar.PingLocator()
     loc.add_tf(_mbes_static(), True)
     loc.add_tf(_earth_tf_at(100, 0, (1.0, 1.0, 1.0)), False)
-    assert loc.locate('mbes', _bare_ping(100, 0).header.stamp) == (None, 'bad_position')
+    assert loc.locate('mbes', _ns(100)) == (None, 'bad_position')

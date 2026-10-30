@@ -285,7 +285,8 @@ class PingLocator:
     Position pings from the bags' own TF tree (``earth -> sensor frame``).
 
     The same guard-then-exact pattern as import_bag. Feed every ``/tf`` and
-    ``/tf_static`` message with add_tf and every ping with push, in bag order.
+    ``/tf_static`` message with add_tf and every ping's stamp and frame with
+    push, in bag order.
     drain then yields the pings whose stamp the dynamic TF stream (the
     *frontier*, the newest dynamic transform stamp seen) has passed by
     ``guard_sec``, so the transforms on both sides of the ping are in the
@@ -302,7 +303,9 @@ class PingLocator:
         self._buffer = tf2_ros.Buffer(cache_time=Duration(seconds=cache_sec))
         self._guard_ns = int(round(guard_sec * 1e9))
         self._frontier_ns = None
-        self._pending = collections.deque()   # (ping stamp ns, ping), arrival order
+        # (ping stamp ns, frame id, item), arrival order
+        self._pending = collections.deque()
+        self.max_pending = 0   # the most pings that waited at once
 
     def add_tf(self, tf_message, is_static):
         """Insert every transform of a tf2_msgs/TFMessage into the buffer."""
@@ -315,9 +318,17 @@ class PingLocator:
                 if self._frontier_ns is None or ns > self._frontier_ns:
                     self._frontier_ns = ns
 
-    def push(self, ping):
-        """Queue a ping (anything with ``header.frame_id``/``header.stamp``)."""
-        self._pending.append((stamp_ns(ping.header.stamp), ping))
+    def push(self, ping_ns, frame_id, item):
+        """
+        Queue ``item`` (any object) for positioning at ``frame_id`` and ``ping_ns``.
+
+        ``item`` comes back from drain. Queue only what the caller needs once
+        the ping is positioned (accumulate queues a compact PingRecord, not the
+        deserialized message), since pings wait here until the TF frontier
+        passes them.
+        """
+        self._pending.append((ping_ns, frame_id, item))
+        self.max_pending = max(self.max_pending, len(self._pending))
 
     @property
     def pending(self):
@@ -326,26 +337,26 @@ class PingLocator:
 
     def drain(self, flush=False):
         """
-        Yield ``(ping, position, reason)`` for each ping that is ready.
+        Yield ``(item, position, reason)`` for each ping that is ready.
 
         A ping is ready once ``ping stamp <= frontier - guard`` (as import_bag,
         first in first out: a ping waits behind an earlier one), or for every
         waiting ping with ``flush``. ``position`` and ``reason`` are locate's.
         """
         while self._pending:
-            ping_ns, ping = self._pending[0]
+            ping_ns, frame_id, item = self._pending[0]
             if not flush and (self._frontier_ns is None
                               or ping_ns > self._frontier_ns - self._guard_ns):
                 return
             self._pending.popleft()
-            position, reason = self.locate(ping.header.frame_id, ping.header.stamp)
-            yield ping, position, reason
+            position, reason = self.locate(frame_id, ping_ns)
+            yield item, position, reason
 
-    def locate(self, frame_id, stamp):
+    def locate(self, frame_id, ping_ns):
         """
         Return ``((lat_deg, lon_deg), None)`` or ``(None, reason)``.
 
-        ``stamp`` is a builtin_interfaces/Time, looked up exactly (tf2
+        ``ping_ns`` (integer nanoseconds) is looked up exactly (tf2
         interpolates between the transforms on either side; there is no
         latest-transform fallback). ``reason`` is ``'bad_stamp'`` for an unset
         (zero) or negative stamp -- tf2 reads time zero as "the latest
@@ -357,12 +368,12 @@ class PingLocator:
         """
         from rclpy.time import Time
 
-        if stamp_ns(stamp) <= 0:
+        if ping_ns <= 0:
             return None, 'bad_stamp'
         tf2_ros = self._tf2_ros
         try:
             t = self._buffer.lookup_transform_core(
-                EARTH_FRAME, frame_id, Time.from_msg(stamp))
+                EARTH_FRAME, frame_id, Time(nanoseconds=ping_ns))
         except tf2_ros.ExtrapolationException:
             return None, 'extrapolation'
         except tf2_ros.TransformException:
@@ -372,6 +383,31 @@ class PingLocator:
         if position is None:
             return None, 'bad_position'
         return position, None
+
+
+class PingRecord:
+    """
+    The fields of a SonarDetections ping that bin_ping reads, and nothing else.
+
+    A deserialized message is several times larger than its serialized bytes
+    (one Python object per beam flag, the header, the ping_info strings); a
+    record keeps the three per-beam float32 arrays as they are, the flags as
+    one byte each, and two floats -- about 13 bytes per beam.
+    """
+
+    __slots__ = ('intensities', 'rx_angles', 'two_way_travel_times',
+                 'sound_speed', 'frequency', 'flags')
+
+    def __init__(self, msg):
+        """Copy the binning fields of a SonarDetections ``msg``."""
+        self.intensities = msg.intensities
+        self.rx_angles = msg.rx_angles
+        self.two_way_travel_times = msg.two_way_travel_times
+        self.sound_speed = msg.ping_info.sound_speed
+        self.frequency = msg.ping_info.frequency
+        flags = getattr(msg, 'flags', None)
+        self.flags = (None if flags is None
+                      else bytes(getattr(f, 'flag', 0) for f in flags))
 
 
 # --box drop reasons, in report order, with the words the run report uses.
@@ -385,17 +421,23 @@ BOX_DROP_REASONS = (
 
 
 def new_box_stats():
-    """Return zeroed --box ping counters: 'kept' plus one per drop reason."""
-    stats = {'kept': 0}
+    """
+    Return zeroed --box counters.
+
+    'kept', one per drop reason, and 'max_pending', the most pings that waited
+    for the TF stream at once.
+    """
+    stats = {'kept': 0, 'max_pending': 0}
     stats.update((key, 0) for key, _words in BOX_DROP_REASONS)
     return stats
 
 
 def box_report(box, stats, n_pings):
     """Return the one-line --box summary printed after the pass."""
-    return 'box %s: kept %d of %d pings; dropped %s' % (
+    return 'box %s: kept %d of %d pings; dropped %s; at most %d waited for TF' % (
         ' '.join('%g' % v for v in box), stats['kept'], n_pings,
-        ', '.join('%d %s' % (stats[key], words) for key, words in BOX_DROP_REASONS))
+        ', '.join('%d %s' % (stats[key], words) for key, words in BOX_DROP_REASONS),
+        stats['max_pending'])
 
 
 def parse_args(argv):
@@ -732,8 +774,8 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
             "error: topic '%s' not in any bag (have: %s)"
             % (topic, ', '.join(sorted(set().union(*type_maps))) or 'none'))
 
-    def add_ping(msg):
-        bin_ping(msg, bin_width_deg, remove_tl, bins, freqs)
+    def add_ping(ping):
+        bin_ping(ping, bin_width_deg, remove_tl, bins, freqs)
 
     n_msgs = 0
     if box is None:
@@ -750,7 +792,7 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
                         corrupt[name] += 1
                         continue
                     n_msgs += 1
-                    add_ping(msg)
+                    add_ping(PingRecord(msg))
             finally:
                 reader.close()
         return n_msgs
@@ -768,6 +810,13 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
         sources.append((start_ns, functools.partial(open_reader, path, wanted)))
         tf_topics.append(kinds)
         msg_types.append(get_message(type_map[topic]) if topic in type_map else None)
+    if not any(kind == 'tf' for kinds in tf_topics for kind in kinds.values()):
+        # Without a dynamic TF stream the frontier never moves: every ping would
+        # wait in memory until the end and then find no earth transform.
+        raise SystemExit(
+            'error: --box positions pings from the dynamic TF (/tf) in the bags, '
+            'and no bag has a /tf topic; add the bag that recorded the '
+            "vehicle's /tf, or drop --box")
     tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
     locator = PingLocator()   # one buffer for every bag on the command line
 
@@ -793,31 +842,30 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
             take_ready(False)
         else:
             n_msgs += 1
-            locator.push(msg)
+            locator.push(stamp_ns(msg.header.stamp), msg.header.frame_id, PingRecord(msg))
     take_ready(True)   # end of the stream: position whatever is still waiting
+    box_stats['max_pending'] = locator.max_pending
     return n_msgs
 
 
-def bin_ping(msg, bin_width_deg, remove_tl, bins, freqs):
-    """Add one SonarDetections ping's beams to `bins` (see accumulate)."""
-    intensities = msg.intensities
-    rx_angles = msg.rx_angles
-    twtt = msg.two_way_travel_times
-    sound_speed = msg.ping_info.sound_speed
-    freq = msg.ping_info.frequency
+def bin_ping(ping, bin_width_deg, remove_tl, bins, freqs):
+    """Add one ping's beams (a PingRecord) to `bins` (see accumulate)."""
+    intensities = ping.intensities
+    rx_angles = ping.rx_angles
+    twtt = ping.two_way_travel_times
+    sound_speed = ping.sound_speed
+    freq = ping.frequency
     if remove_tl and math.isfinite(freq) and freq > 0.0:
         freqs.append(freq)  # only needed for the tier-2 absorption alpha
-    flags = getattr(msg, 'flags', None)
+    flags = ping.flags   # one flag value per beam, or None
     count = min(len(intensities), len(rx_angles))
     for i in range(count):
         db = intensities[i]
         if not math.isfinite(db):
             continue
         # Skip beams flagged bad (flag != 0) when flags are present and aligned.
-        if flags is not None and i < len(flags):
-            flag_val = getattr(flags[i], 'flag', 0)
-            if flag_val != 0:
-                continue
+        if flags is not None and i < len(flags) and flags[i] != 0:
+            continue
         ang = rx_angles[i]
         if not math.isfinite(ang):
             continue
