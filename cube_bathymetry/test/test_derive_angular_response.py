@@ -862,7 +862,7 @@ def test_end_to_end_box_over_split_bags_shares_one_tf_buffer(tmp_path, capsys, r
 
 def write_tf_and_detection_bags(tmp_path):
     """
-    A TF-only bag and a detections-only bag recorded side by side.
+    Write a TF-only bag and a detections-only bag recorded side by side.
 
     The TF bag declares only /tf and /tf_static; the detections bag declares
     only the detections topic. Every ping is inside the box.
