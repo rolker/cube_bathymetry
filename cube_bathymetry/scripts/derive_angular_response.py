@@ -86,8 +86,9 @@ georeferences it:
 
 The ECEF translation of the sensor origin is converted to latitude/longitude in
 closed form; a translation that is not a geocentric position (more than 50 km
-from the ellipsoid) drops the ping. Pings outside the box and pings that cannot be positioned are
-dropped, counted by reason and reported, and the box is recorded in the header.
+from the ellipsoid) drops the ping. Pings outside the box and pings that cannot
+be positioned are dropped, counted by reason and reported, and the box is
+recorded in the header.
 Without ``--box`` no TF is read.
 
 Usage:
@@ -157,6 +158,12 @@ EARTH_FRAME = 'earth'
 # (a local map frame named earth, a placeholder at the origin) puts it thousands
 # of km below it, and its latitude/longitude would be meaningless.
 EARTH_HEIGHT_RANGE_M = (-50000.0, 50000.0)
+# Geocentric radii a sensor position can have: the ellipsoid's polar radius
+# minus 50 km to its equatorial radius plus 50 km. A radius outside this is not
+# a position near the Earth's surface, and is refused BEFORE the closed form,
+# which goes complex (and raises TypeError) for some radii far inside the Earth.
+EARTH_RADIUS_RANGE_M = (WGS84_B + EARTH_HEIGHT_RANGE_M[0],
+                        WGS84_A + EARTH_HEIGHT_RANGE_M[1])
 
 
 def check_absorption_inputs(temp_c, salinity_psu, ph, depth_m):
@@ -212,16 +219,23 @@ def earth_position_to_lat_lon(x, y, z):
     """
     Return ``(lat_deg, lon_deg)`` for an ECEF sensor position, or None.
 
-    None when the position is not a plausible geocentric one: non-finite, the
-    closed form fails on it (a point near the centre of the Earth raises in
-    ecef_to_geodetic), or its ellipsoid height is outside EARTH_HEIGHT_RANGE_M
-    -- (0, 0, 0) would otherwise map to the North Pole.
+    None when the position is not a plausible geocentric one: non-finite, a
+    geocentric radius outside EARTH_RADIUS_RANGE_M (checked before the closed
+    form, which is only valid near the surface: (0, 0, 0) would map to the
+    North Pole, and a point some 20 to 45 km from the centre makes its cube
+    root complex), or an ellipsoid height outside EARTH_HEIGHT_RANGE_M. Any
+    arithmetic failure in the closed form is also caught and gives None.
     """
     if not all(math.isfinite(v) for v in (x, y, z)):
         return None
+    radius = math.sqrt(x * x + y * y + z * z)
+    if not EARTH_RADIUS_RANGE_M[0] <= radius <= EARTH_RADIUS_RANGE_M[1]:
+        return None
     try:
         lat, lon, height = ecef_to_geodetic(x, y, z)
-    except (ValueError, ZeroDivisionError, OverflowError):
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+    if not all(isinstance(v, float) for v in (lat, lon, height)):
         return None
     if not (math.isfinite(lat) and math.isfinite(lon) and math.isfinite(height)
             and EARTH_HEIGHT_RANGE_M[0] <= height <= EARTH_HEIGHT_RANGE_M[1]):

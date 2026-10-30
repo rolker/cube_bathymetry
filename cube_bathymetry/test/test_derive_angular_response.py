@@ -898,10 +898,37 @@ def test_ping_locator_rejects_unset_stamp():
     (1500.0, -2300.0, 4.0),     # local map coordinates in a frame named earth
     (float('nan'), 0.0, 0.0),
     (4.2e7, 0.0, 0.0),          # geostationary orbit
+    (34721.27, 13579.63, -18942.10),   # ~42 km out: the closed form goes complex
+    (0.0, 0.0, dar.WGS84_B - 50000.0 - 1.0),   # 1 m inside the radius band (pole)
+    (dar.WGS84_A + 50000.0 + 1.0, 0.0, 0.0),   # 1 m outside it (equator)
 ])
 def test_earth_position_rejects_non_geocentric(xyz):
     """Translations that are not a position near the Earth's surface give None."""
     assert dar.earth_position_to_lat_lon(*xyz) is None
+
+
+def test_earth_position_radius_band_edges():
+    """Just inside the radius band converts; the height bound still applies."""
+    # 1 m above the inner edge on the polar axis: 49999 m below the ellipsoid.
+    lat, _lon = dar.earth_position_to_lat_lon(0.0, 0.0, dar.WGS84_B - 49999.0)
+    assert lat == 90.0
+    # 1 m inside the outer edge at the equator: 49999 m above the ellipsoid.
+    lat, lon = dar.earth_position_to_lat_lon(dar.WGS84_A + 49999.0, 0.0, 0.0)
+    assert (lat, lon) == (pytest.approx(0.0, abs=1e-9), 0.0)
+    # Inside the radius band but 71 km below the ellipsoid at the equator.
+    assert dar.earth_position_to_lat_lon(dar.WGS84_B - 49999.0, 0.0, 0.0) is None
+
+
+def test_earth_position_never_raises():
+    """No geocentric radius from the centre to far outside the Earth raises."""
+    import random
+    rng = random.Random(170)
+    for _ in range(20000):
+        radius = rng.uniform(0.0, 7.0e6)
+        v = [rng.gauss(0.0, 1.0) for _ in range(3)]
+        norm = math.sqrt(sum(c * c for c in v)) or 1.0
+        got = dar.earth_position_to_lat_lon(*(radius * c / norm for c in v))
+        assert got is None or (-90.0 <= got[0] <= 90.0 and -180.0 <= got[1] <= 180.0)
 
 
 def test_earth_position_accepts_survey_heights():
