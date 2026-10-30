@@ -127,6 +127,14 @@ MAX_ABSORPTION_DB_PER_M = 5.0
 # this is a unit slip (kHz stored as Hz gives a near-zero alpha) or garbage.
 FREQUENCY_KHZ_RANGE = (1.0, 2000.0)
 
+# A bin mean from fewer samples than this is noise. The same threshold as
+# marine_perception_tools' cube_lab self-calibration (kMinPerBin), which refuses
+# a curve whose nadir reference bin is below it or which has fewer than
+# MIN_POPULATED_BINS bins at or above it. This tool warns on those conditions
+# instead and still writes the curve (every row carries its n).
+MIN_SAMPLES_PER_BIN = 200
+MIN_POPULATED_BINS = 3
+
 # WGS84 ellipsoid (semi-major axis a, flattening f).
 WGS84_A = 6378137.0
 WGS84_F = 1.0 / 298.257223563
@@ -772,6 +780,29 @@ def build_header(remove_tl, source_bags, alpha=None, absorption_source=None,
     return lines
 
 
+def thin_curve_warning(bins, bin_width_deg):
+    """
+    Return a warning string when the curve rests on too few samples, else None.
+
+    Thin means the nadir (reference) bin has fewer than MIN_SAMPLES_PER_BIN
+    samples, or fewer than MIN_POPULATED_BINS bins reach it: the conditions
+    under which cube_lab refuses to self-calibrate.
+    """
+    if not bins:
+        return None
+    nadir_idx = min(bins)
+    nadir_n = bins[nadir_idx][2]
+    populated = sum(1 for slot in bins.values() if slot[2] >= MIN_SAMPLES_PER_BIN)
+    if nadir_n >= MIN_SAMPLES_PER_BIN and populated >= MIN_POPULATED_BINS:
+        return None
+    return ('warning: thin curve: the nadir reference bin (%.1f deg) has %d '
+            'samples and %d of %d bins have at least %d; every row is relative '
+            'to the nadir bin, and cube_lab refuses a curve below %d samples '
+            'there or with fewer than %d such bins'
+            % ((nadir_idx + 0.5) * bin_width_deg, nadir_n, populated, len(bins),
+               MIN_SAMPLES_PER_BIN, MIN_SAMPLES_PER_BIN, MIN_POPULATED_BINS))
+
+
 def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, header_lines):
     """
     Write ``header_lines``, then the binned means and db_relative_to_nadir.
@@ -862,6 +893,13 @@ def main(argv=None):
             raise SystemExit('error: no pings inside --box; nothing to derive '
                              '(check the box corners are LATMIN LONMIN LATMAX '
                              'LONMAX and the bags carry earth TF)')
+
+    warning = thin_curve_warning(bins, args.bin_width_deg)
+    if warning is not None:
+        if args.box is not None:
+            warning += ('; --box kept %d pings: widen the box or add bags'
+                        % box_stats['kept'])
+        print(warning, file=sys.stderr)
 
     alpha = 0.0
     if args.remove_tl:

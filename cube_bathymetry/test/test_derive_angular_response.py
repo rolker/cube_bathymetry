@@ -686,6 +686,33 @@ def test_end_to_end_box_keeps_only_site_pings(tmp_path, capsys):
     assert float(nadir.split(',')[1]) == pytest.approx(expected, abs=2e-3)
 
 
+def test_end_to_end_box_warns_about_a_thin_curve(tmp_path, capsys):
+    """A box keeping only a few pings warns, and still writes the curve."""
+    bag = tmp_path / 'site_bag'
+    write_synthetic_bag(bag)
+    out = tmp_path / 'thin.csv'
+    assert dar.main([str(bag), '-t', TOPIC, '-o', str(out), '--box'] + TEST_BOX) == 0
+    err = capsys.readouterr().err
+    assert 'thin curve' in err and '--box kept 2 pings' in err
+    assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
+
+
+def _bins(counts):
+    """Synthetic bins {index: [sum_adjusted, sum_R, n]} from {index: n}."""
+    return {idx: [-30.0 * n, 0.0, n] for idx, n in counts.items()}
+
+
+def test_thin_curve_warning():
+    """Warn on a thin nadir bin or too few populated bins, not on a good curve."""
+    n = dar.MIN_SAMPLES_PER_BIN
+    assert dar.thin_curve_warning(_bins({0: n, 1: n, 2: n, 30: 1}), 2.0) is None
+    thin_nadir = dar.thin_curve_warning(_bins({0: n - 1, 1: n, 2: n, 3: n}), 2.0)
+    assert 'nadir reference bin (1.0 deg) has %d samples' % (n - 1) in thin_nadir
+    narrow = dar.thin_curve_warning(_bins({0: n, 1: n, 2: n - 1}), 2.0)
+    assert '2 of 3 bins have at least %d' % n in narrow
+    assert dar.thin_curve_warning({}, 2.0) is None
+
+
 def test_end_to_end_box_with_override(tmp_path, capsys):
     """--box combines with the alpha override."""
     extra = ['--box'] + TEST_BOX + ['--remove-tl', '--absorption-db-per-m', '0.130']

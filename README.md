@@ -767,6 +767,11 @@ not a geocentric position (more than 50 km from the ellipsoid, such as a local
 map frame named `earth`). A box with no pings in it is an error. A box
 across the antimeridian is not supported.
 
+Any run (with or without `--box`) whose nadir reference bin has fewer than 200
+samples, or which has fewer than three bins with 200, prints a "thin curve"
+warning and still writes the curve; cube_lab's self-calibration refuses such a
+curve. With `--box` it usually means the box keeps too few pings.
+
 **Header provenance.** Every line above the CSV column row is a
 `# key: value` comment. The loader (and the marine_tools SonarInfo mirror)
 reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:
