@@ -951,6 +951,45 @@ def test_end_to_end_box_tf_only_bag_positions_a_detections_bag(tmp_path, capsys)
     assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
 
 
+def write_clock_offset_bag(path, offset_sec):
+    """
+    A 150 s bag whose header stamps run ``offset_sec`` ahead of its bag times.
+
+    earth -> base_link at 1 Hz, inside the box, and a ping every 0.5 s; every
+    message is recorded at its stamp minus ``offset_sec``, as by a recorder
+    whose clock lags the publishers'. Longer than the 60 s buffer, so a ping
+    held back by the offset would fall out of it.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    events = [(0.0, '/bizzy/tf_static', _mbes_static())]
+    for k in range(150):
+        stamp = 100.0 + k
+        events.append((stamp - offset_sec, '/bizzy/tf', _earth_tf(stamp, inside)))
+        for half in (0.25, 0.75):
+            events.append((stamp + half - offset_sec, TOPIC,
+                           _ping(stamp + half, 'mbes', -30.0)))
+    write_bag(path, sorted(events, key=lambda e: e[0]))
+
+
+@pytest.mark.parametrize('offset_sec', [90.0, 57.0])
+def test_end_to_end_box_with_a_recorder_clock_offset(tmp_path, capsys, offset_sec):
+    """A constant clock offset between publisher and recorder keeps the same pings."""
+    outputs = {}
+    for offset in (0.0, offset_sec):
+        bag = tmp_path / ('offset_%g' % offset) / 'site_bag'
+        bag.parent.mkdir()
+        write_clock_offset_bag(bag, offset)
+        out = tmp_path / ('curve_%g.csv' % offset)
+        assert dar.main([str(bag), '-t', TOPIC, '-o', str(out), '--box'] + TEST_BOX) == 0
+        captured = capsys.readouterr()
+        assert 'ignored' not in captured.err
+        outputs[offset] = (out.read_bytes(),
+                           re.search(r'kept \d+ of \d+ pings[^\n]*', captured.out).group(0))
+    assert outputs[offset_sec] == outputs[0.0]
+    # The two pings after the last transform (249 s) are the only ones lost.
+    assert outputs[0.0][1].startswith('kept 298 of 300 pings; dropped 0 outside')
+
+
 def test_without_box_a_bag_without_the_topic_is_an_error(tmp_path):
     """Without --box every bag must carry the detections topic."""
     tf_bag, det_bag = write_tf_and_detection_bags(tmp_path)
@@ -1253,16 +1292,64 @@ def test_ping_locator_future_transform_cannot_purge_the_buffer():
 
 
 def test_ping_locator_frontier_never_passes_the_bag_time():
-    """A transform stamped ahead of its bag time moves the frontier only to that time."""
+    """A transform stamped further ahead of its bag time than its frame moves the frontier only to that time."""
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
     loc = dar.PingLocator()
     loc.add_tf(_mbes_static(), True)
-    early = _push(loc, 97, 0)
-    late = _push(loc, 97, 1)
-    loc.add_tf(_earth_tf_at(110, 0, inside), False, _ns(100))   # 10 s ahead: accepted
+    loc.add_tf(_earth_tf_at(100, 0, inside), False, _ns(100))   # offset 0
+    early = _push(loc, 97, 500000000)
+    late = _push(loc, 97, 500000001)
+    loc.add_tf(_earth_tf_at(110, 0, inside), False, _ns(100, 500000000))   # 10 s jump
     assert loc.tf_rejected == {}
-    assert [r[0] for r in loc.drain()] == [early]   # frontier 100, not 110
+    assert [r[0] for r in loc.drain()] == [early]   # frontier 100.5, not 110
     assert loc.pending == 1 and late
+
+
+@pytest.mark.parametrize('offset', [90, 57, -30])
+def test_ping_locator_constant_clock_offset_changes_nothing(offset):
+    """
+    A constant stamp-minus-bag-time offset releases pings as a zero offset does.
+
+    A recorder whose clock lags (or leads) the publisher's records every
+    transform at stamp - offset; none is left out as 'future', and the
+    frontier follows the stamps, not the bag time.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    first = _push(loc, 100, 0)
+    second = _push(loc, 101, 0)
+    for sec in (100, 101, 102, 103):
+        loc.add_tf(_earth_tf_at(sec, 0, inside), False, _ns(sec - offset))
+    assert [(r[0], r[2]) for r in loc.drain()] == [(first, None)]   # frontier 103
+    loc.add_tf(_earth_tf_at(104, 0, inside), False, _ns(104 - offset))
+    assert [(r[0], r[2]) for r in loc.drain()] == [(second, None)]
+    assert loc.tf_rejected == {}
+
+
+def test_ping_locator_future_jump_is_judged_per_frame():
+    """
+    A frame's offset is its own: one frame's hour jump is left out, the other's +90 s is not.
+
+    The jump does not enter tf2, so the real transforms of its frame still
+    serve, and it does not move the frontier.
+    """
+    from tf2_msgs.msg import TFMessage
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_earth_tf_at(100, 0, inside), False, _ns(100))   # base_link: 0
+    ping = _push(loc, 97, 500000000)
+    loc.add_tf(_earth_tf_at(100 + 3600, 0, inside), False, _ns(100, 500000000))
+    assert list(loc.drain()) == []   # the frontier is still 100
+    for sec in (190, 191):           # buoy: a constant +90 s, accepted
+        relay = TFMessage(transforms=[_transform('earth', 'buoy', float(sec), inside)])
+        loc.add_tf(relay, False, _ns(sec - 90))
+    loc.add_tf(_earth_tf_at(101, 0, inside), False, _ns(101))
+    assert loc.tf_rejected == {'future': 1}
+    assert loc.locate('mbes', _ns(100, 500000000)) == (
+        (pytest.approx(INSIDE[0]), pytest.approx(INSIDE[1])), None)
+    assert [(r[0], r[2]) for r in loc.drain(flush=True)] == [(ping, 'extrapolation')]
 
 
 def test_ping_locator_rejects_unset_stamp():

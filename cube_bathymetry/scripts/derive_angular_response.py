@@ -88,9 +88,12 @@ georeferences it:
   order, so one ping with a bad future stamp does not hold back the rest.
   Pings still waiting when the bags end are looked up against what was read.
   The TF stream's progress is the newest accepted dynamic transform stamp,
-  never later than the time the bag recorded it. Transforms tf2 would reject
+  never later than the time the bag recorded it plus its frame's clock offset
+  (stamp minus bag time of the frame's first transform, so a recorder whose
+  clock lags or leads the publisher's works). Transforms tf2 would reject
   (NaN, zero quaternion, bad frame names, older than the 60 s buffer) or
-  stamped more than 60 s after they were recorded are left out and counted.
+  whose stamp jumps more than 60 s further ahead of the bag time than their
+  frame's offset are left out and counted.
 
 The ECEF translation of the sensor origin is converted to latitude/longitude in
 closed form; a translation that is not a geocentric position (more than 50 km
@@ -317,6 +320,10 @@ class PingLocator:
         self._future_limit_ns = int(round(future_limit_sec * 1e9))
         self._frontier_ns = None
         self._newest_ns = {}   # child frame -> newest dynamic stamp inserted
+        # child frame -> stamp minus bag time of its first accepted dynamic
+        # transform: the clock offset between that frame's publisher and the
+        # recorder, against which later transforms of the frame are judged.
+        self._offset_ns = {}
         # Transforms not given to tf2, by reason (see TF_REJECT_REASONS).
         self.tf_rejected = collections.Counter()
         # Heap of (ping stamp ns, arrival number, frame id, item): the earliest
@@ -335,9 +342,13 @@ class PingLocator:
         each) and do not move the frontier. See transform_reject_reason.
 
         The frontier advances to an accepted dynamic transform's stamp, but
-        never past ``bag_ns``: a transform stamped ahead of the time it was
-        recorded (a clock offset, a glitch) must not release waiting pings
-        before the transforms that really follow them have been read.
+        never past ``bag_ns`` plus its child frame's clock offset (the stamp
+        minus bag time of that frame's first accepted transform): a transform
+        stamped further ahead of the time it was recorded than its frame
+        usually is (a glitch) must not release waiting pings before the
+        transforms that really follow them have been read, while a constant
+        offset between the publisher's clock and the recorder's (relayed
+        topics, unsynchronised hosts) changes nothing.
         """
         for t in tf_message.transforms:
             reason = self.transform_reject_reason(t, is_static, bag_ns)
@@ -352,7 +363,11 @@ class PingLocator:
             child = t.child_frame_id
             if ns > self._newest_ns.get(child, ns - 1):
                 self._newest_ns[child] = ns
-            advance = ns if bag_ns is None else min(ns, bag_ns)
+            if bag_ns is None:
+                advance = ns
+            else:
+                offset = self._offset_ns.setdefault(child, ns - bag_ns)
+                advance = min(ns, bag_ns + offset)
             if self._frontier_ns is None or advance > self._frontier_ns:
                 self._frontier_ns = advance
 
@@ -364,9 +379,14 @@ class PingLocator:
         empty or self-referencing frame name, a NaN or infinite value, or a
         zero quaternion (tf2 normalises any other). Dynamic transforms only:
         ``'old'``, more than the cache length older than the newest transform
-        of the same child frame (tf2's TF_OLD_DATA); ``'future'``, stamped more
-        than the cache length after ``bag_ns``, which tf2 would accept and then
-        prune every real transform of that frame against.
+        of the same child frame (tf2's TF_OLD_DATA); ``'future'``, a stamp
+        minus ``bag_ns`` more than the cache length above that of the frame's
+        first accepted transform, which tf2 would accept and then prune every
+        real transform of that frame against. The first transform of a frame
+        sets that reference whatever its offset, so a constant clock offset
+        between publisher and recorder passes; a frame whose very first
+        transform is a glitch keeps it as reference, and its real transforms
+        are then left out as 'old', as tf2 itself would refuse them.
         """
         tr = t.transform.translation
         q = t.transform.rotation
@@ -380,7 +400,9 @@ class PingLocator:
         if is_static:
             return None
         ns = stamp_ns(t.header.stamp)
-        if bag_ns is not None and ns > bag_ns + self._cache_ns:
+        offset = self._offset_ns.get(t.child_frame_id)
+        if (bag_ns is not None and offset is not None
+                and ns - bag_ns > offset + self._cache_ns):
             return 'future'
         newest = self._newest_ns.get(t.child_frame_id)
         if newest is not None and newest > ns + self._cache_ns:
@@ -505,7 +527,8 @@ BOX_DROP_REASONS = (
 TF_REJECT_REASONS = (
     ('invalid', 'invalid (NaN, zero quaternion or bad frame names)'),
     ('old', 'more than %g s older than the newest of their frame' % TF_CACHE_SEC),
-    ('future', 'stamped more than %g s after the bag recorded them' % TF_CACHE_SEC),
+    ('future', 'stamped more than %g s further ahead of the bag time than '
+               'their frame' % TF_CACHE_SEC),
 )
 
 
