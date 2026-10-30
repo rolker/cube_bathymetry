@@ -171,6 +171,57 @@ TEST(AngularResponseCurve, BackCompatLoaderReturnsPoints)
   EXPECT_FLOAT_EQ(curve[1].second, -1.0f);
 }
 
+// Round trip from derive_angular_response.py (cube_bathymetry#170): the golden
+// curve test/data/derived_curve_tier2_seawater.csv is written by the script's
+// write_csv (and checked to still match it by test_derive_angular_response.py).
+// It carries the full provenance header -- absorption_source, salinity_psu, ph,
+// depth_m, frequency_khz, box, source_bags -- which the loader must ignore while
+// still reading tl_removed, the seawater absorption_db_per_m and the data rows.
+TEST(AngularResponseCurve, LoadsDeriveToolSeawaterCurve)
+{
+  auto loaded = loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE);
+
+  EXPECT_TRUE(loaded.tl_removed);
+  EXPECT_FLOAT_EQ(loaded.absorption_db_per_m, 0.125363f);
+  ASSERT_EQ(loaded.points.size(), 4u);
+  EXPECT_FLOAT_EQ(loaded.points[0].first, 1.0f);
+  EXPECT_FLOAT_EQ(loaded.points[0].second, 0.0f);
+  EXPECT_FLOAT_EQ(loaded.points[1].first, 3.0f);
+  EXPECT_FLOAT_EQ(loaded.points[1].second, -2.046f);
+  EXPECT_FLOAT_EQ(loaded.points[2].first, 5.0f);
+  EXPECT_FLOAT_EQ(loaded.points[2].second, -0.294f);
+  EXPECT_FLOAT_EQ(loaded.points[3].first, 15.0f);
+  EXPECT_FLOAT_EQ(loaded.points[3].second, 9.472f);
+}
+
+// Provenance lines are matched by their exact key only: a value that happens
+// to contain another key's text (a bag named like a header key, extra colons)
+// does not set tl_removed or absorption_db_per_m, and an override-style header
+// with no salinity/pH/temperature lines still loads its alpha (cube#170).
+TEST(AngularResponseCurve, IgnoresProvenanceLines)
+{
+  const std::string csv =
+    "# Empirical angular response (derive_angular_response.py, cube#81)\n"
+    "# tl_removed: true\n"
+    "# absorption_db_per_m: 0.13\n"
+    "# absorption_source: override\n"
+    "# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)\n"
+    "# box: 42.95 -70.65 43 -70.58\n"
+    "# source_bags: absorption_db_per_m: 9.9,tl_removed: false,run_2026-08-26T12:00\n"
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n"
+    "1.0,-40.0,100,+0.000\n"
+    "3.0,-41.0,100,-1.000\n";
+  const std::string path = writeTemp(csv);
+
+  auto loaded = loadAngularResponseCurveWithHeader(path);
+  std::remove(path.c_str());
+
+  EXPECT_TRUE(loaded.tl_removed);
+  EXPECT_FLOAT_EQ(loaded.absorption_db_per_m, 0.13f);
+  ASSERT_EQ(loaded.points.size(), 2u);
+  EXPECT_FLOAT_EQ(loaded.points[1].second, -1.0f);
+}
+
 // Mode-string parsing is case-insensitive; unknown values are rejected.
 TEST(AngularResponseCurve, ParsesMode)
 {

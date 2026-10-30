@@ -686,6 +686,170 @@ the scanned topic, default = the detections topic's sibling `sonar_info`).
 See
 `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
 
+### Deriving a curve (`derive_angular_response.py`)
+
+`ros2 run cube_bathymetry derive_angular_response.py` bins each beam's
+intensity by `|rx_angle|` over one or more bags and writes the curve CSV that
+`--backscatter-curve` (and the SonarInfo curve delivery) consumes. With
+`--remove-tl` (tier-2, #87) each beam's two-way transmission loss
+`40 log10(R) + 2 alpha R` is added back before binning, so the residual curve
+transfers across depths, and alpha is written into the header for the
+estimator to apply verbatim.
+
+```bash
+# fresh water (a lake): alpha from the full Francois-Garrison model at S = 0
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --remove-tl --water-temp-c 24
+
+# salt water: give the salinity too (pH defaults to 8.0)
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --remove-tl --water-temp-c 15.5 --salinity 31
+
+# or a path-averaged alpha worked out from the site's casts
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --remove-tl --absorption-db-per-m 0.130
+
+# only the pings inside a site box, from bags that also hold transit
+derive_angular_response.py <bags...> -t <detections topic> -o curve.csv \
+    --box 42.95 -70.65 43.00 -70.58 --remove-tl --water-temp-c 15.5 --salinity 31
+```
+
+**Choosing the absorption (#170).** alpha matters at multibeam frequencies: at
+500 kHz fresh water at 24 C gives 0.049 dB/m, while the Isles of Shoals water
+in August 2026 (about 31 psu, 11 to 20 C) gave 0.12 to 0.14 dB/m. Using the
+freshwater value there under-compensates the two-way loss by about 3 dB at
+20 m slant range, so the swath edges in deeper water render dark. Salinity is
+the dominant term in salt water; temperature is second order.
+
+- `--salinity` (psu, default 0 = fresh water), `--ph` (default 8.0, no effect
+  in fresh water), `--water-temp-c` and `--depth-m` feed the full
+  Francois-Garrison (1982) model: boric acid, MgSO4 and pure water. At
+  salinity 0 it gives exactly the freshwater value earlier versions computed,
+  so an existing freshwater invocation writes the same data rows. The
+  frequency is the median per-ping `ping_info.frequency` (Hz); a median
+  outside 1 kHz to 2 MHz stops the run, since it is a unit slip (a frequency
+  stored in kHz) that would give a near-zero alpha.
+- Take temperature and salinity from CTD or sound-speed casts at the site,
+  not from the boat's surface temperature alone. In a stratified water column
+  work out a path-averaged alpha over the depths surveyed and pass it with
+  `--absorption-db-per-m`. The override needs `--remove-tl` and cannot be
+  combined with `--salinity`, `--ph` or `--depth-m`; `--water-temp-c` is then
+  optional and only recorded.
+- Derive a curve for each site from that site's own bags, and use `--box` when
+  those bags also cover transit or another site. A freshwater curve applied to
+  a salt-water survey carries the wrong alpha in its header, and the estimator
+  applies whatever alpha the header says.
+
+**`--box LATMIN LONMIN LATMAX LONMAX`** (WGS84 degrees) keeps only pings whose
+sensor position is inside the box. Positions come from the bags' own TF tree,
+the way `import_bag` georeferences:
+
+- All the bags on the command line are read as one time-ordered stream into
+  one TF buffer, so split files work whether they are given together or in any
+  order, and a `/tf_static` recorded only in the first split still applies to
+  the rest. A bag that holds only TF (no detections topic) may be given beside
+  the detections bags to position their pings; at least one bag must carry the
+  detections topic. Without `--box` every bag must carry it.
+- `/tf` and `/tf_static` from every namespace go into that one buffer. In a
+  bag that records several vehicles their TF trees share it, so their frame
+  names must not collide (`import_bag` has the same limitation).
+- Each ping waits until every dynamic link of `earth -> ... -> <detections
+  frame>` is 3 s past its stamp, so the transforms on both sides of it have
+  been read for each link, and `earth -> <detections frame>` is then looked up
+  exactly at the ping stamp, interpolated between them. A slow link (say
+  `earth -> map` at 0.1 Hz beside a 10 Hz `map -> base_link`) holds the ping
+  until its next transform arrives; `import_bag` waits only for the newest
+  transform of any frame, so there a link slower than one transform every 3 s
+  loses pings. A ping is released anyway once the newest transform of a link
+  of its own chain is 57 s past it (that link is then about to drop it from
+  the 60 s buffer), so every dynamic link must publish at least about once a
+  minute; another frame whose clock runs ahead does not release it early. If
+  every link of a chain stops publishing for good, its pings wait until the
+  bags end and, because pings leave in stamp order, hold back later pings of
+  other chains with them (one sonar topic means one chain, so this costs
+  nothing in practice). A ping whose frame is not yet connected to `earth` waits only for
+  the newest transform of any frame, as in `import_bag`. There is no
+  fallback to the latest transform. Waiting pings leave in stamp order, so one
+  ping with a bad future stamp does not hold back the rest. Pings still
+  waiting when the bags end are looked up against what was read.
+- The TF stream's progress is the newest accepted dynamic transform stamp, and
+  never later than the time the bag recorded that transform plus its frame's
+  clock offset, so a transform stamped further ahead of its recording time
+  than its frame usually is does not release pings early. A frame's offset is
+  the stamp minus the bag time of its first accepted transform, so a recorder
+  whose clock lags or leads the publisher's (relayed topics, unsynchronised
+  hosts) works as if the clocks agreed. Only a transform within 1 h of its
+  bag time, either way, can set a frame's offset; one further off before the
+  frame has an offset (a glitch, such as a stamp from a node whose clock was
+  not set yet) is left out, and the offset is taken from the next transform
+  within the bound. A publisher whose clock is more than 1 h off the
+  recorder's (a relay recording in local time instead of UTC, a replay
+  re-recorded without `--use-sim-time`) therefore never gets an offset: all
+  its transforms are counted in the rejection warning and every ping on that
+  chain drops. Fix the clocks or re-record; the script does not guess.
+  Transforms tf2 would reject (NaN, zero quaternion, bad frame names, more
+  than 60 s older than the newest of their frame), dynamic transforms with an
+  unset (zero) stamp, those more than 1 h off their bag time before their
+  frame has an offset, and transforms whose stamp jumps more than 60 s
+  further ahead of the bag time than their frame's offset (which would push
+  the real ones out of the buffer) are left out; a warning counts them
+  instead of tf2 printing a line for each. A transform left out moves no
+  frontier, so it costs no pings of another frame.
+- The ECEF position of the sensor is converted to latitude/longitude.
+- Pings waiting for the TF stream are held in memory, about 13 bytes per beam
+  (7 KB for a 512-beam ping). Normally that is the last few seconds of pings,
+  or the publishing interval of the slowest link in the chain (at most about
+  a minute); the report prints the most that waited at once. A run whose bags have no
+  `/tf` topic at all is refused before reading, since every ping would wait
+  until the end.
+
+The run prints how many pings were kept and how many were dropped, by reason:
+outside the box, no earth transform for their frame, a stamp outside the
+earth TF coverage (before the first earth transform, after the last, or in a
+gap longer than the 60 s buffer), an unset (zero) header stamp, which tf2
+would otherwise read as "the latest transform", or one more than 1 h ahead of
+the TF stream (a clock glitch), or an earth transform that is
+not a geocentric position (more than 50 km from the ellipsoid, such as a local
+map frame named `earth`). A box with no pings in it is an error. A box
+across the antimeridian is not supported.
+
+Any run (with or without `--box`) whose nadir reference bin has fewer than 200
+samples, or which has fewer than three bins with 200, prints a "thin curve"
+warning and still writes the curve; cube_lab's self-calibration refuses such a
+curve. With `--box` it usually means the box keeps too few pings.
+
+A message that will not deserialize (a damaged bag) is skipped, and the run
+ends with a warning counting the skipped messages per topic.
+
+Give each bag once. The same bag given twice (however the path is spelled,
+including a bag directory and a storage file inside it) is refused, since every
+ping in it would be counted twice. Bags that only overlap in time (a re-cut of
+part of a recording beside the original) are not detected: pings recorded in
+both are counted once per bag, so leave the duplicate out.
+
+The CSV is written to a temp file beside `-o` and renamed over it, so a failed
+run leaves an existing curve untouched. A symlinked `-o` is written through to
+its target (the link stays), and `-o /dev/stdout` or another device or pipe is
+written directly. An existing writable file in a directory where no temp file
+can be created (a read-only directory) is written in place, with a warning
+that a failure part-way would leave it truncated; a new file there is refused
+with an error naming the directory.
+
+**Header provenance.** Every line above the CSV column row is a
+`# key: value` comment. The loader (and the marine_tools SonarInfo mirror)
+reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:
+
+| Key | Written | Meaning |
+|---|---|---|
+| `tl_removed` | always | `true` for a tier-2 curve |
+| `absorption_db_per_m` | tier-2 | the alpha the estimator applies |
+| `absorption_source` | tier-2 | `computed` (Francois-Garrison) or `override` |
+| `water_temp_c` | tier-2, when known | temperature used or recorded |
+| `salinity_psu`, `ph`, `depth_m`, `frequency_khz` | computed alpha | the model inputs (frequency = median per-ping `ping_info.frequency`) |
+| `tl_model` | tier-2 | the TL formula |
+| `box` | with `--box` | `LATMIN LONMIN LATMAX LONMAX` |
+| `source_bags` | always | comma-separated basenames of the input bags |
+
 ## Live prior-gate prime (`prior_store_dir`)
 
 `cube_bathymetry_node` accepts an optional **`prior_store_dir`** parameter (empty

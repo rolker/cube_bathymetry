@@ -432,6 +432,21 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
+  # Golden curve written by derive_angular_response.py (#170): the Python test
+  # checks the script still writes it, this test checks the C++ loader reads it.
+  target_compile_definitions(test_angular_response_curve PRIVATE
+    DERIVED_CURVE_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/derived_curve_tier2_seawater.csv")
+
+  # derive_angular_response.py (#170): Francois-Garrison absorption, argument
+  # validation, header provenance, freshwater byte-identity with the pre-#170
+  # tool, ECEF -> geodetic, and an end-to-end --box run over a synthetic bag
+  # (rosbag2 + tf2). Writes only under pytest's tmp_path; no DDS traffic, but
+  # the isolated environment is applied like the other tests that import rclpy.
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_derive_angular_response
+    test/test_derive_angular_response.py
+    TIMEOUT 120
+    ENV ${CUBE_ISOLATED_TEST_ENV})
 
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)
   target_link_libraries(test_sonar_info_curve cube_bathymetry_sonar_info_curve)

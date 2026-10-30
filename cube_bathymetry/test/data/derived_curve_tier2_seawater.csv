@@ -1,0 +1,17 @@
+# Empirical angular response (derive_angular_response.py, cube#81)
+# tl_removed: true
+# absorption_db_per_m: 0.125363
+# absorption_source: computed
+# water_temp_c: 15.5
+# salinity_psu: 31
+# ph: 8
+# depth_m: 0
+# frequency_khz: 500
+# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)
+# box: 42.95 -70.65 43 -70.58
+# source_bags: shoals_2026-08-26_a,shoals_2026-08-26_b
+abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir
+1.0,2.307,100,+0.000
+3.0,0.261,80,-2.046
+5.0,2.013,50,-0.294
+15.0,11.779,10,+9.472
