@@ -1411,6 +1411,90 @@ def test_ping_locator_future_jump_is_judged_per_frame():
     assert [(r[0], r[2]) for r in loc.drain(flush=True)] == [(ping, 'extrapolation')]
 
 
+def _link_tf(parent, child, t_sec, xyz=(0.0, 0.0, 0.0)):
+    """Return a TFMessage holding one parent -> child transform at t_sec."""
+    from tf2_msgs.msg import TFMessage
+    return TFMessage(transforms=[_transform(parent, child, t_sec, xyz)])
+
+
+def _feed_slow_earth_chain(loc, until_sec):
+    """
+    earth -> map at 0.1 Hz (100 s, 110 s, ...) and map -> base_link at 10 Hz.
+
+    Also earth -> buoy at 10 Hz, an unrelated frame. Fed in time order up to,
+    but not including, ``until_sec``.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    for k in range(1000, int(round(until_sec * 10))):
+        sec = k / 10.0
+        if k % 100 == 0:
+            loc.add_tf(_link_tf('earth', 'map', sec, inside), False, _ns(k // 10))
+        loc.add_tf(_link_tf('map', 'base_link', sec), False, int(round(sec * 1e9)))
+        loc.add_tf(_link_tf('earth', 'buoy', sec, inside), False, int(round(sec * 1e9)))
+
+
+def test_ping_locator_waits_for_the_slowest_link_of_its_chain():
+    """
+    A ping waits for every dynamic link of its chain, not the newest stamp of any frame.
+
+    The fast map -> base_link and the unrelated buoy pass the ping long before
+    the 0.1 Hz earth -> map does; released then (import_bag's frontier) it
+    would drop as extrapolation, with only the 100 s earth -> map read.
+    """
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    ping = _push(loc, 101, 0)
+    _feed_slow_earth_chain(loc, 110.0)
+    assert list(loc.drain()) == []
+    assert loc.chain_frontier('mbes') == _ns(100)
+    _feed_slow_earth_chain(loc, 110.1)   # earth -> map at 110 s
+    got = list(loc.drain())
+    assert [(r[0], r[2]) for r in got] == [(ping, None)]
+    assert got[0][1] == (pytest.approx(INSIDE[0]), pytest.approx(INSIDE[1]))
+
+
+def test_ping_locator_releases_a_ping_held_by_a_stalled_link():
+    """Once the newest stamp of any frame is cache - guard past a ping, it leaves anyway."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_link_tf('earth', 'map', 100.0, inside), False, _ns(100))
+    ping = _push(loc, 101, 0)
+    release = 101.0 + dar.TF_CACHE_SEC - dar.TF_GUARD_SEC
+    for k in range(1000, int(round(release * 10))):   # earth -> map has stopped
+        loc.add_tf(_link_tf('map', 'base_link', k / 10.0), False, int(round(k * 1e8)))
+    assert list(loc.drain()) == []
+    loc.add_tf(_link_tf('map', 'base_link', release), False, _ns(int(release)))
+    assert [(r[0], r[2]) for r in loc.drain()] == [(ping, 'extrapolation')]
+
+
+def test_ping_locator_static_chain_and_unconnected_frame():
+    """
+    A chain of static links is ready at once; an unconnected frame waits for the overall frontier.
+
+    Static transforms never change, so nothing needs to be waited for; a frame
+    with no path to earth yet is released as import_bag would and drops as no_tf.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_link_tf('earth', 'buoy', 0.0, inside), True)
+    assert loc.chain_frontier('buoy') == math.inf
+    buoy = _push(loc, 50, 0, frame_id='buoy')
+    assert [(r[0], r[2]) for r in loc.drain()] == [(buoy, None)]
+    orphan = _push(loc, 100, 0, frame_id='orphan')
+    assert loc.chain_frontier('orphan') is None and list(loc.drain()) == []
+    loc.add_tf(_earth_tf_at(103, 0, inside), False, _ns(103))
+    assert [(r[0], r[2]) for r in loc.drain()] == [(orphan, 'no_tf')]
+
+
+def test_ping_locator_chain_with_a_cycle_does_not_hang():
+    """A parent loop in the transforms read so far reads as not connected to earth."""
+    loc = dar.PingLocator()
+    loc.add_tf(_link_tf('a', 'b', 100.0), False, _ns(100))
+    loc.add_tf(_link_tf('b', 'a', 100.0), False, _ns(100))
+    assert loc.chain_frontier('a') == _ns(100)   # the overall frontier
+
+
 def test_ping_locator_rejects_unset_stamp():
     """A zero stamp is dropped as bad_stamp, never read as tf2's "latest"."""
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)

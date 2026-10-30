@@ -753,9 +753,18 @@ the way `import_bag` georeferences:
 - `/tf` and `/tf_static` from every namespace go into that one buffer. In a
   bag that records several vehicles their TF trees share it, so their frame
   names must not collide (`import_bag` has the same limitation).
-- Each ping waits until the TF stream is 3 s past its stamp, so the transforms
-  on both sides of it have been read, and `earth -> <detections frame>` is then
-  looked up exactly at the ping stamp, interpolated between them. There is no
+- Each ping waits until every dynamic link of `earth -> ... -> <detections
+  frame>` is 3 s past its stamp, so the transforms on both sides of it have
+  been read for each link, and `earth -> <detections frame>` is then looked up
+  exactly at the ping stamp, interpolated between them. A slow link (say
+  `earth -> map` at 0.1 Hz beside a 10 Hz `map -> base_link`) holds the ping
+  until its next transform arrives; `import_bag` waits only for the newest
+  transform of any frame, so there a link slower than one transform every 3 s
+  loses pings. A ping is released anyway once the newest transform of any
+  frame is 57 s past it (the faster links are then about to drop it from the
+  60 s buffer), so every dynamic link must publish at least about once a
+  minute. A ping whose frame is not yet connected to `earth` waits only for
+  the newest transform of any frame, as in `import_bag`. There is no
   fallback to the latest transform. Waiting pings leave in stamp order, so one
   ping with a bad future stamp does not hold back the rest. Pings still
   waiting when the bags end are looked up against what was read.
@@ -773,8 +782,9 @@ the way `import_bag` georeferences:
   warning counts them instead of tf2 printing a line for each.
 - The ECEF position of the sensor is converted to latitude/longitude.
 - Pings waiting for the TF stream are held in memory, about 13 bytes per beam
-  (7 KB for a 512-beam ping). Normally that is the last few seconds of pings;
-  the report prints the most that waited at once. A run whose bags have no
+  (7 KB for a 512-beam ping). Normally that is the last few seconds of pings,
+  or the publishing interval of the slowest link in the chain (at most about
+  a minute); the report prints the most that waited at once. A run whose bags have no
   `/tf` topic at all is refused before reading, since every ping would wait
   until the end.
 
