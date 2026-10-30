@@ -304,7 +304,7 @@ class PingLocator:
 
     @property
     def pending(self):
-        """Number of pings waiting for the TF frontier."""
+        """Return the number of pings waiting for the TF frontier."""
         return len(self._pending)
 
     def drain(self, flush=False):
