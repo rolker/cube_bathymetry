@@ -243,6 +243,15 @@ def test_salinity_without_remove_tl_warns(capsys):
     assert 'ignored without --remove-tl' in capsys.readouterr().err
 
 
+@pytest.mark.parametrize('extra', [
+    ['--water-temp-c', '15'], ['--depth-m', '20'], ['--ph', '8.1']])
+def test_absorption_inputs_without_remove_tl_warn(extra, capsys):
+    """Every absorption input given without --remove-tl warns, none silently."""
+    dar.parse_args(BASE + extra)
+    err = capsys.readouterr().err
+    assert extra[0] in err and 'ignored without --remove-tl' in err
+
+
 def test_box_parsed():
     """--box takes four floats."""
     args = dar.parse_args(BASE + ['--box', '42.95', '-70.65', '43.0', '-70.58'])

@@ -444,8 +444,10 @@ def parse_args(argv):
         p.error('--water-temp-c is required when --remove-tl is set (or give '
                 '--absorption-db-per-m)')
     if not args.remove_tl:
-        ignored = [flag for flag, value in (('--salinity', args.salinity),
-                                            ('--ph', args.ph))
+        ignored = [flag for flag, value in (('--water-temp-c', args.water_temp_c),
+                                            ('--salinity', args.salinity),
+                                            ('--ph', args.ph),
+                                            ('--depth-m', args.depth_m))
                    if value is not None]
         if ignored:
             print('warning: %s only feed(s) the tier-2 absorption and is '
