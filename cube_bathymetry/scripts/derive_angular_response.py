@@ -63,6 +63,18 @@ input bag, so a per-site curve can be traced to that site's data. All header
 lines are ``# key: value`` comments; the C++ loader reads only ``tl_removed``
 and ``absorption_db_per_m`` and ignores the rest.
 
+Site box (cube_bathymetry#170): with ``--box LATMIN LONMIN LATMAX LONMAX``
+(degrees, WGS84) only pings whose sensor position lies inside the box are
+binned, so a per-site curve can be derived from bags that mix survey and
+transit. Each ping is positioned from the bag's own TF tree, as the C++
+importer georeferences it: ``/tf`` and ``/tf_static`` (any namespace) are read
+in the same time-ordered pass as the detections into a tf2 buffer, and
+``earth -> <header.frame_id>`` is looked up at the ping stamp (or the latest
+transform, if it is within 1 s of the stamp). The ECEF translation is converted
+to latitude/longitude in closed form. Pings outside the box and pings with no
+usable earth transform are dropped, counted and reported, and the box is
+recorded in the header. Without ``--box`` no TF is read.
+
 Usage:
     derive_angular_response.py <bag> [<bag> ...] -t <topic> -o <out.csv>
     derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
@@ -71,6 +83,8 @@ Usage:
         --remove-tl --water-temp-c 15.5 --salinity 31
     derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
         --remove-tl --absorption-db-per-m 0.130
+    derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
+        --box 42.95 -70.65 43.00 -70.58 --remove-tl --water-temp-c 15.5 --salinity 31
 """
 
 import argparse
@@ -92,6 +106,23 @@ DEPTH_M_RANGE = (0.0, 12000.0)
 # water at 2 MHz and 10 C is ~1.2 dB/m, and multibeam echosounders run lower.
 MAX_ABSORPTION_DB_PER_M = 5.0
 
+# WGS84 ellipsoid (semi-major axis a, flattening f).
+WGS84_A = 6378137.0
+WGS84_F = 1.0 / 298.257223563
+WGS84_B = WGS84_A * (1.0 - WGS84_F)
+WGS84_E2 = WGS84_F * (2.0 - WGS84_F)                       # first eccentricity^2
+WGS84_EP2 = (WGS84_A ** 2 - WGS84_B ** 2) / WGS84_B ** 2   # second eccentricity^2
+
+# --box TF lookups. The bag is read in time order, so the buffer only has to
+# hold the transforms bracketing the pings being read; 300 s is far beyond that
+# (tf2's default is 10 s) without keeping a whole survey day in memory. A ping
+# whose exact stamp cannot be interpolated (typically: it arrived before the
+# next earth transform) takes the latest transform if that is within the
+# tolerance of the ping stamp.
+TF_CACHE_SEC = 300.0
+TF_LATEST_TOLERANCE_SEC = 1.0
+EARTH_FRAME = 'earth'
+
 
 def check_absorption_inputs(temp_c, salinity_psu, ph, depth_m):
     """Raise ValueError naming the first non-finite or implausible input."""
@@ -103,6 +134,134 @@ def check_absorption_inputs(temp_c, salinity_psu, ph, depth_m):
         if not math.isfinite(value) or not lo <= value <= hi:
             raise ValueError('%s %r is outside the plausible range [%g, %g]'
                              % (name, value, lo, hi))
+
+
+def ecef_to_geodetic(x, y, z):
+    """
+    Convert WGS84 ECEF metres to ``(lat_deg, lon_deg, height_m)``, closed form.
+
+    Heikkinen's exact closed-form solution (Zhu 1993, "Conversion of
+    Earth-centered Earth-fixed coordinates to geodetic coordinates"); no
+    iteration and no pyproj. Accurate to well under a millimetre at the
+    Earth's surface. On the polar axis (p = 0) it returns lat = +/-90 directly.
+    """
+    a = WGS84_A
+    b = WGS84_B
+    e2 = WGS84_E2
+    p = math.hypot(x, y)
+    lon = math.degrees(math.atan2(y, x))
+    if p < 1e-9:
+        lat = 90.0 if z >= 0.0 else -90.0
+        return lat, lon, abs(z) - b
+    z2 = z * z
+    big_f = 54.0 * b * b * z2
+    g = p * p + (1.0 - e2) * z2 - e2 * (a * a - b * b)
+    c = e2 * e2 * big_f * p * p / (g ** 3)
+    s = (1.0 + c + math.sqrt(c * c + 2.0 * c)) ** (1.0 / 3.0)
+    k = s + 1.0 + 1.0 / s
+    big_p = big_f / (3.0 * k * k * g * g)
+    q = math.sqrt(1.0 + 2.0 * e2 * e2 * big_p)
+    r0 = (-big_p * e2 * p / (1.0 + q)
+          + math.sqrt(0.5 * a * a * (1.0 + 1.0 / q)
+                      - big_p * (1.0 - e2) * z2 / (q * (1.0 + q))
+                      - 0.5 * big_p * p * p))
+    u = math.sqrt((p - e2 * r0) ** 2 + z2)
+    v = math.sqrt((p - e2 * r0) ** 2 + (1.0 - e2) * z2)
+    z0 = b * b * z / (a * v)
+    height = u * (1.0 - b * b / (a * v))
+    lat = math.degrees(math.atan2(z + WGS84_EP2 * z0, p))
+    return lat, lon, height
+
+
+def check_box(box):
+    """Raise ValueError unless ``box`` is a valid (latmin, lonmin, latmax, lonmax)."""
+    lat_min, lon_min, lat_max, lon_max = box
+    if not all(math.isfinite(v) for v in box):
+        raise ValueError('--box values must be finite, got %r' % (box,))
+    if not (-90.0 <= lat_min < lat_max <= 90.0):
+        raise ValueError('--box needs -90 <= LATMIN < LATMAX <= 90, got %g %g'
+                         % (lat_min, lat_max))
+    if not (-180.0 <= lon_min < lon_max <= 180.0):
+        raise ValueError('--box needs -180 <= LONMIN < LONMAX <= 180, got %g %g '
+                         '(a box across the antimeridian is not supported)'
+                         % (lon_min, lon_max))
+
+
+def in_box(lat, lon, box):
+    """Return True when (lat, lon) lies inside ``box`` (edges inclusive)."""
+    lat_min, lon_min, lat_max, lon_max = box
+    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
+
+
+def is_tf_topic(name):
+    """Return 'tf', 'tf_static' or None for a (possibly namespaced) topic name."""
+    if name == '/tf' or name.endswith('/tf'):
+        return 'tf'
+    if name == '/tf_static' or name.endswith('/tf_static'):
+        return 'tf_static'
+    return None
+
+
+class PingLocator:
+    """
+    Position pings from one bag's own TF tree (``earth -> sensor frame``).
+
+    Feed every ``/tf`` and ``/tf_static`` message with add_tf as it is read, in
+    bag order; locate then looks the ping up at its stamp, falling back to the
+    latest earth transform within ``tolerance_sec`` of the stamp (the same
+    exact-or-latest pattern as the C++ DetectionsProjector, with a staleness
+    bound added).
+    """
+
+    def __init__(self, cache_sec=TF_CACHE_SEC, tolerance_sec=TF_LATEST_TOLERANCE_SEC):
+        """Create an empty buffer holding ``cache_sec`` of dynamic transforms."""
+        import tf2_ros
+        from rclpy.duration import Duration
+
+        self._tf2_ros = tf2_ros
+        self._buffer = tf2_ros.Buffer(cache_time=Duration(seconds=cache_sec))
+        self._tolerance_ns = int(tolerance_sec * 1e9)
+
+    def add_tf(self, tf_message, is_static):
+        """Insert every transform of a tf2_msgs/TFMessage into the buffer."""
+        for t in tf_message.transforms:
+            if is_static:
+                self._buffer.set_transform_static(t, 'bag')
+            else:
+                self._buffer.set_transform(t, 'bag')
+
+    def locate(self, frame_id, stamp):
+        """
+        Return ``((lat_deg, lon_deg), None)`` or ``(None, reason)``.
+
+        ``stamp`` is a builtin_interfaces/Time. ``reason`` is ``'no_tf'`` when
+        there is no earth transform for the frame at all, and ``'stale_tf'``
+        when the nearest one is more than the tolerance away from the stamp.
+        """
+        from rclpy.time import Time
+
+        tf2_ros = self._tf2_ros
+        ping_time = Time.from_msg(stamp)
+        try:
+            t = self._buffer.lookup_transform_core(EARTH_FRAME, frame_id, ping_time)
+        except tf2_ros.ExtrapolationException:
+            try:
+                t = self._buffer.lookup_transform_core(EARTH_FRAME, frame_id, Time())
+            except tf2_ros.TransformException:
+                return None, 'no_tf'
+            latest_ns = Time.from_msg(t.header.stamp).nanoseconds
+            if abs(latest_ns - ping_time.nanoseconds) > self._tolerance_ns:
+                return None, 'stale_tf'
+        except tf2_ros.TransformException:
+            return None, 'no_tf'
+        tr = t.transform.translation
+        lat, lon, _height = ecef_to_geodetic(tr.x, tr.y, tr.z)
+        return (lat, lon), None
+
+
+def new_box_stats():
+    """Return zeroed --box ping counters (kept / outside / no_tf / stale_tf)."""
+    return {'kept': 0, 'outside': 0, 'no_tf': 0, 'stale_tf': 0}
 
 
 def parse_args(argv):
@@ -143,7 +302,18 @@ def parse_args(argv):
                         "it, e.g. a path-averaged value from the site's casts. "
                         'Requires --remove-tl; excludes --salinity, --ph and '
                         '--depth-m')
+    p.add_argument('--box', type=float, nargs=4, default=None,
+                   metavar=('LATMIN', 'LONMIN', 'LATMAX', 'LONMAX'),
+                   help="keep only pings whose sensor position (from the bag's "
+                        'TF tree, earth -> detections frame) lies inside this '
+                        'WGS84 box, degrees; for deriving a per-site curve from '
+                        'bags that mix survey and transit')
     args = p.parse_args(argv)
+    if args.box is not None:
+        try:
+            check_box(args.box)
+        except ValueError as e:
+            p.error(str(e))
     override = args.absorption_db_per_m is not None
     if override:
         if not args.remove_tl:
@@ -268,7 +438,8 @@ def open_reader(bag_path):
     return reader
 
 
-def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
+def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs,
+               box=None, box_stats=None):
     """
     Accumulate per-bin sums on `topic` into `bins` (merged across bags).
 
@@ -283,6 +454,13 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
       median frequency -- a single pass over the bag.
 
     `freqs` collects each ping's ``ping_info.frequency`` (Hz) for the median.
+
+    With `box` (latmin, lonmin, latmax, lonmax) the reader is filtered to the
+    detections topic plus every /tf and /tf_static topic in this bag, read in
+    one time-ordered pass: TF messages feed a PingLocator, and each ping is
+    binned only if its sensor position lies inside the box. `box_stats` (see
+    new_box_stats) counts kept and dropped pings across bags; pings that are
+    dropped contribute neither samples nor a frequency.
     Returns the number of messages read on `topic`.
     """
     from rclpy.serialization import deserialize_message
@@ -295,13 +473,38 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
             % (topic, ', '.join(sorted(type_map)) or 'none'))
     msg_type = get_message(type_map[topic])
 
+    locator = None
+    tf_topics = {}
+    if box is not None:
+        import rosbag2_py
+
+        tf_topics = {name: kind for name, type_name in type_map.items()
+                     for kind in (is_tf_topic(name),)
+                     if kind is not None and type_name == 'tf2_msgs/msg/TFMessage'}
+        reader.set_filter(rosbag2_py.StorageFilter(topics=[topic] + sorted(tf_topics)))
+        tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
+        locator = PingLocator()
+
     n_msgs = 0
     while reader.has_next():
         name, data, _stamp = reader.read_next()
+        if name in tf_topics:
+            locator.add_tf(deserialize_message(data, tf_msg_type),
+                           tf_topics[name] == 'tf_static')
+            continue
         if name != topic:
             continue
         msg = deserialize_message(data, msg_type)
         n_msgs += 1
+        if locator is not None:
+            position, reason = locator.locate(msg.header.frame_id, msg.header.stamp)
+            if position is None:
+                box_stats[reason] += 1
+                continue
+            if not in_box(position[0], position[1], box):
+                box_stats['outside'] += 1
+                continue
+            box_stats['kept'] += 1
         intensities = msg.intensities
         rx_angles = msg.rx_angles
         twtt = msg.two_way_travel_times
@@ -372,7 +575,7 @@ def bag_basenames(bag_paths):
 
 def build_header(remove_tl, source_bags, alpha=None, absorption_source=None,
                  water_temp_c=None, salinity_psu=None, ph=None, depth_m=None,
-                 frequency_khz=None):
+                 frequency_khz=None, box=None):
     """
     Return the curve CSV's comment header lines (without newlines).
 
@@ -382,6 +585,8 @@ def build_header(remove_tl, source_bags, alpha=None, absorption_source=None,
     provenance for people and is ignored by them. Tier-2 lines whose value is
     unknown (None) are omitted -- with an alpha override there is no salinity,
     pH, depth or frequency behind alpha, and the temperature is optional.
+    ``box`` (the --box site filter) is recorded as
+    ``# box: LATMIN LONMIN LATMAX LONMAX`` when given.
     """
     lines = ['# Empirical angular response (derive_angular_response.py, cube#81)']
     if remove_tl:
@@ -400,6 +605,8 @@ def build_header(remove_tl, source_bags, alpha=None, absorption_source=None,
         lines.append('# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)')
     else:
         lines.append('# tl_removed: false')
+    if box is not None:
+        lines.append('# box: %s' % ' '.join('%.9g' % v for v in box))
     lines.append('# source_bags: %s' % ','.join(source_bags))
     return lines
 
@@ -476,11 +683,24 @@ def main(argv=None):
 
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)
+    box_stats = new_box_stats() if args.box is not None else None
     n_msgs = 0
     for bag_path in args.bag:
         reader = open_reader(bag_path)
         n_msgs += accumulate(
-            reader, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs)
+            reader, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
+            box=args.box, box_stats=box_stats)
+    if box_stats is not None:
+        print('box %s: kept %d of %d pings; dropped %d outside the box, %d with '
+              'no earth transform, %d with an earth transform more than %g s '
+              'from the ping'
+              % (' '.join('%g' % v for v in args.box), box_stats['kept'], n_msgs,
+                 box_stats['outside'], box_stats['no_tf'], box_stats['stale_tf'],
+                 TF_LATEST_TOLERANCE_SEC))
+        if box_stats['kept'] == 0:
+            raise SystemExit('error: no pings inside --box; nothing to derive '
+                             '(check the box corners are LATMIN LONMIN LATMAX '
+                             'LONMAX and the bags carry earth TF)')
 
     alpha = 0.0
     if args.remove_tl:
@@ -490,7 +710,7 @@ def main(argv=None):
                   % alpha)
             header = build_header(
                 True, source_bags, alpha=alpha, absorption_source=source,
-                water_temp_c=args.water_temp_c)
+                water_temp_c=args.water_temp_c, box=args.box)
         else:
             print('tier-2: median frequency %.1f kHz, T=%.1f C, S=%g psu, '
                   'pH=%g, D=%.1f m -> alpha=%.6g dB/m'
@@ -499,9 +719,10 @@ def main(argv=None):
             header = build_header(
                 True, source_bags, alpha=alpha, absorption_source=source,
                 water_temp_c=args.water_temp_c, salinity_psu=args.salinity,
-                ph=args.ph, depth_m=args.depth_m, frequency_khz=freq_khz)
+                ph=args.ph, depth_m=args.depth_m, frequency_khz=freq_khz,
+                box=args.box)
     else:
-        header = build_header(False, source_bags)
+        header = build_header(False, source_bags, box=args.box)
 
     n_rows = write_csv(
         bins, args.bin_width_deg, args.output, args.remove_tl, alpha, header)
