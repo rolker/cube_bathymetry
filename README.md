@@ -760,10 +760,10 @@ the way `import_bag` georeferences:
   `earth -> map` at 0.1 Hz beside a 10 Hz `map -> base_link`) holds the ping
   until its next transform arrives; `import_bag` waits only for the newest
   transform of any frame, so there a link slower than one transform every 3 s
-  loses pings. A ping is released anyway once the newest transform of any
-  frame is 57 s past it (the faster links are then about to drop it from the
-  60 s buffer), so every dynamic link must publish at least about once a
-  minute. A ping whose frame is not yet connected to `earth` waits only for
+  loses pings. A ping is released anyway once the newest transform of a link
+  of its own chain is 57 s past it (that link is then about to drop it from
+  the 60 s buffer), so every dynamic link must publish at least about once a
+  minute; another frame whose clock runs ahead does not release it early. A ping whose frame is not yet connected to `earth` waits only for
   the newest transform of any frame, as in `import_bag`. There is no
   fallback to the latest transform. Waiting pings leave in stamp order, so one
   ping with a bad future stamp does not hold back the rest. Pings still

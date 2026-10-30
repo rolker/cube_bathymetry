@@ -79,8 +79,8 @@ georeferences it:
   must not collide (import_bag behaves the same);
 * each ping waits until every dynamic link of ``earth -> ... -> <frame>`` has
   advanced 3 s past its stamp (but no longer than about 57 s after the
-  newest transform of any frame passes it, so every link of the chain must
-  publish at least about once a minute), so the
+  newest transform of a link of that chain passes it, so every link of the
+  chain must publish at least about once a minute), so the
   transforms on both sides of it are in the buffer, then ``earth ->
   <header.frame_id>`` is looked up exactly at the ping stamp, interpolated
   between them. There is no fallback to the latest transform: a ping outside
@@ -320,11 +320,14 @@ class PingLocator:
     newest stamp of any frame, releases it early and the ping drops as
     extrapolation. Two bounds keep a stalled link from holding pings forever:
     a ping whose chain does not reach ``earth`` yet waits for the newest stamp
-    of any frame (the overall frontier), as in import_bag, and any ping is
-    released once the overall frontier is ``cache_sec - guard_sec`` past it,
-    since by then its chain's faster links are about to drop the transforms
-    around it from the cache. So a dynamic link publishing less often than
-    about once a minute still loses pings.
+    of any frame (the overall frontier), as in import_bag, and any other ping
+    is released once the newest frontier among its own chain's dynamic links
+    is ``cache_sec - guard_sec`` past it, since by then that link is about to
+    drop the transforms around it from the cache (tf2 prunes per frame). Using
+    the chain's own links, not the overall frontier, keeps another frame whose
+    clock offset runs ahead from releasing this chain's pings early. So a
+    dynamic link publishing less often than about once a minute still loses
+    pings.
     """
 
     def __init__(self, cache_sec=TF_CACHE_SEC, guard_sec=TF_GUARD_SEC,
@@ -407,19 +410,32 @@ class PingLocator:
         frontier (None before any dynamic transform) when the chain does not
         reach ``earth`` from what has been read so far.
         """
-        frontier = math.inf
+        links = self._chain_link_frontiers(frame_id)
+        return self._frontier_ns if links is None else links[0]
+
+    def _chain_link_frontiers(self, frame_id):
+        """
+        Return the oldest and newest frontier of the dynamic links from ``earth`` to ``frame_id``.
+
+        Both ``math.inf`` when every link is static; None when the chain does
+        not reach ``earth`` from what has been read so far (or loops).
+        """
+        oldest = newest = None
         frame = frame_id
         seen = set()
         while frame != EARTH_FRAME:
             parent = self._parent.get(frame)
             if parent is None or frame in seen:
-                return self._frontier_ns   # not (yet) connected to earth
+                return None   # not (yet) connected to earth
             seen.add(frame)
             link = self._link_frontier_ns.get(frame)
-            if link is not None and link < frontier:
-                frontier = link
+            if link is not None:
+                oldest = link if oldest is None else min(oldest, link)
+                newest = link if newest is None else max(newest, link)
             frame = parent
-        return frontier
+        if oldest is None:
+            return math.inf, math.inf
+        return oldest, newest
 
     def transform_reject_reason(self, t, is_static, bag_ns=None):
         """
@@ -501,8 +517,9 @@ class PingLocator:
         Yield ``(item, position, reason)`` for each ping that is ready.
 
         A ping is ready once ``ping stamp <= chain_frontier - guard``, or
-        ``ping stamp <= overall frontier - (cache - guard)`` (see the class
-        docstring), or for every waiting ping with ``flush``. Pings leave in
+        ``ping stamp <= newest frontier of the chain's dynamic links - (cache -
+        guard)`` (see the class docstring), or for every waiting ping with
+        ``flush``. Pings leave in
         stamp order, not arrival order, so one ping with a far-future stamp
         does not hold back the pings that arrived after it (import_bag's
         first-in-first-out deque does); a ping waiting on a slow link holds
@@ -519,10 +536,13 @@ class PingLocator:
 
     def _ready(self, ping_ns, frame_id):
         """Return True when the ping at ``ping_ns`` in ``frame_id`` can be looked up."""
-        if self._frontier_ns is not None and ping_ns <= self._frontier_ns - self._release_ns:
-            return True
-        frontier = self.chain_frontier(frame_id)
-        return frontier is not None and ping_ns <= frontier - self._guard_ns
+        links = self._chain_link_frontiers(frame_id)
+        if links is None:   # not connected to earth: the overall frontier
+            return (self._frontier_ns is not None
+                    and ping_ns <= self._frontier_ns - self._guard_ns)
+        oldest, newest = links
+        return (ping_ns <= oldest - self._guard_ns
+                or ping_ns <= newest - self._release_ns)
 
     def locate(self, frame_id, ping_ns):
         """

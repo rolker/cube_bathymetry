@@ -1499,7 +1499,7 @@ def test_ping_locator_waits_for_the_slowest_link_of_its_chain():
 
 
 def test_ping_locator_releases_a_ping_held_by_a_stalled_link():
-    """Once the newest stamp of any frame is cache - guard past a ping, it leaves anyway."""
+    """Once its chain's newest link stamp is cache - guard past a ping, it leaves anyway."""
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
     loc = dar.PingLocator()
     loc.add_tf(_mbes_static(), True)
@@ -1511,6 +1511,34 @@ def test_ping_locator_releases_a_ping_held_by_a_stalled_link():
     assert list(loc.drain()) == []
     loc.add_tf(_link_tf('map', 'base_link', release), False, _ns(int(release)))
     assert [(r[0], r[2]) for r in loc.drain()] == [(ping, 'extrapolation')]
+
+
+def test_ping_locator_release_bound_is_per_chain():
+    """
+    Another frame whose clock runs 90 s ahead does not release a chain's pings early.
+
+    earth -> base_link at 1 Hz with no offset beside earth -> buoy at 10 Hz
+    stamped 90 s ahead of the bag time: the 57 s release is measured on each
+    chain's own links, so every ping on both chains is positioned.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    tokens = []
+    got = []
+    for k in range(1000, 1600):
+        sec = k / 10.0
+        bag = int(round(sec * 1e9))
+        if k % 10 == 0:
+            loc.add_tf(_link_tf('earth', 'base_link', sec, inside), False, bag)
+        loc.add_tf(_link_tf('earth', 'buoy', sec + 90.0, inside), False, bag)
+        if k % 10 == 5 and k < 1400:
+            tokens.append(_push(loc, k // 10, 500000000))
+            tokens.append(_push(loc, k // 10 + 90, 500000000, frame_id='buoy'))
+        got += [(r[0], r[2]) for r in loc.drain()]
+    got += [(r[0], r[2]) for r in loc.drain(flush=True)]
+    assert loc.tf_rejected == {}
+    assert sorted(got) == sorted((token, None) for token in tokens)
 
 
 def test_ping_locator_static_chain_and_unconnected_frame():
