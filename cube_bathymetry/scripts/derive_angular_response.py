@@ -56,6 +56,13 @@ The absorption alpha (cube_bathymetry#170) is either
 Take T and S from casts at the site, not from the boat's surface temperature
 alone; in salt water salinity is the dominant term.
 
+Provenance (cube_bathymetry#170): the header also records how alpha was
+obtained (``absorption_source``, ``salinity_psu``, ``ph``, ``depth_m``,
+``frequency_khz``) and ``source_bags``, the comma-separated basenames of every
+input bag, so a per-site curve can be traced to that site's data. All header
+lines are ``# key: value`` comments; the C++ loader reads only ``tl_removed``
+and ``absorption_db_per_m`` and ignores the rest.
+
 Usage:
     derive_angular_response.py <bag> [<bag> ...] -t <topic> -o <out.csv>
     derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
@@ -68,6 +75,7 @@ Usage:
 
 import argparse
 import math
+import os
 import sys
 
 DEFAULT_PH = 8.0
@@ -343,14 +351,67 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
     return n_msgs
 
 
-def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
+def bag_basenames(bag_paths):
     """
-    Write the binned means and db_relative_to_nadir to a curve CSV.
+    Return the basenames of ``bag_paths`` for the ``source_bags`` header line.
+
+    A trailing slash on a bag directory is ignored. A name that cannot be
+    recorded unambiguously on one comma-separated header line (it contains a
+    comma, a line break, or is empty) is refused rather than mangled.
+    """
+    names = []
+    for path in bag_paths:
+        name = os.path.basename(os.path.normpath(path))
+        if not name or name in ('.', '..') or any(ch in name for ch in ',\r\n'):
+            raise SystemExit(
+                'error: bag name %r cannot be recorded in the source_bags '
+                'header (empty, or contains a comma or line break)' % path)
+        names.append(name)
+    return names
+
+
+def build_header(remove_tl, source_bags, alpha=None, absorption_source=None,
+                 water_temp_c=None, salinity_psu=None, ph=None, depth_m=None,
+                 frequency_khz=None):
+    """
+    Return the curve CSV's comment header lines (without newlines).
+
+    Every provenance line is a ``# key: value`` comment. The C++ loader
+    (``loadAngularResponseCurveWithHeader``) and its marine_tools Python mirror
+    read only ``tl_removed`` and ``absorption_db_per_m``; every other key is
+    provenance for people and is ignored by them. Tier-2 lines whose value is
+    unknown (None) are omitted -- with an alpha override there is no salinity,
+    pH, depth or frequency behind alpha, and the temperature is optional.
+    """
+    lines = ['# Empirical angular response (derive_angular_response.py, cube#81)']
+    if remove_tl:
+        # Self-describing tier-2 header (cube#87): the estimator reads
+        # tl_removed + absorption_db_per_m and applies the identical TL.
+        lines.append('# tl_removed: true')
+        lines.append('# absorption_db_per_m: %.6g' % alpha)
+        lines.append('# absorption_source: %s' % absorption_source)
+        for key, value in (('water_temp_c', water_temp_c),
+                           ('salinity_psu', salinity_psu),
+                           ('ph', ph),
+                           ('depth_m', depth_m),
+                           ('frequency_khz', frequency_khz)):
+            if value is not None:
+                lines.append('# %s: %.6g' % (key, value))
+        lines.append('# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)')
+    else:
+        lines.append('# tl_removed: false')
+    lines.append('# source_bags: %s' % ','.join(source_bags))
+    return lines
+
+
+def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, header_lines):
+    """
+    Write ``header_lines``, then the binned means and db_relative_to_nadir.
 
     For tier-2 (`remove_tl`), the absorption term ``2*alpha*R`` is added here
     (compensated) using the per-bin mean range, completing the TL compensation
-    started in accumulate. The header records the TL provenance so the C++
-    estimator applies the identical model.
+    started in accumulate. ``header_lines`` (see build_header) records the TL
+    provenance so the C++ estimator applies the identical model.
     """
     if not bins:
         raise SystemExit('error: no finite intensity/angle samples found')
@@ -368,17 +429,8 @@ def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
 
     nadir_mean = rows[0][1]  # lowest-angle (nadir-most) bin
     with open(out_path, 'w') as f:
-        f.write('# Empirical angular response (derive_angular_response.py, cube#81)\n')
-        if remove_tl:
-            # Self-describing tier-2 header (cube#87): the estimator reads
-            # tl_removed + absorption_db_per_m and applies the identical TL.
-            f.write('# tl_removed: true\n')
-            f.write('# absorption_db_per_m: %.6g\n' % alpha)
-            if water_temp_c is not None:  # unknown with an alpha override
-                f.write('# water_temp_c: %.3g\n' % water_temp_c)
-            f.write('# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)\n')
-        else:
-            f.write('# tl_removed: false\n')
+        for line in header_lines:
+            f.write(line + '\n')
         f.write('abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n')
         for center, mean_db, n in rows:
             db_rel = mean_db - nadir_mean
@@ -420,6 +472,7 @@ def median(values):
 def main(argv=None):
     """Read the bag(s), bin by |rx_angles| and write the curve CSV (one line)."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    source_bags = bag_basenames(args.bag)  # refuse a bad name before reading
 
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)
@@ -435,15 +488,23 @@ def main(argv=None):
         if source == 'override':
             print('tier-2: alpha=%.6g dB/m (--absorption-db-per-m override)'
                   % alpha)
+            header = build_header(
+                True, source_bags, alpha=alpha, absorption_source=source,
+                water_temp_c=args.water_temp_c)
         else:
             print('tier-2: median frequency %.1f kHz, T=%.1f C, S=%g psu, '
                   'pH=%g, D=%.1f m -> alpha=%.6g dB/m'
                   % (freq_khz, args.water_temp_c, args.salinity, args.ph,
                      args.depth_m, alpha))
+            header = build_header(
+                True, source_bags, alpha=alpha, absorption_source=source,
+                water_temp_c=args.water_temp_c, salinity_psu=args.salinity,
+                ph=args.ph, depth_m=args.depth_m, frequency_khz=freq_khz)
+    else:
+        header = build_header(False, source_bags)
 
     n_rows = write_csv(
-        bins, args.bin_width_deg, args.output,
-        args.remove_tl, alpha, args.water_temp_c if args.remove_tl else None)
+        bins, args.bin_width_deg, args.output, args.remove_tl, alpha, header)
     print('read %d pings across %d bag(s) on %s; wrote %d-bin curve to %s'
           % (n_msgs, len(args.bag), args.topic, n_rows, args.output))
     return 0
