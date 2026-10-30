@@ -445,7 +445,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_derive_angular_response
     test/test_derive_angular_response.py
-    TIMEOUT 120
+    TIMEOUT 300
     ENV ${CUBE_ISOLATED_TEST_ENV})
 
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)

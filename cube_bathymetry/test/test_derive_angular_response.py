@@ -1668,3 +1668,663 @@ def test_ping_locator_drops_non_geocentric_earth_transform():
     loc.add_tf(_mbes_static(), True)
     loc.add_tf(_earth_tf_at(100, 0, (1.0, 1.0, 1.0)), False)
     assert loc.locate('mbes', _ns(100)) == (None, 'bad_position')
+
+
+# ==========================================================================
+# --by-mode: per-pulse-mode table (cube_bathymetry#172)
+# ==========================================================================
+
+MODE_KEYS = HERE / 'data' / 'mode_keys.json'
+MODE_TABLE_FIXTURE = HERE / 'data' / 'angular_response_table_v1.csv'
+REF_KEY = 'FMU_1000us_24000Hz_500kHz'
+CW_KEY = 'CW_50us_20000Hz_500kHz'
+
+
+def _f32(value):
+    """Return a JSON vector value as the float32 a message would carry, widened."""
+    import struct
+    if isinstance(value, str):
+        return float(value)
+    return struct.unpack('f', struct.pack('f', value))[0]
+
+
+def _key_cases():
+    import json
+    return json.loads(MODE_KEYS.read_text())['cases']
+
+
+@pytest.mark.parametrize('case', _key_cases(), ids=lambda c: c['name'])
+def test_mode_key_vectors(case):
+    """The shared key vectors (the spec PR 2's C++ must match) hold."""
+    key = dar.canonical_mode_key([_f32(v) for v in case['pulse_lengths_s']],
+                                 [_f32(v) for v in case['bandwidths_hz']],
+                                 case['tx_signal_types'], _f32(case['frequency_hz']))
+    assert key == case['key']
+    # Letter first (the old loaders' numeric parse rejects the row), no field
+    # or line separators, never the reserved '*'.
+    assert key[0].isalpha()
+    assert not any(c in key for c in ', \t\r\n*')
+
+
+@pytest.mark.parametrize('value,scale,text', [
+    (1000.0, 1.0, '1000'), (24000.0, 1.0, '24000'), (20.0, 1.0, '20'),
+    (0.45, 1.0, '0.45'), (1.5, 1.0, '1.5'), (0.0200, 1.0, '0.02'),
+    (9.996, 1.0, '10'), (123456.0, 1.0, '123000'), (0.001, 1e6, '1000'),
+    (500000.0, 1e-3, '500'), (0.0, 1.0, '?'), (-1.0, 1.0, '?'),
+    (float('nan'), 1.0, '?'), (float('inf'), 1.0, '?'), ('x', 1.0, '?'),
+])
+def test_key_number(value, scale, text):
+    """Key numbers: 3 significant figures, plain decimal, '?' for bad raw values."""
+    assert dar.key_number(value, scale) == text
+
+
+def test_default_sonar_info_topic():
+    """The SonarInfo topic defaults to the detections topic's sibling."""
+    assert dar.default_sonar_info_topic('/bizzy/sensors/m3/detections') == \
+        '/bizzy/sensors/m3/sonar_info'
+    assert dar.default_sonar_info_topic('detections') == '/sonar_info'
+
+
+def test_by_mode_defaults():
+    """--by-mode fills the topic, reference and fit defaults."""
+    args = dar.parse_args(BASE + ['--by-mode'])
+    assert args.sonar_info_topic == '/sonar/sonar_info'
+    assert args.reference_mode == REF_KEY
+    assert (args.adjacency_window_s, args.specular_exclusion_deg,
+            args.misfit_threshold_db, args.range_ref_m) == (2.0, 10.0, 1.5, None)
+
+
+def test_by_mode_refuses_remove_tl(capsys):
+    """A table never carries tl_removed: --by-mode --remove-tl is refused."""
+    err = parse_error(['--by-mode', '--remove-tl', '--water-temp-c', '15'], capsys)
+    assert '--by-mode is refused with --remove-tl' in err
+
+
+@pytest.mark.parametrize('flag', [['--reference-mode', REF_KEY], ['--range-ref-m', '10'],
+                                  ['--adjacency-window-s', '1'],
+                                  ['--diagnostics-out', 'd.json']])
+def test_by_mode_flags_need_by_mode(flag, capsys):
+    """The per-mode options are an error without --by-mode."""
+    assert 'only applies with --by-mode' in parse_error(flag, capsys)
+
+
+@pytest.mark.parametrize('flag', [['--range-ref-m', '0'], ['--adjacency-window-s', '-1'],
+                                  ['--specular-exclusion-deg', '85'],
+                                  ['--misfit-threshold-db', 'nan'],
+                                  ['--reference-mode', 'a,b']])
+def test_by_mode_values_checked(flag, capsys):
+    """Out-of-range per-mode values are argparse errors."""
+    parse_error(['--by-mode'] + flag, capsys)
+
+
+class _Ping:
+    """A PingRecord stand-in for synthetic streams."""
+
+    __slots__ = ('intensities', 'rx_angles', 'two_way_travel_times', 'sound_speed',
+                 'frequency', 'flags')
+
+
+SYNTH_ANGLES_DEG = [a + 0.5 for a in range(-65, 65)]
+MODES = {
+    REF_KEY: {'pulse': 0.001, 'bw': 24000.0, 'type': 2},
+    CW_KEY: {'pulse': 0.00005, 'bw': 20000.0, 'type': 1},
+    'CW_20us_50000Hz_500kHz': {'pulse': 0.00002, 'bw': 50000.0, 'type': 1},
+    'FMU_5000us_24000Hz_500kHz': {'pulse': 0.005, 'bw': 24000.0, 'type': 2},
+}
+
+
+def sweep_depth(t):
+    """Depth that sweeps 5..25 m every 120 s (identifies the range term)."""
+    return 15.0 + 10.0 * math.sin(2.0 * math.pi * t / 120.0)
+
+
+def two_mode_switch(threshold=15.0, hysteresis=1.0, shallow=REF_KEY, deep=CW_KEY):
+    """Return a mode chooser switching at ``threshold`` m depth with hysteresis."""
+    def choose(_t, h, cur):
+        if cur is None:
+            return shallow if h < threshold else deep
+        if cur == shallow and h > threshold + hysteresis:
+            return deep
+        if cur == deep and h < threshold - hysteresis:
+            return shallow
+        return cur
+    return choose
+
+
+def synth_stream(builder, mode_of, level, offsets=None, seconds=600.0, rate=20.0,
+                 depth=sweep_depth, slope_deg=0.0, noise_db=3.0, seed=1, t0=100.0,
+                 angles_deg=SYNTH_ANGLES_DEG, tvg=(0, float('nan'))):
+    """
+    Feed a synthetic multibeam stream into ``builder``.
+
+    Flat or cross-track sloping bottom (``slope_deg`` > 0 deepens to
+    starboard): a beam at angle theta meets it at R = h cos(s) / cos(theta + s)
+    with incidence |theta + s|. Each beam's dB is ``level(incidence_deg, R,
+    theta_deg, mode) + offsets[mode]`` plus Gaussian noise. A SonarInfo is
+    added (stamped 1 us before the ping, declaring ``tvg`` = (model, alpha))
+    whenever the mode changes.
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    offsets = offsets or {}
+    theta = np.radians(np.asarray(angles_deg, dtype=np.float64))
+    slope = math.radians(slope_deg)
+    cur = None
+    for i in range(int(seconds * rate)):
+        t = t0 + i / rate
+        h = depth(t)
+        mode = mode_of(t, h, cur)
+        if mode != cur:
+            m = MODES[mode]
+            builder.add_sonar_info(int(round(t * 1e9)) - 1000, [m['pulse']], [m['bw']],
+                                   [m['type']], tvg[0], tvg[1], 'synthetic')
+            cur = mode
+        rng_m = h * math.cos(slope) / np.cos(theta + slope)
+        inc = np.abs(np.degrees(theta + slope))
+        y = (level(inc, rng_m, np.degrees(theta), mode) + offsets.get(mode, 0.0)
+             + rng.normal(0.0, noise_db, len(theta)))
+        p = _Ping()
+        p.intensities = y.astype(np.float32)
+        p.rx_angles = theta.astype(np.float32)
+        p.two_way_travel_times = (2.0 * rng_m / 1500.0).astype(np.float32)
+        p.sound_speed = 1500.0
+        p.frequency = 500000.0
+        p.flags = None
+        builder.add_ping(int(round(t * 1e9)), p)
+
+
+def lambert_like(inc_deg):
+    """Return a smooth incidence-angle response, dB."""
+    import numpy as np
+    return -20.0 - 0.15 * np.asarray(inc_deg)
+
+
+def supported(fit, min_support=2000.0):
+    """Return ``(node, r, se)`` of the well-supported range nodes."""
+    rows = zip(fit['nodes'], fit['r'], fit['r_se'], fit['r_support'])
+    return [(x, r, se) for x, r, se, n in rows if n >= min_support]
+
+
+def test_two_mode_step_offset_recovered():
+    """A 12 dB step between two modes is recovered within 0.5 dB; directions agree."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, two_mode_switch(),
+                 lambda inc, r, th, m: lambert_like(inc) - 10.0 * dar_log10(r),
+                 offsets={CW_KEY: 12.0})
+    table = b.finish(REF_KEY)
+    assert table['reference_source'] == 'requested'
+    off = table['offsets']
+    assert off[REF_KEY] == {'offset_db': 0.0, 'se_db': 0.0, 'anchored': True}
+    assert off[CW_KEY]['offset_db'] == pytest.approx(12.0, abs=0.5)
+    assert off[CW_KEY]['anchored'] and off[CW_KEY]['se_db'] < 0.5
+    (pair,) = table['pairs']
+    assert pair['used'] and pair['count'] >= 6
+    assert pair['directions_agree'] is True
+    assert all(d['count'] >= 3 for d in pair['directions'].values())
+    assert table['switches']['events'] == pair['count']
+
+
+def dar_log10(x):
+    """Return numpy log10 of ``x`` (the synthetic level laws)."""
+    import numpy as np
+    return np.log10(x)
+
+
+def test_offsets_chain_through_an_intermediate_mode_and_flag_unanchored():
+    """A mode that only meets an intermediate mode is chained; an isolated one is unanchored."""
+    deep = 'FMU_5000us_24000Hz_500kHz'
+    iso = 'CW_20us_50000Hz_500kHz'
+
+    def three(t, h, cur):
+        # shallow REF (< 11 m), CW (11-19 m), deep FMU 5 ms (> 19 m), with
+        # hysteresis, so the deep mode never borders the reference.
+        if cur is None:
+            return REF_KEY if h < 11 else (CW_KEY if h < 19 else deep)
+        if cur == REF_KEY and h > 12:
+            return CW_KEY
+        if cur == CW_KEY and h < 10:
+            return REF_KEY
+        if cur == CW_KEY and h > 20:
+            return deep
+        if cur == deep and h < 18:
+            return CW_KEY
+        return cur
+
+    b = dar.ModeTableBuilder()
+    law = (lambda inc, r, th, m: lambert_like(inc) - 15.0 * dar_log10(r))
+    synth_stream(b, three, law, offsets={CW_KEY: 8.0, deep: 17.0})
+    # An isolated mode recorded after a 60 s gap: no switch path to the rest.
+    synth_stream(b, lambda t, h, cur: iso, law, offsets={iso: -5.0}, seconds=60.0,
+                 t0=800.0, seed=2)
+    table = b.finish(REF_KEY)
+    off = table['offsets']
+    assert off[CW_KEY]['offset_db'] == pytest.approx(8.0, abs=0.5)
+    # The deep mode never reaches R0: its range term is anchored at its node
+    # nearest R0, and the offset carries the -15 dB/decade law between them.
+    nodes = table['modes'][deep]['nodes']
+    anchor = min(max(0.0, nodes[0]), nodes[-1])
+    assert off[deep]['offset_db'] == pytest.approx(17.0 - 15.0 * anchor, abs=0.5)
+    assert off[deep]['anchored'] and off[deep]['se_db'] > off[CW_KEY]['se_db']
+    assert not any(set(p['modes']) == {REF_KEY, deep} for p in table['pairs'])
+    assert off[iso] == {'offset_db': 0.0, 'se_db': off[iso]['se_db'], 'anchored': False}
+    assert math.isnan(off[iso]['se_db'])
+    assert any('no switch path to the reference mode for %s' % iso in w
+               for w in table['warnings'])
+    assert table['switches']['discarded'].get('gap', 0) >= 1
+    lines = dar.mode_table_lines(table, ['synthetic'])
+    assert any(ln.startswith('# mode_summary: %s ' % iso) and 'anchored=false' in ln
+               for ln in lines)
+
+
+def test_reference_fallback_is_loud():
+    """An absent reference mode falls back to the most-sampled one with a warning."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, two_mode_switch(threshold=12.0),
+                 lambda inc, r, th, m: lambert_like(inc), seconds=240.0)
+    table = b.finish('CW_1us_1Hz_1kHz')
+    assert table['reference_mode'] in (REF_KEY, CW_KEY)
+    assert 'NOT comparable across campaigns' in table['reference_source']
+    assert any('NOT comparable' in w for w in table['warnings'])
+    hd = table_header(dar.mode_table_lines(table, ['s']))
+    assert 'NOT comparable across campaigns' in hd['reference_mode_source']
+
+
+@pytest.mark.parametrize('slope_db_per_decade', [0.0, -20.0, 10.0])
+def test_range_term_recovers_the_compensation_residual(slope_db_per_decade):
+    """
+    40logR-, 20logR- and over-compensated streams: the nodes recover the shape.
+
+    A sonar compensating 40 log R leaves a flat level (0 dB/decade); one
+    compensating 20 log R of a 40 log R loss leaves -20 dB/decade; no law is
+    assumed by the fit.
+    """
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) + slope_db_per_decade * dar_log10(r))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    assert fit['range_status'] == 'fitted'
+    nodes = supported(fit)
+    assert len(nodes) >= 4
+    for x, r, _se in nodes:
+        assert r == pytest.approx(slope_db_per_decade * x, abs=0.5), (x, r)
+    assert 0.0 in fit['nodes']
+    assert fit['r'][fit['nodes'].index(0.0)] == pytest.approx(0.0, abs=1e-9)
+    assert not fit['misfit_exceeded']
+    assert fit['scalar_comparison']['slope_db_per_decade'] == pytest.approx(
+        slope_db_per_decade, abs=0.5)
+    # Intercepts are referred to R0: the angle curve is the incidence law.
+    rows = {centre: rel for centre, _n, _a, _v, rel in fit['angle']}
+    assert rows[40.5 if 40.5 in rows else 41.0] == pytest.approx(
+        -0.15 * (41.0 - 1.0), abs=0.6)
+
+
+def test_absorption_curvature_needs_the_binned_term():
+    """An uncompensated 2*alpha*R loss: the nodes follow the curve, a scalar slope cannot."""
+    alpha = 0.13  # dB/m: 500 kHz in 15 C, 31 psu seawater (cube_bathymetry#170)
+
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 2.0 * alpha * r,
+                 depth=lambda t: 22.5 + 17.5 * math.sin(2.0 * math.pi * t / 120.0))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    r0 = table['range_ref_m']
+    for x, r, _se in supported(fit):
+        # Linear between quarter-decade nodes: within 0.5 dB of the curve at the nodes.
+        assert r == pytest.approx(-2.0 * alpha * r0 * (10.0 ** x - 1.0), abs=0.5), (x, r)
+    assert fit['misfit_max_db'] < table['misfit_threshold_db']
+    assert not fit['misfit_exceeded']
+    assert fit['scalar_comparison']['misfit_max_db'] > table['misfit_threshold_db']
+
+
+def test_sloping_bottom_signed_bins_keep_the_slope_out_of_the_range_term():
+    """
+    A cross-track slope pairs shorter range with smaller incidence on one side.
+
+    Signed angle bins recover the true range term; folding to |theta| bins
+    (shown for comparison) is biased.
+    """
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: -20.0 - 0.3 * inc - 10.0 * dar_log10(r),
+                 slope_deg=12.0, depth=lambda t: 17.0 + 5.0 * math.sin(2.0 * math.pi * t / 120.0))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    for x, r, _se in supported(fit):
+        assert r == pytest.approx(-10.0 * x, abs=0.5), (x, r)
+    n, s, ss = b.modes[REF_KEY].cells()
+    folded = dar.fit_mode(n, s, ss, b.bin_width_deg, b.first_nonspecular_bin,
+                          table['log_r0'], fold=True)
+    errors = [abs(r + 10.0 * x) for x, r, _se in supported(folded)]
+    assert max(errors) > 1.5
+
+
+def test_specular_band_is_kept_out_of_the_range_fit():
+    """A range-dependent artefact inside 10 deg stays out of r; without the exclusion it leaks."""
+    law = (lambda inc, r, th, m: lambert_like(inc) - 10.0 * dar_log10(r)
+           + dar_where(abs_array(th) < 10.0, 30.0 * dar_log10(r), 0.0))
+    errors = {}
+    for exclusion in (10.0, 0.0):
+        b = dar.ModeTableBuilder(specular_exclusion_deg=exclusion)
+        synth_stream(b, lambda t, h, cur: REF_KEY, law)
+        fit = b.finish(REF_KEY)['modes'][REF_KEY]
+        errors[exclusion] = max(abs(r + 10.0 * x) for x, r, _se in supported(fit))
+    assert errors[10.0] < 0.5
+    assert errors[0.0] > 1.0
+
+
+def dar_where(cond, a, b):
+    """Return numpy where."""
+    import numpy as np
+    return np.where(cond, a, b)
+
+
+def abs_array(x):
+    """Return numpy abs."""
+    import numpy as np
+    return np.abs(x)
+
+
+def test_misfit_flags_a_step_inside_a_node_interval():
+    """A 6 dB step between nodes is structure the binned term cannot carry: flagged."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) + dar_where(r > 21.0, -6.0, 0.0))
+    table = b.finish(REF_KEY, range_ref_m=10.0)
+    fit = table['modes'][REF_KEY]
+    assert fit['misfit_exceeded'] and fit['misfit_max_db'] > 1.5
+    assert any('misfit' in w and REF_KEY in w for w in table['warnings'])
+    assert 'misfit_exceeded=yes' in '\n'.join(dar.mode_table_lines(table, ['s']))
+
+
+def test_flat_single_depth_bottom_leaves_the_range_term_unidentified():
+    """Angle and range are confounded on a flat single-depth bottom: r = 0 with a reason."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 20.0 * dar_log10(r),
+                 depth=lambda t: 20.0, seconds=120.0)
+    fit = b.finish(REF_KEY)['modes'][REF_KEY]
+    assert fit['range_status'].startswith('zero: not identified')
+    assert fit['nodes'] == [] and fit['within_bin_spread_decades'] < 0.03
+
+
+def test_variance_column_measures_the_beam_scatter():
+    """The per-(mode, angle bin) variance is the scatter after the range term (noise^2)."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 20.0 * dar_log10(r),
+                 noise_db=2.0, seconds=300.0)
+    fit = b.finish(REF_KEY)['modes'][REF_KEY]
+    for centre, n, _level, var, _rel in fit['angle']:
+        if centre > 12.0 and n > 2000:
+            # Each 2 deg bin also spans ~0.3 dB of the incidence slope.
+            assert var == pytest.approx(4.0, rel=0.15), centre
+
+
+def test_sonar_info_history_dedupes_and_orders():
+    """Heartbeats repeating a stamp dedupe; an out-of-order SonarInfo is inserted in place."""
+    h = dar.SonarInfoHistory()
+    h.add(100, 'A', ('UNKNOWN', None))
+    h.add(100, 'A', ('UNKNOWN', None))
+    h.add(300, 'C', ('UNKNOWN', None))
+    h.add(200, 'B', ('40LOGR', 80.0))
+    assert len(h) == 3
+    assert h.at(99) is None
+    assert h.at(100)[0] == 'A' and h.at(250)[0] == 'B' and h.at(10 ** 12)[0] == 'C'
+
+
+def test_pings_before_the_first_sonar_info_are_counted_not_binned():
+    """A ping with no SonarInfo at or before it gets no mode."""
+    b = dar.ModeTableBuilder()
+    p = _Ping()
+    p.intensities, p.rx_angles = [-30.0], [0.3]
+    p.two_way_travel_times, p.sound_speed, p.frequency, p.flags = [0.02], 1500.0, 5e5, None
+    b.add_ping(50, p)
+    b.add_sonar_info(60, [0.001], [24000.0], [2])
+    b.add_ping(70, p)
+    assert b.pings_without_info == 1
+    assert list(b.modes) == [REF_KEY] and b.modes[REF_KEY].pings == 1
+
+
+def test_declared_state_per_mode_and_mixed():
+    """The declared TVG state is recorded per mode; two states in one mode are MIXED."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY, lambda inc, r, th, m: lambert_like(inc),
+                 seconds=30.0)
+    synth_stream(b, lambda t, h, cur: REF_KEY, lambda inc, r, th, m: lambert_like(inc),
+                 seconds=30.0, t0=200.5, tvg=(3, 80.0))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    assert fit['declared_tvg_model'] == 'MIXED'
+    assert {(s['model'], s['absorption_db_per_km']) for s in fit['declared_states']} == {
+        ('UNKNOWN', None), ('40LOGR', 80.0)}
+    assert any('declared TVG states' in w for w in table['warnings'])
+
+
+def table_header(lines):
+    """Map every ``# key: value`` comment of a table to its value (the title is skipped)."""
+    out = {}
+    for line in lines:
+        m = HEADER_LINE.match(line)
+        if m and line.startswith('#'):
+            out.setdefault(m.group(1), m.group(2))
+    return out
+
+
+def hand_built_table():
+    """Return a small deterministic table dict, the shape derive_mode_table returns."""
+    nan = float('nan')
+
+    def mode(pings, angle, nodes, r, se, support, status='fitted', declared=('UNKNOWN', nan),
+             misfit=0.4):
+        return {'pings': pings, 'beams': pings * 256, 'angle': angle, 'nodes': nodes,
+                'r': r, 'r_se': se, 'r_support': support, 'range_status': status,
+                'declared_tvg_model': declared[0],
+                'declared_tvg_absorption_db_per_km': declared[1],
+                'misfit_max_db': misfit, 'misfit_exceeded': misfit > 1.5}
+    return {
+        'reference_mode': REF_KEY, 'reference_source': 'requested',
+        'range_ref_m': 18.9, 'range_ref_source': 'median slant range of the reference mode',
+        'bin_width_deg': 2.0, 'specular_exclusion_deg': 10.0, 'window_sec': 2.0,
+        'misfit_threshold_db': 1.5,
+        'modes': {
+            REF_KEY: mode(93890, [(1.0, 5000, 25.5, 9.25, 0.0), (11.0, 4000, 24.7, 6.5, -0.8),
+                                  (41.0, 3000, 18.3, 7.0, -7.2)],
+                          [-0.25, 0.0, 0.25], [1.5, 0.0, -2.25], [0.1, 0.0, 0.12],
+                          [3000.0, 5000.0, 2500.0]),
+            CW_KEY: mode(217255, [(1.0, 6000, 7.7, 12.0, 0.0), (41.0, 1, 2.1, nan, -5.6)],
+                         [], [], [], [],
+                         status='zero: not identified, the within-angle-bin spread of '
+                                'log10 R is 0.010 decade (< 0.03)',
+                         declared=('40LOGR', 80.0), misfit=2.0),
+        },
+        'offsets': {REF_KEY: {'offset_db': 0.0, 'se_db': 0.0, 'anchored': True},
+                    CW_KEY: {'offset_db': -17.25, 'se_db': 0.31, 'anchored': True}},
+    }
+
+
+def test_mode_table_format():
+    """The table: format line first, mode first, angle and range rows, scalars per row."""
+    lines = dar.mode_table_lines(hand_built_table(), ['bag_a', 'bag_b'],
+                                 box=(42.976, -70.628, 43.002, -70.596))
+    assert lines[0] == '# format: angular-response-table v1'
+    hd = table_header(lines)
+    assert hd['format'] == 'angular-response-table v1'
+    assert hd['reference_mode'] == REF_KEY and hd['range_ref_m'] == '18.9'
+    assert hd['box'] == '42.976 -70.628 43.002 -70.596'
+    assert hd['source_bags'] == 'bag_a,bag_b'
+    assert 'tl_removed' not in hd and 'absorption_db_per_m' not in hd
+    rows = [ln for ln in lines if not ln.startswith('#')]
+    assert rows[0] == ','.join(dar.TABLE_COLUMNS)
+    assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1.0,7.700,6000,12.000,+0.000,'
+                       '0.045,-17.250,0.310,true,40LOGR,80')
+    assert rows[2] == ('CW_50us_20000Hz_500kHz,angle,41.0,2.100,1,,-5.600,,'
+                       '-17.250,0.310,true,40LOGR,80')
+    assert rows[-1] == ('FMU_1000us_24000Hz_500kHz,range,0.25,-2.250,2500,,,0.120,'
+                        '0.000,0.000,true,UNKNOWN,nan')
+    assert all(len(r.split(',')) == len(dar.TABLE_COLUMNS) for r in rows)
+    assert not any(r.split(',')[0] == CW_KEY and r.split(',')[1] == 'range' for r in rows)
+
+
+def test_mode_table_fixture_for_the_loader_tests():
+    """The table fixture the old-loader tests (C++ and the marine_tools mirror) read is current."""
+    content = ''.join(ln + '\n' for ln in dar.mode_table_lines(
+        hand_built_table(), ['bag_a'], box=(42.976, -70.628, 43.002, -70.596))).encode()
+    if os.environ.get('GOLDEN_REGENERATE') == '1':
+        MODE_TABLE_FIXTURE.write_bytes(content)
+    assert MODE_TABLE_FIXTURE.read_bytes() == content, (
+        '%s no longer matches mode_table_lines output; if intended, re-run with '
+        'GOLDEN_REGENERATE=1 and check test_angular_response_curve' % MODE_TABLE_FIXTURE)
+
+
+def _load_marine_tools_mirror():
+    """Import kongsberg_em_bridge.angular_response (read-only), or None."""
+    try:
+        from kongsberg_em_bridge import angular_response
+        return angular_response
+    except ImportError:
+        pass
+    path = (HERE.parents[2] / 'marine_tools' / 'kongsberg_em_bridge'
+            / 'kongsberg_em_bridge' / 'angular_response.py')
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location('mt_angular_response', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_marine_tools_mirror_ignores_a_mode_table():
+    """The SonarInfo-publishing mirror reads a table as an empty curve, never as garbage."""
+    mirror = _load_marine_tools_mirror()
+    if mirror is None:
+        pytest.skip('marine_tools kongsberg_em_bridge is not in this workspace')
+    points, tl_removed, alpha = mirror.load_angular_response_curve(str(MODE_TABLE_FIXTURE))
+    assert points == []
+    assert tl_removed is False and alpha is None
+
+
+# --- end to end over a bag with SonarInfo ---------------------------------
+
+INFO_TOPIC = '/bizzy/sonar/sonar_info'
+MODE_BAG_TOPICS = BAG_TOPICS + ((INFO_TOPIC, 'marine_interfaces/msg/SonarInfo'),)
+
+
+def _sonar_info(t_sec, mode_key):
+    """Return a SonarInfo for one of MODES stamped at t_sec."""
+    from marine_interfaces.msg import SonarInfo
+    m = MODES[mode_key]
+    msg = SonarInfo()
+    msg.header.stamp = _stamp(t_sec)
+    msg.header.frame_id = 'mbes'
+    msg.sonar_model = 'synthetic'
+    msg.pulse_lengths = [m['pulse']]
+    msg.bandwidths = [m['bw']]
+    msg.tx_signal_types = [m['type']]
+    msg.tvg_absorption_db_per_km = float('nan')
+    return msg
+
+
+def write_mode_bag(path, with_tf=False):
+    """
+    Bag alternating two modes every 50 pings at 20 Hz, the second 12 dB brighter.
+
+    The first five pings come before any SonarInfo. Each SonarInfo is stamped
+    just before the first ping of its mode but RECORDED 10 ms after it, so a
+    ping must be attributed by stamp, not by arrival order. ``with_tf`` adds a
+    static mbes frame and an earth transform inside the test box every second.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    events = []
+    if with_tf:
+        events.append((99.0, '/bizzy/tf_static', _mbes_static()))
+        events += [(99.0 + k, '/bizzy/tf', _earth_tf(99.0 + k, inside)) for k in range(30)]
+    for i in range(400):
+        ts = 100.0 + 0.05 * i
+        mode = CW_KEY if (i // 50) % 2 else REF_KEY
+        if i == 5 or (i % 50 == 0 and i):
+            events.append((ts + 0.01, INFO_TOPIC, _sonar_info(ts - 0.001, mode)))
+        events.append((ts, TOPIC, _ping(ts, 'mbes', -30.0 + (12.0 if mode == CW_KEY else 0.0))))
+    events.sort(key=lambda e: e[0])
+    write_bag(path, events, MODE_BAG_TOPICS)
+
+
+def test_end_to_end_by_mode_attributes_pings_by_stamp(tmp_path, capsys):
+    """--by-mode over a bag: every ping lands in its own mode, the step is the offset."""
+    import json
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    out = tmp_path / 'table.csv'
+    diag = tmp_path / 'diag.json'
+    assert dar.main([str(bag), '-t', TOPIC, '-o', str(out), '--by-mode',
+                     '--diagnostics-out', str(diag)]) == 0
+    stdout = capsys.readouterr().out
+    assert '5 pings before the first SonarInfo were left out' in stdout
+    lines = out.read_text().splitlines()
+    assert lines[0] == '# format: angular-response-table v1'
+    summaries = {ln.split()[2]: ln for ln in lines if ln.startswith('# mode_summary:')}
+    assert set(summaries) == {REF_KEY, CW_KEY}
+    assert ' pings=195 ' in summaries[REF_KEY] and ' pings=200 ' in summaries[CW_KEY]
+    assert 'offset_db=12.000' in summaries[CW_KEY]
+    d = json.loads(diag.read_text())
+    assert d['pings_without_info'] == 5 and d['detections_read'] == 400
+    assert d['modes'][CW_KEY]['declared_tvg_model'] == 'UNKNOWN'
+    # The old loaders see nothing in the table.
+    mirror = _load_marine_tools_mirror()
+    if mirror is not None:
+        assert mirror.load_angular_response_curve(str(out))[0] == []
+
+
+def test_end_to_end_by_mode_with_box(tmp_path, capsys):
+    """--by-mode --box positions the pings and still attributes every kept one."""
+    bag = tmp_path / 'mode_bag_tf'
+    write_mode_bag(bag, with_tf=True)
+    out = tmp_path / 'table.csv'
+    assert dar.main([str(bag), '-t', TOPIC, '-o', str(out), '--by-mode',
+                     '--box'] + TEST_BOX) == 0
+    stdout = capsys.readouterr().out
+    assert 'kept 400 of 400 pings' in stdout
+    text = out.read_text()
+    assert '# box: 42.95 -70.65 43 -70.58' in text
+    assert 'offset_db=12.000' in text
+
+
+def test_by_mode_without_a_sonar_info_topic_is_an_error(tmp_path):
+    """--by-mode needs SonarInfo in at least one bag."""
+    bag = tmp_path / 'site_bag'
+    write_synthetic_bag(bag)
+    with pytest.raises(SystemExit, match='needs the SonarInfo topic'):
+        dar.main([str(bag), '-t', TOPIC, '-o', str(tmp_path / 'x.csv'), '--by-mode'])
+
+
+def test_switch_tracker_gap_discards_the_switch():
+    """A switch across a gap wider than the window has no before side."""
+    tr = dar.SwitchTracker(int(2e9), 45, dar.RANGE_CELL_COUNT)
+
+    def summary():
+        s = dar.OffsetSummary(45, dar.RANGE_CELL_COUNT)
+        s.n, s.s, s.pings = 10, -300.0, 1
+        return s
+    tr.add(int(1e9), 'A', summary())
+    tr.add(int(5e9), 'B', summary())          # 4 s gap: discarded
+    tr.add(int(5.5e9), 'A', summary())        # adjacent: kept
+    tr.add(int(5.4e9), 'A', summary())        # out of order: breaks the run
+    tr.finish()
+    assert len(tr.events) == 1 and tr.events[0].from_key == 'B'
+    assert tr.discarded == {'gap': 1, 'out_of_order': 1}
+
+
+def test_offset_summary_compact_gives_the_same_level():
+    """A compacted (sparse) summary corrects to the same level as the dense one."""
+    import numpy as np
+    s = dar.OffsetSummary(45, dar.RANGE_CELL_COUNT)
+    s.n, s.s, s.pings = 6, -180.0, 2
+    s.angle_counts[[5, 20]] = (4, 2)
+    s.cell_counts[[110, 111, 300]] = (1, 3, 2)
+    rel = np.linspace(0.0, -9.0, 45)
+    rng = np.linspace(5.0, -20.0, dar.RANGE_CELL_COUNT)
+    dense = s.level(rel, rng)
+    s.compact()
+    assert isinstance(s.cell_counts, tuple) and len(s.cell_counts[0]) == 3
+    assert s.level(rel, rng) == pytest.approx(dense, abs=1e-12)
