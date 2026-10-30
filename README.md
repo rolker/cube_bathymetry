@@ -756,8 +756,9 @@ the way `import_bag` georeferences:
 - Each ping waits until the TF stream is 3 s past its stamp, so the transforms
   on both sides of it have been read, and `earth -> <detections frame>` is then
   looked up exactly at the ping stamp, interpolated between them. There is no
-  fallback to the latest transform. Pings still waiting when the bags end are
-  looked up against what was read.
+  fallback to the latest transform. Waiting pings leave in stamp order, so one
+  ping with a bad future stamp does not hold back the rest. Pings still
+  waiting when the bags end are looked up against what was read.
 - The ECEF position of the sensor is converted to latitude/longitude.
 - Pings waiting for the TF stream are held in memory, about 13 bytes per beam
   (7 KB for a 512-beam ping). Normally that is the last few seconds of pings;
@@ -769,7 +770,8 @@ The run prints how many pings were kept and how many were dropped, by reason:
 outside the box, no earth transform for their frame, a stamp outside the
 earth TF coverage (before the first earth transform, after the last, or in a
 gap longer than the 60 s buffer), an unset (zero) header stamp, which tf2
-would otherwise read as "the latest transform", or an earth transform that is
+would otherwise read as "the latest transform", or one more than 1 h ahead of
+the TF stream (a clock glitch), or an earth transform that is
 not a geocentric position (more than 50 km from the ellipsoid, such as a local
 map frame named `earth`). A box with no pings in it is an error. A box
 across the antimeridian is not supported.

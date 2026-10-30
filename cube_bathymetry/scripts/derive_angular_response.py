@@ -83,8 +83,10 @@ georeferences it:
   between them. There is no fallback to the latest transform: a ping outside
   the earth TF coverage (before the first earth transform, after the last, or
   in a gap wider than the 60 s buffer) is dropped, and so is a ping with an
-  unset (zero) stamp, which tf2 would read as "the latest transform". Pings
-  still waiting when the bags end are looked up against what was read.
+  unset (zero) stamp, which tf2 would read as "the latest transform", or one
+  stamped more than 1 h ahead of the TF stream. Waiting pings leave in stamp
+  order, so one ping with a bad future stamp does not hold back the rest.
+  Pings still waiting when the bags end are looked up against what was read.
 
 The ECEF translation of the sensor origin is converted to latitude/longitude in
 closed form; a translation that is not a geocentric position (more than 50 km
@@ -155,6 +157,10 @@ WGS84_EP2 = (WGS84_A ** 2 - WGS84_B ** 2) / WGS84_B ** 2   # second eccentricity
 # transform after it is in the buffer too, and is then looked up exactly.
 TF_CACHE_SEC = 60.0
 TF_GUARD_SEC = 3.0
+# A ping stamped further than this ahead of the TF frontier when it arrives is
+# dropped as a bad stamp (a clock glitch, a garbage header): it could only be
+# looked up at the very end, and would sit in memory until then.
+PING_FUTURE_LIMIT_SEC = 3600.0
 EARTH_FRAME = 'earth'
 # Ellipsoid heights a ping's sensor can plausibly have. A survey sensor is
 # within a few km of the ellipsoid; an ``earth`` frame that is not geocentric
@@ -294,7 +300,8 @@ class PingLocator:
     end of the stream yields whatever is still waiting.
     """
 
-    def __init__(self, cache_sec=TF_CACHE_SEC, guard_sec=TF_GUARD_SEC):
+    def __init__(self, cache_sec=TF_CACHE_SEC, guard_sec=TF_GUARD_SEC,
+                 future_limit_sec=PING_FUTURE_LIMIT_SEC):
         """Create an empty buffer holding ``cache_sec`` of dynamic transforms."""
         import tf2_ros
         from rclpy.duration import Duration
@@ -302,9 +309,12 @@ class PingLocator:
         self._tf2_ros = tf2_ros
         self._buffer = tf2_ros.Buffer(cache_time=Duration(seconds=cache_sec))
         self._guard_ns = int(round(guard_sec * 1e9))
+        self._future_limit_ns = int(round(future_limit_sec * 1e9))
         self._frontier_ns = None
-        # (ping stamp ns, frame id, item), arrival order
-        self._pending = collections.deque()
+        # Heap of (ping stamp ns, arrival number, frame id, item): the earliest
+        # stamp leaves first, ties in arrival order.
+        self._pending = []
+        self._arrivals = 0
         self.max_pending = 0   # the most pings that waited at once
 
     def add_tf(self, tf_message, is_static):
@@ -326,9 +336,18 @@ class PingLocator:
         the ping is positioned (accumulate queues a compact PingRecord, not the
         deserialized message), since pings wait here until the TF frontier
         passes them.
+
+        Returns None when queued, or ``'bad_stamp'`` when the ping is dropped
+        at once: an unset (zero) or negative stamp, or one more than
+        ``future_limit_sec`` ahead of the TF frontier.
         """
-        self._pending.append((ping_ns, frame_id, item))
+        if ping_ns <= 0 or (self._frontier_ns is not None
+                            and ping_ns > self._frontier_ns + self._future_limit_ns):
+            return 'bad_stamp'
+        heapq.heappush(self._pending, (ping_ns, self._arrivals, frame_id, item))
+        self._arrivals += 1
         self.max_pending = max(self.max_pending, len(self._pending))
+        return None
 
     @property
     def pending(self):
@@ -339,16 +358,18 @@ class PingLocator:
         """
         Yield ``(item, position, reason)`` for each ping that is ready.
 
-        A ping is ready once ``ping stamp <= frontier - guard`` (as import_bag,
-        first in first out: a ping waits behind an earlier one), or for every
-        waiting ping with ``flush``. ``position`` and ``reason`` are locate's.
+        A ping is ready once ``ping stamp <= frontier - guard``, or for every
+        waiting ping with ``flush``. Pings leave in stamp order, not arrival
+        order, so one ping with a far-future stamp does not hold back the
+        pings that arrived after it (import_bag's first-in-first-out deque
+        does). ``position`` and ``reason`` are locate's.
         """
         while self._pending:
-            ping_ns, frame_id, item = self._pending[0]
+            ping_ns, _arrival, frame_id, item = self._pending[0]
             if not flush and (self._frontier_ns is None
                               or ping_ns > self._frontier_ns - self._guard_ns):
                 return
-            self._pending.popleft()
+            heapq.heappop(self._pending)
             position, reason = self.locate(frame_id, ping_ns)
             yield item, position, reason
 
@@ -415,7 +436,8 @@ BOX_DROP_REASONS = (
     ('outside', 'outside the box'),
     ('no_tf', 'with no earth transform for their frame'),
     ('extrapolation', 'outside the earth TF coverage at their stamp'),
-    ('bad_stamp', 'with an unset (zero) header stamp'),
+    ('bad_stamp', 'with an unset (zero) header stamp or one more than %g s '
+                  'ahead of the TF stream' % PING_FUTURE_LIMIT_SEC),
     ('bad_position', 'with an earth transform that is not a geocentric position'),
 )
 
@@ -842,7 +864,10 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
             take_ready(False)
         else:
             n_msgs += 1
-            locator.push(stamp_ns(msg.header.stamp), msg.header.frame_id, PingRecord(msg))
+            reason = locator.push(
+                stamp_ns(msg.header.stamp), msg.header.frame_id, PingRecord(msg))
+            if reason is not None:
+                box_stats[reason] += 1
     take_ready(True)   # end of the stream: position whatever is still waiting
     box_stats['max_pending'] = locator.max_pending
     return n_msgs

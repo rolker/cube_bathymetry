@@ -804,9 +804,9 @@ def test_end_to_end_box_keeps_only_site_pings(tmp_path, capsys):
     assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
     assert ('kept 2 of 7 pings; dropped 1 outside the box, 1 with no earth '
             'transform for their frame, 2 outside the earth TF coverage at '
-            'their stamp, 1 with an unset (zero) header stamp, 0 with an earth '
-            'transform that is not a geocentric position; at most 4 waited '
-            'for TF') in stdout
+            'their stamp, 1 with an unset (zero) header stamp or one more than '
+            '3600 s ahead of the TF stream, 0 with an earth transform that is '
+            'not a geocentric position; at most 3 waited for TF') in stdout
     lines = out.read_text().splitlines()
     hd = header_dict([ln for ln in lines if ln.startswith('#')])
     assert hd['box'] == '42.95 -70.65 43 -70.58'
@@ -1166,7 +1166,36 @@ def test_ping_locator_flush_and_no_latest_fallback():
     orphan = _push(loc, 100, 500000000, frame_id='orphan')
     assert list(loc.drain()) == []   # frontier 101 < 100.5 + guard
     got = [(r[0], r[2]) for r in loc.drain(flush=True)]
-    assert got == [(within, None), (after, 'extrapolation'), (orphan, 'no_tf')]
+    # In stamp order (ties in arrival order), not arrival order.
+    assert got == [(within, None), (orphan, 'no_tf'), (after, 'extrapolation')]
+
+
+def test_ping_locator_far_future_ping_does_not_block_the_queue():
+    """Pings leave in stamp order: a far-future stamp holds back nothing."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_earth_tf_at(100, 0, inside), False)
+    future = _push(loc, 100 + 1800, 0)   # half an hour ahead: queued
+    first = _push(loc, 100, 500000000)
+    second = _push(loc, 101, 0)
+    loc.add_tf(_earth_tf_at(104, 0, inside), False)
+    assert [(r[0], r[2]) for r in loc.drain()] == [(first, None), (second, None)]
+    assert loc.pending == 1
+    assert [(r[0], r[2]) for r in loc.drain(flush=True)] == [(future, 'extrapolation')]
+
+
+def test_ping_locator_drops_a_ping_far_ahead_of_the_tf_stream():
+    """A ping more than the future limit ahead of the frontier is a bad stamp."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    assert loc.push(_ns(5000), 'mbes', 'no frontier yet') is None   # cannot judge
+    loc.add_tf(_earth_tf_at(100, 0, inside), False)
+    limit_ns = int(dar.PING_FUTURE_LIMIT_SEC * 1e9)
+    assert loc.push(_ns(100) + limit_ns, 'mbes', 'at the limit') is None
+    assert loc.push(_ns(100) + limit_ns + 1, 'mbes', 'past it') == 'bad_stamp'
+    assert loc.push(0, 'mbes', 'unset') == 'bad_stamp'
+    assert loc.pending == 2
 
 
 def test_ping_locator_rejects_unset_stamp():
