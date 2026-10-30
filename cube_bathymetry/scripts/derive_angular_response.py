@@ -409,7 +409,8 @@ def parse_args(argv):
                    help='marine_acoustic_msgs/SonarDetections topic')
     p.add_argument('-o', '--output', required=True, help='output CSV path')
     p.add_argument('--bin-width-deg', type=float, default=2.0,
-                   help='angular bin width in degrees (default 2.0)')
+                   help='angular bin width in degrees, > 0 and <= 90 '
+                        '(default 2.0)')
     p.add_argument('--remove-tl', action='store_true',
                    help='tier-2: remove per-beam 2-way transmission loss '
                         '40*log10(R) + 2*alpha*R before binning (cube#87)')
@@ -442,6 +443,9 @@ def parse_args(argv):
                         'WGS84 box, degrees; for deriving a per-site curve from '
                         'bags that mix survey and transit')
     args = p.parse_args(argv)
+    if not (math.isfinite(args.bin_width_deg) and 0.0 < args.bin_width_deg <= 90.0):
+        p.error('--bin-width-deg must be > 0 and <= 90 degrees, got %r'
+                % args.bin_width_deg)
     if args.box is not None:
         try:
             check_box(args.box)

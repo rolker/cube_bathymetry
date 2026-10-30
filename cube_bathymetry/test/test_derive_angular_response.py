@@ -275,6 +275,18 @@ def test_override_ignores_implausible_frequency():
     assert dar.resolve_absorption(args, [500.0])[:2] == (0.13, 'override')
 
 
+@pytest.mark.parametrize('width', ['0', '-2', 'nan', 'inf', '90.5'])
+def test_bin_width_rejected(width, capsys):
+    """A zero, negative, non-finite or wider-than-90 degree bin is refused."""
+    assert '--bin-width-deg' in parse_error(['--bin-width-deg', width], capsys)
+
+
+@pytest.mark.parametrize('width', ['0.1', '2', '90'])
+def test_bin_width_accepted(width):
+    """Positive widths up to 90 degrees are accepted."""
+    assert dar.parse_args(BASE + ['--bin-width-deg', width]).bin_width_deg == float(width)
+
+
 def test_box_parsed():
     """--box takes four floats."""
     args = dar.parse_args(BASE + ['--box', '42.95', '-70.65', '43.0', '-70.58'])
