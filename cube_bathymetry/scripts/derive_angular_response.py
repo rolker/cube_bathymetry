@@ -85,7 +85,8 @@ georeferences it:
   still waiting when the bags end are looked up against what was read.
 
 The ECEF translation of the sensor origin is converted to latitude/longitude in
-closed form. Pings outside the box and pings that cannot be positioned are
+closed form; a translation that is not a geocentric position (more than 50 km
+from the ellipsoid) drops the ping. Pings outside the box and pings that cannot be positioned are
 dropped, counted by reason and reported, and the box is recorded in the header.
 Without ``--box`` no TF is read.
 
@@ -137,6 +138,11 @@ WGS84_EP2 = (WGS84_A ** 2 - WGS84_B ** 2) / WGS84_B ** 2   # second eccentricity
 TF_CACHE_SEC = 60.0
 TF_GUARD_SEC = 3.0
 EARTH_FRAME = 'earth'
+# Ellipsoid heights a ping's sensor can plausibly have. A survey sensor is
+# within a few km of the ellipsoid; an ``earth`` frame that is not geocentric
+# (a local map frame named earth, a placeholder at the origin) puts it thousands
+# of km below it, and its latitude/longitude would be meaningless.
+EARTH_HEIGHT_RANGE_M = (-50000.0, 50000.0)
 
 
 def check_absorption_inputs(temp_c, salinity_psu, ph, depth_m):
@@ -186,6 +192,27 @@ def ecef_to_geodetic(x, y, z):
     height = u * (1.0 - b * b / (a * v))
     lat = math.degrees(math.atan2(z + WGS84_EP2 * z0, p))
     return lat, lon, height
+
+
+def earth_position_to_lat_lon(x, y, z):
+    """
+    Return ``(lat_deg, lon_deg)`` for an ECEF sensor position, or None.
+
+    None when the position is not a plausible geocentric one: non-finite, the
+    closed form fails on it (a point near the centre of the Earth raises in
+    ecef_to_geodetic), or its ellipsoid height is outside EARTH_HEIGHT_RANGE_M
+    -- (0, 0, 0) would otherwise map to the North Pole.
+    """
+    if not all(math.isfinite(v) for v in (x, y, z)):
+        return None
+    try:
+        lat, lon, height = ecef_to_geodetic(x, y, z)
+    except (ValueError, ZeroDivisionError, OverflowError):
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lon) and math.isfinite(height)
+            and EARTH_HEIGHT_RANGE_M[0] <= height <= EARTH_HEIGHT_RANGE_M[1]):
+        return None
+    return lat, lon
 
 
 def check_box(box):
@@ -294,7 +321,8 @@ class PingLocator:
         transform", which would position the ping wherever the vessel happened
         to be -- ``'no_tf'`` when the frame has no earth transform at all, and
         ``'extrapolation'`` when it has one but the stamp is outside the
-        buffered coverage.
+        buffered coverage, and ``'bad_position'`` when the transform is not a
+        plausible geocentric position (see earth_position_to_lat_lon).
         """
         from rclpy.time import Time
 
@@ -309,8 +337,10 @@ class PingLocator:
         except tf2_ros.TransformException:
             return None, 'no_tf'
         tr = t.transform.translation
-        lat, lon, _height = ecef_to_geodetic(tr.x, tr.y, tr.z)
-        return (lat, lon), None
+        position = earth_position_to_lat_lon(tr.x, tr.y, tr.z)
+        if position is None:
+            return None, 'bad_position'
+        return position, None
 
 
 # --box drop reasons, in report order, with the words the run report uses.
@@ -319,6 +349,7 @@ BOX_DROP_REASONS = (
     ('no_tf', 'with no earth transform for their frame'),
     ('extrapolation', 'outside the earth TF coverage at their stamp'),
     ('bad_stamp', 'with an unset (zero) header stamp'),
+    ('bad_position', 'with an earth transform that is not a geocentric position'),
 )
 
 

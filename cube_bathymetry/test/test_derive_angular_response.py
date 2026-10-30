@@ -637,7 +637,8 @@ def test_end_to_end_box_keeps_only_site_pings(tmp_path, capsys):
     assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
     assert ('kept 2 of 7 pings; dropped 1 outside the box, 1 with no earth '
             'transform for their frame, 2 outside the earth TF coverage at '
-            'their stamp, 1 with an unset (zero) header stamp') in stdout
+            'their stamp, 1 with an unset (zero) header stamp, 0 with an earth '
+            'transform that is not a geocentric position') in stdout
     lines = out.read_text().splitlines()
     hd = header_dict([ln for ln in lines if ln.startswith('#')])
     assert hd['box'] == '42.95 -70.65 43 -70.58'
@@ -793,3 +794,32 @@ def test_ping_locator_rejects_unset_stamp():
     loc.add_tf(_earth_tf_at(100, 0, inside), False)
     assert loc.locate('mbes', _bare_ping(0, 0).header.stamp) == (None, 'bad_stamp')
     assert loc.locate('mbes', _bare_ping(100, 0).header.stamp)[1] is None
+
+
+@pytest.mark.parametrize('xyz', [
+    (0.0, 0.0, 0.0),            # would be the North Pole, 6357 km down
+    (1.0, 1.0, 1.0),            # ecef_to_geodetic raises on these
+    (100.0, 100.0, 100.0),
+    (1500.0, -2300.0, 4.0),     # local map coordinates in a frame named earth
+    (float('nan'), 0.0, 0.0),
+    (4.2e7, 0.0, 0.0),          # geostationary orbit
+])
+def test_earth_position_rejects_non_geocentric(xyz):
+    """Translations that are not a position near the Earth's surface give None."""
+    assert dar.earth_position_to_lat_lon(*xyz) is None
+
+
+def test_earth_position_accepts_survey_heights():
+    """A sensor a little below or above the ellipsoid converts."""
+    for h in (-120.0, 0.0, 35.0):
+        lat, lon = dar.earth_position_to_lat_lon(*geodetic_to_ecef(42.97, -70.61, h))
+        assert lat == pytest.approx(42.97, abs=1e-9)
+        assert lon == pytest.approx(-70.61, abs=1e-9)
+
+
+def test_ping_locator_drops_non_geocentric_earth_transform():
+    """A non-geocentric earth transform drops the ping instead of aborting."""
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_earth_tf_at(100, 0, (1.0, 1.0, 1.0)), False)
+    assert loc.locate('mbes', _bare_ping(100, 0).header.stamp) == (None, 'bad_position')

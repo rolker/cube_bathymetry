@@ -758,8 +758,10 @@ the way `import_bag` georeferences:
 The run prints how many pings were kept and how many were dropped, by reason:
 outside the box, no earth transform for their frame, a stamp outside the
 earth TF coverage (before the first earth transform, after the last, or in a
-gap longer than the 60 s buffer), or an unset (zero) header stamp, which tf2
-would otherwise read as "the latest transform". A box with no pings in it is an error. A box
+gap longer than the 60 s buffer), an unset (zero) header stamp, which tf2
+would otherwise read as "the latest transform", or an earth transform that is
+not a geocentric position (more than 50 km from the ellipsoid, such as a local
+map frame named `earth`). A box with no pings in it is an error. A box
 across the antimeridian is not supported.
 
 **Header provenance.** Every line above the CSV column row is a
