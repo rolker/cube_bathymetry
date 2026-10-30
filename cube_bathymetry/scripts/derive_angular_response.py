@@ -43,12 +43,18 @@ transferable. The CSV columns are unchanged; the header records
 ``tl_removed``/``absorption_db_per_m`` so the C++ estimator applies the
 identical TL (and never recomputes alpha).
 
-The absorption alpha (cube_bathymetry#170) is computed with the full
-Francois-Garrison (1982) model -- boric acid, MgSO4 and pure water -- from
-``--water-temp-c``, ``--salinity`` (psu, default 0 = fresh water), ``--ph``
-(default 8.0), ``--depth-m`` and the median per-ping frequency. Take T and S
-from casts at the site, not from the boat's surface temperature alone; in salt
-water salinity is the dominant term.
+The absorption alpha (cube_bathymetry#170) is either
+
+* computed with the full Francois-Garrison (1982) model -- boric acid, MgSO4
+  and pure water -- from ``--water-temp-c``, ``--salinity`` (psu, default 0 =
+  fresh water), ``--ph`` (default 8.0), ``--depth-m`` and the median per-ping
+  frequency (``absorption_source: computed``); or
+* given directly with ``--absorption-db-per-m``, e.g. a path-averaged value
+  worked out from the site's CTD / sound-speed casts
+  (``absorption_source: override``).
+
+Take T and S from casts at the site, not from the boat's surface temperature
+alone; in salt water salinity is the dominant term.
 
 Usage:
     derive_angular_response.py <bag> [<bag> ...] -t <topic> -o <out.csv>
@@ -56,6 +62,8 @@ Usage:
         --remove-tl --water-temp-c 24.0
     derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
         --remove-tl --water-temp-c 15.5 --salinity 31
+    derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
+        --remove-tl --absorption-db-per-m 0.130
 """
 
 import argparse
@@ -72,6 +80,9 @@ TEMP_C_RANGE = (-2.0, 40.0)
 SALINITY_PSU_RANGE = (0.0, 50.0)
 PH_RANGE = (6.0, 10.0)
 DEPTH_M_RANGE = (0.0, 12000.0)
+# An explicit alpha above this is almost certainly dB/km typed as dB/m: pure
+# water at 2 MHz and 10 C is ~1.2 dB/m, and multibeam echosounders run lower.
+MAX_ABSORPTION_DB_PER_M = 5.0
 
 
 def check_absorption_inputs(temp_c, salinity_psu, ph, depth_m):
@@ -103,10 +114,12 @@ def parse_args(argv):
                    help='tier-2: remove per-beam 2-way transmission loss '
                         '40*log10(R) + 2*alpha*R before binning (cube#87)')
     p.add_argument('--water-temp-c', type=float, default=None,
-                   help='water temperature, degC (REQUIRED with --remove-tl); '
-                        'feeds the absorption alpha. Use a cast value '
+                   help='water temperature, degC (REQUIRED with --remove-tl '
+                        'unless --absorption-db-per-m is given); feeds the '
+                        'computed absorption alpha. Use a cast value '
                         'representative of the water column, not the surface '
-                        'temperature alone')
+                        'temperature alone. With --absorption-db-per-m it is '
+                        'only recorded in the header')
     p.add_argument('--salinity', type=float, default=None,
                    help='salinity, psu (default 0 = fresh water); feeds the '
                         'Francois-Garrison boric-acid and MgSO4 terms. Take it '
@@ -114,12 +127,41 @@ def parse_args(argv):
     p.add_argument('--ph', type=float, default=None,
                    help='pH for the boric-acid term (default %g; it has no '
                         'effect at salinity 0)' % DEFAULT_PH)
-    p.add_argument('--depth-m', type=float, default=0.0,
+    p.add_argument('--depth-m', type=float, default=None,
                    help='nominal depth for the absorption pressure terms D '
                         '(default 0.0 -> P2=P3=1)')
+    p.add_argument('--absorption-db-per-m', type=float, default=None,
+                   help='use this absorption alpha (dB/m) instead of computing '
+                        "it, e.g. a path-averaged value from the site's casts. "
+                        'Requires --remove-tl; excludes --salinity, --ph and '
+                        '--depth-m')
     args = p.parse_args(argv)
+    override = args.absorption_db_per_m is not None
+    if override:
+        if not args.remove_tl:
+            p.error('--absorption-db-per-m requires --remove-tl (alpha is only '
+                    'used by the tier-2 TL compensation)')
+        given = [flag for flag, value in (('--salinity', args.salinity),
+                                          ('--ph', args.ph),
+                                          ('--depth-m', args.depth_m))
+                 if value is not None]
+        if given:
+            p.error('--absorption-db-per-m is mutually exclusive with %s: they '
+                    'only feed the computed alpha' % ', '.join(given))
+        alpha = args.absorption_db_per_m
+        if not math.isfinite(alpha) or not 0.0 < alpha <= MAX_ABSORPTION_DB_PER_M:
+            p.error('--absorption-db-per-m %r must be > 0 and <= %g dB/m (is it '
+                    'in dB/km?)' % (alpha, MAX_ABSORPTION_DB_PER_M))
+        if args.water_temp_c is not None and not (
+                math.isfinite(args.water_temp_c)
+                and TEMP_C_RANGE[0] <= args.water_temp_c <= TEMP_C_RANGE[1]):
+            p.error('--water-temp-c %r is outside the plausible range [%g, %g]'
+                    % ((args.water_temp_c,) + TEMP_C_RANGE))
+        return args
+
     if args.remove_tl and args.water_temp_c is None:
-        p.error('--water-temp-c is required when --remove-tl is set')
+        p.error('--water-temp-c is required when --remove-tl is set (or give '
+                '--absorption-db-per-m)')
     if not args.remove_tl:
         ignored = [flag for flag, value in (('--salinity', args.salinity),
                                             ('--ph', args.ph))
@@ -132,6 +174,8 @@ def parse_args(argv):
         args.salinity = 0.0
     if args.ph is None:
         args.ph = DEFAULT_PH
+    if args.depth_m is None:
+        args.depth_m = 0.0
     if args.remove_tl:
         try:
             check_absorption_inputs(
@@ -330,7 +374,8 @@ def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
             # tl_removed + absorption_db_per_m and applies the identical TL.
             f.write('# tl_removed: true\n')
             f.write('# absorption_db_per_m: %.6g\n' % alpha)
-            f.write('# water_temp_c: %.3g\n' % water_temp_c)
+            if water_temp_c is not None:  # unknown with an alpha override
+                f.write('# water_temp_c: %.3g\n' % water_temp_c)
             f.write('# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)\n')
         else:
             f.write('# tl_removed: false\n')
@@ -339,6 +384,27 @@ def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
             db_rel = mean_db - nadir_mean
             f.write('%.1f,%.3f,%d,%+.3f\n' % (center, mean_db, n, db_rel))
     return len(rows)
+
+
+def resolve_absorption(args, freqs):
+    """
+    Return ``(alpha_db_per_m, source, freq_khz)`` for the tier-2 TL.
+
+    ``source`` is ``'override'`` when ``--absorption-db-per-m`` was given (alpha
+    used verbatim) and ``'computed'`` otherwise (Francois-Garrison at the median
+    per-ping frequency). ``freq_khz`` is that median, or None when no finite
+    frequency was found -- which is an error only for the computed path.
+    """
+    freq_khz = median(freqs) / 1000.0 if freqs else None
+    if args.absorption_db_per_m is not None:
+        return args.absorption_db_per_m, 'override', freq_khz
+    if freq_khz is None:
+        raise SystemExit(
+            'error: --remove-tl needs a finite ping_info.frequency to compute '
+            'alpha; none found (or give --absorption-db-per-m)')
+    alpha = francois_garrison_absorption_db_per_m(
+        freq_khz, args.water_temp_c, args.salinity, args.depth_m, args.ph)
+    return alpha, 'computed', freq_khz
 
 
 def median(values):
@@ -365,20 +431,19 @@ def main(argv=None):
 
     alpha = 0.0
     if args.remove_tl:
-        if not freqs:
-            raise SystemExit(
-                'error: --remove-tl needs a finite ping_info.frequency; none found')
-        freq_khz = median(freqs) / 1000.0
-        alpha = francois_garrison_absorption_db_per_m(
-            freq_khz, args.water_temp_c, args.salinity, args.depth_m, args.ph)
-        print('tier-2: median frequency %.1f kHz, T=%.1f C, S=%g psu, pH=%g, '
-              'D=%.1f m -> alpha=%.6g dB/m'
-              % (freq_khz, args.water_temp_c, args.salinity, args.ph,
-                 args.depth_m, alpha))
+        alpha, source, freq_khz = resolve_absorption(args, freqs)
+        if source == 'override':
+            print('tier-2: alpha=%.6g dB/m (--absorption-db-per-m override)'
+                  % alpha)
+        else:
+            print('tier-2: median frequency %.1f kHz, T=%.1f C, S=%g psu, '
+                  'pH=%g, D=%.1f m -> alpha=%.6g dB/m'
+                  % (freq_khz, args.water_temp_c, args.salinity, args.ph,
+                     args.depth_m, alpha))
 
     n_rows = write_csv(
         bins, args.bin_width_deg, args.output,
-        args.remove_tl, alpha, args.water_temp_c if args.remove_tl else 0.0)
+        args.remove_tl, alpha, args.water_temp_c if args.remove_tl else None)
     print('read %d pings across %d bag(s) on %s; wrote %d-bin curve to %s'
           % (n_msgs, len(args.bag), args.topic, n_rows, args.output))
     return 0
