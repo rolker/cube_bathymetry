@@ -434,8 +434,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
   # Golden curve written by derive_angular_response.py (#170): the Python test
   # checks the script still writes it, this test checks the C++ loader reads it.
+  # Per-mode table fixture (#172), written by the same Python test: the current
+  # single-curve loader must read it as an EMPTY curve, never as garbage rows.
   target_compile_definitions(test_angular_response_curve PRIVATE
-    DERIVED_CURVE_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/derived_curve_tier2_seawater.csv")
+    DERIVED_CURVE_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/derived_curve_tier2_seawater.csv"
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
 
   # derive_angular_response.py (#170): Francois-Garrison absorption, argument
   # validation, header provenance, freshwater byte-identity with the pre-#170

@@ -194,6 +194,23 @@ TEST(AngularResponseCurve, LoadsDeriveToolSeawaterCurve)
   EXPECT_FLOAT_EQ(loaded.points[3].second, 9.472f);
 }
 
+// A per-mode angular-response-table v1 (cube_bathymetry#172) handed to this
+// single-curve loader -- an old binary, or a new one before PR 2 adds the table
+// loader -- must yield an EMPTY curve (which every caller already reports
+// loudly), never rows parsed out of it: the mode key in column 0 starts with a
+// letter, so std::stof rejects every row, and the table carries no tl_removed
+// or absorption_db_per_m header. The fixture is written by
+// test_derive_angular_response.py (mode_table_lines).
+TEST(AngularResponseCurve, ModeTableLoadsAsAnEmptyCurve)
+{
+  auto loaded = loadAngularResponseCurveWithHeader(MODE_TABLE_FIXTURE_FILE);
+
+  EXPECT_TRUE(loaded.points.empty());
+  EXPECT_FALSE(loaded.tl_removed);
+  EXPECT_FLOAT_EQ(loaded.absorption_db_per_m, 0.0f);
+  EXPECT_TRUE(loadAngularResponseCurve(MODE_TABLE_FIXTURE_FILE).empty());
+}
+
 // Provenance lines are matched by their exact key only: a value that happens
 // to contain another key's text (a bag named like a header key, extra colons)
 // does not set tl_removed or absorption_db_per_m, and an override-style header
