@@ -774,6 +774,12 @@ samples, or which has fewer than three bins with 200, prints a "thin curve"
 warning and still writes the curve; cube_lab's self-calibration refuses such a
 curve. With `--box` it usually means the box keeps too few pings.
 
+Give each bag once. The same bag given twice (however the path is spelled,
+including a bag directory and a storage file inside it) is refused, since every
+ping in it would be counted twice. Bags that only overlap in time (a re-cut of
+part of a recording beside the original) are not detected: pings recorded in
+both are counted once per bag, so leave the duplicate out.
+
 **Header provenance.** Every line above the CSV column row is a
 `# key: value` comment. The loader (and the marine_tools SonarInfo mirror)
 reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:

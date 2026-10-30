@@ -775,6 +775,29 @@ def bag_basenames(bag_paths):
     return names
 
 
+def check_distinct_bags(bag_paths):
+    """
+    Refuse a bag given twice, which would count every ping in it twice.
+
+    Paths are compared after resolving symlinks, ``..`` and trailing slashes,
+    and a storage file is the same bag as a bag directory given that holds it.
+    Bags that merely overlap in time are not detected: their shared pings are
+    counted once per bag.
+    """
+    seen = {}
+    for path in bag_paths:
+        real = os.path.realpath(path)
+        if real in seen:
+            raise SystemExit('error: bag %r is the same as %r; give each bag once'
+                             % (path, seen[real]))
+        seen[real] = path
+    for path in bag_paths:
+        parent = os.path.dirname(os.path.realpath(path))
+        if parent in seen and os.path.isdir(parent) and seen[parent] != path:
+            raise SystemExit('error: bag %r is a file inside the bag directory %r; '
+                             'give each bag once' % (path, seen[parent]))
+
+
 def build_header(remove_tl, source_bags, alpha=None, absorption_source=None,
                  water_temp_c=None, salinity_psu=None, ph=None, depth_m=None,
                  frequency_khz=None, box=None):
@@ -943,6 +966,7 @@ def main(argv=None):
     """Read the bag(s), bin by |rx_angles| and write the curve CSV (one line)."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
     source_bags = bag_basenames(args.bag)  # refuse a bad name before reading
+    check_distinct_bags(args.bag)
 
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)

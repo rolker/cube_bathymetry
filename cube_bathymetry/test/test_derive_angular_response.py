@@ -424,6 +424,33 @@ def test_bag_basenames_refuses_unrecordable(bad):
         dar.bag_basenames([bad])
 
 
+def test_check_distinct_bags(tmp_path):
+    """The same bag twice, however spelled, is refused; distinct bags pass."""
+    (tmp_path / 'run_1').mkdir()
+    (tmp_path / 'run_1' / 'run_1_0.mcap').write_bytes(b'')
+    (tmp_path / 'run_2').mkdir()
+    (tmp_path / 'link').symlink_to(tmp_path / 'run_1')
+    a = str(tmp_path / 'run_1')
+    dar.check_distinct_bags([a, str(tmp_path / 'run_2')])
+    for twice in ([a, a + '/'],
+                  [a, str(tmp_path / 'run_2' / '..' / 'run_1')],
+                  [a, str(tmp_path / 'link')],
+                  [a, str(tmp_path / 'run_1' / 'run_1_0.mcap')]):
+        with pytest.raises(SystemExit) as exc:
+            dar.check_distinct_bags(twice)
+        assert 'give each bag once' in str(exc.value)
+
+
+def test_main_refuses_the_same_bag_twice(tmp_path):
+    """main() refuses a repeated bag before reading anything."""
+    bag = tmp_path / 'site_bag'
+    write_synthetic_bag(bag)
+    with pytest.raises(SystemExit) as exc:
+        dar.main([str(bag), str(bag) + '/', '-t', TOPIC, '-o', str(tmp_path / 'x.csv')])
+    assert 'give each bag once' in str(exc.value)
+    assert not (tmp_path / 'x.csv').exists()
+
+
 def test_fresh_tier2_rows_byte_identical_to_pre170(tmp_path):
     """Fresh-water tier-2 data rows match the pre-#170 tool byte for byte."""
     out = tmp_path / 'c.csv'
