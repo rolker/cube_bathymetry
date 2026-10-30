@@ -32,3 +32,20 @@ issue: 172
 - [ ] Specify the mode key (canonicalised float pulse/bandwidth, ordered sector tuple, multi-sector sonars) and the SonarInfo-before-detections ordering guarantee live (udp_bridge) and offline.
 - [ ] Note batch_regen (no SonarInfo source) needs a sidecar or stays unsupported for per-mode; drop source_level_db from the residual (constant offset only).
 - [ ] Sequence A on top of open PR #171 (cube#170).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-10-30 13:43 -04:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-172/plan.md` at `433e01f`
+**Branch**: feature/issue-172 at `433e01f` (local, not pushed; `feature/issue-170` merged in as `2afec3e`)
+**Phases**: 3 (core table/estimator; importer and live node; derive script, docs, Appledore validation)
+
+### Open questions
+- [ ] Reference mode default: most-sampled mode or a fixed one shared across campaigns?
+- [ ] Is a 5 s adjacency window right for offset pairs? Confirm on Appledore pair counts.
+- [ ] Confirm the M3's SonarInfo pulse/bandwidth values are stable under 1 us / 100 Hz rounding.
+- [ ] Live node: accept the stale-mode window, or hold soundings a bounded delay?
+- [ ] Declared-state mismatch: warn only, or add a strict flag to fail import_bag?
+- [ ] Three PRs or one?
