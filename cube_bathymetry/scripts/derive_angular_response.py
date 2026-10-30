@@ -650,8 +650,33 @@ def merged_messages(sources):
             reader.close()
 
 
+def deserialize_or_none(data, msg_type):
+    """
+    Deserialize one bag message, or return None when it is corrupt.
+
+    rclpy raises (an RMWError, a RuntimeError) on bytes that are not a valid
+    CDR ``msg_type``; one bad message must not abort a run over many bags.
+    """
+    from rclpy.serialization import deserialize_message
+
+    try:
+        return deserialize_message(data, msg_type)
+    except (RuntimeError, ValueError, MemoryError):
+        return None
+
+
+def corrupt_report(corrupt):
+    """Return the stderr warning for the corrupt-message counter, or None."""
+    total = sum(corrupt.values())
+    if not total:
+        return None
+    by_topic = ', '.join('%d on %s' % (n, name) for name, n in sorted(corrupt.items()))
+    return ('warning: skipped %d corrupt message(s) that would not deserialize '
+            '(%s)' % (total, by_topic))
+
+
 def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
-               box=None, box_stats=None):
+               box=None, box_stats=None, corrupt=None):
     """
     Accumulate per-bin sums on `topic` over every bag into `bins`.
 
@@ -683,10 +708,15 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
     and binned only if its sensor position lies inside the box. `box_stats` (see
     new_box_stats) counts kept and dropped pings; pings that are dropped
     contribute neither samples nor a frequency.
-    Returns the number of messages read on `topic`.
+
+    A message that will not deserialize is skipped and counted per topic in
+    `corrupt` (a collections.Counter), and the run goes on.
+    Returns the number of messages read on `topic` (corrupt ones excluded).
     """
-    from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
+
+    if corrupt is None:
+        corrupt = collections.Counter()
 
     metas = [read_bag_metadata(path) for path in bag_paths]
     type_maps = [type_map for type_map, _start_ns in metas]
@@ -715,8 +745,12 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
                     name, data, _stamp = reader.read_next()
                     if name != topic:
                         continue
+                    msg = deserialize_or_none(data, msg_type)
+                    if msg is None:
+                        corrupt[name] += 1
+                        continue
                     n_msgs += 1
-                    add_ping(deserialize_message(data, msg_type))
+                    add_ping(msg)
             finally:
                 reader.close()
         return n_msgs
@@ -749,12 +783,17 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
 
     for i, name, data, _t_ns in merged_messages(sources):
         kind = tf_topics[i].get(name)
-        if kind is not None:
-            locator.add_tf(deserialize_message(data, tf_msg_type), kind == 'tf_static')
+        if kind is None and name != topic:
+            continue
+        msg = deserialize_or_none(data, tf_msg_type if kind else msg_types[i])
+        if msg is None:
+            corrupt[name] += 1
+        elif kind is not None:
+            locator.add_tf(msg, kind == 'tf_static')
             take_ready(False)
-        elif name == topic:
+        else:
             n_msgs += 1
-            locator.push(deserialize_message(data, msg_types[i]))
+            locator.push(msg)
     take_ready(True)   # end of the stream: position whatever is still waiting
     return n_msgs
 
@@ -1050,9 +1089,13 @@ def main(argv=None):
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)
     box_stats = new_box_stats() if args.box is not None else None
+    corrupt = collections.Counter()   # topic -> messages that would not deserialize
     n_msgs = accumulate(
         args.bag, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
-        box=args.box, box_stats=box_stats)
+        box=args.box, box_stats=box_stats, corrupt=corrupt)
+    warning = corrupt_report(corrupt)
+    if warning is not None:
+        print(warning, file=sys.stderr)
     if box_stats is not None:
         print(box_report(args.box, box_stats, n_msgs))
         if box_stats['kept'] == 0:

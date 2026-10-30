@@ -720,7 +720,8 @@ def write_bag(path, events, topics=BAG_TOPICS):
     for i, (name, type_name) in enumerate(topics):
         writer.create_topic(rosbag2_py.TopicMetadata(i, name, type_name, 'cdr'))
     for t_sec, topic, msg in events:
-        writer.write(topic, serialize_message(msg), int(round(t_sec * 1e9)))
+        data = msg if isinstance(msg, bytes) else serialize_message(msg)   # bytes: raw
+        writer.write(topic, data, int(round(t_sec * 1e9)))
     del writer
 
 
@@ -1034,6 +1035,45 @@ def test_merged_messages_closes_readers_when_abandoned():
     assert _FakeReader.open_now == 2
     stream.close()
     assert _FakeReader.open_now == 0
+
+
+CORRUPT = b'\x00\x01\x00\x00garbage, not CDR'
+
+
+def write_bag_with_corrupt_messages(path):
+    """Write a bag whose detections and TF topics each hold one corrupt message."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    write_bag(path, [
+        (99.0, '/bizzy/tf_static', _mbes_static()),
+        (100.0, '/bizzy/tf', _earth_tf(100.0, inside)),
+        (100.5, TOPIC, _ping(100.5, 'mbes', -30.0)),
+        (100.7, TOPIC, CORRUPT),
+        (100.8, '/bizzy/tf', CORRUPT),
+        (101.0, '/bizzy/tf', _earth_tf(101.0, inside)),
+        (101.5, TOPIC, _ping(101.5, 'mbes', -30.0)),
+        (102.0, '/bizzy/tf', _earth_tf(102.0, inside)),
+        (105.0, '/bizzy/tf', _earth_tf(105.0, inside)),
+    ])
+
+
+@pytest.mark.parametrize('box', [False, True])
+def test_corrupt_messages_are_skipped_and_counted(tmp_path, capsys, box):
+    """A message that will not deserialize is counted and skipped; the run goes on."""
+    bag = tmp_path / 'damaged'
+    write_bag_with_corrupt_messages(bag)
+    out = tmp_path / 'curve.csv'
+    extra = ['--box'] + TEST_BOX if box else []
+    assert dar.main([str(bag), '-t', TOPIC, '-o', str(out)] + extra) == 0
+    captured = capsys.readouterr()
+    if box:
+        assert 'kept 2 of 2 pings' in captured.out
+        assert ('skipped 2 corrupt message(s) that would not deserialize '
+                '(1 on /bizzy/sonar/detections, 1 on /bizzy/tf)') in captured.err
+    else:
+        assert 'read 2 pings' in captured.out
+        assert ('skipped 1 corrupt message(s) that would not deserialize '
+                '(1 on /bizzy/sonar/detections)') in captured.err
+    assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
 
 
 def _bare_ping(sec, nanosec, frame_id='mbes'):

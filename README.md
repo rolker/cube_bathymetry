@@ -774,6 +774,9 @@ samples, or which has fewer than three bins with 200, prints a "thin curve"
 warning and still writes the curve; cube_lab's self-calibration refuses such a
 curve. With `--box` it usually means the box keeps too few pings.
 
+A message that will not deserialize (a damaged bag) is skipped, and the run
+ends with a warning counting the skipped messages per topic.
+
 Give each bag once. The same bag given twice (however the path is spelled,
 including a bag directory and a storage file inside it) is refused, since every
 ping in it would be counted twice. Bags that only overlap in time (a re-cut of
