@@ -747,7 +747,9 @@ the way `import_bag` georeferences:
 - All the bags on the command line are read as one time-ordered stream into
   one TF buffer, so split files work whether they are given together or in any
   order, and a `/tf_static` recorded only in the first split still applies to
-  the rest.
+  the rest. A bag that holds only TF (no detections topic) may be given beside
+  the detections bags to position their pings; at least one bag must carry the
+  detections topic. Without `--box` every bag must carry it.
 - `/tf` and `/tf_static` from every namespace go into that one buffer. In a
   bag that records several vehicles their TF trees share it, so their frame
   names must not collide (`import_bag` has the same limitation).

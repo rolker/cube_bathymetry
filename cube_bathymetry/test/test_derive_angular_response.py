@@ -608,18 +608,22 @@ def _mbes_static():
     return TFMessage(transforms=[_transform('base_link', 'mbes', 0.0, (0.0, 0.0, -0.5))])
 
 
-def write_bag(path, events):
-    """Write ``(t_sec, topic, msg)`` events to an mcap bag at ``path``."""
+BAG_TOPICS = (
+    ('/bizzy/tf', 'tf2_msgs/msg/TFMessage'),
+    ('/bizzy/tf_static', 'tf2_msgs/msg/TFMessage'),
+    (TOPIC, 'marine_acoustic_msgs/msg/SonarDetections'),
+)
+
+
+def write_bag(path, events, topics=BAG_TOPICS):
+    """Write ``(t_sec, topic, msg)`` events to an mcap bag declaring ``topics``."""
     import rosbag2_py
     from rclpy.serialization import serialize_message
 
     writer = rosbag2_py.SequentialWriter()
     writer.open(rosbag2_py.StorageOptions(uri=str(path), storage_id='mcap'),
                 rosbag2_py.ConverterOptions('cdr', 'cdr'))
-    for i, (name, type_name) in enumerate([
-            ('/bizzy/tf', 'tf2_msgs/msg/TFMessage'),
-            ('/bizzy/tf_static', 'tf2_msgs/msg/TFMessage'),
-            (TOPIC, 'marine_acoustic_msgs/msg/SonarDetections')]):
+    for i, (name, type_name) in enumerate(topics):
         writer.create_topic(rosbag2_py.TopicMetadata(i, name, type_name, 'cdr'))
     for t_sec, topic, msg in events:
         writer.write(topic, serialize_message(msg), int(round(t_sec * 1e9)))
@@ -815,6 +819,59 @@ def test_end_to_end_box_over_split_bags_shares_one_tf_buffer(tmp_path, capsys, r
     assert counts_by_angle(out) == {1.0: 4, 31.0: 4}
     hd = header_dict([ln for ln in out.read_text().splitlines() if ln.startswith('#')])
     assert hd['source_bags'] == ','.join(os.path.basename(b) for b in bags)
+
+
+def write_tf_and_detection_bags(tmp_path):
+    """
+    A TF-only bag and a detections-only bag recorded side by side.
+
+    The TF bag declares only /tf and /tf_static; the detections bag declares
+    only the detections topic. Every ping is inside the box.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    tf_bag = tmp_path / 'nav_tf'
+    det_bag = tmp_path / 'mbes_only'
+    write_bag(tf_bag, [
+        (99.0, '/bizzy/tf_static', _mbes_static()),
+        (100.0, '/bizzy/tf', _earth_tf(100.0, inside)),
+        (101.0, '/bizzy/tf', _earth_tf(101.0, inside)),
+        (102.0, '/bizzy/tf', _earth_tf(102.0, inside)),
+        (105.0, '/bizzy/tf', _earth_tf(105.0, inside)),
+    ], topics=BAG_TOPICS[:2])
+    write_bag(det_bag, [
+        (100.5, TOPIC, _ping(100.5, 'mbes', -30.0)),
+        (101.5, TOPIC, _ping(101.5, 'mbes', -30.0)),
+    ], topics=BAG_TOPICS[2:])
+    return tf_bag, det_bag
+
+
+def test_end_to_end_box_tf_only_bag_positions_a_detections_bag(tmp_path, capsys):
+    """With --box a TF-only bag beside a detections bag positions its pings."""
+    tf_bag, det_bag = write_tf_and_detection_bags(tmp_path)
+    out = tmp_path / 'curve.csv'
+    assert dar.main([str(tf_bag), str(det_bag), '-t', TOPIC, '-o', str(out),
+                     '--box'] + TEST_BOX) == 0
+    assert 'kept 2 of 2 pings' in capsys.readouterr().out
+    assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
+
+
+def test_without_box_a_bag_without_the_topic_is_an_error(tmp_path):
+    """Without --box every bag must carry the detections topic."""
+    tf_bag, det_bag = write_tf_and_detection_bags(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        dar.main([str(tf_bag), str(det_bag), '-t', TOPIC,
+                  '-o', str(tmp_path / 'x.csv')])
+    assert "topic '%s' not in bag" % TOPIC in str(exc.value)
+
+
+def test_box_with_no_bag_holding_the_topic_is_an_error(tmp_path):
+    """With --box at least one bag must carry the detections topic."""
+    tf_bag, _det_bag = write_tf_and_detection_bags(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        dar.main([str(tf_bag), '-t', TOPIC, '-o', str(tmp_path / 'x.csv'),
+                  '--box'] + TEST_BOX)
+    assert "topic '%s' not in any bag" % TOPIC in str(exc.value)
+    assert not (tmp_path / 'x.csv').exists()
 
 
 def _bare_ping(sec, nanosec, frame_id='mbes'):

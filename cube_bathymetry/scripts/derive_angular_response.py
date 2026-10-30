@@ -71,10 +71,12 @@ georeferences it:
 
 * every bag on the command line is read in ONE time-ordered pass (merged on the
   bag timestamp) into ONE tf2 buffer, so a ``/tf_static`` recorded only in the
-  first split file still serves the later ones. ``/tf`` and ``/tf_static`` from
-  every namespace go into that buffer; in a bag recording several vehicles
-  their trees share it, so their frame names must not collide (import_bag
-  behaves the same);
+  first split file still serves the later ones, and a bag holding only TF may
+  position the pings of a detections bag recorded beside it (at least one bag
+  must have the detections topic; without ``--box`` every bag must).
+  ``/tf`` and ``/tf_static`` from every namespace go into that buffer; in a
+  bag recording several vehicles their trees share it, so their frame names
+  must not collide (import_bag behaves the same);
 * each ping waits until the TF stream has advanced 3 s past its stamp, so the
   transforms on both sides of it are in the buffer, then ``earth ->
   <header.frame_id>`` is looked up exactly at the ping stamp, interpolated
@@ -621,7 +623,9 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
     are merged into ONE time-ordered pass (merged_messages) feeding ONE
     PingLocator, as import_bag does: a /tf_static recorded only in the first
     split file still positions the pings of the later splits, and a bag holding
-    only TF positions the pings of a bag recorded beside it. Each ping is queued
+    only TF positions the pings of a bag recorded beside it (so with `box` a
+    bag without `topic` is allowed; only no bag at all having it is an error,
+    whereas without `box` every bag must have it). Each ping is queued
     until the TF frontier is TF_GUARD_SEC past its stamp, looked up exactly,
     and binned only if its sensor position lies inside the box. `box_stats` (see
     new_box_stats) counts kept and dropped pings; pings that are dropped
@@ -634,12 +638,19 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
     type_maps = []
     for reader in readers:
         type_map = {t.name: t.type for t in reader.get_all_topics_and_types()}
-        if topic not in type_map:
+        if topic not in type_map and box is None:
             raise SystemExit(
                 "error: topic '%s' not in bag (have: %s)"
                 % (topic, ', '.join(sorted(type_map)) or 'none'))
         type_maps.append(type_map)
-    msg_types = [get_message(type_map[topic]) for type_map in type_maps]
+    if not any(topic in type_map for type_map in type_maps):
+        # Only reachable with --box, where a bag without the detections topic
+        # may still carry the TF that positions another bag's pings.
+        raise SystemExit(
+            "error: topic '%s' not in any bag (have: %s)"
+            % (topic, ', '.join(sorted(set().union(*type_maps))) or 'none'))
+    msg_types = [get_message(type_map[topic]) if topic in type_map else None
+                 for type_map in type_maps]
 
     def add_ping(msg):
         bin_ping(msg, bin_width_deg, remove_tl, bins, freqs)
@@ -662,7 +673,9 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
         kinds = {name: kind for name, type_name in type_map.items()
                  for kind in (is_tf_topic(name),)
                  if kind is not None and type_name == 'tf2_msgs/msg/TFMessage'}
-        reader.set_filter(rosbag2_py.StorageFilter(topics=[topic] + sorted(kinds)))
+        wanted = ([topic] if topic in type_map else []) + sorted(kinds)
+        if wanted:   # an empty filter would read every topic
+            reader.set_filter(rosbag2_py.StorageFilter(topics=wanted))
         tf_topics.append(kinds)
     tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
     locator = PingLocator()   # one buffer for every bag on the command line
