@@ -87,6 +87,10 @@ georeferences it:
   stamped more than 1 h ahead of the TF stream. Waiting pings leave in stamp
   order, so one ping with a bad future stamp does not hold back the rest.
   Pings still waiting when the bags end are looked up against what was read.
+  The TF stream's progress is the newest accepted dynamic transform stamp,
+  never later than the time the bag recorded it. Transforms tf2 would reject
+  (NaN, zero quaternion, bad frame names, older than the 60 s buffer) or
+  stamped more than 60 s after they were recorded are left out and counted.
 
 The ECEF translation of the sensor origin is converted to latitude/longitude in
 closed form; a translation that is not a geocentric position (more than 50 km
@@ -308,25 +312,80 @@ class PingLocator:
 
         self._tf2_ros = tf2_ros
         self._buffer = tf2_ros.Buffer(cache_time=Duration(seconds=cache_sec))
+        self._cache_ns = int(round(cache_sec * 1e9))
         self._guard_ns = int(round(guard_sec * 1e9))
         self._future_limit_ns = int(round(future_limit_sec * 1e9))
         self._frontier_ns = None
+        self._newest_ns = {}   # child frame -> newest dynamic stamp inserted
+        # Transforms not given to tf2, by reason (see TF_REJECT_REASONS).
+        self.tf_rejected = collections.Counter()
         # Heap of (ping stamp ns, arrival number, frame id, item): the earliest
         # stamp leaves first, ties in arrival order.
         self._pending = []
         self._arrivals = 0
         self.max_pending = 0   # the most pings that waited at once
 
-    def add_tf(self, tf_message, is_static):
-        """Insert every transform of a tf2_msgs/TFMessage into the buffer."""
+    def add_tf(self, tf_message, is_static, bag_ns=None):
+        """
+        Insert every transform of a tf2_msgs/TFMessage into the buffer.
+
+        ``bag_ns`` is the time the bag recorded the message. Transforms tf2
+        would reject, or that would corrupt the buffer, are not given to it:
+        they are counted in ``tf_rejected`` (instead of tf2 printing a line for
+        each) and do not move the frontier. See transform_reject_reason.
+
+        The frontier advances to an accepted dynamic transform's stamp, but
+        never past ``bag_ns``: a transform stamped ahead of the time it was
+        recorded (a clock offset, a glitch) must not release waiting pings
+        before the transforms that really follow them have been read.
+        """
         for t in tf_message.transforms:
+            reason = self.transform_reject_reason(t, is_static, bag_ns)
+            if reason is not None:
+                self.tf_rejected[reason] += 1
+                continue
             if is_static:
                 self._buffer.set_transform_static(t, 'bag')
-            else:
-                self._buffer.set_transform(t, 'bag')
-                ns = stamp_ns(t.header.stamp)
-                if self._frontier_ns is None or ns > self._frontier_ns:
-                    self._frontier_ns = ns
+                continue
+            self._buffer.set_transform(t, 'bag')
+            ns = stamp_ns(t.header.stamp)
+            child = t.child_frame_id
+            if ns > self._newest_ns.get(child, ns - 1):
+                self._newest_ns[child] = ns
+            advance = ns if bag_ns is None else min(ns, bag_ns)
+            if self._frontier_ns is None or advance > self._frontier_ns:
+                self._frontier_ns = advance
+
+    def transform_reject_reason(self, t, is_static, bag_ns=None):
+        """
+        Return why TransformStamped ``t`` must not enter the buffer, or None.
+
+        ``'invalid'``: what tf2 itself rejects (and prints an error for) -- an
+        empty or self-referencing frame name, a NaN or infinite value, or a
+        zero quaternion (tf2 normalises any other). Dynamic transforms only:
+        ``'old'``, more than the cache length older than the newest transform
+        of the same child frame (tf2's TF_OLD_DATA); ``'future'``, stamped more
+        than the cache length after ``bag_ns``, which tf2 would accept and then
+        prune every real transform of that frame against.
+        """
+        tr = t.transform.translation
+        q = t.transform.rotation
+        values = (tr.x, tr.y, tr.z, q.x, q.y, q.z, q.w)
+        norm2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w
+        if (not t.header.frame_id or not t.child_frame_id
+                or t.header.frame_id == t.child_frame_id
+                or not all(math.isfinite(v) for v in values)
+                or not (math.isfinite(norm2) and norm2 > 0.0)):
+            return 'invalid'
+        if is_static:
+            return None
+        ns = stamp_ns(t.header.stamp)
+        if bag_ns is not None and ns > bag_ns + self._cache_ns:
+            return 'future'
+        newest = self._newest_ns.get(t.child_frame_id)
+        if newest is not None and newest > ns + self._cache_ns:
+            return 'old'
+        return None
 
     def push(self, ping_ns, frame_id, item):
         """
@@ -442,14 +501,33 @@ BOX_DROP_REASONS = (
 )
 
 
+# Transforms PingLocator keeps out of the tf2 buffer, in report order.
+TF_REJECT_REASONS = (
+    ('invalid', 'invalid (NaN, zero quaternion or bad frame names)'),
+    ('old', 'more than %g s older than the newest of their frame' % TF_CACHE_SEC),
+    ('future', 'stamped more than %g s after the bag recorded them' % TF_CACHE_SEC),
+)
+
+
+def tf_rejected_warning(tf_rejected):
+    """Return the stderr warning for PingLocator.tf_rejected, or None."""
+    total = sum(tf_rejected.values())
+    if not total:
+        return None
+    return 'warning: --box ignored %d transform(s): %s' % (
+        total, ', '.join('%d %s' % (tf_rejected[key], words)
+                         for key, words in TF_REJECT_REASONS))
+
+
 def new_box_stats():
     """
     Return zeroed --box counters.
 
-    'kept', one per drop reason, and 'max_pending', the most pings that waited
-    for the TF stream at once.
+    'kept', one per drop reason, 'max_pending', the most pings that waited
+    for the TF stream at once, and 'tf_rejected', PingLocator's counter of
+    transforms kept out of the buffer.
     """
-    stats = {'kept': 0, 'max_pending': 0}
+    stats = {'kept': 0, 'max_pending': 0, 'tf_rejected': collections.Counter()}
     stats.update((key, 0) for key, _words in BOX_DROP_REASONS)
     return stats
 
@@ -852,7 +930,7 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
                 box_stats['kept'] += 1
                 add_ping(msg)
 
-    for i, name, data, _t_ns in merged_messages(sources):
+    for i, name, data, t_ns in merged_messages(sources):
         kind = tf_topics[i].get(name)
         if kind is None and name != topic:
             continue
@@ -860,7 +938,7 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
         if msg is None:
             corrupt[name] += 1
         elif kind is not None:
-            locator.add_tf(msg, kind == 'tf_static')
+            locator.add_tf(msg, kind == 'tf_static', t_ns)
             take_ready(False)
         else:
             n_msgs += 1
@@ -870,6 +948,7 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
                 box_stats[reason] += 1
     take_ready(True)   # end of the stream: position whatever is still waiting
     box_stats['max_pending'] = locator.max_pending
+    box_stats['tf_rejected'] = locator.tf_rejected
     return n_msgs
 
 
@@ -1171,6 +1250,9 @@ def main(argv=None):
         print(warning, file=sys.stderr)
     if box_stats is not None:
         print(box_report(args.box, box_stats, n_msgs))
+        warning = tf_rejected_warning(box_stats['tf_rejected'])
+        if warning is not None:
+            print(warning, file=sys.stderr)
         if box_stats['kept'] == 0:
             raise SystemExit('error: no pings inside --box; nothing to derive '
                              '(check the box corners are LATMIN LONMIN LATMAX '

@@ -1198,6 +1198,73 @@ def test_ping_locator_drops_a_ping_far_ahead_of_the_tf_stream():
     assert loc.pending == 2
 
 
+def _bad_tf(sec, xyz=(6378137.0, 0.0, 0.0), w=1.0, parent='earth', child='base_link'):
+    """Return a TFMessage with one transform built from the given parts."""
+    from tf2_msgs.msg import TFMessage
+    t = _transform(parent, child, sec, xyz)
+    t.transform.rotation.w = w
+    return TFMessage(transforms=[t])
+
+
+def test_ping_locator_keeps_invalid_transforms_out_and_counts_them(capfd):
+    """NaN, zero-quaternion and bad-name transforms neither enter tf2 nor move the frontier."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_earth_tf_at(100, 0, inside), False, _ns(100))
+    ping = _push(loc, 100, 0)
+    for msg in (_bad_tf(110.0, xyz=(float('nan'), 0.0, 0.0)),
+                _bad_tf(110.0, w=0.0),
+                _bad_tf(110.0, parent=''),
+                _bad_tf(110.0, parent='base_link'),
+                _bad_tf(0.0, xyz=(float('inf'), 0.0, 0.0))):
+        loc.add_tf(msg, False, _ns(110))
+    loc.add_tf(_bad_tf(0.0, w=0.0), True)   # statics are checked too
+    assert loc.tf_rejected == {'invalid': 6}
+    assert list(loc.drain()) == []           # the frontier is still 100
+    assert loc.pending == 1
+    assert 'TF_' not in capfd.readouterr().err   # tf2 printed nothing
+    assert dar.tf_rejected_warning(loc.tf_rejected).startswith(
+        'warning: --box ignored 6 transform(s): 6 invalid')
+    assert [r[0] for r in loc.drain(flush=True)] == [ping]
+
+
+def test_ping_locator_old_transform_is_counted_not_printed(capfd):
+    """A transform tf2 would refuse as TF_OLD_DATA is counted, silently."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_earth_tf_at(200, 0, inside), False, _ns(200))
+    loc.add_tf(_earth_tf_at(139, 0, inside), False, _ns(201))   # 61 s older
+    loc.add_tf(_earth_tf_at(141, 0, inside), False, _ns(201))   # within 60 s
+    assert loc.tf_rejected == {'old': 1}
+    assert 'TF_OLD_DATA' not in capfd.readouterr().err
+
+
+def test_ping_locator_future_transform_cannot_purge_the_buffer():
+    """A transform far ahead of its bag time is left out, so real ones still serve."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_earth_tf_at(100, 0, inside), False, _ns(100))
+    loc.add_tf(_earth_tf_at(100 + 86400, 0, inside), False, _ns(100, 500000000))
+    loc.add_tf(_earth_tf_at(101, 0, inside), False, _ns(101))
+    assert loc.tf_rejected == {'future': 1}
+    assert loc.locate('mbes', _ns(100, 500000000)) == ((pytest.approx(INSIDE[0]),
+                                                        pytest.approx(INSIDE[1])), None)
+
+
+def test_ping_locator_frontier_never_passes_the_bag_time():
+    """A transform stamped ahead of its bag time moves the frontier only to that time."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    early = _push(loc, 97, 0)
+    late = _push(loc, 97, 1)
+    loc.add_tf(_earth_tf_at(110, 0, inside), False, _ns(100))   # 10 s ahead: accepted
+    assert loc.tf_rejected == {}
+    assert [r[0] for r in loc.drain()] == [early]   # frontier 100, not 110
+    assert loc.pending == 1 and late
+
+
 def test_ping_locator_rejects_unset_stamp():
     """A zero stamp is dropped as bad_stamp, never read as tf2's "latest"."""
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)

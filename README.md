@@ -759,6 +759,14 @@ the way `import_bag` georeferences:
   fallback to the latest transform. Waiting pings leave in stamp order, so one
   ping with a bad future stamp does not hold back the rest. Pings still
   waiting when the bags end are looked up against what was read.
+- The TF stream's progress is the newest accepted dynamic transform stamp, and
+  never later than the time the bag recorded that transform, so a transform
+  stamped ahead of its recording time does not release pings early.
+  Transforms tf2 would reject (NaN, zero quaternion, bad frame names, more
+  than 60 s older than the newest of their frame) and transforms stamped more
+  than 60 s after they were recorded (which would push the real ones out of
+  the buffer) are left out; a warning counts them instead of tf2 printing a
+  line for each.
 - The ECEF position of the sensor is converted to latitude/longitude.
 - Pings waiting for the TF stream are held in memory, about 13 bytes per beam
   (7 KB for a 512-beam ping). Normally that is the last few seconds of pings;
