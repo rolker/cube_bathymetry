@@ -51,6 +51,13 @@
   <exec_depend>ros2lifecycle</exec_depend>
   <exec_depend>ros2param</exec_depend>
   <exec_depend>ros2service</exec_depend>
+  <!-- scripts/derive_angular_response.py reads bags in Python (cube#81) and, with
+       with the box filter, positions pings from the bag TF tree (#170) -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>tf2_ros_py</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
