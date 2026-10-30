@@ -440,6 +440,42 @@ def golden_content(tmp_path):
     return out.read_bytes()
 
 
+def test_write_csv_failure_keeps_the_existing_curve(tmp_path):
+    """A failure while writing leaves the old curve intact and no temp file."""
+    out = tmp_path / 'curve.csv'
+    out.write_text('a good curve\n')
+    with pytest.raises(TypeError):
+        dar.write_csv(BINS, 2.0, str(out), False, 0.0, ['# ok', None])
+    assert out.read_text() == 'a good curve\n'
+    assert [q.name for q in tmp_path.iterdir()] == ['curve.csv']
+
+
+def test_atomic_write_cleans_up_when_the_replace_fails(tmp_path, monkeypatch):
+    """A failure after the temp file is written removes it; the old file stays."""
+    out = tmp_path / 'curve.csv'
+    out.write_text('a good curve\n')
+
+    def fail(_src, _dst):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(dar.os, 'replace', fail)
+    with pytest.raises(OSError):
+        dar.write_csv(BINS, 2.0, str(out), False, 0.0, ['# new'])
+    assert out.read_text() == 'a good curve\n'
+    assert [q.name for q in tmp_path.iterdir()] == ['curve.csv']
+
+
+def test_write_csv_replaces_and_keeps_permissions(tmp_path):
+    """A successful write replaces the file and keeps its permission bits."""
+    out = tmp_path / 'curve.csv'
+    out.write_text('old\n')
+    out.chmod(0o640)
+    dar.write_csv(BINS, 2.0, str(out), False, 0.0, ['# new'])
+    assert out.read_text().startswith('# new\nabs_angle_deg_center,')
+    assert (out.stat().st_mode & 0o777) == 0o640
+    assert [q.name for q in tmp_path.iterdir()] == ['curve.csv']
+
+
 def test_golden_seawater_curve_for_cpp_round_trip(tmp_path):
     """The golden curve the C++ loader test reads is current."""
     content = golden_content(tmp_path)

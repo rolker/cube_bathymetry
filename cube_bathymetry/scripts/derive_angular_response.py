@@ -107,7 +107,9 @@ import collections
 import heapq
 import math
 import os
+import stat
 import sys
+import tempfile
 
 DEFAULT_PH = 8.0
 
@@ -827,14 +829,45 @@ def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, header_lines):
         rows.append([center, mean, n])
 
     nadir_mean = rows[0][1]  # lowest-angle (nadir-most) bin
-    with open(out_path, 'w') as f:
-        for line in header_lines:
-            f.write(line + '\n')
-        f.write('abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n')
-        for center, mean_db, n in rows:
-            db_rel = mean_db - nadir_mean
-            f.write('%.1f,%.3f,%d,%+.3f\n' % (center, mean_db, n, db_rel))
+    lines = list(header_lines)
+    lines.append('abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir')
+    for center, mean_db, n in rows:
+        db_rel = mean_db - nadir_mean
+        lines.append('%.1f,%.3f,%d,%+.3f' % (center, mean_db, n, db_rel))
+    write_text_atomically(out_path, ''.join(line + '\n' for line in lines))
     return len(rows)
+
+
+def write_text_atomically(path, text):
+    """
+    Replace ``path`` with ``text`` in one step (temp file + os.replace).
+
+    A failure part-way leaves an existing file untouched and no partial file
+    behind. The new file keeps an existing file's permission bits, else gets
+    the umask default, as open(path, 'w') would.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp_path = tempfile.mkstemp(
+        dir=directory, prefix='.%s.' % os.path.basename(path), suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def resolve_absorption(args, freqs):
