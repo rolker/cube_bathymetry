@@ -122,6 +122,10 @@ DEPTH_M_RANGE = (0.0, 12000.0)
 # An explicit alpha above this is almost certainly dB/km typed as dB/m: pure
 # water at 2 MHz and 10 C is ~1.2 dB/m, and multibeam echosounders run lower.
 MAX_ABSORPTION_DB_PER_M = 5.0
+# Plausible median ping_info.frequency for the computed alpha, kHz. Multibeam
+# and single-beam echosounders run from ~12 kHz to ~1.5 MHz; a value outside
+# this is a unit slip (kHz stored as Hz gives a near-zero alpha) or garbage.
+FREQUENCY_KHZ_RANGE = (1.0, 2000.0)
 
 # WGS84 ellipsoid (semi-major axis a, flattening f).
 WGS84_A = 6378137.0
@@ -809,7 +813,8 @@ def resolve_absorption(args, freqs):
     ``source`` is ``'override'`` when ``--absorption-db-per-m`` was given (alpha
     used verbatim) and ``'computed'`` otherwise (Francois-Garrison at the median
     per-ping frequency). ``freq_khz`` is that median, or None when no finite
-    frequency was found -- which is an error only for the computed path.
+    frequency was found -- which is an error only for the computed path, as
+    is a median outside FREQUENCY_KHZ_RANGE.
     """
     freq_khz = median(freqs) / 1000.0 if freqs else None
     if args.absorption_db_per_m is not None:
@@ -818,6 +823,12 @@ def resolve_absorption(args, freqs):
         raise SystemExit(
             'error: --remove-tl needs a finite ping_info.frequency to compute '
             'alpha; none found (or give --absorption-db-per-m)')
+    if not FREQUENCY_KHZ_RANGE[0] <= freq_khz <= FREQUENCY_KHZ_RANGE[1]:
+        raise SystemExit(
+            'error: the median ping_info.frequency is %g kHz, outside the '
+            'plausible %g..%g kHz; it should be in Hz (is it in kHz?). Give '
+            '--absorption-db-per-m instead of computing alpha from it'
+            % ((freq_khz,) + FREQUENCY_KHZ_RANGE))
     alpha = francois_garrison_absorption_db_per_m(
         freq_khz, args.water_temp_c, args.salinity, args.depth_m, args.ph)
     return alpha, 'computed', freq_khz

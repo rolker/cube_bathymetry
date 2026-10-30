@@ -252,6 +252,29 @@ def test_absorption_inputs_without_remove_tl_warn(extra, capsys):
     assert extra[0] in err and 'ignored without --remove-tl' in err
 
 
+@pytest.mark.parametrize('freq_hz', [500.0, 0.9e3, 2.1e6])
+def test_computed_alpha_refuses_implausible_frequency(freq_hz):
+    """A median frequency outside 1 kHz..2 MHz (kHz stored as Hz) is refused."""
+    args = dar.parse_args(BASE + ['--remove-tl', '--water-temp-c', '15'])
+    with pytest.raises(SystemExit) as exc:
+        dar.resolve_absorption(args, [freq_hz])
+    assert 'ping_info.frequency' in str(exc.value)
+
+
+@pytest.mark.parametrize('freq_hz', [1e3, 12e3, 500e3, 2e6])
+def test_computed_alpha_accepts_frequency_range(freq_hz):
+    """The range edges and real echosounder frequencies compute."""
+    args = dar.parse_args(BASE + ['--remove-tl', '--water-temp-c', '15'])
+    alpha, source, freq_khz = dar.resolve_absorption(args, [freq_hz])
+    assert source == 'computed' and freq_khz == freq_hz / 1000.0 and alpha > 0.0
+
+
+def test_override_ignores_implausible_frequency():
+    """With --absorption-db-per-m the frequency is not used, so not checked."""
+    args = dar.parse_args(BASE + ['--remove-tl', '--absorption-db-per-m', '0.13'])
+    assert dar.resolve_absorption(args, [500.0])[:2] == (0.13, 'override')
+
+
 def test_box_parsed():
     """--box takes four floats."""
     args = dar.parse_args(BASE + ['--box', '42.95', '-70.65', '43.0', '-70.58'])

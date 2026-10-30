@@ -725,7 +725,10 @@ the dominant term in salt water; temperature is second order.
   in fresh water), `--water-temp-c` and `--depth-m` feed the full
   Francois-Garrison (1982) model: boric acid, MgSO4 and pure water. At
   salinity 0 it gives exactly the freshwater value earlier versions computed,
-  so an existing freshwater invocation writes the same data rows.
+  so an existing freshwater invocation writes the same data rows. The
+  frequency is the median per-ping `ping_info.frequency` (Hz); a median
+  outside 1 kHz to 2 MHz stops the run, since it is a unit slip (a frequency
+  stored in kHz) that would give a near-zero alpha.
 - Take temperature and salinity from CTD or sound-speed casts at the site,
   not from the boat's surface temperature alone. In a stratified water column
   work out a path-averaged alpha over the depths surveyed and pass it with
