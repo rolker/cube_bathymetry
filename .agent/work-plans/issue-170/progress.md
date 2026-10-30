@@ -77,3 +77,31 @@ Compared with `derive_angular_response.py` before #170:
 
 ### Next
 review-code (re-review) on the branch at `6d69025`. Nothing pushed.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-10-30 11:18 -04:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-170 at `b6fa686`
+**Mode**: pre-push
+**Depth**: Deep (reason: ~2000 changed lines across 9 files)
+**Must-fix**: 2 | **Suggestions**: 8
+**Round**: 2 | **Ship**: recommended — 2 must-fixes, the same count as round 1, each a precise mechanical fix (one guard plus a test, and one topic check or docstring); no design question remains
+
+Specialists: static analysis (the ament lint tests inside the suite: all clean); governance; plan drift skipped (no plan.md); Claude Adversarial Lens A + Lens B; cross-model gemini + codex (both EXIT=0); local model off. `./sensors_ws/test.sh cube_bathymetry`: 1192 tests, 0 errors, 0 failures, 90 skipped. Old (origin/jazzy) and new script run end to end on the test suite's synthetic bag (tier-1; tier-2 at 24 C; tier-2 at 15.55 C and 30 m): the data rows are byte-identical in all three runs. No `.agents/README.md` and no `review-context.yaml` in this repo.
+
+Round-1 findings: 12 of 13 resolved as claimed. The shared buffer, the time-ordered merge (also correct for out-of-order files on the command line), the 3 s guard with exact lookup and end-of-run flush, bad_stamp, the package deps, the typo, the ADR wording, the ignored-input warnings, the frequency bound, the thin-curve warning and the atomic write all check out. Round-1 item 4, the non-geocentric earth position, is only partly fixed (must-fix 1). Gemini's CI-image dependency finding is a false positive: ci.yml runs rosdep install at CI time.
+
+### Findings
+- [ ] (must-fix) `earth_position_to_lat_lon` still lets a non-geocentric position abort the run. For an ECEF position about 20 to 45 km from the Earth's centre, Heikkinen's cube root goes complex and the next `math.sqrt` raises `TypeError`, which the `except (ValueError, ZeroDivisionError, OverflowError)` does not catch. That is a local map frame named `earth` with the sensor 20 to 45 km from its origin. Reproduced by fuzzing, e.g. (34721.27, 13579.63, -18942.10); confirmed by Lens A. Reject a radius outside roughly [b - 50 km, a + 50 km] before the closed form (or catch TypeError), and add a test point in that band. — `cube_bathymetry/scripts/derive_angular_response.py:222`
+- [ ] (must-fix) `accumulate` exits with "topic not in bag" for any bag without the detections topic, yet its docstring says "a bag holding only TF positions the pings of a bag recorded beside it" (:609-611, also :564-566). With `--box`, allow readers without the topic (error only when no bag has it) and add a test with a real TF-only bag, or drop the claim. Raised by gemini, codex and Lens B. — `cube_bathymetry/scripts/derive_angular_response.py:621`
+- [ ] (suggestion) FIFO head-of-line blocking: one ping with a far-future header stamp holds every later ping until the end of the run, and at the flush most of them drop as `extrapolation`. Codex reproduced it; in Lens A's run 95 of 101 dropped. Drain from a stamp-ordered heap so ready pings leave regardless of arrival order. import_bag has the same deque (`import_bag_main.cpp:2243`), so the fix belongs there too. Raised by codex (as must-fix), gemini, Lens A and Lens B. — `cube_bathymetry/scripts/derive_angular_response.py:318`
+- [ ] (suggestion) The pending queue is unbounded. With no dynamic /tf (frontier stays None), or once TF stops, every remaining ping is held as a deserialized message until the flush: about 36 KB per 512-beam ping in Python, against about 7 KB serialized, so roughly 2.6 GB per hour at 20 Hz. Fail fast when no bag has a dynamic tf topic, queue a compact tuple or the serialized bytes, and report the maximum pending count; give it a README sentence. Raised by Lens A and Lens B, and measured here. — `cube_bathymetry/scripts/derive_angular_response.py:288`
+- [ ] (suggestion) The frontier advances on a transform tf2 rejects (NaN, bad quaternion, TF_OLD_DATA) and on a future-stamped one, so waiting pings are released before their bracketing transform arrives and drop as `extrapolation`. Advance it only for accepted, plausible stamps. Raised by Lens A and Lens B. — `cube_bathymetry/scripts/derive_angular_response.py:297`
+- [ ] (suggestion) `main` now opens every bag reader up front even without `--box` (before the fix pass they were opened one at a time) and never releases them; hundreds of split files run into `ulimit -n`. Open lazily in the no-box path, and release each reader once it is exhausted in `merged_messages`. Raised by Lens B. — `cube_bathymetry/scripts/derive_angular_response.py:919`
+- [ ] (suggestion) `write_text_atomically` replaces a symlinked `-o` with a regular file, where the old `open('w')` wrote through the link, and `-o /dev/stdout` now fails (temp file in /dev). Resolve `os.path.realpath` first and write a non-regular target directly. Raised by Lens A and Lens B. — `cube_bathymetry/scripts/derive_angular_response.py:849`
+- [ ] (suggestion) The same bag given twice, or overlapping bags, double-counts pings and floods stderr with unthrottled tf2 TF_OLD_DATA warnings. Refuse duplicate resolved paths, and count rather than print the rejected transforms. Raised by Lens A and Lens B. — `cube_bathymetry/scripts/derive_angular_response.py:919`
+- [ ] (suggestion) `deserialize_message` is unguarded, so one corrupt message aborts the run with a traceback (the C++ catches and reports per message); skip and count it, or fail naming the bag. Raised by Lens B. — `cube_bathymetry/scripts/derive_angular_response.py:669`
+- [ ] (suggestion) `--bin-width-deg` is unvalidated: 0 raises ZeroDivisionError, and a negative or NaN value makes nonsense bins (this predates the PR; one `p.error`). Raised by Lens A. — `cube_bathymetry/scripts/derive_angular_response.py:395`
