@@ -515,6 +515,61 @@ def test_write_csv_replaces_and_keeps_permissions(tmp_path):
     assert [q.name for q in tmp_path.iterdir()] == ['curve.csv']
 
 
+def test_write_csv_writes_through_a_symlink(tmp_path):
+    """A symlinked output keeps the link and replaces its target."""
+    real_dir = tmp_path / 'curves'
+    real_dir.mkdir()
+    target = real_dir / 'site.csv'
+    target.write_text('old\n')
+    target.chmod(0o640)
+    link = tmp_path / 'current.csv'
+    link.symlink_to(target)
+    dar.write_csv(BINS, 2.0, str(link), False, 0.0, ['# new'])
+    assert link.is_symlink() and os.readlink(link) == str(target)
+    assert target.read_text().startswith('# new\n')
+    assert (target.stat().st_mode & 0o777) == 0o640
+    assert sorted(q.name for q in real_dir.iterdir()) == ['site.csv']
+    assert sorted(q.name for q in tmp_path.iterdir()) == ['current.csv', 'curves']
+
+
+def test_write_csv_through_a_dangling_symlink_creates_the_target(tmp_path):
+    """A link to a file that does not exist yet creates that file, as open('w')."""
+    link = tmp_path / 'current.csv'
+    link.symlink_to(tmp_path / 'new.csv')
+    dar.write_csv(BINS, 2.0, str(link), False, 0.0, ['# new'])
+    assert link.is_symlink()
+    assert (tmp_path / 'new.csv').read_text().startswith('# new\n')
+
+
+def test_write_csv_to_a_non_regular_file_writes_directly(tmp_path):
+    """/dev/null and a FIFO are written in place; no temp file is attempted."""
+    dar.write_csv(BINS, 2.0, '/dev/null', False, 0.0, ['# new'])
+    import threading
+    fifo = tmp_path / 'pipe'
+    os.mkfifo(fifo)
+    got = []
+    reader = threading.Thread(target=lambda: got.append(fifo.read_text()), daemon=True)
+    reader.start()
+    dar.write_csv(BINS, 2.0, str(fifo), False, 0.0, ['# new'])
+    reader.join(timeout=10)
+    assert got and got[0].startswith('# new\nabs_angle_deg_center,')
+    assert sorted(q.name for q in tmp_path.iterdir()) == ['pipe']
+
+
+def test_output_to_dev_stdout(tmp_path):
+    """-o /dev/stdout writes the curve to standard output."""
+    import subprocess
+    import sys
+    bag = tmp_path / 'site_bag'
+    write_synthetic_bag(bag)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(bag), '-t', TOPIC, '-o', '/dev/stdout'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert '\nabs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n' in proc.stdout
+    assert '1.0,' in proc.stdout and 'wrote 2-bin curve to /dev/stdout' in proc.stdout
+
+
 def test_golden_seawater_curve_for_cpp_round_trip(tmp_path):
     """The golden curve the C++ loader test reads is current."""
     content = golden_content(tmp_path)

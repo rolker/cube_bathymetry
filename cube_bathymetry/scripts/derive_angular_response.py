@@ -899,8 +899,19 @@ def write_text_atomically(path, text):
     A failure part-way leaves an existing file untouched and no partial file
     behind. The new file keeps an existing file's permission bits, else gets
     the umask default, as open(path, 'w') would.
+
+    A symlinked ``path`` is written through: its final target is replaced and
+    the link is kept. A path that is not (or would not be) a regular file -- a
+    device or pipe such as ``/dev/stdout`` or ``/dev/null``, or anything under
+    ``/dev`` or ``/proc`` -- is written directly, as open(path, 'w') would,
+    since it cannot be replaced by a temp file.
     """
-    directory = os.path.dirname(os.path.abspath(path))
+    if not _replaceable_regular_path(path):
+        with open(path, 'w') as f:
+            f.write(text)
+        return
+    path = os.path.realpath(path)
+    directory = os.path.dirname(path)
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except FileNotFoundError:
@@ -922,6 +933,21 @@ def write_text_atomically(path, text):
         except FileNotFoundError:
             pass
         raise
+
+
+def _replaceable_regular_path(path):
+    """Return True when ``path`` names a regular file, or none yet, outside /dev and /proc."""
+    special = ('/dev/', '/proc/')
+    # The path as given first: /dev/stdout redirected to a file resolves to
+    # that file, which must be written in place, not replaced.
+    if os.path.abspath(path).startswith(special):
+        return False
+    if os.path.realpath(path).startswith(special):
+        return False
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except FileNotFoundError:
+        return True
 
 
 def resolve_absorption(args, freqs):

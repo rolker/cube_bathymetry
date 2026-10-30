@@ -780,6 +780,11 @@ ping in it would be counted twice. Bags that only overlap in time (a re-cut of
 part of a recording beside the original) are not detected: pings recorded in
 both are counted once per bag, so leave the duplicate out.
 
+The CSV is written to a temp file beside `-o` and renamed over it, so a failed
+run leaves an existing curve untouched. A symlinked `-o` is written through to
+its target (the link stays), and `-o /dev/stdout` or another device or pipe is
+written directly.
+
 **Header provenance.** Every line above the CSV column row is a
 `# key: value` comment. The loader (and the marine_tools SonarInfo mirror)
 reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:
