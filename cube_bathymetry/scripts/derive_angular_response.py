@@ -66,14 +66,27 @@ and ``absorption_db_per_m`` and ignores the rest.
 Site box (cube_bathymetry#170): with ``--box LATMIN LONMIN LATMAX LONMAX``
 (degrees, WGS84) only pings whose sensor position lies inside the box are
 binned, so a per-site curve can be derived from bags that mix survey and
-transit. Each ping is positioned from the bag's own TF tree, as the C++
-importer georeferences it: ``/tf`` and ``/tf_static`` (any namespace) are read
-in the same time-ordered pass as the detections into a tf2 buffer, and
-``earth -> <header.frame_id>`` is looked up at the ping stamp (or the latest
-transform, if it is within 1 s of the stamp). The ECEF translation is converted
-to latitude/longitude in closed form. Pings outside the box and pings with no
-usable earth transform are dropped, counted and reported, and the box is
-recorded in the header. Without ``--box`` no TF is read.
+transit. Each ping is positioned from the bags' own TF tree the way import_bag
+georeferences it:
+
+* every bag on the command line is read in ONE time-ordered pass (merged on the
+  bag timestamp) into ONE tf2 buffer, so a ``/tf_static`` recorded only in the
+  first split file still serves the later ones. ``/tf`` and ``/tf_static`` from
+  every namespace go into that buffer; in a bag recording several vehicles
+  their trees share it, so their frame names must not collide (import_bag
+  behaves the same);
+* each ping waits until the TF stream has advanced 3 s past its stamp, so the
+  transforms on both sides of it are in the buffer, then ``earth ->
+  <header.frame_id>`` is looked up exactly at the ping stamp, interpolated
+  between them. There is no fallback to the latest transform: a ping outside
+  the earth TF coverage (before the first earth transform, after the last, or
+  in a gap wider than the 60 s buffer) is dropped. Pings still waiting when the
+  bags end are looked up against what was read.
+
+The ECEF translation of the sensor origin is converted to latitude/longitude in
+closed form. Pings outside the box and pings that cannot be positioned are
+dropped, counted by reason and reported, and the box is recorded in the header.
+Without ``--box`` no TF is read.
 
 Usage:
     derive_angular_response.py <bag> [<bag> ...] -t <topic> -o <out.csv>
@@ -88,6 +101,7 @@ Usage:
 """
 
 import argparse
+import collections
 import heapq
 import math
 import os
@@ -114,14 +128,13 @@ WGS84_B = WGS84_A * (1.0 - WGS84_F)
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)                       # first eccentricity^2
 WGS84_EP2 = (WGS84_A ** 2 - WGS84_B ** 2) / WGS84_B ** 2   # second eccentricity^2
 
-# --box TF lookups. The bag is read in time order, so the buffer only has to
-# hold the transforms bracketing the pings being read; 300 s is far beyond that
-# (tf2's default is 10 s) without keeping a whole survey day in memory. A ping
-# whose exact stamp cannot be interpolated (typically: it arrived before the
-# next earth transform) takes the latest transform if that is within the
-# tolerance of the ping stamp.
-TF_CACHE_SEC = 300.0
-TF_LATEST_TOLERANCE_SEC = 1.0
+# --box TF lookups, the same constants as import_bag (kCacheWindowSec,
+# kGuardSec). The bags are read in time order, so the buffer only has to hold
+# the transforms bracketing the pings waiting to be positioned; a ping waits
+# until the dynamic TF stream has advanced TF_GUARD_SEC past its stamp, so the
+# transform after it is in the buffer too, and is then looked up exactly.
+TF_CACHE_SEC = 60.0
+TF_GUARD_SEC = 3.0
 EARTH_FRAME = 'earth'
 
 
@@ -203,25 +216,34 @@ def is_tf_topic(name):
     return None
 
 
+def stamp_ns(stamp):
+    """Return a builtin_interfaces/Time as integer nanoseconds."""
+    return int(stamp.sec) * 1000000000 + int(stamp.nanosec)
+
+
 class PingLocator:
     """
     Position pings from the bags' own TF tree (``earth -> sensor frame``).
 
-    Feed every ``/tf`` and ``/tf_static`` message with add_tf as it is read, in
-    bag order; locate then looks the ping up at its stamp, falling back to the
-    latest earth transform within ``tolerance_sec`` of the stamp (the same
-    exact-or-latest pattern as the C++ DetectionsProjector, with a staleness
-    bound added).
+    The same guard-then-exact pattern as import_bag. Feed every ``/tf`` and
+    ``/tf_static`` message with add_tf and every ping with push, in bag order.
+    drain then yields the pings whose stamp the dynamic TF stream (the
+    *frontier*, the newest dynamic transform stamp seen) has passed by
+    ``guard_sec``, so the transforms on both sides of the ping are in the
+    buffer, each looked up exactly at its stamp. ``drain(flush=True)`` at the
+    end of the stream yields whatever is still waiting.
     """
 
-    def __init__(self, cache_sec=TF_CACHE_SEC, tolerance_sec=TF_LATEST_TOLERANCE_SEC):
+    def __init__(self, cache_sec=TF_CACHE_SEC, guard_sec=TF_GUARD_SEC):
         """Create an empty buffer holding ``cache_sec`` of dynamic transforms."""
         import tf2_ros
         from rclpy.duration import Duration
 
         self._tf2_ros = tf2_ros
         self._buffer = tf2_ros.Buffer(cache_time=Duration(seconds=cache_sec))
-        self._tolerance_ns = int(tolerance_sec * 1e9)
+        self._guard_ns = int(round(guard_sec * 1e9))
+        self._frontier_ns = None
+        self._pending = collections.deque()   # (ping stamp ns, ping), arrival order
 
     def add_tf(self, tf_message, is_static):
         """Insert every transform of a tf2_msgs/TFMessage into the buffer."""
@@ -230,29 +252,54 @@ class PingLocator:
                 self._buffer.set_transform_static(t, 'bag')
             else:
                 self._buffer.set_transform(t, 'bag')
+                ns = stamp_ns(t.header.stamp)
+                if self._frontier_ns is None or ns > self._frontier_ns:
+                    self._frontier_ns = ns
+
+    def push(self, ping):
+        """Queue a ping (anything with ``header.frame_id``/``header.stamp``)."""
+        self._pending.append((stamp_ns(ping.header.stamp), ping))
+
+    @property
+    def pending(self):
+        """Number of pings waiting for the TF frontier."""
+        return len(self._pending)
+
+    def drain(self, flush=False):
+        """
+        Yield ``(ping, position, reason)`` for each ping that is ready.
+
+        A ping is ready once ``ping stamp <= frontier - guard`` (as import_bag,
+        first in first out: a ping waits behind an earlier one), or for every
+        waiting ping with ``flush``. ``position`` and ``reason`` are locate's.
+        """
+        while self._pending:
+            ping_ns, ping = self._pending[0]
+            if not flush and (self._frontier_ns is None
+                              or ping_ns > self._frontier_ns - self._guard_ns):
+                return
+            self._pending.popleft()
+            position, reason = self.locate(ping.header.frame_id, ping.header.stamp)
+            yield ping, position, reason
 
     def locate(self, frame_id, stamp):
         """
         Return ``((lat_deg, lon_deg), None)`` or ``(None, reason)``.
 
-        ``stamp`` is a builtin_interfaces/Time. ``reason`` is ``'no_tf'`` when
-        there is no earth transform for the frame at all, and ``'stale_tf'``
-        when the nearest one is more than the tolerance away from the stamp.
+        ``stamp`` is a builtin_interfaces/Time, looked up exactly (tf2
+        interpolates between the transforms on either side; there is no
+        latest-transform fallback). ``reason`` is ``'no_tf'`` when the frame
+        has no earth transform at all, and ``'extrapolation'`` when it has one
+        but the stamp is outside the buffered coverage.
         """
         from rclpy.time import Time
 
         tf2_ros = self._tf2_ros
-        ping_time = Time.from_msg(stamp)
         try:
-            t = self._buffer.lookup_transform_core(EARTH_FRAME, frame_id, ping_time)
+            t = self._buffer.lookup_transform_core(
+                EARTH_FRAME, frame_id, Time.from_msg(stamp))
         except tf2_ros.ExtrapolationException:
-            try:
-                t = self._buffer.lookup_transform_core(EARTH_FRAME, frame_id, Time())
-            except tf2_ros.TransformException:
-                return None, 'no_tf'
-            latest_ns = Time.from_msg(t.header.stamp).nanoseconds
-            if abs(latest_ns - ping_time.nanoseconds) > self._tolerance_ns:
-                return None, 'stale_tf'
+            return None, 'extrapolation'
         except tf2_ros.TransformException:
             return None, 'no_tf'
         tr = t.transform.translation
@@ -260,9 +307,26 @@ class PingLocator:
         return (lat, lon), None
 
 
+# --box drop reasons, in report order, with the words the run report uses.
+BOX_DROP_REASONS = (
+    ('outside', 'outside the box'),
+    ('no_tf', 'with no earth transform for their frame'),
+    ('extrapolation', 'outside the earth TF coverage at their stamp'),
+)
+
+
 def new_box_stats():
-    """Return zeroed --box ping counters (kept / outside / no_tf / stale_tf)."""
-    return {'kept': 0, 'outside': 0, 'no_tf': 0, 'stale_tf': 0}
+    """Return zeroed --box ping counters: 'kept' plus one per drop reason."""
+    stats = {'kept': 0}
+    stats.update((key, 0) for key, _words in BOX_DROP_REASONS)
+    return stats
+
+
+def box_report(box, stats, n_pings):
+    """Return the one-line --box summary printed after the pass."""
+    return 'box %s: kept %d of %d pings; dropped %s' % (
+        ' '.join('%g' % v for v in box), stats['kept'], n_pings,
+        ', '.join('%d %s' % (stats[key], words) for key, words in BOX_DROP_REASONS))
 
 
 def parse_args(argv):
@@ -489,8 +553,9 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
     are merged into ONE time-ordered pass (merged_messages) feeding ONE
     PingLocator, as import_bag does: a /tf_static recorded only in the first
     split file still positions the pings of the later splits, and a bag holding
-    only TF positions the pings of a bag recorded beside it. Each ping is binned
-    only if its sensor position lies inside the box. `box_stats` (see
+    only TF positions the pings of a bag recorded beside it. Each ping is queued
+    until the TF frontier is TF_GUARD_SEC past its stamp, looked up exactly,
+    and binned only if its sensor position lies inside the box. `box_stats` (see
     new_box_stats) counts kept and dropped pings; pings that are dropped
     contribute neither samples nor a frequency.
     Returns the number of messages read on `topic`.
@@ -534,24 +599,25 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
     tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
     locator = PingLocator()   # one buffer for every bag on the command line
 
+    def take_ready(flush):
+        for msg, position, reason in locator.drain(flush):
+            if position is None:
+                box_stats[reason] += 1
+            elif not in_box(position[0], position[1], box):
+                box_stats['outside'] += 1
+            else:
+                box_stats['kept'] += 1
+                add_ping(msg)
+
     for i, name, data, _t_ns in merged_messages(readers):
         kind = tf_topics[i].get(name)
         if kind is not None:
             locator.add_tf(deserialize_message(data, tf_msg_type), kind == 'tf_static')
-            continue
-        if name != topic:
-            continue
-        msg = deserialize_message(data, msg_types[i])
-        n_msgs += 1
-        position, reason = locator.locate(msg.header.frame_id, msg.header.stamp)
-        if position is None:
-            box_stats[reason] += 1
-            continue
-        if not in_box(position[0], position[1], box):
-            box_stats['outside'] += 1
-            continue
-        box_stats['kept'] += 1
-        add_ping(msg)
+            take_ready(False)
+        elif name == topic:
+            n_msgs += 1
+            locator.push(deserialize_message(data, msg_types[i]))
+    take_ready(True)   # end of the stream: position whatever is still waiting
     return n_msgs
 
 
@@ -740,12 +806,7 @@ def main(argv=None):
         readers, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
         box=args.box, box_stats=box_stats)
     if box_stats is not None:
-        print('box %s: kept %d of %d pings; dropped %d outside the box, %d with '
-              'no earth transform, %d with an earth transform more than %g s '
-              'from the ping'
-              % (' '.join('%g' % v for v in args.box), box_stats['kept'], n_msgs,
-                 box_stats['outside'], box_stats['no_tf'], box_stats['stale_tf'],
-                 TF_LATEST_TOLERANCE_SEC))
+        print(box_report(args.box, box_stats, n_msgs))
         if box_stats['kept'] == 0:
             raise SystemExit('error: no pings inside --box; nothing to derive '
                              '(check the box corners are LATMIN LONMIN LATMAX '

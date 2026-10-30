@@ -738,15 +738,28 @@ the dominant term in salt water; temperature is second order.
   applies whatever alpha the header says.
 
 **`--box LATMIN LONMIN LATMAX LONMAX`** (WGS84 degrees) keeps only pings whose
-sensor position is inside the box. Positions come from the bag's own TF tree,
-the way `import_bag` georeferences: `/tf` and `/tf_static` (any namespace) are
-read in the same pass as the detections, `earth -> <detections frame>` is
-looked up at the ping stamp (or the latest transform if it is within 1 s of
-the stamp), and the ECEF position is converted to latitude/longitude. The run
-prints how many pings were kept and how many were dropped for being outside
-the box, having no earth transform, or having one more than 1 s away. A box
-with no pings in it is an error. A box across the antimeridian is not
-supported.
+sensor position is inside the box. Positions come from the bags' own TF tree,
+the way `import_bag` georeferences:
+
+- All the bags on the command line are read as one time-ordered stream into
+  one TF buffer, so split files work whether they are given together or in any
+  order, and a `/tf_static` recorded only in the first split still applies to
+  the rest.
+- `/tf` and `/tf_static` from every namespace go into that one buffer. In a
+  bag that records several vehicles their TF trees share it, so their frame
+  names must not collide (`import_bag` has the same limitation).
+- Each ping waits until the TF stream is 3 s past its stamp, so the transforms
+  on both sides of it have been read, and `earth -> <detections frame>` is then
+  looked up exactly at the ping stamp, interpolated between them. There is no
+  fallback to the latest transform. Pings still waiting when the bags end are
+  looked up against what was read.
+- The ECEF position of the sensor is converted to latitude/longitude.
+
+The run prints how many pings were kept and how many were dropped, by reason:
+outside the box, no earth transform for their frame, or a stamp outside the
+earth TF coverage (before the first earth transform, after the last, or in a
+gap longer than the 60 s buffer). A box with no pings in it is an error. A box
+across the antimeridian is not supported.
 
 **Header provenance.** Every line above the CSV column row is a
 `# key: value` comment. The loader (and the marine_tools SonarInfo mirror)

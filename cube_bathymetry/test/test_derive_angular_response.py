@@ -490,6 +490,8 @@ def test_is_tf_topic():
 TOPIC = '/bizzy/sonar/detections'
 INSIDE = (42.97, -70.61)     # inside the test box
 OUTSIDE = (43.10, -70.61)    # north of it
+SOUTH = (42.90, -70.61)      # just south of the box
+NORTH = (43.04, -70.61)      # just north of it; the SOUTH-NORTH midpoint is inside
 TEST_BOX = ['42.95', '-70.65', '43.0', '-70.58']
 
 
@@ -558,18 +560,28 @@ def write_bag(path, events):
 
 def write_synthetic_bag(path):
     """
-    Bag with earth TF and four pings.
+    Bag with earth TF and six pings, positioned as import_bag would.
 
-      ping 1, t=100.5: inside the box (latest-transform fallback, 0.5 s old)
-      ping 2, t=102.5: outside (logged after the 103 s TF -> exact lookup)
-      ping 3, t=200.0: latest earth TF is 97 s old -> stale_tf
-      ping 4, t=101.0: frame with no earth transform -> no_tf
+      ping 99.5:  before the first earth transform (100 s)  -> extrapolation
+      ping 100.5: between two inside transforms              -> kept
+      ping 101.0: frame with no earth transform              -> no_tf
+      ping 102.5: between two outside transforms (logged after the 103 s one)
+                                                             -> outside
+      ping 105.0: between a SOUTH (104 s) and a NORTH (106 s) transform, both
+                  outside the box; only the interpolated position is inside,
+                  so the latest or the nearest transform would drop it
+                                                             -> kept
+      ping 200.0: after the last earth transform (109 s); still waiting when
+                  the bag ends, flushed and looked up         -> extrapolation
     """
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
     outside = geodetic_to_ecef(OUTSIDE[0], OUTSIDE[1], 0.0)
+    south = geodetic_to_ecef(SOUTH[0], SOUTH[1], 0.0)
+    north = geodetic_to_ecef(NORTH[0], NORTH[1], 0.0)
     earth = _earth_tf
     events = [
         (99.0, '/bizzy/tf_static', _mbes_static()),
+        (99.5, TOPIC, _ping(99.5, 'mbes', -35.0)),
         (100.0, '/bizzy/tf', earth(100.0, inside)),
         (100.5, TOPIC, _ping(100.5, 'mbes', -30.0)),
         (101.0, '/bizzy/tf', earth(101.0, inside)),
@@ -577,6 +589,10 @@ def write_synthetic_bag(path):
         (102.0, '/bizzy/tf', earth(102.0, outside)),
         (103.0, '/bizzy/tf', earth(103.0, outside)),
         (103.2, TOPIC, _ping(102.5, 'mbes', -32.0)),
+        (104.0, '/bizzy/tf', earth(104.0, south)),
+        (105.0, TOPIC, _ping(105.0, 'mbes', -34.0)),
+        (106.0, '/bizzy/tf', earth(106.0, north)),
+        (109.0, '/bizzy/tf', earth(109.0, north)),
         (200.0, TOPIC, _ping(200.0, 'mbes', -33.0)),
     ]
     write_bag(path, events)
@@ -601,7 +617,7 @@ def counts_by_angle(path):
 def test_end_to_end_without_box_reads_every_ping(tmp_path, capsys):
     """Without --box every ping is binned and no box is recorded."""
     out, stdout = run_main(tmp_path, [], capsys)
-    assert counts_by_angle(out) == {1.0: 4, 31.0: 4}
+    assert counts_by_angle(out) == {1.0: 6, 31.0: 6}
     hd = header_dict([ln for ln in out.read_text().splitlines() if ln.startswith('#')])
     assert hd['source_bags'] == 'site_bag'
     assert 'box' not in hd
@@ -609,14 +625,15 @@ def test_end_to_end_without_box_reads_every_ping(tmp_path, capsys):
 
 
 def test_end_to_end_box_keeps_only_site_pings(tmp_path, capsys):
-    """--box keeps only the inside ping and reports each drop reason."""
+    """--box keeps the pings positioned inside and reports each drop reason."""
     out, stdout = run_main(
         tmp_path, ['--box'] + TEST_BOX + ['--remove-tl', '--water-temp-c', '15.5',
                                           '--salinity', '31'], capsys)
-    # Only ping 1 survives: one sample per bin.
-    assert counts_by_angle(out) == {1.0: 1, 31.0: 1}
-    assert ('kept 1 of 4 pings; dropped 1 outside the box, 1 with no earth '
-            'transform, 1 with an earth transform more than 1 s from the ping') in stdout
+    # Pings 100.5 and 105.0 survive: two samples per bin.
+    assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
+    assert ('kept 2 of 6 pings; dropped 1 outside the box, 1 with no earth '
+            'transform for their frame, 2 outside the earth TF coverage at '
+            'their stamp') in stdout
     lines = out.read_text().splitlines()
     hd = header_dict([ln for ln in lines if ln.startswith('#')])
     assert hd['box'] == '42.95 -70.65 43 -70.58'
@@ -624,10 +641,11 @@ def test_end_to_end_box_keeps_only_site_pings(tmp_path, capsys):
     assert hd['salinity_psu'] == '31'
     assert hd['frequency_khz'] == '500'
     assert float(hd['absorption_db_per_m']) == pytest.approx(fg(500.0, 15.5, 31.0), rel=1e-5)
-    # Ping 1 nadir beam: -30 dB + 40 log10(15) + 2 alpha 15.
+    # Nadir beams of the two kept pings (-30 and -34 dB, both at 15 m):
+    # their mean + 40 log10(15) + 2 alpha 15.
     alpha = float(hd['absorption_db_per_m'])
     nadir = [ln for ln in lines if ln.startswith('1.0,')][0]
-    expected = -30.0 + 40.0 * math.log10(15.0) + 2.0 * alpha * 15.0
+    expected = -32.0 + 40.0 * math.log10(15.0) + 2.0 * alpha * 15.0
     assert float(nadir.split(',')[1]) == pytest.approx(expected, abs=2e-3)
 
 
@@ -697,3 +715,67 @@ def test_end_to_end_box_over_split_bags_shares_one_tf_buffer(tmp_path, capsys, r
     assert counts_by_angle(out) == {1.0: 4, 31.0: 4}
     hd = header_dict([ln for ln in out.read_text().splitlines() if ln.startswith('#')])
     assert hd['source_bags'] == ','.join(os.path.basename(b) for b in bags)
+
+
+def _bare_ping(sec, nanosec, frame_id='mbes'):
+    """Return a header-only stand-in for a ping (all PingLocator reads)."""
+    from builtin_interfaces.msg import Time
+    from types import SimpleNamespace
+    return SimpleNamespace(header=SimpleNamespace(
+        frame_id=frame_id, stamp=Time(sec=sec, nanosec=nanosec)))
+
+
+def _earth_tf_at(sec, nanosec, xyz):
+    """Return earth -> base_link at an exact (sec, nanosec) stamp."""
+    from builtin_interfaces.msg import Time
+    msg = _earth_tf(0.0, xyz)
+    msg.transforms[0].header.stamp = Time(sec=sec, nanosec=nanosec)
+    return msg
+
+
+def test_ping_locator_guard_edge_and_exact_interpolation():
+    """
+    A ping is released once the TF frontier is exactly the guard past its stamp.
+
+    One nanosecond later it waits. The released ping is positioned by
+    interpolating between the transforms on either side of its stamp.
+    """
+    south = geodetic_to_ecef(SOUTH[0], SOUTH[1], 0.0)
+    north = geodetic_to_ecef(NORTH[0], NORTH[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_earth_tf_at(100, 0, south), False)
+    loc.add_tf(_earth_tf_at(103, 0, north), False)
+    edge = _bare_ping(101, 0)    # stamp == frontier - guard once TF 104 is in
+    late = _bare_ping(101, 1)    # one nanosecond later
+    loc.push(edge)
+    loc.push(late)
+    assert list(loc.drain()) == []           # frontier 103: nothing is ready
+    loc.add_tf(_earth_tf_at(104, 0, north), False)
+    ready = list(loc.drain())
+    assert [r[0] for r in ready] == [edge]
+    assert loc.pending == 1
+    # One third of the way from SOUTH to NORTH (the ECEF chord's sag is metres).
+    lat, lon = ready[0][1]
+    assert lat == pytest.approx(SOUTH[0] + (NORTH[0] - SOUTH[0]) / 3.0, abs=1e-4)
+    assert lon == pytest.approx(SOUTH[1], abs=1e-6)
+    loc.add_tf(_earth_tf_at(104, 1, north), False)   # frontier moves 1 ns
+    assert [r[0] for r in loc.drain()] == [late]
+    assert loc.pending == 0
+
+
+def test_ping_locator_flush_and_no_latest_fallback():
+    """Flushed pings get the exact lookup too: no latest-transform fallback."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_earth_tf_at(100, 0, inside), False)
+    loc.add_tf(_earth_tf_at(101, 0, inside), False)
+    within = _bare_ping(100, 500000000)
+    after = _bare_ping(101, 1)       # a nanosecond past the last transform
+    orphan = _bare_ping(100, 500000000, frame_id='orphan')
+    for ping in (within, after, orphan):
+        loc.push(ping)
+    assert list(loc.drain()) == []   # frontier 101 < 100.5 + guard
+    got = [(r[0], r[2]) for r in loc.drain(flush=True)]
+    assert got == [(within, None), (after, 'extrapolation'), (orphan, 'no_tf')]
