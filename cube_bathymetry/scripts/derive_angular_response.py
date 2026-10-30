@@ -523,7 +523,11 @@ class PingLocator:
         stamp order, not arrival order, so one ping with a far-future stamp
         does not hold back the pings that arrived after it (import_bag's
         first-in-first-out deque does); a ping waiting on a slow link holds
-        back the later pings of other frames, for at most that bound.
+        back the later pings of other frames for at most that bound while the
+        link keeps publishing. If every link of a chain stops for good, its
+        pings wait until ``flush`` and hold back later pings of other chains
+        with them (one sonar topic means one chain, so this costs nothing in
+        practice).
         ``position`` and ``reason`` are locate's.
         """
         while self._pending:

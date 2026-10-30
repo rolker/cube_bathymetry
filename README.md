@@ -763,7 +763,11 @@ the way `import_bag` georeferences:
   loses pings. A ping is released anyway once the newest transform of a link
   of its own chain is 57 s past it (that link is then about to drop it from
   the 60 s buffer), so every dynamic link must publish at least about once a
-  minute; another frame whose clock runs ahead does not release it early. A ping whose frame is not yet connected to `earth` waits only for
+  minute; another frame whose clock runs ahead does not release it early. If
+  every link of a chain stops publishing for good, its pings wait until the
+  bags end and, because pings leave in stamp order, hold back later pings of
+  other chains with them (one sonar topic means one chain, so this costs
+  nothing in practice). A ping whose frame is not yet connected to `earth` waits only for
   the newest transform of any frame, as in `import_bag`. There is no
   fallback to the latest transform. Waiting pings leave in stamp order, so one
   ping with a bad future stamp does not hold back the rest. Pings still
@@ -778,7 +782,11 @@ the way `import_bag` georeferences:
   bag time, either way, can set a frame's offset; one further off before the
   frame has an offset (a glitch, such as a stamp from a node whose clock was
   not set yet) is left out, and the offset is taken from the next transform
-  within the bound.
+  within the bound. A publisher whose clock is more than 1 h off the
+  recorder's (a relay recording in local time instead of UTC, a replay
+  re-recorded without `--use-sim-time`) therefore never gets an offset: all
+  its transforms are counted in the rejection warning and every ping on that
+  chain drops. Fix the clocks or re-record; the script does not guess.
   Transforms tf2 would reject (NaN, zero quaternion, bad frame names, more
   than 60 s older than the newest of their frame), dynamic transforms with an
   unset (zero) stamp, those more than 1 h off their bag time before their
