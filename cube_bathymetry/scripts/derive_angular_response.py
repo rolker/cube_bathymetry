@@ -35,24 +35,627 @@ bin is ~0 and off-nadir bins are <= 0; the estimator subtracts this column from
 each beam's raw dB. NaN/inf intensities and beams flagged bad are skipped.
 
 Tier-2 (cube_bathymetry#87): with ``--remove-tl`` the per-beam 2-way
-transmission loss ``TL = 40*log10(R) + 2*alpha*R`` (R = ``twtt*c/2`` per beam,
-alpha = freshwater Francois-Garrison absorption from ``--water-temp-c`` and the
-per-ping frequency) is compensated -- ADDED BACK -- for each beam BEFORE binning
-(a distant return lost more energy, so it is boosted to recover range-independent
-backscatter, TVG-style), so the curve becomes a TL-removed residual that is
-depth/range transferable. The CSV columns
-are unchanged; the header records ``tl_removed``/``absorption_db_per_m`` so the
-C++ estimator applies the identical TL (and never recomputes alpha).
+transmission loss ``TL = 40*log10(R) + 2*alpha*R`` (R = ``twtt*c/2`` per beam)
+is compensated -- ADDED BACK -- for each beam BEFORE binning (a distant return
+lost more energy, so it is boosted to recover range-independent backscatter,
+TVG-style), so the curve becomes a TL-removed residual that is depth/range
+transferable. The CSV columns are unchanged; the header records
+``tl_removed``/``absorption_db_per_m`` so the C++ estimator applies the
+identical TL (and never recomputes alpha).
+
+The absorption alpha (cube_bathymetry#170) is either
+
+* computed with the full Francois-Garrison (1982) model -- boric acid, MgSO4
+  and pure water -- from ``--water-temp-c``, ``--salinity`` (psu, default 0 =
+  fresh water), ``--ph`` (default 8.0), ``--depth-m`` and the median per-ping
+  frequency (``absorption_source: computed``); or
+* given directly with ``--absorption-db-per-m``, e.g. a path-averaged value
+  worked out from the site's CTD / sound-speed casts
+  (``absorption_source: override``).
+
+Take T and S from casts at the site, not from the boat's surface temperature
+alone; in salt water salinity is the dominant term.
+
+Provenance (cube_bathymetry#170): the header also records how alpha was
+obtained (``absorption_source``, ``salinity_psu``, ``ph``, ``depth_m``,
+``frequency_khz``) and ``source_bags``, the comma-separated basenames of every
+input bag, so a per-site curve can be traced to that site's data. All header
+lines are ``# key: value`` comments; the C++ loader reads only ``tl_removed``
+and ``absorption_db_per_m`` and ignores the rest.
+
+Site box (cube_bathymetry#170): with ``--box LATMIN LONMIN LATMAX LONMAX``
+(degrees, WGS84) only pings whose sensor position lies inside the box are
+binned, so a per-site curve can be derived from bags that mix survey and
+transit. Each ping is positioned from the bags' own TF tree the way import_bag
+georeferences it:
+
+* every bag on the command line is read in ONE time-ordered pass (merged on the
+  bag timestamp) into ONE tf2 buffer, so a ``/tf_static`` recorded only in the
+  first split file still serves the later ones, and a bag holding only TF may
+  position the pings of a detections bag recorded beside it (at least one bag
+  must have the detections topic; without ``--box`` every bag must).
+  ``/tf`` and ``/tf_static`` from every namespace go into that buffer; in a
+  bag recording several vehicles their trees share it, so their frame names
+  must not collide (import_bag behaves the same);
+* each ping waits until every dynamic link of ``earth -> ... -> <frame>`` has
+  advanced 3 s past its stamp (but no longer than about 57 s after the
+  newest transform of a link of that chain passes it, so every link of the
+  chain must publish at least about once a minute), so the
+  transforms on both sides of it are in the buffer, then ``earth ->
+  <header.frame_id>`` is looked up exactly at the ping stamp, interpolated
+  between them. There is no fallback to the latest transform: a ping outside
+  the earth TF coverage (before the first earth transform, after the last, or
+  in a gap wider than the 60 s buffer) is dropped, and so is a ping with an
+  unset (zero) stamp, which tf2 would read as "the latest transform", or one
+  stamped more than 1 h ahead of the TF stream. Waiting pings leave in stamp
+  order, so one ping with a bad future stamp does not hold back the rest.
+  Pings still waiting when the bags end are looked up against what was read.
+  The TF stream's progress is the newest accepted dynamic transform stamp,
+  never later than the time the bag recorded it plus its frame's clock offset
+  (stamp minus bag time of the frame's first accepted transform, so a
+  recorder whose clock lags or leads the publisher's works; only a transform
+  within 1 h of its bag time can set it). Transforms tf2 would reject (NaN,
+  zero quaternion, bad frame names, older than the 60 s buffer), dynamic
+  transforms with an unset (zero) stamp, transforms whose stamp jumps more
+  than 60 s further ahead of the bag time than their frame's offset, and,
+  while a frame has no offset yet, transforms more than 1 h off their bag
+  time are left out and counted; they move no frontier.
+
+The ECEF translation of the sensor origin is converted to latitude/longitude in
+closed form; a translation that is not a geocentric position (more than 50 km
+from the ellipsoid) drops the ping. Pings outside the box and pings that cannot
+be positioned are dropped, counted by reason and reported, and the box is
+recorded in the header.
+Without ``--box`` no TF is read.
 
 Usage:
     derive_angular_response.py <bag> [<bag> ...] -t <topic> -o <out.csv>
     derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
         --remove-tl --water-temp-c 24.0
+    derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
+        --remove-tl --water-temp-c 15.5 --salinity 31
+    derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
+        --remove-tl --absorption-db-per-m 0.130
+    derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
+        --box 42.95 -70.65 43.00 -70.58 --remove-tl --water-temp-c 15.5 --salinity 31
 """
 
 import argparse
+import collections
+import errno
+import functools
+import heapq
 import math
+import os
+import stat
 import sys
+import tempfile
+
+DEFAULT_PH = 8.0
+
+# Plausibility bounds for the absorption inputs. They are wider than the
+# Francois-Garrison fit's validity range (T -2..22 C, S 30..35 psu, pH 7.7..8.3)
+# so lakes, estuaries and warm water still compute, but narrow enough to catch a
+# unit slip -- degF for degC, a dropped decimal point in a salinity or pH.
+TEMP_C_RANGE = (-2.0, 40.0)
+SALINITY_PSU_RANGE = (0.0, 50.0)
+PH_RANGE = (6.0, 10.0)
+DEPTH_M_RANGE = (0.0, 12000.0)
+# An explicit alpha above this is almost certainly dB/km typed as dB/m: pure
+# water at 2 MHz and 10 C is ~1.2 dB/m, and multibeam echosounders run lower.
+MAX_ABSORPTION_DB_PER_M = 5.0
+# Plausible median ping_info.frequency for the computed alpha, kHz. Multibeam
+# and single-beam echosounders run from ~12 kHz to ~1.5 MHz; a value outside
+# this is a unit slip (kHz stored as Hz gives a near-zero alpha) or garbage.
+FREQUENCY_KHZ_RANGE = (1.0, 2000.0)
+
+# A bin mean from fewer samples than this is noise. The same threshold as
+# marine_perception_tools' cube_lab self-calibration (kMinPerBin), which refuses
+# a curve whose nadir reference bin is below it or which has fewer than
+# MIN_POPULATED_BINS bins at or above it. This tool warns on those conditions
+# instead and still writes the curve (every row carries its n).
+MIN_SAMPLES_PER_BIN = 200
+MIN_POPULATED_BINS = 3
+
+# WGS84 ellipsoid (semi-major axis a, flattening f).
+WGS84_A = 6378137.0
+WGS84_F = 1.0 / 298.257223563
+WGS84_B = WGS84_A * (1.0 - WGS84_F)
+WGS84_E2 = WGS84_F * (2.0 - WGS84_F)                       # first eccentricity^2
+WGS84_EP2 = (WGS84_A ** 2 - WGS84_B ** 2) / WGS84_B ** 2   # second eccentricity^2
+
+# --box TF lookups, the same constants as import_bag (kCacheWindowSec,
+# kGuardSec). The bags are read in time order, so the buffer only has to hold
+# the transforms bracketing the pings waiting to be positioned; a ping waits
+# until each dynamic link of its earth chain has advanced TF_GUARD_SEC past its
+# stamp, so the transform after it is in the buffer too, and is then looked up
+# exactly (see PingLocator).
+TF_CACHE_SEC = 60.0
+TF_GUARD_SEC = 3.0
+# A ping stamped further than this ahead of the TF frontier when it arrives is
+# dropped as a bad stamp (a clock glitch, a garbage header): it could only be
+# looked up at the very end, and would sit in memory until then.
+PING_FUTURE_LIMIT_SEC = 3600.0
+EARTH_FRAME = 'earth'
+# Ellipsoid heights a ping's sensor can plausibly have. A survey sensor is
+# within a few km of the ellipsoid; an ``earth`` frame that is not geocentric
+# (a local map frame named earth, a placeholder at the origin) puts it thousands
+# of km below it, and its latitude/longitude would be meaningless.
+EARTH_HEIGHT_RANGE_M = (-50000.0, 50000.0)
+# Geocentric radii a sensor position can have: the ellipsoid's polar radius
+# minus 50 km to its equatorial radius plus 50 km. A radius outside this is not
+# a position near the Earth's surface, and is refused BEFORE the closed form,
+# which goes complex (and raises TypeError) for some radii far inside the Earth.
+EARTH_RADIUS_RANGE_M = (WGS84_B + EARTH_HEIGHT_RANGE_M[0],
+                        WGS84_A + EARTH_HEIGHT_RANGE_M[1])
+
+
+def check_absorption_inputs(temp_c, salinity_psu, ph, depth_m):
+    """Raise ValueError naming the first non-finite or implausible input."""
+    for name, value, (lo, hi) in (
+            ('--water-temp-c', temp_c, TEMP_C_RANGE),
+            ('--salinity', salinity_psu, SALINITY_PSU_RANGE),
+            ('--ph', ph, PH_RANGE),
+            ('--depth-m', depth_m, DEPTH_M_RANGE)):
+        if not math.isfinite(value) or not lo <= value <= hi:
+            raise ValueError('%s %r is outside the plausible range [%g, %g]'
+                             % (name, value, lo, hi))
+
+
+def ecef_to_geodetic(x, y, z):
+    """
+    Convert WGS84 ECEF metres to ``(lat_deg, lon_deg, height_m)``, closed form.
+
+    Heikkinen's exact closed-form solution (Zhu 1993, "Conversion of
+    Earth-centered Earth-fixed coordinates to geodetic coordinates"); no
+    iteration and no pyproj. Accurate to well under a millimetre at the
+    Earth's surface. On the polar axis (p = 0) it returns lat = +/-90 directly.
+    """
+    a = WGS84_A
+    b = WGS84_B
+    e2 = WGS84_E2
+    p = math.hypot(x, y)
+    lon = math.degrees(math.atan2(y, x))
+    if p < 1e-9:
+        lat = 90.0 if z >= 0.0 else -90.0
+        return lat, lon, abs(z) - b
+    z2 = z * z
+    big_f = 54.0 * b * b * z2
+    g = p * p + (1.0 - e2) * z2 - e2 * (a * a - b * b)
+    c = e2 * e2 * big_f * p * p / (g ** 3)
+    s = (1.0 + c + math.sqrt(c * c + 2.0 * c)) ** (1.0 / 3.0)
+    k = s + 1.0 + 1.0 / s
+    big_p = big_f / (3.0 * k * k * g * g)
+    q = math.sqrt(1.0 + 2.0 * e2 * e2 * big_p)
+    r0 = (-big_p * e2 * p / (1.0 + q)
+          + math.sqrt(0.5 * a * a * (1.0 + 1.0 / q)
+                      - big_p * (1.0 - e2) * z2 / (q * (1.0 + q))
+                      - 0.5 * big_p * p * p))
+    u = math.sqrt((p - e2 * r0) ** 2 + z2)
+    v = math.sqrt((p - e2 * r0) ** 2 + (1.0 - e2) * z2)
+    z0 = b * b * z / (a * v)
+    height = u * (1.0 - b * b / (a * v))
+    lat = math.degrees(math.atan2(z + WGS84_EP2 * z0, p))
+    return lat, lon, height
+
+
+def earth_position_to_lat_lon(x, y, z):
+    """
+    Return ``(lat_deg, lon_deg)`` for an ECEF sensor position, or None.
+
+    None when the position is not a plausible geocentric one: non-finite, a
+    geocentric radius outside EARTH_RADIUS_RANGE_M (checked before the closed
+    form, which is only valid near the surface: (0, 0, 0) would map to the
+    North Pole, and a point some 20 to 45 km from the centre makes its cube
+    root complex), or an ellipsoid height outside EARTH_HEIGHT_RANGE_M. Any
+    arithmetic failure in the closed form is also caught and gives None.
+    """
+    if not all(math.isfinite(v) for v in (x, y, z)):
+        return None
+    radius = math.sqrt(x * x + y * y + z * z)
+    if not EARTH_RADIUS_RANGE_M[0] <= radius <= EARTH_RADIUS_RANGE_M[1]:
+        return None
+    try:
+        lat, lon, height = ecef_to_geodetic(x, y, z)
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+    if not all(isinstance(v, float) for v in (lat, lon, height)):
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lon) and math.isfinite(height)
+            and EARTH_HEIGHT_RANGE_M[0] <= height <= EARTH_HEIGHT_RANGE_M[1]):
+        return None
+    return lat, lon
+
+
+def check_box(box):
+    """Raise ValueError unless ``box`` is a valid (latmin, lonmin, latmax, lonmax)."""
+    lat_min, lon_min, lat_max, lon_max = box
+    if not all(math.isfinite(v) for v in box):
+        raise ValueError('--box values must be finite, got %r' % (box,))
+    if not (-90.0 <= lat_min < lat_max <= 90.0):
+        raise ValueError('--box needs -90 <= LATMIN < LATMAX <= 90, got %g %g'
+                         % (lat_min, lat_max))
+    if not (-180.0 <= lon_min < lon_max <= 180.0):
+        raise ValueError('--box needs -180 <= LONMIN < LONMAX <= 180, got %g %g '
+                         '(a box across the antimeridian is not supported)'
+                         % (lon_min, lon_max))
+
+
+def in_box(lat, lon, box):
+    """Return True when (lat, lon) lies inside ``box`` (edges inclusive)."""
+    lat_min, lon_min, lat_max, lon_max = box
+    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
+
+
+def is_tf_topic(name):
+    """Return 'tf', 'tf_static' or None for a (possibly namespaced) topic name."""
+    if name == '/tf' or name.endswith('/tf'):
+        return 'tf'
+    if name == '/tf_static' or name.endswith('/tf_static'):
+        return 'tf_static'
+    return None
+
+
+def stamp_ns(stamp):
+    """Return a builtin_interfaces/Time as integer nanoseconds."""
+    return int(stamp.sec) * 1000000000 + int(stamp.nanosec)
+
+
+class PingLocator:
+    """
+    Position pings from the bags' own TF tree (``earth -> sensor frame``).
+
+    The same guard-then-exact pattern as import_bag. Feed every ``/tf`` and
+    ``/tf_static`` message with add_tf and every ping's stamp and frame with
+    push, in bag order.
+    drain then yields the pings whose stamp every dynamic link of their chain
+    (``earth -> ... -> <ping frame>``) has passed by ``guard_sec``, so the
+    transforms on both sides of the ping are in the buffer for each link, each
+    ping looked up exactly at its stamp. ``drain(flush=True)`` at the end of
+    the stream yields whatever is still waiting.
+
+    A link's *frontier* is the newest accepted stamp of its child frame, so a
+    slow link (earth -> map at 0.1 Hz beside a 10 Hz map -> base_link) holds a
+    ping until its next transform arrives; import_bag's single frontier, the
+    newest stamp of any frame, releases it early and the ping drops as
+    extrapolation. Two bounds keep a stalled link from holding pings forever:
+    a ping whose chain does not reach ``earth`` yet waits for the newest stamp
+    of any frame (the overall frontier), as in import_bag, and any other ping
+    is released once the newest frontier among its own chain's dynamic links
+    is ``cache_sec - guard_sec`` past it, since by then that link is about to
+    drop the transforms around it from the cache (tf2 prunes per frame). Using
+    the chain's own links, not the overall frontier, keeps another frame whose
+    clock offset runs ahead from releasing this chain's pings early. So a
+    dynamic link publishing less often than about once a minute still loses
+    pings.
+    """
+
+    def __init__(self, cache_sec=TF_CACHE_SEC, guard_sec=TF_GUARD_SEC,
+                 future_limit_sec=PING_FUTURE_LIMIT_SEC):
+        """Create an empty buffer holding ``cache_sec`` of dynamic transforms."""
+        import tf2_ros
+        from rclpy.duration import Duration
+
+        self._tf2_ros = tf2_ros
+        self._buffer = tf2_ros.Buffer(cache_time=Duration(seconds=cache_sec))
+        self._cache_ns = int(round(cache_sec * 1e9))
+        self._guard_ns = int(round(guard_sec * 1e9))
+        self._future_limit_ns = int(round(future_limit_sec * 1e9))
+        self._frontier_ns = None   # overall: the newest of _link_frontier_ns
+        self._link_frontier_ns = {}   # child frame -> its frontier (dynamic only)
+        self._parent = {}   # child frame -> parent, from accepted transforms
+        self._release_ns = self._cache_ns - self._guard_ns
+        self._newest_ns = {}   # child frame -> newest dynamic stamp inserted
+        # child frame -> stamp minus bag time of its first accepted dynamic
+        # transform (within future_limit_sec of its bag time): the clock offset
+        # between that frame's publisher and the recorder, against which later
+        # transforms of the frame are judged.
+        self._offset_ns = {}
+        # Transforms not given to tf2, by reason (see TF_REJECT_REASONS).
+        self.tf_rejected = collections.Counter()
+        # Heap of (ping stamp ns, arrival number, frame id, item): the earliest
+        # stamp leaves first, ties in arrival order.
+        self._pending = []
+        self._arrivals = 0
+        self.max_pending = 0   # the most pings that waited at once
+
+    def add_tf(self, tf_message, is_static, bag_ns=None):
+        """
+        Insert every transform of a tf2_msgs/TFMessage into the buffer.
+
+        ``bag_ns`` is the time the bag recorded the message. Transforms tf2
+        would reject, or that would corrupt the buffer, are not given to it:
+        they are counted in ``tf_rejected`` (instead of tf2 printing a line for
+        each) and do not move the frontier. See transform_reject_reason.
+
+        The frontier advances to an accepted dynamic transform's stamp, but
+        never past ``bag_ns`` plus its child frame's clock offset (the stamp
+        minus bag time of that frame's first accepted transform): a transform
+        stamped further ahead of the time it was recorded than its frame
+        usually is (a glitch) must not release waiting pings before the
+        transforms that really follow them have been read, while a constant
+        offset between the publisher's clock and the recorder's (relayed
+        topics, unsynchronised hosts) changes nothing.
+        """
+        for t in tf_message.transforms:
+            reason = self.transform_reject_reason(t, is_static, bag_ns)
+            if reason is not None:
+                self.tf_rejected[reason] += 1
+                continue
+            child = t.child_frame_id
+            self._parent[child] = t.header.frame_id
+            if is_static:
+                self._buffer.set_transform_static(t, 'bag')
+                continue
+            self._buffer.set_transform(t, 'bag')
+            ns = stamp_ns(t.header.stamp)
+            if ns > self._newest_ns.get(child, ns - 1):
+                self._newest_ns[child] = ns
+            if bag_ns is None:
+                advance = ns
+            else:
+                offset = self._offset_ns.setdefault(child, ns - bag_ns)
+                advance = min(ns, bag_ns + offset)
+            if advance > self._link_frontier_ns.get(child, advance - 1):
+                self._link_frontier_ns[child] = advance
+            if self._frontier_ns is None or advance > self._frontier_ns:
+                self._frontier_ns = advance
+
+    def chain_frontier(self, frame_id):
+        """
+        Return the stamp up to which every link from ``earth`` to ``frame_id`` has been read.
+
+        That is the oldest frontier among the chain's dynamic links; ``math.inf``
+        when every link is static (the position never changes); the overall
+        frontier (None before any dynamic transform) when the chain does not
+        reach ``earth`` from what has been read so far.
+        """
+        links = self._chain_link_frontiers(frame_id)
+        return self._frontier_ns if links is None else links[0]
+
+    def _chain_link_frontiers(self, frame_id):
+        """
+        Return the oldest and newest frontier of the dynamic links from ``earth`` to ``frame_id``.
+
+        Both ``math.inf`` when every link is static; None when the chain does
+        not reach ``earth`` from what has been read so far (or loops).
+        """
+        oldest = newest = None
+        frame = frame_id
+        seen = set()
+        while frame != EARTH_FRAME:
+            parent = self._parent.get(frame)
+            if parent is None or frame in seen:
+                return None   # not (yet) connected to earth
+            seen.add(frame)
+            link = self._link_frontier_ns.get(frame)
+            if link is not None:
+                oldest = link if oldest is None else min(oldest, link)
+                newest = link if newest is None else max(newest, link)
+            frame = parent
+        if oldest is None:
+            return math.inf, math.inf
+        return oldest, newest
+
+    def transform_reject_reason(self, t, is_static, bag_ns=None):
+        """
+        Return why TransformStamped ``t`` must not enter the buffer, or None.
+
+        ``'invalid'``: what tf2 itself rejects (and prints an error for) -- an
+        empty or self-referencing frame name, a NaN or infinite value, or a
+        zero quaternion (tf2 normalises any other) -- and, for a dynamic
+        transform, an unset (zero) or negative stamp, as push treats it for
+        pings. Dynamic transforms only: ``'old'``, more than the cache length
+        older than the newest transform of the same child frame (tf2's
+        TF_OLD_DATA); ``'future'``, a stamp minus ``bag_ns`` more than the
+        cache length above the frame's clock reference, which tf2 would accept
+        and then prune every real transform of that frame against. The
+        reference is the stamp minus ``bag_ns`` of the frame's first accepted
+        transform, so a constant clock offset between publisher and recorder
+        passes. Only a transform whose offset is within ``future_limit_sec``
+        (1 h) of its bag time, either way, can become the reference: one
+        further off while the frame has none yet (a glitch) is also left out
+        as 'future', and the reference stays unset until a transform within
+        the bound arrives. A rejected transform never enters tf2, never
+        becomes a reference and never moves any frontier, so a glitch on one
+        frame costs no pings of another.
+        """
+        tr = t.transform.translation
+        q = t.transform.rotation
+        values = (tr.x, tr.y, tr.z, q.x, q.y, q.z, q.w)
+        norm2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w
+        if (not t.header.frame_id or not t.child_frame_id
+                or t.header.frame_id == t.child_frame_id
+                or not all(math.isfinite(v) for v in values)
+                or not (math.isfinite(norm2) and norm2 > 0.0)):
+            return 'invalid'
+        if is_static:
+            return None
+        ns = stamp_ns(t.header.stamp)
+        if ns <= 0:
+            return 'invalid'
+        offset = self._offset_ns.get(t.child_frame_id)
+        if bag_ns is not None:
+            if offset is None:
+                if abs(ns - bag_ns) > self._future_limit_ns:
+                    return 'future'
+            elif ns - bag_ns > offset + self._cache_ns:
+                return 'future'
+        newest = self._newest_ns.get(t.child_frame_id)
+        if newest is not None and newest > ns + self._cache_ns:
+            return 'old'
+        return None
+
+    def push(self, ping_ns, frame_id, item):
+        """
+        Queue ``item`` (any object) for positioning at ``frame_id`` and ``ping_ns``.
+
+        ``item`` comes back from drain. Queue only what the caller needs once
+        the ping is positioned (accumulate queues a compact PingRecord, not the
+        deserialized message), since pings wait here until the TF frontier
+        passes them.
+
+        Returns None when queued, or ``'bad_stamp'`` when the ping is dropped
+        at once: an unset (zero) or negative stamp, or one more than
+        ``future_limit_sec`` ahead of the TF frontier.
+        """
+        if ping_ns <= 0 or (self._frontier_ns is not None
+                            and ping_ns > self._frontier_ns + self._future_limit_ns):
+            return 'bad_stamp'
+        heapq.heappush(self._pending, (ping_ns, self._arrivals, frame_id, item))
+        self._arrivals += 1
+        self.max_pending = max(self.max_pending, len(self._pending))
+        return None
+
+    @property
+    def pending(self):
+        """Return the number of pings waiting for the TF frontier."""
+        return len(self._pending)
+
+    def drain(self, flush=False):
+        """
+        Yield ``(item, position, reason)`` for each ping that is ready.
+
+        A ping is ready once ``ping stamp <= chain_frontier - guard``, or
+        ``ping stamp <= newest frontier of the chain's dynamic links - (cache -
+        guard)`` (see the class docstring), or for every waiting ping with
+        ``flush``. Pings leave in
+        stamp order, not arrival order, so one ping with a far-future stamp
+        does not hold back the pings that arrived after it (import_bag's
+        first-in-first-out deque does); a ping waiting on a slow link holds
+        back the later pings of other frames for at most that bound while the
+        link keeps publishing. If every link of a chain stops for good, its
+        pings wait until ``flush`` and hold back later pings of other chains
+        with them (one sonar topic means one chain, so this costs nothing in
+        practice).
+        ``position`` and ``reason`` are locate's.
+        """
+        while self._pending:
+            ping_ns, _arrival, frame_id, item = self._pending[0]
+            if not flush and not self._ready(ping_ns, frame_id):
+                return
+            heapq.heappop(self._pending)
+            position, reason = self.locate(frame_id, ping_ns)
+            yield item, position, reason
+
+    def _ready(self, ping_ns, frame_id):
+        """Return True when the ping at ``ping_ns`` in ``frame_id`` can be looked up."""
+        links = self._chain_link_frontiers(frame_id)
+        if links is None:   # not connected to earth: the overall frontier
+            return (self._frontier_ns is not None
+                    and ping_ns <= self._frontier_ns - self._guard_ns)
+        oldest, newest = links
+        return (ping_ns <= oldest - self._guard_ns
+                or ping_ns <= newest - self._release_ns)
+
+    def locate(self, frame_id, ping_ns):
+        """
+        Return ``((lat_deg, lon_deg), None)`` or ``(None, reason)``.
+
+        ``ping_ns`` (integer nanoseconds) is looked up exactly (tf2
+        interpolates between the transforms on either side; there is no
+        latest-transform fallback). ``reason`` is ``'bad_stamp'`` for an unset
+        (zero) or negative stamp -- tf2 reads time zero as "the latest
+        transform", which would position the ping wherever the vessel happened
+        to be -- ``'no_tf'`` when the frame has no earth transform at all, and
+        ``'extrapolation'`` when it has one but the stamp is outside the
+        buffered coverage, and ``'bad_position'`` when the transform is not a
+        plausible geocentric position (see earth_position_to_lat_lon).
+        """
+        from rclpy.time import Time
+
+        if ping_ns <= 0:
+            return None, 'bad_stamp'
+        tf2_ros = self._tf2_ros
+        try:
+            t = self._buffer.lookup_transform_core(
+                EARTH_FRAME, frame_id, Time(nanoseconds=ping_ns))
+        except tf2_ros.ExtrapolationException:
+            return None, 'extrapolation'
+        except tf2_ros.TransformException:
+            return None, 'no_tf'
+        tr = t.transform.translation
+        position = earth_position_to_lat_lon(tr.x, tr.y, tr.z)
+        if position is None:
+            return None, 'bad_position'
+        return position, None
+
+
+class PingRecord:
+    """
+    The fields of a SonarDetections ping that bin_ping reads, and nothing else.
+
+    A deserialized message is several times larger than its serialized bytes
+    (one Python object per beam flag, the header, the ping_info strings); a
+    record keeps the three per-beam float32 arrays as they are, the flags as
+    one byte each, and two floats -- about 13 bytes per beam.
+    """
+
+    __slots__ = ('intensities', 'rx_angles', 'two_way_travel_times',
+                 'sound_speed', 'frequency', 'flags')
+
+    def __init__(self, msg):
+        """Copy the binning fields of a SonarDetections ``msg``."""
+        self.intensities = msg.intensities
+        self.rx_angles = msg.rx_angles
+        self.two_way_travel_times = msg.two_way_travel_times
+        self.sound_speed = msg.ping_info.sound_speed
+        self.frequency = msg.ping_info.frequency
+        flags = getattr(msg, 'flags', None)
+        self.flags = (None if flags is None
+                      else bytes(getattr(f, 'flag', 0) for f in flags))
+
+
+# --box drop reasons, in report order, with the words the run report uses.
+BOX_DROP_REASONS = (
+    ('outside', 'outside the box'),
+    ('no_tf', 'with no earth transform for their frame'),
+    ('extrapolation', 'outside the earth TF coverage at their stamp'),
+    ('bad_stamp', 'with an unset (zero) header stamp or one more than %g s '
+                  'ahead of the TF stream' % PING_FUTURE_LIMIT_SEC),
+    ('bad_position', 'with an earth transform that is not a geocentric position'),
+)
+
+
+# Transforms PingLocator keeps out of the tf2 buffer, in report order.
+TF_REJECT_REASONS = (
+    ('invalid', 'invalid (NaN, zero quaternion, bad frame names or unset stamp)'),
+    ('old', 'more than %g s older than the newest of their frame' % TF_CACHE_SEC),
+    ('future', 'stamped more than %g s further ahead of the bag time than '
+               'their frame, or more than %g s off it before their frame had '
+               'a clock reference' % (TF_CACHE_SEC, PING_FUTURE_LIMIT_SEC)),
+)
+
+
+def tf_rejected_warning(tf_rejected):
+    """Return the stderr warning for PingLocator.tf_rejected, or None."""
+    total = sum(tf_rejected.values())
+    if not total:
+        return None
+    return 'warning: --box ignored %d transform(s): %s' % (
+        total, ', '.join('%d %s' % (tf_rejected[key], words)
+                         for key, words in TF_REJECT_REASONS))
+
+
+def new_box_stats():
+    """
+    Return zeroed --box counters.
+
+    'kept', one per drop reason, 'max_pending', the most pings that waited
+    for the TF stream at once, and 'tf_rejected', PingLocator's counter of
+    transforms kept out of the buffer.
+    """
+    stats = {'kept': 0, 'max_pending': 0, 'tf_rejected': collections.Counter()}
+    stats.update((key, 0) for key, _words in BOX_DROP_REASONS)
+    return stats
+
+
+def box_report(box, stats, n_pings):
+    """Return the one-line --box summary printed after the pass."""
+    return 'box %s: kept %d of %d pings; dropped %s; at most %d waited for TF' % (
+        ' '.join('%g' % v for v in box), stats['kept'], n_pings,
+        ', '.join('%d %s' % (stats[key], words) for key, words in BOX_DROP_REASONS),
+        stats['max_pending'])
 
 
 def parse_args(argv):
@@ -67,71 +670,275 @@ def parse_args(argv):
                    help='marine_acoustic_msgs/SonarDetections topic')
     p.add_argument('-o', '--output', required=True, help='output CSV path')
     p.add_argument('--bin-width-deg', type=float, default=2.0,
-                   help='angular bin width in degrees (default 2.0)')
+                   help='angular bin width in degrees, > 0 and <= 90 '
+                        '(default 2.0)')
     p.add_argument('--remove-tl', action='store_true',
                    help='tier-2: remove per-beam 2-way transmission loss '
                         '40*log10(R) + 2*alpha*R before binning (cube#87)')
     p.add_argument('--water-temp-c', type=float, default=None,
-                   help='water temperature, degC (REQUIRED with --remove-tl); '
-                        'feeds the freshwater absorption alpha')
-    p.add_argument('--salinity', type=float, default=0.0,
-                   help='salinity, psu (default 0.0 = fresh water). Non-zero '
-                        'seawater absorption is out of scope for cube#87.')
-    p.add_argument('--depth-m', type=float, default=0.0,
-                   help='nominal depth for the absorption pressure term D '
-                        '(default 0.0 -> P3=1 at lake depth)')
+                   help='water temperature, degC (REQUIRED with --remove-tl '
+                        'unless --absorption-db-per-m is given); feeds the '
+                        'computed absorption alpha. Use a cast value '
+                        'representative of the water column, not the surface '
+                        'temperature alone. With --absorption-db-per-m it is '
+                        'only recorded in the header')
+    p.add_argument('--salinity', type=float, default=None,
+                   help='salinity, psu (default 0 = fresh water); feeds the '
+                        'Francois-Garrison boric-acid and MgSO4 terms. Take it '
+                        'from a CTD cast at the site')
+    p.add_argument('--ph', type=float, default=None,
+                   help='pH for the boric-acid term (default %g; it has no '
+                        'effect at salinity 0)' % DEFAULT_PH)
+    p.add_argument('--depth-m', type=float, default=None,
+                   help='nominal depth for the absorption pressure terms D '
+                        '(default 0.0 -> P2=P3=1)')
+    p.add_argument('--absorption-db-per-m', type=float, default=None,
+                   help='use this absorption alpha (dB/m) instead of computing '
+                        "it, e.g. a path-averaged value from the site's casts. "
+                        'Requires --remove-tl; excludes --salinity, --ph and '
+                        '--depth-m')
+    p.add_argument('--box', type=float, nargs=4, default=None,
+                   metavar=('LATMIN', 'LONMIN', 'LATMAX', 'LONMAX'),
+                   help="keep only pings whose sensor position (from the bag's "
+                        'TF tree, earth -> detections frame) lies inside this '
+                        'WGS84 box, degrees; for deriving a per-site curve from '
+                        'bags that mix survey and transit')
     args = p.parse_args(argv)
+    if not (math.isfinite(args.bin_width_deg) and 0.0 < args.bin_width_deg <= 90.0):
+        p.error('--bin-width-deg must be > 0 and <= 90 degrees, got %r'
+                % args.bin_width_deg)
+    if args.box is not None:
+        try:
+            check_box(args.box)
+        except ValueError as e:
+            p.error(str(e))
+    override = args.absorption_db_per_m is not None
+    if override:
+        if not args.remove_tl:
+            p.error('--absorption-db-per-m requires --remove-tl (alpha is only '
+                    'used by the tier-2 TL compensation)')
+        given = [flag for flag, value in (('--salinity', args.salinity),
+                                          ('--ph', args.ph),
+                                          ('--depth-m', args.depth_m))
+                 if value is not None]
+        if given:
+            p.error('--absorption-db-per-m is mutually exclusive with %s: they '
+                    'only feed the computed alpha' % ', '.join(given))
+        alpha = args.absorption_db_per_m
+        if not math.isfinite(alpha) or not 0.0 < alpha <= MAX_ABSORPTION_DB_PER_M:
+            p.error('--absorption-db-per-m %r must be > 0 and <= %g dB/m (is it '
+                    'in dB/km?)' % (alpha, MAX_ABSORPTION_DB_PER_M))
+        if args.water_temp_c is not None and not (
+                math.isfinite(args.water_temp_c)
+                and TEMP_C_RANGE[0] <= args.water_temp_c <= TEMP_C_RANGE[1]):
+            p.error('--water-temp-c %r is outside the plausible range [%g, %g]'
+                    % ((args.water_temp_c,) + TEMP_C_RANGE))
+        return args
+
     if args.remove_tl and args.water_temp_c is None:
-        p.error('--water-temp-c is required when --remove-tl is set')
-    if args.remove_tl and args.salinity > 0.0:
-        p.error('--salinity > 0 (seawater) is out of scope for cube#87 '
-                '(freshwater pure-water absorption only); omit --salinity')
+        p.error('--water-temp-c is required when --remove-tl is set (or give '
+                '--absorption-db-per-m)')
+    if not args.remove_tl:
+        ignored = [flag for flag, value in (('--water-temp-c', args.water_temp_c),
+                                            ('--salinity', args.salinity),
+                                            ('--ph', args.ph),
+                                            ('--depth-m', args.depth_m))
+                   if value is not None]
+        if ignored:
+            print('warning: %s only feed(s) the tier-2 absorption and is '
+                  'ignored without --remove-tl' % ', '.join(ignored),
+                  file=sys.stderr)
+    if args.salinity is None:
+        args.salinity = 0.0
+    if args.ph is None:
+        args.ph = DEFAULT_PH
+    if args.depth_m is None:
+        args.depth_m = 0.0
+    if args.remove_tl:
+        try:
+            check_absorption_inputs(
+                args.water_temp_c, args.salinity, args.ph, args.depth_m)
+        except ValueError as e:
+            p.error(str(e))
     return args
 
 
-def freshwater_absorption_db_per_m(freq_khz, temp_c, depth_m=0.0):
+def francois_garrison_absorption_db_per_m(
+        freq_khz, temp_c, salinity_psu=0.0, depth_m=0.0, ph=DEFAULT_PH):
     """
-    Francois-Garrison pure-water (freshwater) absorption alpha, dB/m.
+    Francois-Garrison (1982) sound absorption alpha in sea or fresh water, dB/m.
 
-    Only the pure-water term is needed in fresh water (the boric-acid and
-    MgSO4 seawater terms vanish at salinity 0):
+    Sum of the boric-acid, magnesium-sulphate and pure-water relaxation terms
+    (f in kHz, T in degC, S in psu, D in metres, c in m/s), each in dB/km:
 
-        alpha_w(dB/km) = A3 * P3 * f_kHz**2
+        c       = 1412 + 3.21 T + 1.19 S + 0.0167 D
+        boric   = A1 P1 f1 f**2 / (f1**2 + f**2)
+                  A1 = 8.86 / c * 10**(0.78 pH - 5),  P1 = 1
+                  f1 = 2.8 sqrt(S / 35) 10**(4 - 1245 / (273 + T))
+        MgSO4   = A2 P2 f2 f**2 / (f2**2 + f**2)
+                  A2 = 21.44 S / c (1 + 0.025 T)
+                  P2 = 1 - 1.37e-4 D + 6.2e-9 D**2
+                  f2 = 8.17 10**(8 - 1990 / (273 + T)) / (1 + 0.0018 (S - 35))
+        water   = A3 P3 f**2
+                  A3 = temperature-split cubic (T <= 20 / T > 20)
+                  P3 = 1 - 3.83e-5 D + 4.9e-10 D**2
 
-    with the temperature-split A3 and the pressure term P3 (D in metres).
-    Returns alpha in dB/m (= alpha_w / 1000). Sanity: f=500 kHz, T=24 C,
-    D=0 -> ~0.049 dB/m.
+    At S = 0 both chemical terms are exactly zero (f1 = 0 and A2 = 0), so the
+    result is the pure-water term alone, bit-for-bit the freshwater value the
+    tool computed before cube_bathymetry#170 (f=500 kHz, T=24 C, D=0 ->
+    0.0489736 dB/m). Sanity in salt water: f=500 kHz, T=15 C, S=32, pH 8, D=0
+    -> ~0.126 dB/m. Returns alpha_dB/km / 1000.
     """
+    if not math.isfinite(freq_khz) or freq_khz <= 0.0:
+        raise ValueError('frequency must be finite and > 0 kHz, got %r' % freq_khz)
     t = temp_c
+    s = salinity_psu
+    d = depth_m
+    f2_khz2 = freq_khz ** 2
+    c = 1412.0 + 3.21 * t + 1.19 * s + 0.0167 * d
+
+    # Boric acid (dominant below ~1 kHz; small at multibeam frequencies).
+    a1 = 8.86 / c * 10.0 ** (0.78 * ph - 5.0)
+    f1 = 2.8 * math.sqrt(s / 35.0) * 10.0 ** (4.0 - 1245.0 / (273.0 + t))
+    boric = a1 * f1 * f2_khz2 / (f1 ** 2 + f2_khz2)
+
+    # Magnesium sulphate (dominant from ~10 to a few hundred kHz).
+    a2 = 21.44 * s / c * (1.0 + 0.025 * t)
+    p2 = 1.0 - 1.37e-4 * d + 6.2e-9 * d ** 2
+    f2 = 8.17 * 10.0 ** (8.0 - 1990.0 / (273.0 + t)) / (1.0 + 0.0018 * (s - 35.0))
+    mgso4 = a2 * p2 * f2 * f2_khz2 / (f2 ** 2 + f2_khz2)
+
+    # Pure water. Written exactly as the pre-#170 freshwater function so S = 0
+    # reproduces its floating-point result (and therefore its CSV rows).
     if t > 20.0:
         a3 = (3.964e-4 - 1.146e-5 * t + 1.45e-7 * t ** 2 - 6.5e-10 * t ** 3)
     else:
         a3 = (4.937e-4 - 2.590e-5 * t + 9.110e-7 * t ** 2 - 1.500e-8 * t ** 3)
-    p3 = 1.0 - 3.83e-5 * depth_m + 4.9e-10 * depth_m ** 2
-    alpha_db_per_km = a3 * p3 * freq_khz ** 2
+    p3 = 1.0 - 3.83e-5 * d + 4.9e-10 * d ** 2
+    water = a3 * p3 * freq_khz ** 2
+
+    alpha_db_per_km = boric + mgso4 + water
     return alpha_db_per_km / 1000.0
 
 
-def open_reader(bag_path):
-    """Open a rosbag2 SequentialReader, auto-detecting the storage backend."""
+def storage_id_for(bag_path):
+    """Return the rosbag2 storage id for ``bag_path`` ('' = auto-detect)."""
+    if bag_path.endswith('.mcap'):
+        return 'mcap'
+    if bag_path.endswith('.db3'):
+        return 'sqlite3'
+    return ''
+
+
+def read_bag_metadata(bag_path):
+    """
+    Return ``({topic: type}, start_ns)`` from a bag's metadata.
+
+    Nothing is held open afterwards, so every bag on the command line can be
+    checked before any is read, however many split files there are.
+    """
     import rosbag2_py
 
-    storage_id = ''
-    if bag_path.endswith('.mcap'):
-        storage_id = 'mcap'
-    elif bag_path.endswith('.db3'):
-        storage_id = 'sqlite3'
-    storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id=storage_id)
+    meta = rosbag2_py.Info().read_metadata(bag_path, storage_id_for(bag_path))
+    types = {t.topic_metadata.name: t.topic_metadata.type
+             for t in meta.topics_with_message_count}
+    return types, int(meta.starting_time.nanoseconds)
+
+
+def open_reader(bag_path, topics=None):
+    """
+    Open a rosbag2 SequentialReader, auto-detecting the storage backend.
+
+    With ``topics`` the reader yields only those topics.
+    """
+    import rosbag2_py
+
+    storage_options = rosbag2_py.StorageOptions(
+        uri=bag_path, storage_id=storage_id_for(bag_path))
     converter_options = rosbag2_py.ConverterOptions(
         input_serialization_format='cdr', output_serialization_format='cdr')
     reader = rosbag2_py.SequentialReader()
     reader.open(storage_options, converter_options)
+    if topics:
+        reader.set_filter(rosbag2_py.StorageFilter(topics=list(topics)))
     return reader
 
 
-def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
+def merged_messages(sources):
     """
-    Accumulate per-bin sums on `topic` into `bins` (merged across bags).
+    Yield ``(source_index, topic, data, t_ns)`` from every source in time order.
+
+    ``sources`` is a list of ``(start_ns, open_fn)``: the bag's first message
+    time (from its metadata) and a function returning an opened reader. A
+    k-way merge on each message's bag timestamp, so several bags -- split
+    files of one recording, or bags recorded side by side -- are read as one
+    chronological stream, as import_bag's BagReaders does. Ties go to the
+    source given first.
+
+    A bag is opened only once the stream reaches its start time and is closed
+    as soon as it is exhausted, so a recording split into hundreds of files
+    holds one or two open at a time, not one per file.
+    """
+    waiting = collections.deque(
+        sorted(range(len(sources)), key=lambda i: (sources[i][0], i)))
+    heap = []
+    readers = {}
+
+    def advance(i):
+        reader = readers[i]
+        if reader.has_next():
+            name, data, t_ns = reader.read_next()
+            heapq.heappush(heap, (t_ns, i, name, data))
+        else:
+            del readers[i]
+            reader.close()
+
+    try:
+        while heap or waiting:
+            while waiting and (not heap or sources[waiting[0]][0] <= heap[0][0]):
+                i = waiting.popleft()
+                readers[i] = sources[i][1]()
+                advance(i)
+            if not heap:
+                continue
+            # (t_ns, i) is unique: each reader has at most one message in the heap.
+            t_ns, i, name, data = heapq.heappop(heap)
+            yield i, name, data, t_ns
+            advance(i)
+    finally:
+        for reader in readers.values():
+            reader.close()
+
+
+def deserialize_or_none(data, msg_type):
+    """
+    Deserialize one bag message, or return None when it is corrupt.
+
+    rclpy raises (an RMWError, a RuntimeError) on bytes that are not a valid
+    CDR ``msg_type``; one bad message must not abort a run over many bags.
+    """
+    from rclpy.serialization import deserialize_message
+
+    try:
+        return deserialize_message(data, msg_type)
+    except (RuntimeError, ValueError, MemoryError):
+        return None
+
+
+def corrupt_report(corrupt):
+    """Return the stderr warning for the corrupt-message counter, or None."""
+    total = sum(corrupt.values())
+    if not total:
+        return None
+    by_topic = ', '.join('%d on %s' % (n, name) for name, n in sorted(corrupt.items()))
+    return ('warning: skipped %d corrupt message(s) that would not deserialize '
+            '(%s)' % (total, by_topic))
+
+
+def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
+               box=None, box_stats=None, corrupt=None):
+    """
+    Accumulate per-bin sums on `topic` over every bag into `bins`.
 
     Each bin slot is ``[sum_adjusted, sum_R, count]``:
 
@@ -141,85 +948,288 @@ def accumulate(reader, topic, bin_width_deg, remove_tl, bins, freqs):
       (the spreading term ``40*log10(R)``) is compensated (added back) inline, so
       ``sum_adjusted`` is ``sum(db + 40*log10(R))`` and ``sum_R`` is ``sum(R)``. The
       absorption term ``2*alpha*R`` is added in write_csv once alpha is known from the
-      median frequency -- a single pass over the bag.
+      median frequency -- a single pass over the bags.
 
     `freqs` collects each ping's ``ping_info.frequency`` (Hz) for the median.
-    Returns the number of messages read on `topic`.
+
+    Every bag's topics are checked from its metadata before any bag is read.
+    Without `box` the bags are opened and read one after another, each closed
+    before the next is opened; the binned sums do not depend on the order.
+
+    With `box` (latmin, lonmin, latmax, lonmax) each bag is filtered to the
+    detections topic plus every /tf and /tf_static topic in it, and all bags
+    are merged into ONE time-ordered pass (merged_messages) feeding ONE
+    PingLocator, as import_bag does: a /tf_static recorded only in the first
+    split file still positions the pings of the later splits, and a bag holding
+    only TF positions the pings of a bag recorded beside it (so with `box` a
+    bag without `topic` is allowed; only no bag at all having it is an error,
+    whereas without `box` every bag must have it). Each ping is queued
+    until each dynamic link of its earth chain is TF_GUARD_SEC past its stamp
+    (see PingLocator), looked up exactly,
+    and binned only if its sensor position lies inside the box. `box_stats` (see
+    new_box_stats) counts kept and dropped pings; pings that are dropped
+    contribute neither samples nor a frequency.
+
+    A message that will not deserialize is skipped and counted per topic in
+    `corrupt` (a collections.Counter), and the run goes on.
+    Returns the number of messages read on `topic` (corrupt ones excluded).
     """
-    from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
 
-    type_map = {t.name: t.type for t in reader.get_all_topics_and_types()}
-    if topic not in type_map:
+    if corrupt is None:
+        corrupt = collections.Counter()
+
+    metas = [read_bag_metadata(path) for path in bag_paths]
+    type_maps = [type_map for type_map, _start_ns in metas]
+    for path, type_map in zip(bag_paths, type_maps):
+        if topic not in type_map and box is None:
+            raise SystemExit(
+                "error: topic '%s' not in bag %s (have: %s)"
+                % (topic, path, ', '.join(sorted(type_map)) or 'none'))
+    if not any(topic in type_map for type_map in type_maps):
+        # Only reachable with --box, where a bag without the detections topic
+        # may still carry the TF that positions another bag's pings.
         raise SystemExit(
-            "error: topic '%s' not in bag (have: %s)"
-            % (topic, ', '.join(sorted(type_map)) or 'none'))
-    msg_type = get_message(type_map[topic])
+            "error: topic '%s' not in any bag (have: %s)"
+            % (topic, ', '.join(sorted(set().union(*type_maps))) or 'none'))
+
+    def add_ping(ping):
+        bin_ping(ping, bin_width_deg, remove_tl, bins, freqs)
 
     n_msgs = 0
-    while reader.has_next():
-        name, data, _stamp = reader.read_next()
-        if name != topic:
-            continue
-        msg = deserialize_message(data, msg_type)
-        n_msgs += 1
-        intensities = msg.intensities
-        rx_angles = msg.rx_angles
-        twtt = msg.two_way_travel_times
-        sound_speed = msg.ping_info.sound_speed
-        freq = msg.ping_info.frequency
-        if remove_tl and math.isfinite(freq) and freq > 0.0:
-            freqs.append(freq)  # only needed for the tier-2 absorption alpha
-        flags = getattr(msg, 'flags', None)
-        count = min(len(intensities), len(rx_angles))
-        for i in range(count):
-            db = intensities[i]
-            if not math.isfinite(db):
-                continue
-            # Skip beams flagged bad (flag != 0) when flags are present and aligned.
-            if flags is not None and i < len(flags):
-                flag_val = getattr(flags[i], 'flag', 0)
-                if flag_val != 0:
-                    continue
-            ang = rx_angles[i]
-            if not math.isfinite(ang):
-                continue
+    if box is None:
+        for path, type_map in zip(bag_paths, type_maps):
+            msg_type = get_message(type_map[topic])
+            reader = open_reader(path, [topic])
+            try:
+                while reader.has_next():
+                    name, data, _stamp = reader.read_next()
+                    if name != topic:
+                        continue
+                    msg = deserialize_or_none(data, msg_type)
+                    if msg is None:
+                        corrupt[name] += 1
+                        continue
+                    n_msgs += 1
+                    add_ping(PingRecord(msg))
+            finally:
+                reader.close()
+        return n_msgs
 
-            range_m = 0.0
-            if remove_tl:
-                # R = twtt * c / 2; skip beams with a non-positive / NaN range
-                # (log10 undefined) so they never poison the residual. NOTE: this
-                # DROPS such beams from the derivation entirely, whereas the C++
-                # estimator RETAINS them and just skips the TL term (tier-1 fallback
-                # for that beam) -- an intentional asymmetry: a beam with no valid
-                # range can't inform the TL-removed residual, but its raw value is
-                # still a usable backscatter sample at apply time.
-                if i >= len(twtt):
-                    continue
-                range_m = twtt[i] * sound_speed / 2.0
-                if not math.isfinite(range_m) or range_m <= 0.0:
-                    continue
-                adjusted = db + 40.0 * math.log10(range_m)
+    sources = []      # (start_ns, open_fn) for merged_messages
+    tf_topics = []    # per source: {topic name: 'tf' | 'tf_static'}
+    msg_types = []    # per source: the detections message class, or None
+    for path, (type_map, start_ns) in zip(bag_paths, metas):
+        kinds = {name: kind for name, type_name in type_map.items()
+                 for kind in (is_tf_topic(name),)
+                 if kind is not None and type_name == 'tf2_msgs/msg/TFMessage'}
+        wanted = ([topic] if topic in type_map else []) + sorted(kinds)
+        if not wanted:
+            continue   # neither detections nor TF: nothing to read in it
+        sources.append((start_ns, functools.partial(open_reader, path, wanted)))
+        tf_topics.append(kinds)
+        msg_types.append(get_message(type_map[topic]) if topic in type_map else None)
+    if not any(kind == 'tf' for kinds in tf_topics for kind in kinds.values()):
+        # Without a dynamic TF stream the frontier never moves: every ping would
+        # wait in memory until the end and then find no earth transform.
+        raise SystemExit(
+            'error: --box positions pings from the dynamic TF (/tf) in the bags, '
+            'and no bag has a /tf topic; add the bag that recorded the '
+            "vehicle's /tf, or drop --box")
+    tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
+    locator = PingLocator()   # one buffer for every bag on the command line
+
+    def take_ready(flush):
+        for msg, position, reason in locator.drain(flush):
+            if position is None:
+                box_stats[reason] += 1
+            elif not in_box(position[0], position[1], box):
+                box_stats['outside'] += 1
             else:
-                adjusted = db
+                box_stats['kept'] += 1
+                add_ping(msg)
 
-            abs_deg = abs(math.degrees(ang))
-            idx = int(abs_deg // bin_width_deg)
-            slot = bins.setdefault(idx, [0.0, 0.0, 0])
-            slot[0] += adjusted
-            slot[1] += range_m
-            slot[2] += 1
+    for i, name, data, t_ns in merged_messages(sources):
+        kind = tf_topics[i].get(name)
+        if kind is None and name != topic:
+            continue
+        msg = deserialize_or_none(data, tf_msg_type if kind else msg_types[i])
+        if msg is None:
+            corrupt[name] += 1
+        elif kind is not None:
+            locator.add_tf(msg, kind == 'tf_static', t_ns)
+            take_ready(False)
+        else:
+            n_msgs += 1
+            reason = locator.push(
+                stamp_ns(msg.header.stamp), msg.header.frame_id, PingRecord(msg))
+            if reason is not None:
+                box_stats[reason] += 1
+    take_ready(True)   # end of the stream: position whatever is still waiting
+    box_stats['max_pending'] = locator.max_pending
+    box_stats['tf_rejected'] = locator.tf_rejected
     return n_msgs
 
 
-def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
+def bin_ping(ping, bin_width_deg, remove_tl, bins, freqs):
+    """Add one ping's beams (a PingRecord) to `bins` (see accumulate)."""
+    intensities = ping.intensities
+    rx_angles = ping.rx_angles
+    twtt = ping.two_way_travel_times
+    sound_speed = ping.sound_speed
+    freq = ping.frequency
+    if remove_tl and math.isfinite(freq) and freq > 0.0:
+        freqs.append(freq)  # only needed for the tier-2 absorption alpha
+    flags = ping.flags   # one flag value per beam, or None
+    count = min(len(intensities), len(rx_angles))
+    for i in range(count):
+        db = intensities[i]
+        if not math.isfinite(db):
+            continue
+        # Skip beams flagged bad (flag != 0) when flags are present and aligned.
+        if flags is not None and i < len(flags) and flags[i] != 0:
+            continue
+        ang = rx_angles[i]
+        if not math.isfinite(ang):
+            continue
+
+        range_m = 0.0
+        if remove_tl:
+            # R = twtt * c / 2; skip beams with a non-positive / NaN range
+            # (log10 undefined) so they never poison the residual. NOTE: this
+            # DROPS such beams from the derivation entirely, whereas the C++
+            # estimator RETAINS them and just skips the TL term (tier-1 fallback
+            # for that beam) -- an intentional asymmetry: a beam with no valid
+            # range can't inform the TL-removed residual, but its raw value is
+            # still a usable backscatter sample at apply time.
+            if i >= len(twtt):
+                continue
+            range_m = twtt[i] * sound_speed / 2.0
+            if not math.isfinite(range_m) or range_m <= 0.0:
+                continue
+            adjusted = db + 40.0 * math.log10(range_m)
+        else:
+            adjusted = db
+
+        abs_deg = abs(math.degrees(ang))
+        idx = int(abs_deg // bin_width_deg)
+        slot = bins.setdefault(idx, [0.0, 0.0, 0])
+        slot[0] += adjusted
+        slot[1] += range_m
+        slot[2] += 1
+
+
+def bag_basenames(bag_paths):
     """
-    Write the binned means and db_relative_to_nadir to a curve CSV.
+    Return the basenames of ``bag_paths`` for the ``source_bags`` header line.
+
+    A trailing slash on a bag directory is ignored. A name that cannot be
+    recorded unambiguously on one comma-separated header line (it contains a
+    comma, a line break, or is empty) is refused rather than mangled.
+    """
+    names = []
+    for path in bag_paths:
+        name = os.path.basename(os.path.normpath(path))
+        if not name or name in ('.', '..') or any(ch in name for ch in ',\r\n'):
+            raise SystemExit(
+                'error: bag name %r cannot be recorded in the source_bags '
+                'header (empty, or contains a comma or line break)' % path)
+        names.append(name)
+    return names
+
+
+def check_distinct_bags(bag_paths):
+    """
+    Refuse a bag given twice, which would count every ping in it twice.
+
+    Paths are compared after resolving symlinks, ``..`` and trailing slashes,
+    and a storage file is the same bag as a bag directory given that holds it.
+    Bags that merely overlap in time are not detected: their shared pings are
+    counted once per bag.
+    """
+    seen = {}
+    for path in bag_paths:
+        real = os.path.realpath(path)
+        if real in seen:
+            raise SystemExit('error: bag %r is the same as %r; give each bag once'
+                             % (path, seen[real]))
+        seen[real] = path
+    for path in bag_paths:
+        parent = os.path.dirname(os.path.realpath(path))
+        if parent in seen and os.path.isdir(parent) and seen[parent] != path:
+            raise SystemExit('error: bag %r is a file inside the bag directory %r; '
+                             'give each bag once' % (path, seen[parent]))
+
+
+def build_header(remove_tl, source_bags, alpha=None, absorption_source=None,
+                 water_temp_c=None, salinity_psu=None, ph=None, depth_m=None,
+                 frequency_khz=None, box=None):
+    """
+    Return the curve CSV's comment header lines (without newlines).
+
+    Every provenance line is a ``# key: value`` comment. The C++ loader
+    (``loadAngularResponseCurveWithHeader``) and its marine_tools Python mirror
+    read only ``tl_removed`` and ``absorption_db_per_m``; every other key is
+    provenance for people and is ignored by them. Tier-2 lines whose value is
+    unknown (None) are omitted -- with an alpha override there is no salinity,
+    pH, depth or frequency behind alpha, and the temperature is optional.
+    ``box`` (the --box site filter) is recorded as
+    ``# box: LATMIN LONMIN LATMAX LONMAX`` when given.
+    """
+    lines = ['# Empirical angular response (derive_angular_response.py, cube#81)']
+    if remove_tl:
+        # Self-describing tier-2 header (cube#87): the estimator reads
+        # tl_removed + absorption_db_per_m and applies the identical TL.
+        lines.append('# tl_removed: true')
+        lines.append('# absorption_db_per_m: %.6g' % alpha)
+        lines.append('# absorption_source: %s' % absorption_source)
+        for key, value in (('water_temp_c', water_temp_c),
+                           ('salinity_psu', salinity_psu),
+                           ('ph', ph),
+                           ('depth_m', depth_m),
+                           ('frequency_khz', frequency_khz)):
+            if value is not None:
+                lines.append('# %s: %.6g' % (key, value))
+        lines.append('# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)')
+    else:
+        lines.append('# tl_removed: false')
+    if box is not None:
+        lines.append('# box: %s' % ' '.join('%.9g' % v for v in box))
+    lines.append('# source_bags: %s' % ','.join(source_bags))
+    return lines
+
+
+def thin_curve_warning(bins, bin_width_deg):
+    """
+    Return a warning string when the curve rests on too few samples, else None.
+
+    Thin means the nadir (reference) bin has fewer than MIN_SAMPLES_PER_BIN
+    samples, or fewer than MIN_POPULATED_BINS bins reach it: the conditions
+    under which cube_lab refuses to self-calibrate.
+    """
+    if not bins:
+        return None
+    nadir_idx = min(bins)
+    nadir_n = bins[nadir_idx][2]
+    populated = sum(1 for slot in bins.values() if slot[2] >= MIN_SAMPLES_PER_BIN)
+    if nadir_n >= MIN_SAMPLES_PER_BIN and populated >= MIN_POPULATED_BINS:
+        return None
+    return ('warning: thin curve: the nadir reference bin (%.1f deg) has %d '
+            'samples and %d of %d bins have at least %d; every row is relative '
+            'to the nadir bin, and cube_lab refuses a curve below %d samples '
+            'there or with fewer than %d such bins'
+            % ((nadir_idx + 0.5) * bin_width_deg, nadir_n, populated, len(bins),
+               MIN_SAMPLES_PER_BIN, MIN_SAMPLES_PER_BIN, MIN_POPULATED_BINS))
+
+
+def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, header_lines):
+    """
+    Write ``header_lines``, then the binned means and db_relative_to_nadir.
 
     For tier-2 (`remove_tl`), the absorption term ``2*alpha*R`` is added here
     (compensated) using the per-bin mean range, completing the TL compensation
-    started in accumulate. The header records the TL provenance so the C++
-    estimator applies the identical model.
+    started in accumulate. ``header_lines`` (see build_header) records the TL
+    provenance so the C++ estimator applies the identical model.
     """
     if not bins:
         raise SystemExit('error: no finite intensity/angle samples found')
@@ -236,22 +1246,128 @@ def write_csv(bins, bin_width_deg, out_path, remove_tl, alpha, water_temp_c):
         rows.append([center, mean, n])
 
     nadir_mean = rows[0][1]  # lowest-angle (nadir-most) bin
-    with open(out_path, 'w') as f:
-        f.write('# Empirical angular response (derive_angular_response.py, cube#81)\n')
-        if remove_tl:
-            # Self-describing tier-2 header (cube#87): the estimator reads
-            # tl_removed + absorption_db_per_m and applies the identical TL.
-            f.write('# tl_removed: true\n')
-            f.write('# absorption_db_per_m: %.6g\n' % alpha)
-            f.write('# water_temp_c: %.3g\n' % water_temp_c)
-            f.write('# tl_model: 40*log10(R) + 2*alpha*R   (R = twtt*c/2, metres)\n')
-        else:
-            f.write('# tl_removed: false\n')
-        f.write('abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n')
-        for center, mean_db, n in rows:
-            db_rel = mean_db - nadir_mean
-            f.write('%.1f,%.3f,%d,%+.3f\n' % (center, mean_db, n, db_rel))
+    lines = list(header_lines)
+    lines.append('abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir')
+    for center, mean_db, n in rows:
+        db_rel = mean_db - nadir_mean
+        lines.append('%.1f,%.3f,%d,%+.3f' % (center, mean_db, n, db_rel))
+    write_text_atomically(out_path, ''.join(line + '\n' for line in lines))
     return len(rows)
+
+
+def write_text_atomically(path, text):
+    """
+    Replace ``path`` with ``text`` in one step (temp file + os.replace).
+
+    A failure part-way leaves an existing file untouched and no partial file
+    behind. The new file keeps an existing file's permission bits, else gets
+    the umask default, as open(path, 'w') would.
+
+    A symlinked ``path`` is written through: its final target is replaced and
+    the link is kept. A path that is not (or would not be) a regular file -- a
+    device or pipe such as ``/dev/stdout`` or ``/dev/null``, or anything under
+    ``/dev`` or ``/proc`` -- is written directly, as open(path, 'w') would,
+    since it cannot be replaced by a temp file.
+
+    When no temp file can be created beside the target (a read-only
+    directory holding a writable file), an existing writable file is written
+    in place, as open(path, 'w') did, with a warning that a failure part-way
+    would leave it truncated (and such a failure's error says it may now be);
+    otherwise the run exits with an error naming the directory. Any other
+    failure to write is an error naming the path, never a traceback.
+    """
+    if not _replaceable_regular_path(path):
+        _write_in_place(path, text)
+        return
+    path = os.path.realpath(path)
+    directory = os.path.dirname(path) or '.'
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=directory, prefix='.%s.' % os.path.basename(path), suffix='.tmp')
+    except OSError as e:
+        if (e.errno in (errno.EACCES, errno.EPERM) and os.path.isfile(path)
+                and os.access(path, os.W_OK)):
+            print('warning: cannot create a temp file in %s (%s); writing %s '
+                  'in place instead, so a failure part-way would leave it '
+                  'truncated' % (directory, e.strerror, path), file=sys.stderr)
+            _write_in_place(path, text, '; it may now be truncated')
+            return
+        raise SystemExit('error: cannot write %s: cannot create a file in %s (%s)'
+                         % (path, directory, e.strerror))
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except BaseException as e:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        if isinstance(e, OSError):
+            raise SystemExit('error: cannot write %s (%s); it is unchanged'
+                             % (path, e.strerror or e))
+        raise
+
+
+def _write_in_place(path, text, note=''):
+    """Write ``text`` to ``path`` as open(path, 'w') does; on failure exit with ``note`` added."""
+    try:
+        with open(path, 'w') as f:
+            f.write(text)
+    except OSError as e:
+        raise SystemExit('error: cannot write %s (%s)%s' % (path, e.strerror, note))
+
+
+def _replaceable_regular_path(path):
+    """Return True when ``path`` names a regular file, or none yet, outside /dev and /proc."""
+    special = ('/dev/', '/proc/')
+    # The path as given first: /dev/stdout redirected to a file resolves to
+    # that file, which must be written in place, not replaced.
+    if os.path.abspath(path).startswith(special):
+        return False
+    if os.path.realpath(path).startswith(special):
+        return False
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except FileNotFoundError:
+        return True
+
+
+def resolve_absorption(args, freqs):
+    """
+    Return ``(alpha_db_per_m, source, freq_khz)`` for the tier-2 TL.
+
+    ``source`` is ``'override'`` when ``--absorption-db-per-m`` was given (alpha
+    used verbatim) and ``'computed'`` otherwise (Francois-Garrison at the median
+    per-ping frequency). ``freq_khz`` is that median, or None when no finite
+    frequency was found -- which is an error only for the computed path, as
+    is a median outside FREQUENCY_KHZ_RANGE.
+    """
+    freq_khz = median(freqs) / 1000.0 if freqs else None
+    if args.absorption_db_per_m is not None:
+        return args.absorption_db_per_m, 'override', freq_khz
+    if freq_khz is None:
+        raise SystemExit(
+            'error: --remove-tl needs a finite ping_info.frequency to compute '
+            'alpha; none found (or give --absorption-db-per-m)')
+    if not FREQUENCY_KHZ_RANGE[0] <= freq_khz <= FREQUENCY_KHZ_RANGE[1]:
+        raise SystemExit(
+            'error: the median ping_info.frequency is %g kHz, outside the '
+            'plausible %g..%g kHz; it should be in Hz (is it in kHz?). Give '
+            '--absorption-db-per-m instead of computing alpha from it'
+            % ((freq_khz,) + FREQUENCY_KHZ_RANGE))
+    alpha = francois_garrison_absorption_db_per_m(
+        freq_khz, args.water_temp_c, args.salinity, args.depth_m, args.ph)
+    return alpha, 'computed', freq_khz
 
 
 def median(values):
@@ -267,29 +1383,60 @@ def median(values):
 def main(argv=None):
     """Read the bag(s), bin by |rx_angles| and write the curve CSV (one line)."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    source_bags = bag_basenames(args.bag)  # refuse a bad name before reading
+    check_distinct_bags(args.bag)
 
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)
-    n_msgs = 0
-    for bag_path in args.bag:
-        reader = open_reader(bag_path)
-        n_msgs += accumulate(
-            reader, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs)
+    box_stats = new_box_stats() if args.box is not None else None
+    corrupt = collections.Counter()   # topic -> messages that would not deserialize
+    n_msgs = accumulate(
+        args.bag, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
+        box=args.box, box_stats=box_stats, corrupt=corrupt)
+    warning = corrupt_report(corrupt)
+    if warning is not None:
+        print(warning, file=sys.stderr)
+    if box_stats is not None:
+        print(box_report(args.box, box_stats, n_msgs))
+        warning = tf_rejected_warning(box_stats['tf_rejected'])
+        if warning is not None:
+            print(warning, file=sys.stderr)
+        if box_stats['kept'] == 0:
+            raise SystemExit('error: no pings inside --box; nothing to derive '
+                             '(check the box corners are LATMIN LONMIN LATMAX '
+                             'LONMAX and the bags carry earth TF)')
+
+    warning = thin_curve_warning(bins, args.bin_width_deg)
+    if warning is not None:
+        if args.box is not None:
+            warning += ('; --box kept %d pings: widen the box or add bags'
+                        % box_stats['kept'])
+        print(warning, file=sys.stderr)
 
     alpha = 0.0
     if args.remove_tl:
-        if not freqs:
-            raise SystemExit(
-                'error: --remove-tl needs a finite ping_info.frequency; none found')
-        freq_khz = median(freqs) / 1000.0
-        alpha = freshwater_absorption_db_per_m(
-            freq_khz, args.water_temp_c, args.depth_m)
-        print('tier-2: median frequency %.1f kHz, T=%.1f C, D=%.1f m -> '
-              'alpha=%.6g dB/m' % (freq_khz, args.water_temp_c, args.depth_m, alpha))
+        alpha, source, freq_khz = resolve_absorption(args, freqs)
+        if source == 'override':
+            print('tier-2: alpha=%.6g dB/m (--absorption-db-per-m override)'
+                  % alpha)
+            header = build_header(
+                True, source_bags, alpha=alpha, absorption_source=source,
+                water_temp_c=args.water_temp_c, box=args.box)
+        else:
+            print('tier-2: median frequency %.1f kHz, T=%.1f C, S=%g psu, '
+                  'pH=%g, D=%.1f m -> alpha=%.6g dB/m'
+                  % (freq_khz, args.water_temp_c, args.salinity, args.ph,
+                     args.depth_m, alpha))
+            header = build_header(
+                True, source_bags, alpha=alpha, absorption_source=source,
+                water_temp_c=args.water_temp_c, salinity_psu=args.salinity,
+                ph=args.ph, depth_m=args.depth_m, frequency_khz=freq_khz,
+                box=args.box)
+    else:
+        header = build_header(False, source_bags, box=args.box)
 
     n_rows = write_csv(
-        bins, args.bin_width_deg, args.output,
-        args.remove_tl, alpha, args.water_temp_c if args.remove_tl else 0.0)
+        bins, args.bin_width_deg, args.output, args.remove_tl, alpha, header)
     print('read %d pings across %d bag(s) on %s; wrote %d-bin curve to %s'
           % (n_msgs, len(args.bag), args.topic, n_rows, args.output))
     return 0
