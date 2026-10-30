@@ -968,6 +968,74 @@ def test_box_with_no_bag_holding_the_topic_is_an_error(tmp_path):
     assert not (tmp_path / 'x.csv').exists()
 
 
+class _FakeReader:
+    """A SequentialReader stand-in that records how many are open at once."""
+
+    open_now = 0
+    open_max = 0
+
+    def __init__(self, messages):
+        """Open over ``messages``, a list of ``(name, data, t_ns)``."""
+        self._messages = list(messages)
+        self.closed = False
+        _FakeReader.open_now += 1
+        _FakeReader.open_max = max(_FakeReader.open_max, _FakeReader.open_now)
+
+    def has_next(self):
+        """Return True while messages remain."""
+        assert not self.closed
+        return bool(self._messages)
+
+    def read_next(self):
+        """Return the next message."""
+        return self._messages.pop(0)
+
+    def close(self):
+        """Close the reader (once)."""
+        assert not self.closed
+        self.closed = True
+        _FakeReader.open_now -= 1
+
+
+def _fake_sources(bags):
+    """Return merged_messages sources over lists of (name, t_ns) messages."""
+    _FakeReader.open_now = _FakeReader.open_max = 0
+    return [(msgs[0][1] if msgs else 0,
+             (lambda msgs=msgs: _FakeReader([(n, b'', t) for n, t in msgs])))
+            for msgs in bags]
+
+
+def test_merged_messages_opens_split_files_one_at_a_time():
+    """A recording in many consecutive splits holds one reader open at a time."""
+    bags = [[('/t', 100 * k + j) for j in range(5)] for k in range(300)]
+    bags.reverse()   # the command-line order does not matter
+    got = [t for _i, _n, _d, t in dar.merged_messages(_fake_sources(bags))]
+    assert got == sorted(got) and len(got) == 1500
+    assert _FakeReader.open_max == 1 and _FakeReader.open_now == 0
+
+
+def test_merged_messages_interleaves_overlapping_bags():
+    """Overlapping bags interleave in time order; ties go to the bag given first."""
+    bags = [[('/a', 10), ('/a', 30), ('/a', 50)],
+            [('/b', 20), ('/b', 30), ('/b', 40)],
+            [],
+            [('/c', 60)]]
+    got = [(i, t) for i, _n, _d, t in dar.merged_messages(_fake_sources(bags))]
+    assert got == [(0, 10), (1, 20), (0, 30), (1, 30), (1, 40), (0, 50), (3, 60)]
+    assert _FakeReader.open_max == 2 and _FakeReader.open_now == 0
+
+
+def test_merged_messages_closes_readers_when_abandoned():
+    """A consumer that stops early still closes every open reader."""
+    bags = [[('/a', 10), ('/a', 30)], [('/b', 20), ('/b', 40)]]
+    stream = dar.merged_messages(_fake_sources(bags))
+    next(stream)
+    next(stream)
+    assert _FakeReader.open_now == 2
+    stream.close()
+    assert _FakeReader.open_now == 0
+
+
 def _bare_ping(sec, nanosec, frame_id='mbes'):
     """Return a header-only stand-in for a ping (all PingLocator reads)."""
     from builtin_interfaces.msg import Time

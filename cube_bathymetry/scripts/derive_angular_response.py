@@ -107,6 +107,7 @@ Usage:
 
 import argparse
 import collections
+import functools
 import heapq
 import math
 import os
@@ -560,52 +561,99 @@ def francois_garrison_absorption_db_per_m(
     return alpha_db_per_km / 1000.0
 
 
-def open_reader(bag_path):
-    """Open a rosbag2 SequentialReader, auto-detecting the storage backend."""
+def storage_id_for(bag_path):
+    """Return the rosbag2 storage id for ``bag_path`` ('' = auto-detect)."""
+    if bag_path.endswith('.mcap'):
+        return 'mcap'
+    if bag_path.endswith('.db3'):
+        return 'sqlite3'
+    return ''
+
+
+def read_bag_metadata(bag_path):
+    """
+    Return ``({topic: type}, start_ns)`` from a bag's metadata.
+
+    Nothing is held open afterwards, so every bag on the command line can be
+    checked before any is read, however many split files there are.
+    """
     import rosbag2_py
 
-    storage_id = ''
-    if bag_path.endswith('.mcap'):
-        storage_id = 'mcap'
-    elif bag_path.endswith('.db3'):
-        storage_id = 'sqlite3'
-    storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id=storage_id)
+    meta = rosbag2_py.Info().read_metadata(bag_path, storage_id_for(bag_path))
+    types = {t.topic_metadata.name: t.topic_metadata.type
+             for t in meta.topics_with_message_count}
+    return types, int(meta.starting_time.nanoseconds)
+
+
+def open_reader(bag_path, topics=None):
+    """
+    Open a rosbag2 SequentialReader, auto-detecting the storage backend.
+
+    With ``topics`` the reader yields only those topics.
+    """
+    import rosbag2_py
+
+    storage_options = rosbag2_py.StorageOptions(
+        uri=bag_path, storage_id=storage_id_for(bag_path))
     converter_options = rosbag2_py.ConverterOptions(
         input_serialization_format='cdr', output_serialization_format='cdr')
     reader = rosbag2_py.SequentialReader()
     reader.open(storage_options, converter_options)
+    if topics:
+        reader.set_filter(rosbag2_py.StorageFilter(topics=list(topics)))
     return reader
 
 
-def merged_messages(readers):
+def merged_messages(sources):
     """
-    Yield ``(reader_index, topic, data, t_ns)`` from every reader in time order.
+    Yield ``(source_index, topic, data, t_ns)`` from every source in time order.
 
-    A k-way merge on each message's bag timestamp, so several bags -- split
+    ``sources`` is a list of ``(start_ns, open_fn)``: the bag's first message
+    time (from its metadata) and a function returning an opened reader. A
+    k-way merge on each message's bag timestamp, so several bags -- split
     files of one recording, or bags recorded side by side -- are read as one
     chronological stream, as import_bag's BagReaders does. Ties go to the
-    reader given first.
+    source given first.
+
+    A bag is opened only once the stream reaches its start time and is closed
+    as soon as it is exhausted, so a recording split into hundreds of files
+    holds one or two open at a time, not one per file.
     """
+    waiting = collections.deque(
+        sorted(range(len(sources)), key=lambda i: (sources[i][0], i)))
     heap = []
-    for i, reader in enumerate(readers):
-        if reader.has_next():
-            name, data, t_ns = reader.read_next()
-            heap.append((t_ns, i, name, data))
-    heapq.heapify(heap)
-    while heap:
-        # (t_ns, i) is unique: each reader has at most one message in the heap.
-        t_ns, i, name, data = heapq.heappop(heap)
-        yield i, name, data, t_ns
+    readers = {}
+
+    def advance(i):
         reader = readers[i]
         if reader.has_next():
             name, data, t_ns = reader.read_next()
             heapq.heappush(heap, (t_ns, i, name, data))
+        else:
+            del readers[i]
+            reader.close()
+
+    try:
+        while heap or waiting:
+            while waiting and (not heap or sources[waiting[0]][0] <= heap[0][0]):
+                i = waiting.popleft()
+                readers[i] = sources[i][1]()
+                advance(i)
+            if not heap:
+                continue
+            # (t_ns, i) is unique: each reader has at most one message in the heap.
+            t_ns, i, name, data = heapq.heappop(heap)
+            yield i, name, data, t_ns
+            advance(i)
+    finally:
+        for reader in readers.values():
+            reader.close()
 
 
-def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
+def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
                box=None, box_stats=None):
     """
-    Accumulate per-bin sums on `topic` over every reader into `bins`.
+    Accumulate per-bin sums on `topic` over every bag into `bins`.
 
     Each bin slot is ``[sum_adjusted, sum_R, count]``:
 
@@ -619,11 +667,12 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
 
     `freqs` collects each ping's ``ping_info.frequency`` (Hz) for the median.
 
-    Without `box` the readers are read one after another; the binned sums do not
-    depend on the order.
+    Every bag's topics are checked from its metadata before any bag is read.
+    Without `box` the bags are opened and read one after another, each closed
+    before the next is opened; the binned sums do not depend on the order.
 
-    With `box` (latmin, lonmin, latmax, lonmax) each reader is filtered to the
-    detections topic plus every /tf and /tf_static topic in it, and all readers
+    With `box` (latmin, lonmin, latmax, lonmax) each bag is filtered to the
+    detections topic plus every /tf and /tf_static topic in it, and all bags
     are merged into ONE time-ordered pass (merged_messages) feeding ONE
     PingLocator, as import_bag does: a /tf_static recorded only in the first
     split file still positions the pings of the later splits, and a bag holding
@@ -639,48 +688,52 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
 
-    type_maps = []
-    for reader in readers:
-        type_map = {t.name: t.type for t in reader.get_all_topics_and_types()}
+    metas = [read_bag_metadata(path) for path in bag_paths]
+    type_maps = [type_map for type_map, _start_ns in metas]
+    for path, type_map in zip(bag_paths, type_maps):
         if topic not in type_map and box is None:
             raise SystemExit(
-                "error: topic '%s' not in bag (have: %s)"
-                % (topic, ', '.join(sorted(type_map)) or 'none'))
-        type_maps.append(type_map)
+                "error: topic '%s' not in bag %s (have: %s)"
+                % (topic, path, ', '.join(sorted(type_map)) or 'none'))
     if not any(topic in type_map for type_map in type_maps):
         # Only reachable with --box, where a bag without the detections topic
         # may still carry the TF that positions another bag's pings.
         raise SystemExit(
             "error: topic '%s' not in any bag (have: %s)"
             % (topic, ', '.join(sorted(set().union(*type_maps))) or 'none'))
-    msg_types = [get_message(type_map[topic]) if topic in type_map else None
-                 for type_map in type_maps]
 
     def add_ping(msg):
         bin_ping(msg, bin_width_deg, remove_tl, bins, freqs)
 
     n_msgs = 0
     if box is None:
-        for i, reader in enumerate(readers):
-            while reader.has_next():
-                name, data, _stamp = reader.read_next()
-                if name != topic:
-                    continue
-                n_msgs += 1
-                add_ping(deserialize_message(data, msg_types[i]))
+        for path, type_map in zip(bag_paths, type_maps):
+            msg_type = get_message(type_map[topic])
+            reader = open_reader(path, [topic])
+            try:
+                while reader.has_next():
+                    name, data, _stamp = reader.read_next()
+                    if name != topic:
+                        continue
+                    n_msgs += 1
+                    add_ping(deserialize_message(data, msg_type))
+            finally:
+                reader.close()
         return n_msgs
 
-    import rosbag2_py
-
-    tf_topics = []    # per reader: {topic name: 'tf' | 'tf_static'}
-    for reader, type_map in zip(readers, type_maps):
+    sources = []      # (start_ns, open_fn) for merged_messages
+    tf_topics = []    # per source: {topic name: 'tf' | 'tf_static'}
+    msg_types = []    # per source: the detections message class, or None
+    for path, (type_map, start_ns) in zip(bag_paths, metas):
         kinds = {name: kind for name, type_name in type_map.items()
                  for kind in (is_tf_topic(name),)
                  if kind is not None and type_name == 'tf2_msgs/msg/TFMessage'}
         wanted = ([topic] if topic in type_map else []) + sorted(kinds)
-        if wanted:   # an empty filter would read every topic
-            reader.set_filter(rosbag2_py.StorageFilter(topics=wanted))
+        if not wanted:
+            continue   # neither detections nor TF: nothing to read in it
+        sources.append((start_ns, functools.partial(open_reader, path, wanted)))
         tf_topics.append(kinds)
+        msg_types.append(get_message(type_map[topic]) if topic in type_map else None)
     tf_msg_type = get_message('tf2_msgs/msg/TFMessage')
     locator = PingLocator()   # one buffer for every bag on the command line
 
@@ -694,7 +747,7 @@ def accumulate(readers, topic, bin_width_deg, remove_tl, bins, freqs,
                 box_stats['kept'] += 1
                 add_ping(msg)
 
-    for i, name, data, _t_ns in merged_messages(readers):
+    for i, name, data, _t_ns in merged_messages(sources):
         kind = tf_topics[i].get(name)
         if kind is not None:
             locator.add_tf(deserialize_message(data, tf_msg_type), kind == 'tf_static')
@@ -997,9 +1050,8 @@ def main(argv=None):
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)
     box_stats = new_box_stats() if args.box is not None else None
-    readers = [open_reader(bag_path) for bag_path in args.bag]
     n_msgs = accumulate(
-        readers, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
+        args.bag, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
         box=args.box, box_stats=box_stats)
     if box_stats is not None:
         print(box_report(args.box, box_stats, n_msgs))
