@@ -159,9 +159,9 @@ Design decisions:
    computes the full Francois-Garrison absorption from `--salinity`/`--ph`, or
    takes an explicit `--absorption-db-per-m`, and records `absorption_source`,
    the model inputs and the source bags in the header. The C++ side is
-   unchanged: it still applies the header's alpha verbatim.) The salinity
-   (boric-acid + MgSO₄) seawater absorption terms are out of scope for this
-   issue; `--salinity > 0` is rejected by the tool.
+   unchanged: it still applies the header's alpha verbatim.) As decided for
+   cube_bathymetry#87: the salinity (boric-acid + MgSO₄) seawater absorption
+   terms were out of scope, and the tool then rejected `--salinity > 0`.
 5. **Multi-bag derivation.** `derive_angular_response.py` now accepts multiple
    bags (`nargs='+'`) and merges the per-bin sums — a real survey calibration
    spans many bags.
