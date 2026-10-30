@@ -573,6 +573,9 @@ def write_synthetic_bag(path):
                                                              -> kept
       ping 200.0: after the last earth transform (109 s); still waiting when
                   the bag ends, flushed and looked up         -> extrapolation
+      ping 0.0:   unset header stamp, logged at 101.5 s while inside
+                  transforms exist (tf2 would read it as "latest")
+                                                             -> bad_stamp
     """
     inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
     outside = geodetic_to_ecef(OUTSIDE[0], OUTSIDE[1], 0.0)
@@ -586,6 +589,7 @@ def write_synthetic_bag(path):
         (100.5, TOPIC, _ping(100.5, 'mbes', -30.0)),
         (101.0, '/bizzy/tf', earth(101.0, inside)),
         (101.0, TOPIC, _ping(101.0, 'orphan_frame', -31.0)),
+        (101.5, TOPIC, _ping(0.0, 'mbes', -36.0)),
         (102.0, '/bizzy/tf', earth(102.0, outside)),
         (103.0, '/bizzy/tf', earth(103.0, outside)),
         (103.2, TOPIC, _ping(102.5, 'mbes', -32.0)),
@@ -617,7 +621,7 @@ def counts_by_angle(path):
 def test_end_to_end_without_box_reads_every_ping(tmp_path, capsys):
     """Without --box every ping is binned and no box is recorded."""
     out, stdout = run_main(tmp_path, [], capsys)
-    assert counts_by_angle(out) == {1.0: 6, 31.0: 6}
+    assert counts_by_angle(out) == {1.0: 7, 31.0: 7}
     hd = header_dict([ln for ln in out.read_text().splitlines() if ln.startswith('#')])
     assert hd['source_bags'] == 'site_bag'
     assert 'box' not in hd
@@ -631,9 +635,9 @@ def test_end_to_end_box_keeps_only_site_pings(tmp_path, capsys):
                                           '--salinity', '31'], capsys)
     # Pings 100.5 and 105.0 survive: two samples per bin.
     assert counts_by_angle(out) == {1.0: 2, 31.0: 2}
-    assert ('kept 2 of 6 pings; dropped 1 outside the box, 1 with no earth '
+    assert ('kept 2 of 7 pings; dropped 1 outside the box, 1 with no earth '
             'transform for their frame, 2 outside the earth TF coverage at '
-            'their stamp') in stdout
+            'their stamp, 1 with an unset (zero) header stamp') in stdout
     lines = out.read_text().splitlines()
     hd = header_dict([ln for ln in lines if ln.startswith('#')])
     assert hd['box'] == '42.95 -70.65 43 -70.58'
@@ -779,3 +783,13 @@ def test_ping_locator_flush_and_no_latest_fallback():
     assert list(loc.drain()) == []   # frontier 101 < 100.5 + guard
     got = [(r[0], r[2]) for r in loc.drain(flush=True)]
     assert got == [(within, None), (after, 'extrapolation'), (orphan, 'no_tf')]
+
+
+def test_ping_locator_rejects_unset_stamp():
+    """A zero stamp is dropped as bad_stamp, never read as tf2's "latest"."""
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    loc = dar.PingLocator()
+    loc.add_tf(_mbes_static(), True)
+    loc.add_tf(_earth_tf_at(100, 0, inside), False)
+    assert loc.locate('mbes', _bare_ping(0, 0).header.stamp) == (None, 'bad_stamp')
+    assert loc.locate('mbes', _bare_ping(100, 0).header.stamp)[1] is None

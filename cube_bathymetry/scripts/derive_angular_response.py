@@ -80,8 +80,9 @@ georeferences it:
   <header.frame_id>`` is looked up exactly at the ping stamp, interpolated
   between them. There is no fallback to the latest transform: a ping outside
   the earth TF coverage (before the first earth transform, after the last, or
-  in a gap wider than the 60 s buffer) is dropped. Pings still waiting when the
-  bags end are looked up against what was read.
+  in a gap wider than the 60 s buffer) is dropped, and so is a ping with an
+  unset (zero) stamp, which tf2 would read as "the latest transform". Pings
+  still waiting when the bags end are looked up against what was read.
 
 The ECEF translation of the sensor origin is converted to latitude/longitude in
 closed form. Pings outside the box and pings that cannot be positioned are
@@ -288,12 +289,17 @@ class PingLocator:
 
         ``stamp`` is a builtin_interfaces/Time, looked up exactly (tf2
         interpolates between the transforms on either side; there is no
-        latest-transform fallback). ``reason`` is ``'no_tf'`` when the frame
-        has no earth transform at all, and ``'extrapolation'`` when it has one
-        but the stamp is outside the buffered coverage.
+        latest-transform fallback). ``reason`` is ``'bad_stamp'`` for an unset
+        (zero) or negative stamp -- tf2 reads time zero as "the latest
+        transform", which would position the ping wherever the vessel happened
+        to be -- ``'no_tf'`` when the frame has no earth transform at all, and
+        ``'extrapolation'`` when it has one but the stamp is outside the
+        buffered coverage.
         """
         from rclpy.time import Time
 
+        if stamp_ns(stamp) <= 0:
+            return None, 'bad_stamp'
         tf2_ros = self._tf2_ros
         try:
             t = self._buffer.lookup_transform_core(
@@ -312,6 +318,7 @@ BOX_DROP_REASONS = (
     ('outside', 'outside the box'),
     ('no_tf', 'with no earth transform for their frame'),
     ('extrapolation', 'outside the earth TF coverage at their stamp'),
+    ('bad_stamp', 'with an unset (zero) header stamp'),
 )
 
 
