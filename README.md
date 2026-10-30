@@ -805,7 +805,10 @@ both are counted once per bag, so leave the duplicate out.
 The CSV is written to a temp file beside `-o` and renamed over it, so a failed
 run leaves an existing curve untouched. A symlinked `-o` is written through to
 its target (the link stays), and `-o /dev/stdout` or another device or pipe is
-written directly.
+written directly. An existing writable file in a directory where no temp file
+can be created (a read-only directory) is written in place, with a warning
+that a failure part-way would leave it truncated; a new file there is refused
+with an error naming the directory.
 
 **Header provenance.** Every line above the CSV column row is a
 `# key: value` comment. The loader (and the marine_tools SonarInfo mirror)

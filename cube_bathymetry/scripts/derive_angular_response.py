@@ -116,6 +116,7 @@ Usage:
 
 import argparse
 import collections
+import errno
 import functools
 import heapq
 import math
@@ -1172,21 +1173,38 @@ def write_text_atomically(path, text):
     device or pipe such as ``/dev/stdout`` or ``/dev/null``, or anything under
     ``/dev`` or ``/proc`` -- is written directly, as open(path, 'w') would,
     since it cannot be replaced by a temp file.
+
+    When no temp file can be created beside the target (a read-only
+    directory holding a writable file), an existing writable file is written
+    in place, as open(path, 'w') did, with a warning that a failure part-way
+    would leave it truncated; otherwise the run exits with an error naming
+    the directory. Any other failure to write is an error naming the path,
+    never a traceback.
     """
     if not _replaceable_regular_path(path):
-        with open(path, 'w') as f:
-            f.write(text)
+        _write_in_place(path, text)
         return
     path = os.path.realpath(path)
-    directory = os.path.dirname(path)
+    directory = os.path.dirname(path) or '.'
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except FileNotFoundError:
         umask = os.umask(0)
         os.umask(umask)
         mode = 0o666 & ~umask
-    fd, tmp_path = tempfile.mkstemp(
-        dir=directory, prefix='.%s.' % os.path.basename(path), suffix='.tmp')
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=directory, prefix='.%s.' % os.path.basename(path), suffix='.tmp')
+    except OSError as e:
+        if (e.errno in (errno.EACCES, errno.EPERM) and os.path.isfile(path)
+                and os.access(path, os.W_OK)):
+            print('warning: cannot create a temp file in %s (%s); writing %s '
+                  'in place instead, so a failure part-way would leave it '
+                  'truncated' % (directory, e.strerror, path), file=sys.stderr)
+            _write_in_place(path, text)
+            return
+        raise SystemExit('error: cannot write %s: cannot create a file in %s (%s)'
+                         % (path, directory, e.strerror))
     try:
         with os.fdopen(fd, 'w') as f:
             f.write(text)
@@ -1194,12 +1212,24 @@ def write_text_atomically(path, text):
             os.fsync(f.fileno())
         os.chmod(tmp_path, mode)
         os.replace(tmp_path, path)
-    except BaseException:
+    except BaseException as e:
         try:
             os.unlink(tmp_path)
         except FileNotFoundError:
             pass
+        if isinstance(e, OSError):
+            raise SystemExit('error: cannot write %s (%s); it is unchanged'
+                             % (path, e.strerror or e))
         raise
+
+
+def _write_in_place(path, text):
+    """Write ``text`` to ``path`` as open(path, 'w') does; exit cleanly on failure."""
+    try:
+        with open(path, 'w') as f:
+            f.write(text)
+    except OSError as e:
+        raise SystemExit('error: cannot write %s (%s)' % (path, e.strerror))
 
 
 def _replaceable_regular_path(path):

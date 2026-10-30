@@ -498,7 +498,7 @@ def test_atomic_write_cleans_up_when_the_replace_fails(tmp_path, monkeypatch):
         raise OSError('disk full')
 
     monkeypatch.setattr(dar.os, 'replace', fail)
-    with pytest.raises(OSError):
+    with pytest.raises(SystemExit, match='cannot write .*curve.csv .disk full.; it is unchanged'):
         dar.write_csv(BINS, 2.0, str(out), False, 0.0, ['# new'])
     assert out.read_text() == 'a good curve\n'
     assert [q.name for q in tmp_path.iterdir()] == ['curve.csv']
@@ -539,6 +539,65 @@ def test_write_csv_through_a_dangling_symlink_creates_the_target(tmp_path):
     dar.write_csv(BINS, 2.0, str(link), False, 0.0, ['# new'])
     assert link.is_symlink()
     assert (tmp_path / 'new.csv').read_text().startswith('# new\n')
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root writes into read-only directories')
+@pytest.mark.parametrize('through_link', [False, True])
+def test_write_csv_in_a_read_only_directory_writes_in_place(tmp_path, capsys, through_link):
+    """
+    A writable file in a read-only directory is written in place, with a warning.
+
+    No temp file can be created beside it, so it is written as open('w')
+    would, directly or through a symlink from a writable directory.
+    """
+    ro_dir = tmp_path / 'readonly'
+    ro_dir.mkdir()
+    target = ro_dir / 'site.csv'
+    target.write_text('old\n')
+    out = target
+    if through_link:
+        out = tmp_path / 'current.csv'
+        out.symlink_to(target)
+    ro_dir.chmod(0o555)
+    try:
+        dar.write_csv(BINS, 2.0, str(out), False, 0.0, ['# new'])
+    finally:
+        ro_dir.chmod(0o755)
+    assert target.read_text().startswith('# new\nabs_angle_deg_center,')
+    assert sorted(q.name for q in ro_dir.iterdir()) == ['site.csv']
+    err = capsys.readouterr().err
+    assert 'warning: cannot create a temp file in %s' % ro_dir in err
+    assert 'writing %s in place' % target in err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root writes into read-only directories')
+def test_write_csv_in_a_read_only_directory_without_the_file_is_a_clean_error(tmp_path):
+    """A new file, or a read-only one, in a read-only directory exits naming the directory."""
+    ro_dir = tmp_path / 'readonly'
+    ro_dir.mkdir()
+    locked = ro_dir / 'locked.csv'
+    locked.write_text('old\n')
+    locked.chmod(0o444)
+    ro_dir.chmod(0o555)
+    try:
+        for name in ('new.csv', 'locked.csv'):
+            with pytest.raises(SystemExit) as exc:
+                dar.write_csv(BINS, 2.0, str(ro_dir / name), False, 0.0, ['# new'])
+            assert str(exc.value) == (
+                'error: cannot write %s: cannot create a file in %s (Permission denied)'
+                % (ro_dir / name, ro_dir))
+    finally:
+        ro_dir.chmod(0o755)
+    assert locked.read_text() == 'old\n'
+    assert sorted(q.name for q in ro_dir.iterdir()) == ['locked.csv']
+
+
+def test_write_csv_into_a_missing_directory_is_a_clean_error(tmp_path):
+    """-o in a directory that does not exist exits naming it, no traceback."""
+    out = tmp_path / 'no_such_dir' / 'curve.csv'
+    with pytest.raises(SystemExit, match='cannot create a file in %s' % re.escape(
+            str(out.parent))):
+        dar.write_csv(BINS, 2.0, str(out), False, 0.0, ['# new'])
 
 
 def test_write_csv_to_a_non_regular_file_writes_directly(tmp_path):
