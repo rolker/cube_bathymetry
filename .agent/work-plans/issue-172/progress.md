@@ -101,3 +101,66 @@ issue: 172
 - [ ] Live stale window: accept it and count it, with reader depth > 1. The bridge publishes SonarInfo before the detections, and soundings take an extra hop through detections_to_pointcloud, so the window is rare in this topology.
 - [ ] Strict declared-state flag: warn only for now. Print the per-(mode, state) summary in the import report.
 - [ ] Phases: two PRs. PR 1: derive `--by-mode`, the table format, shared key vectors and fit diagnostics on Appledore, with no estimator change; it gates the format on real fits. PR 2: C++ loader, resolver, estimator, importer, node, fingerprint and the ADR amendments, plus the Appledore re-import.
+
+## Implementation
+**Status**: complete
+**When**: 2026-10-30 14:52 -04:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Scope**: plan fold + PR 1 ("science first": derive `--by-mode`, table format, key spec, diagnostics on Appledore; no estimator change). Not pushed, no PR.
+**Branch**: feature/issue-172 at `558486f` (local; contains the unmerged `feature/issue-170` merge, so do not push before PR #171 lands)
+
+### Commits
+- `e246fac` plan: fold the plan review and operator decisions into the #172 plan
+- `1099b39` derive_angular_response.py: --by-mode per-pulse-mode table (PR 1 of #172)
+- `34395c3` test: the single-curve C++ loader reads a mode table as an empty curve
+- `4e7282c` README: document derive --by-mode, the table format and the key spec
+- `558486f` plan: record the range-cell and misfit-bin sizes as implemented
+
+### Plan fold (must-fixes)
+- MF1 old-loader safety: keys start with a letter (`FMU_1000us_24000Hz_500kHz`), tables detected by `# format: angular-response-table v1`; the C++ loader (gtest) and the marine_tools mirror (pytest, read-only import) both return an empty curve on the table fixture. No C++ loader change was needed.
+- MF2 `correction_idx` 0 = unresolved (use `*` if present, else identity), explicit identity a separate value (PR 2).
+- MF3 angular intercepts are bin means of `L - r`, referred to R0; `db_relative_to_nadir` = A minus the nadir-most bin.
+- MF4 range term = binned log-range residual per mode (operator decision), quarter-decade nodes of log10(R/R0), linear between them, signed-angle bins, specular < 10 deg excluded; misfit diagnostic with threshold, scalar slope reported beside it.
+- MF5 offset bias stated; up- vs down-switch agreement per pair; 2 s window parameter.
+- MF6 frequency in the key (3 significant figures, plain decimal).
+- Plus: inverse-variance column in the format now, fixed reference mode with loud fallback, declared TVG per mode (column), `--by-mode --remove-tl` refused, two PRs, nits (`Node::insert`/`update`, `ScatterRecord`), acceptance restated.
+
+### Implementation notes / deviations from the plan text
+- Range term nodes are linear between nodes (no steps at bin edges); "bins" in the operator decision are realised as nodes every quarter decade of log10(R/R0), node 0 at R0.
+- Samples are accumulated in (signed angle bin, 0.01-decade range cell) sufficient statistics; the first 0.05-decade cells biased edge nodes by up to 0.6 dB (caught by the 20logR test) and were refined before the real run.
+- Misfit bins are eighth-decade (half the node spacing), n >= 200 per bin.
+- A mode whose ranges never reach R0 has its range term anchored at its nearest node; its offset carries the range law between that node and R0 (consistent corrected output, but the offset column alone is not a pure "mode step").
+- Switch events are stored sparse after closing, so a sonar switching every ping stays bounded.
+
+### Tests
+`./sensors_ws/test.sh cube_bathymetry`: `Summary: 1317 tests, 0 errors, 0 failures, 90 skipped`. New: 20 key vectors (`test/data/mode_keys.json`, float32-widening case included), 12 dB step recovered within 0.5 dB, chaining through an intermediate mode + unanchored flag, 0/-20/+10 dB/decade residual shapes, seawater 2*alpha*R curvature (binned misfit < 1.5 dB, scalar misfit > 1.5 dB), sloping bottom (signed fit right, folded fit biased > 1.5 dB), specular leak only without the exclusion, misfit flag on a step between nodes, flat single-depth bottom not identified, variance column, history/tracker units, end-to-end bags with and without `--box`, table format, fixture, both old loaders. Legacy CSV byte-identity tests unchanged and passing.
+
+### Appledore diagnostic (cube#172 PR 1)
+Run: `--by-mode --box 42.976 -70.628 43.002 -70.596`, 7 bags, `/bizzy/sensors/m3/detections`, 32 min over the NAS. Outputs in `/home/roland/project11/.agent/scratchpad/appledore_backscatter/by_mode/` (table, diagnostics JSON, `summary.md`, run log). Box kept 2641422 of 2822535 pings; 1880 SonarInfo stamps; 0 pings before the first SonarInfo; 6810 pings without usable beams. Reference FMU_1000us_24000Hz_500kHz (requested, present); R0 = 16.68 m (its median slant range). Declared TVG = UNKNOWN for every mode.
+
+| mode | pings | median R m | offset vs ref dB (SE) | misfit max / rms dB | scalar-slope misfit dB |
+|---|---|---|---|---|---|
+| CW_20us_50000Hz_500kHz | 1457065 | 3.1 | +1.19 (0.08) | 5.03 / 0.74 | 10.26 |
+| CW_50us_20000Hz_500kHz | 866161 | 7.7 | -0.67 (0.04) | 7.07 / 0.68 | 13.79 |
+| FMU_1000us_24000Hz_500kHz (ref) | 317497 | 16.7 | 0 | 12.97 / 0.58 | 58.21 |
+| FMU_5000us_24000Hz_500kHz | 169 | 5.8 | -15.03 (1.22) | 4.56 / 1.33 | 15.27 |
+| FMU_10000us_12000Hz_500kHz | 530 | 10.2 | -22.95 (1.52) | 4.77 / 1.09 | 4.06 |
+
+Range term r (dB) at log10(R/R0) nodes, well-supported nodes only:
+- CW 20 us: -1.75: -11.6, -1.50: -7.7, -1.25: -9.0, -1.00: -6.1, -0.75: -2.9, -0.50: -0.4, -0.25: -6.1 (rises from 0.3 m to 5 m, then falls; same shape as mode_vs_range.txt)
+- CW 50 us: -1.50: -16.2, -1.25: -14.7, -1.00: -9.9, -0.75: -12.3, -0.50: +2.7, -0.25: +4.3, 0: 0, +0.25: -0.7 (the 15 dB jump between 3 m and 5.3 m is the earlier "13 dB step")
+- FMU 1 ms: -0.25: +5.4, 0: 0, +0.25: -7.4, +0.50: -17.5 (falls faster with range, -30 then -40 dB/decade, the way 2*alpha*R would)
+- The two rare FM modes rest on a few hundred pings each; their nodes have SE 1-2 dB.
+
+Switches at the 2 s window: 1806 used, 1 discarded for a gap, 23 with no beams. Pairs:
+- 20 us <-> 50 us: 1023 switches, o(50us) - o(20us) = -1.85 +/- 0.07 dB; up -2.38 (504), down -1.34 (519): directions DISAGREE by 1.04 +/- 0.14 dB (flagged; the depth-correlated seabed bias the plan names).
+- 50 us <-> 1 ms: 695 switches, +0.66 +/- 0.04 dB; directions agree (-0.18 +/- 0.07).
+- Rare-mode pairs: 2-40 switches, mostly one direction only; 20 us <-> 1 ms (13) differs 11.8 +/- 5.2 dB between directions; the chain is loop-inconsistent (chi2 44.9 on 5 dof), driven by the rare modes.
+
+### Findings for the operator (gate format v1 before PR 2)
+- [ ] Separability: every mode exceeds the 1.5 dB misfit threshold. The pooled residuals are within about 2 dB, but well-populated angle-group bins are not: CW 20 us 10-30 deg at about 7 m is -5.0 dB (3.2M samples) and 50-90 deg runs +1.6 to +4 dB over 16.6M of its 36M samples; FMU 1 ms 10-30 deg at about 40 m is -3.5 dB (0.54M). The rms misfit is 0.6-0.7 dB for the main modes. Decide: accept the 1-D range term, or add an angle-group dimension to the `range` rows (a v1 format change; cheap now, expensive after PR 2). The max-over-bins metric is also sensitive to thin bins (n >= 200); a minimum share of samples could be added.
+- [ ] After each mode's own range term is removed, the three main modes sit within about 2 dB of each other: most of the 10-17 dB mode difference is carried by the range terms (and R0 anchoring), not the offset column.
+- [ ] The rare FM modes (5 ms: 169 pings, 10 ms: 530) have poorly determined offsets (SE 1.2-1.5 dB, inconsistent loops). PR 2 needs a policy (exclude backscatter for modes under N pings, or accept).
+- [ ] Per-beam scatter is large (sigma about 11 dB, variance about 130 dB^2 per bin), so the inverse-variance weights will be nearly flat across angle for the CW modes.
+- [ ] Not done here: the within-mode level-vs-range re-check on corrected data and the pass-to-pass step need the estimator (PR 2).
