@@ -1268,9 +1268,9 @@ def write_text_atomically(path, text):
     When no temp file can be created beside the target (a read-only
     directory holding a writable file), an existing writable file is written
     in place, as open(path, 'w') did, with a warning that a failure part-way
-    would leave it truncated; otherwise the run exits with an error naming
-    the directory. Any other failure to write is an error naming the path,
-    never a traceback.
+    would leave it truncated (and such a failure's error says it may now be);
+    otherwise the run exits with an error naming the directory. Any other
+    failure to write is an error naming the path, never a traceback.
     """
     if not _replaceable_regular_path(path):
         _write_in_place(path, text)
@@ -1292,7 +1292,7 @@ def write_text_atomically(path, text):
             print('warning: cannot create a temp file in %s (%s); writing %s '
                   'in place instead, so a failure part-way would leave it '
                   'truncated' % (directory, e.strerror, path), file=sys.stderr)
-            _write_in_place(path, text)
+            _write_in_place(path, text, '; it may now be truncated')
             return
         raise SystemExit('error: cannot write %s: cannot create a file in %s (%s)'
                          % (path, directory, e.strerror))
@@ -1314,13 +1314,13 @@ def write_text_atomically(path, text):
         raise
 
 
-def _write_in_place(path, text):
-    """Write ``text`` to ``path`` as open(path, 'w') does; exit cleanly on failure."""
+def _write_in_place(path, text, note=''):
+    """Write ``text`` to ``path`` as open(path, 'w') does; on failure exit with ``note`` added."""
     try:
         with open(path, 'w') as f:
             f.write(text)
     except OSError as e:
-        raise SystemExit('error: cannot write %s (%s)' % (path, e.strerror))
+        raise SystemExit('error: cannot write %s (%s)%s' % (path, e.strerror, note))
 
 
 def _replaceable_regular_path(path):

@@ -33,6 +33,7 @@ which closes the Python -> C++ round trip. If the header format changes on
 purpose, regenerate it with GOLDEN_REGENERATE=1 and re-run both tests.
 """
 
+import errno
 import importlib.util
 import math
 import os
@@ -568,6 +569,41 @@ def test_write_csv_in_a_read_only_directory_writes_in_place(tmp_path, capsys, th
     err = capsys.readouterr().err
     assert 'warning: cannot create a temp file in %s' % ro_dir in err
     assert 'writing %s in place' % target in err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason='root writes into read-only directories')
+def test_write_csv_in_place_failure_says_the_file_may_be_truncated(tmp_path, monkeypatch):
+    """A write that fails part-way through the in-place fallback says the file may be truncated."""
+    ro_dir = tmp_path / 'readonly'
+    ro_dir.mkdir()
+    target = ro_dir / 'site.csv'
+    target.write_text('old\n')
+    real_open = open
+
+    class FullDisk:
+        """open(path, 'w') that truncates the file, then fails to write."""
+
+        def __init__(self, path, mode):
+            self.f = real_open(path, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.f.close()
+
+        def write(self, _text):
+            raise OSError(errno.ENOSPC, 'No space left on device')
+
+    monkeypatch.setattr(dar, 'open', FullDisk, raising=False)
+    ro_dir.chmod(0o555)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            dar.write_csv(BINS, 2.0, str(target), False, 0.0, ['# new'])
+    finally:
+        ro_dir.chmod(0o755)
+    assert str(exc.value) == (
+        'error: cannot write %s (No space left on device); it may now be truncated' % target)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason='root writes into read-only directories')
