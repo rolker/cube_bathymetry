@@ -164,3 +164,21 @@ Switches at the 2 s window: 1806 used, 1 discarded for a gap, 23 with no beams. 
 - [ ] The rare FM modes (5 ms: 169 pings, 10 ms: 530) have poorly determined offsets (SE 1.2-1.5 dB, inconsistent loops). PR 2 needs a policy (exclude backscatter for modes under N pings, or accept).
 - [ ] Per-beam scatter is large (sigma about 11 dB, variance about 130 dB^2 per bin), so the inverse-variance weights will be nearly flat across angle for the CW modes.
 - [ ] Not done here: the within-mode level-vs-range re-check on corrected data and the pass-to-pass step need the estimator (PR 2).
+
+## Implementation
+
+**Date:** 2026-11-02. **Scope:** PR 1 format decisions settled on the Appledore data (operator decisions of 2026-11-02: range term per angle group; offset = level above the fixed reference mode after `db_relative_to_nadir` and range term, kept absolute rather than flattened; rare modes keep their entries; variance weights kept).
+
+**Changes (branch `feature/issue-172`, on top of the first implementation entry):**
+- `derive_angular_response.py --by-mode`: range term `r_g` per `|angle|` group (`--range-angle-edges`, default 30,50; `none` = one group); range rows carry `angle_lo_deg`/`angle_hi_deg`; header gains `range_angle_groups_deg`, `range_term_lookup`, `offset_meaning`, one `range_term` line per mode and group. Misfit also per HALF group (the per-bin intercepts hide within-group angle-by-range interaction otherwise).
+- End-node trimming: an end node under max(200, 0.1 %) of the group's beams is dropped; beams beyond the kept span are counted (`out_of_span`), corrected with the clamped end value at apply time, left out of the fit, intercepts and misfit; `r_g` is 0 at R0 if inside the span, else at the nearest end node. Misfit bins need the same share. Why: run 2 anchored the 20 µs term at an R0 node of 6e3 junk beams (offset +49.5 dB).
+- `--accumulation-cache`: plain-data pickle of the accumulated builder; the 35-min bag pass runs once, refits take 0.3 s; identity-checked (bags, topics, box, bin width, exclusion, edges).
+- `--range-node-spacing-decades` (default 0.25; misfit bins at half).
+- Tests: 496 in `test_derive_angular_response.py` (edge parsing/rejection, bin snapping, non-separable stream, apply formula on the two-mode stream, trimming of a junk sliver, share floor, cache round trip, finer nodes on a sub-node step); fixture regenerated; C++ single-curve loader still reads the table as an empty curve (11 gtests). Full package suite: 1335 tests, 0 failures. flake8/pep257 clean.
+- README by-mode section and plan decisions 2-7, 9 amended; plan Open Questions carry runs 1-3.
+
+**Appledore results (scratchpad `appledore_backscatter/by_mode/summary_run3.md`):** run 3 offsets vs the 1 ms/24 kHz FM reference: 20 µs CW −14.31 (0.10), 50 µs CW −0.98 (0.06), 10 ms FM −36.92 (1.58), 5 ms FM −4.96 (1.26) dB; misfit rms 0.53/0.62/0.59 dB for the three main modes, max 3.2-3.8 dB from step-like structure inside a quarter decade (50 µs at 3-4 m slant range, 20 µs at 7-9 m); eighth-decade nodes do not remove it. 50 µs ↔ 20 µs offset differs by direction by 1.40 ± 0.15 dB (seabed-with-depth bias).
+
+**Open for the operator:** whether the remaining 2-3 dB sub-node residual is acceptable for the product (the misfit flag stays on either way); PR 2 can start on this format.
+
+**Next:** `/review-code` pre-push on the branch, then push and open PR 1.
