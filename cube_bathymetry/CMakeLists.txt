@@ -446,6 +446,9 @@ if(BUILD_TESTING)
   # (rosbag2 + tf2). Writes only under pytest's tmp_path; no DDS traffic, but
   # the isolated environment is applied like the other tests that import rclpy.
   find_package(ament_cmake_pytest REQUIRED)
+  # TIMEOUT 300: the --by-mode synthetic streams (#172) take ~25 s in all on the
+  # reference workstation; the 120 s it had left too little headroom on a
+  # loaded or slower machine.
   ament_add_pytest_test(test_derive_angular_response
     test/test_derive_angular_response.py
     TIMEOUT 300

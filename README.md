@@ -866,11 +866,18 @@ derive_angular_response.py <bags...> -t /bizzy/sensors/m3/detections \
 **Iterating on the fit.** `--accumulation-cache <file>` writes the accumulated
 per-mode statistics (a pickle) after the bag pass and, when the file already
 exists, skips the bag pass and refits from it, so a 35-minute accumulation is
-read in seconds while the fit settings (reference mode, R0, threshold, window)
-are explored. The cache records the bags, topics, box, bin width, specular
-exclusion and angle edges it was made with and refuses to be reused with
-others. It is a local cache for this script on this host, not an interchange
-format: load only a file this script wrote.
+read in seconds while the fit settings (reference mode, R0, misfit threshold,
+node spacing) are explored. The cache records what the accumulation depends
+on and refuses to be reused with anything else: the bags by real path and
+every bag file's size and mtime (a replaced bag or a same-named bag of another
+campaign does not match), the topics, box, bin width, specular exclusion,
+adjacency window (the switch events are accumulated with it) and angle edges,
+plus the accumulation code version and cell grid. A cache hit reprints the
+bag-pass reports (dropped pings, corrupt messages). A cache that cannot be
+written is a warning, the table is still derived. It is a local cache for
+this script on this host, not an interchange format: a pickle runs code when
+loaded, so the script loads only a regular file owned by the current user that
+nobody else can write, and refuses anything else.
 
 **The estimator does not read the table yet.** That is PR 2 of #172 (C++ table
 loader and mode resolver, per-ping correction in the estimator, `import_bag` and
@@ -1016,7 +1023,17 @@ whose `angle_lo_deg <= |angle| < angle_hi_deg`, interpolated linearly in
 with no `range` rows has a zero term. The corrected value is
 `raw - db_relative_to_nadir - r_g - offset_db_vs_ref`, which puts every mode on
 the reference mode's nadir level at R0, and the beam is weighted by
-`1 / var_db2` of its angle bin.
+`1 / var_db2` of its angle bin. Three cases the loader must handle, all
+written as EMPTY fields rather than plausible numbers: a mode with
+`offset_anchored=false` has no measured offset (both offset columns empty) and
+**must not be corrected by this table** (it is the fallback policy's case, or a
+loud failure, never a zero offset); an angle bin with `n < 2` has an empty
+`var_db2` and `se_db` and cannot be weighted, so a beam in it is uncorrectable
+in the same way; and `declared_tvg_absorption_db_per_km` is `nan` for a
+`MIXED` or undeclared state. `x` is written with 10 significant digits, so any
+bin width or node spacing round-trips; a loader matches nodes by value and
+angle bins by centre, never by re-deriving them from the header. The header
+states these rules once more (`# empty_fields:`, `# offset_meaning:`).
 
 **Decisions carried in the format (2026-11-02).** Rare modes keep their table
 entries however few pings they have (on Appledore the 10 ms and 5 ms FM modes
