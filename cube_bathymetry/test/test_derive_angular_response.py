@@ -2212,9 +2212,11 @@ def hand_built_table():
     """Return a small deterministic table dict, the shape derive_mode_table returns."""
     nan = float('nan')
 
-    def group(lo, hi, nodes, r, se, support, status='fitted'):
+    def group(lo, hi, nodes, r, se, support, status='fitted', trimmed=(), out_of_span=0):
         return {'lo_deg': lo, 'hi_deg': hi, 'nodes': nodes, 'r': r, 'r_se': se,
-                'r_support': support, 'range_status': status}
+                'r_support': support, 'range_status': status,
+                'span': [nodes[0], nodes[-1]] if nodes else [0.0, 0.0],
+                'trimmed_nodes': list(trimmed), 'out_of_span_samples': out_of_span}
 
     def mode(pings, angle, groups, declared=('UNKNOWN', nan), misfit=0.4):
         return {'pings': pings, 'beams': pings * 256, 'angle': angle, 'groups': groups,
@@ -2235,7 +2237,7 @@ def hand_built_table():
                           [group(10.0, 30.0, [-0.25, 0.0, 0.25], [1.5, 0.0, -2.25],
                                  [0.1, 0.0, 0.12], [3000.0, 5000.0, 2500.0]),
                            group(30.0, 90.0, [0.0, 0.25], [0.0, -1.0], [0.0, 0.08],
-                                 [4000.0, 1500.0])]),
+                                 [4000.0, 1500.0], trimmed=(-0.25, 0.5), out_of_span=37)]),
             CW_KEY: mode(217255, [(1.0, 6000, 7.7, 12.0, 0.0), (41.0, 1, 2.1, nan, -5.6)],
                          [group(10.0, 30.0, [], [], [], [], status=unidentified),
                           group(30.0, 90.0, [], [], [], [],
@@ -2265,8 +2267,10 @@ def test_mode_table_format():
                      'within-angle-bin spread of log10 R is 0.010 decade (< 0.03)'),
                      '# range_term: %s 30-90 zero: 120 non-specular samples, fewer than 200'
                      % CW_KEY,
-                     '# range_term: %s 10-30 fitted nodes=3' % REF_KEY,
-                     '# range_term: %s 30-90 fitted nodes=2' % REF_KEY]
+                     '# range_term: %s 10-30 fitted nodes=3 span=-0.25..0.25 trimmed=none '
+                     'out_of_span=0' % REF_KEY,
+                     '# range_term: %s 30-90 fitted nodes=2 span=0..0.25 trimmed=-0.25,0.5 '
+                     'out_of_span=37' % REF_KEY]
     rows = [ln for ln in lines if not ln.startswith('#')]
     assert rows[0] == ','.join(dar.TABLE_COLUMNS)
     assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1.0,,,7.700,6000,12.000,+0.000,'

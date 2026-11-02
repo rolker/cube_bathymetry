@@ -912,7 +912,16 @@ slant range `twtt * c / 2` and `g` the angle group `|theta|` falls in:
   jointly with one intercept per SIGNED 2-degree angle bin of the group,
   leaving out the specular band (`--specular-exclusion-deg`, default 10); every
   bin belongs to exactly one group, so the joint fit separates exactly into one
-  fit per group. On a flat bottom angle and range are confounded
+  fit per group. The node grid covers the group's populated ranges, but an END
+  node carrying under 0.1 % of the group's beams (and under 200) is trimmed,
+  repeatedly: such a node describes the mode's rare excursions outside its
+  operating range, typically junk detections, and on Appledore one of them
+  held the 20 µs mode's R0 node (6e3 of 1e8 beams, 60 dB off) and anchored the
+  whole term. Beams beyond the kept span do not shape the fit, the intercepts
+  or the misfit; they are corrected with the clamped end value, and their
+  count is written per group (`out_of_span`). `r_g` is 0 at R0 when R0 lies
+  inside the span, else at the nearest end node. On a flat bottom angle and
+  range are confounded
   (R = h / cos(theta)), so only depth change within an angle bin identifies
   `r_g`; signed bins keep a cross-track slope (shorter range with smaller
   incidence on the up-slope side) out of it. A group with under 200
@@ -951,7 +960,9 @@ slant range `twtt * c / 2` and `g` the angle group `|theta|` falls in:
 the pings, beams, median range, offset and its SE, the range-term nodes per
 group, and the misfit: the mean residual after the fit per eighth-decade bin of
 `log10(R / R0)`, pooled, per range-term angle group and per **half** group,
-over bins with at least 200 samples. The halves matter: the per-bin intercepts
+over bins holding at least 200 beams and at least 0.1 % of the group's fitted
+beams (a 20 dB residual on 0.001 % of the beams is noise, not structure). The
+halves matter: the per-bin intercepts
 make a group's pooled residual near zero even when its inner and outer bins
 still differ in range dependence, so a group is split in two to show that.
 A mode whose largest binned residual exceeds `--misfit-threshold-db` (default

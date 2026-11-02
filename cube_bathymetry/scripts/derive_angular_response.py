@@ -1540,6 +1540,17 @@ MIN_WITHIN_BIN_SPREAD_DECADES = 0.03
 # the range term (removed again by referring the term to R0).
 RANGE_SMOOTHING_WEIGHT = 10.0
 RANGE_RIDGE_WEIGHT = 1e-3
+# A range node at either END of a group's grid is trimmed when it carries under
+# this share of the group's beams (and under MIN_SAMPLES_PER_BIN): such a node
+# describes the mode's rare excursions outside its operating range, typically
+# junk detections (Appledore run 2: the 20 us mode's R0 node held 6e3 of 1e8
+# beams, read 60 dB off, and anchored the whole term). Beams beyond the trimmed
+# span are corrected with the clamped end value but do not shape the fit.
+NODE_MIN_SHARE = 1e-3
+# The misfit diagnostic reports a residual bin only when it holds at least this
+# share of its group's fitted beams (and MIN_SAMPLES_PER_BIN), for the same
+# reason: a 20 dB residual on 0.001 % of the beams is noise, not structure.
+MISFIT_MIN_SHARE = 1e-3
 # A mode pair needs this many switches before its offset is used.
 MIN_SWITCHES_PER_PAIR = 3
 # Up- vs down-switch offsets disagree when they differ by more than this AND by
@@ -2119,14 +2130,15 @@ def _solve_additive(nb, sb, ssb, basis, penalty):
     return beta[:n_bins], beta[n_bins:], sigma2 * inv[n_bins:, n_bins:], sigma2
 
 
-def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n):
+def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n, min_share=0.0):
     """
     Mean post-fit residual per eighth-decade bin of log10(R/R0), pooled and per angle group.
 
     ``r_bin`` is each fit bin's range term per cell, (bins, cells); ``groups``
     maps a group name to a boolean mask over the fit bins. Returns ``{name:
     [(bin_centre, n, mean_db), ...]}`` with only bins of at least ``min_n``
-    samples; ``'all'`` is the pooled one.
+    samples and at least ``min_share`` of the group's samples; ``'all'`` is
+    the pooled one.
     """
     import numpy as np
     resid = sb - nb * (a[:, None] + r_bin)
@@ -2137,10 +2149,11 @@ def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n):
         if mask.any():
             n_c = nb[mask].sum(axis=0)
             e_c = resid[mask].sum(axis=0)
+            floor = max(min_n, min_share * float(n_c.sum()))
             for qi in np.unique(q[n_c > 0]):
                 sel = q == qi
                 n = float(n_c[sel].sum())
-                if n >= min_n:
+                if n >= floor:
                     rows.append((float(qi * MISFIT_BIN_DECADES), int(round(n)),
                                  float(e_c[sel].sum() / n)))
         out[name] = rows
@@ -2217,21 +2230,69 @@ def parse_range_angle_edges(text):
     return edges
 
 
+def _trim_span(nb, x_rel):
+    """
+    Return ``(nodes, cell_mask, trimmed)`` for one group: its node grid after trimming the ends.
+
+    The candidate grid covers every populated cell at RANGE_NODE_SPACING_DECADES;
+    an END node carrying under ``max(MIN_SAMPLES_PER_BIN, NODE_MIN_SHARE *
+    total)`` beams is dropped, repeatedly, down to two nodes. ``cell_mask``
+    keeps the cells within the kept span (so the fit, the intercepts and the
+    misfit ignore the beams beyond it; they are corrected with the clamped end
+    value); ``trimmed`` lists the dropped node positions. With no populated
+    cell the grid is ``[0.0]`` and the mask is empty.
+    """
+    import numpy as np
+    counts = nb.sum(axis=0) if nb.shape[0] else np.zeros(nb.shape[1])
+    populated = np.nonzero(counts > 0)[0]
+    if not len(populated):
+        return np.zeros(1), np.zeros(nb.shape[1], dtype=bool), []
+    lo = math.floor(x_rel[populated[0]] / RANGE_NODE_SPACING_DECADES)
+    hi = math.ceil(x_rel[populated[-1]] / RANGE_NODE_SPACING_DECADES)
+    nodes = np.arange(lo, hi + 1) * RANGE_NODE_SPACING_DECADES
+    floor = max(float(MIN_SAMPLES_PER_BIN), NODE_MIN_SHARE * float(counts.sum()))
+    trimmed = []
+    while len(nodes) > 2:
+        support = tent_weights(x_rel, nodes).T @ counts
+        if support[0] < floor:
+            trimmed.append(float(nodes[0]))
+            nodes = nodes[1:]
+        elif support[-1] < floor:
+            trimmed.append(float(nodes[-1]))
+            nodes = nodes[:-1]
+        else:
+            break
+    cell_mask = (x_rel >= nodes[0] - 1e-9) & (x_rel <= nodes[-1] + 1e-9)
+    return nodes, cell_mask, sorted(trimmed)
+
+
 def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model):
     """
     Fit ``y = a_bin + r(log10(R / R0))`` on one angle group's cell statistics.
 
-    ``nb``, ``sb``, ``ssb``: (fit bins of the group, cells). Returns ``(a,
-    r_cell, info)``: the per-bin intercepts, the range term per range cell
-    (zeros when not fitted) and a dict with ``range_status`` (``'fitted'`` or
-    ``'zero: <reason>'``), ``nonspecular_samples``,
+    ``nb``, ``sb``, ``ssb``: (fit bins of the group, cells). The node grid is
+    trimmed first (_trim_span) and only the cells within the kept span are
+    fitted, for both range models. Returns ``(a, r_cell, cell_mask, info)``:
+    the per-bin intercepts, the range term per range cell (zeros when not
+    fitted; clamped beyond the span), the in-span cell mask, and a dict with
+    ``range_status`` (``'fitted'`` or ``'zero: <reason>'``),
+    ``nonspecular_samples`` (in span), ``out_of_span_samples``,
+    ``trimmed_nodes``, ``span`` (first and last node),
     ``within_bin_spread_decades``, ``sigma_db`` and, for ``'nodes'``,
-    ``nodes``/``r``/``r_se``/``r_support`` (0 at R0), for ``'scalar'``
+    ``nodes``/``r``/``r_se``/``r_support`` (0 at R0 when R0 is inside the
+    span, else 0 at the nearest end node), for ``'scalar'``
     ``slope_db_per_decade``/``slope_se``.
     """
     import numpy as np
+    nodes, cell_mask, trimmed = _trim_span(nb, x_rel)
+    all_total = float(nb.sum())
+    nb = np.where(cell_mask[None, :], nb, 0.0)
+    sb = np.where(cell_mask[None, :], sb, 0.0)
+    ssb = np.where(cell_mask[None, :], ssb, 0.0)
     total = float(nb.sum())
     info = {'range_model': range_model, 'nonspecular_samples': int(total),
+            'out_of_span_samples': int(round(all_total - total)),
+            'trimmed_nodes': trimmed, 'span': [float(nodes[0]), float(nodes[-1])],
             'nodes': [], 'r': [], 'r_se': [], 'r_support': []}
 
     # Within-angle-bin spread of log10 R: what identifies the range term.
@@ -2248,7 +2309,6 @@ def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model):
     a = np.zeros(nb.shape[0])
     sigma2 = float('nan')
     status = 'fitted'
-    populated = np.nonzero(nb.sum(axis=0) > 0)[0] if nb.shape[0] else np.zeros(0, dtype=int)
     if total < MIN_SAMPLES_PER_BIN:
         status = ('zero: %d non-specular samples, fewer than %d'
                   % (int(total), MIN_SAMPLES_PER_BIN))
@@ -2256,12 +2316,9 @@ def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model):
         status = ('zero: not identified, the within-angle-bin spread of log10 R '
                   'is %.3f decade (< %g)' % (spread, MIN_WITHIN_BIN_SPREAD_DECADES))
     if range_model == 'scalar':
-        basis = x_rel[:, None].copy()
+        basis = np.clip(x_rel, nodes[0], nodes[-1])[:, None]
         penalty = np.zeros((1, 1))
     else:
-        lo = math.floor(x_rel[populated[0]] / RANGE_NODE_SPACING_DECADES) if len(populated) else 0
-        hi = math.ceil(x_rel[populated[-1]] / RANGE_NODE_SPACING_DECADES) if len(populated) else 0
-        nodes = np.arange(lo, hi + 1) * RANGE_NODE_SPACING_DECADES
         if status == 'fitted' and len(nodes) < 2:
             status = 'zero: the ranges span less than one node spacing'
         basis = tent_weights(x_rel, nodes)
@@ -2300,7 +2357,7 @@ def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model):
         a = np.where(tot > 0, sb.sum(axis=1) / np.maximum(tot, 1), 0.0)
     info['range_status'] = status
     info['sigma_db'] = math.sqrt(sigma2) if math.isfinite(sigma2) else float('nan')
-    return a, r_cell, info
+    return a, r_cell, cell_mask, info
 
 
 def range_status_summary(groups):
@@ -2357,15 +2414,17 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
     populated_bins = fit_n.sum(axis=1) > 0
     result = {'range_model': range_model, 'groups': [], 'nonspecular_samples': 0}
     r_cell = np.zeros((len(groups), RANGE_CELL_COUNT))
+    cell_masks = np.zeros((len(groups), RANGE_CELL_COUNT), dtype=bool)
     a_all = np.zeros(fit_n.shape[0])
     use_all = np.zeros(fit_n.shape[0], dtype=bool)
     for g, (lo_bin, hi_bin) in enumerate(groups):
         use = (bin_abs >= lo_bin) & (bin_abs < hi_bin) & populated_bins
-        a, r_g, info = _fit_group(fit_n[use], fit_s[use], fit_ss[use], x_abs, x_rel,
-                                  range_model)
+        a, r_g, cell_mask, info = _fit_group(fit_n[use], fit_s[use], fit_ss[use], x_abs,
+                                             x_rel, range_model)
         info['lo_deg'], info['hi_deg'] = group_bounds_deg((lo_bin, hi_bin), bin_width_deg)
         info['lo_bin'], info['hi_bin'] = lo_bin, hi_bin
         r_cell[g] = r_g
+        cell_masks[g] = cell_mask
         a_all[use] = a
         use_all |= use
         result['groups'].append(info)
@@ -2374,17 +2433,19 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
     result['range_db_per_cell'] = r_cell
 
     # Angular intercepts per |theta| bin (specular bins included), referred to
-    # R0 with the bin's own group's range term.
-    nj = abs_n.sum(axis=1)
+    # R0 with the bin's own group's range term, over the group's in-span cells.
     rows = []
     rel_per_bin = np.zeros(n_half)
     nadir = None
-    for j in np.nonzero(nj > 0)[0]:
-        cnt = float(nj[j])
-        r_j = r_cell[bin_group[j]]
-        level = float((abs_s[j].sum() - abs_n[j] @ r_j) / cnt)
+    for j in range(n_half):
+        m = cell_masks[bin_group[j]]
+        cnt = float(abs_n[j][m].sum())
+        if cnt <= 0:
+            continue
+        r_j = r_cell[bin_group[j]][m]
+        level = float((abs_s[j][m].sum() - abs_n[j][m] @ r_j) / cnt)
         if cnt >= 2:
-            sse = float((abs_ss[j] - 2.0 * r_j * abs_s[j] + abs_n[j] * r_j ** 2).sum())
+            sse = float((abs_ss[j][m] - 2.0 * r_j * abs_s[j][m] + abs_n[j][m] * r_j ** 2).sum())
             var = max(sse - cnt * level * level, 0.0) / (cnt - 1.0)
         else:
             var = float('nan')
@@ -2399,8 +2460,10 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
     # HALF group. The per-bin intercepts make the pooled mean residual of a
     # group near zero even when the range dependence still differs between
     # its inner and outer bins, so each group is also split in two.
-    nb, sb = fit_n[use_all], fit_s[use_all]
-    r_bin = r_cell[bin_group[bin_abs[use_all]]]
+    fit_groups = bin_group[bin_abs[use_all]]
+    in_span = cell_masks[fit_groups]
+    nb, sb = fit_n[use_all] * in_span, fit_s[use_all] * in_span
+    r_bin = r_cell[fit_groups]
     lower_bin = bin_abs[use_all]
     diag_groups = []
     for lo_bin, hi_bin in groups:
@@ -2413,7 +2476,7 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
             diag_groups.append(('%g-%g deg%s' % (lo_deg, hi_deg, tag),
                                 (lower_bin >= p_lo) & (lower_bin < p_hi)))
     binned = _binned_residuals(nb, sb, a_all[use_all], r_bin, x_rel, diag_groups,
-                               MIN_SAMPLES_PER_BIN)
+                               MIN_SAMPLES_PER_BIN, MISFIT_MIN_SHARE)
     result['binned_residuals'] = binned
     result['misfit_max_db'], result['misfit_rms_db'] = _misfit_stats(binned)
     return result
@@ -2694,7 +2757,10 @@ def mode_table_lines(table, source_bags, box=None):
         for g in fit['groups']:
             lines.append('# range_term: %s %g-%g %s' % (
                 key, g['lo_deg'], g['hi_deg'],
-                ('fitted nodes=%d' % len(g['nodes']))
+                ('fitted nodes=%d span=%g..%g trimmed=%s out_of_span=%d'
+                 % (len(g['nodes']), g['span'][0], g['span'][1],
+                    ','.join('%g' % t for t in g['trimmed_nodes']) or 'none',
+                    g['out_of_span_samples']))
                 if g['range_status'] == 'fitted' else g['range_status']))
     lines.append(','.join(TABLE_COLUMNS))
     for key, fit in sorted(table['modes'].items()):
@@ -2740,7 +2806,11 @@ def mode_report_lines(table):
             if g['range_status'] == 'fitted':
                 out.append('    r(log10 R/R0) %g-%g deg: ' % (g['lo_deg'], g['hi_deg'])
                            + ' '.join('%+.2f:%+.1f' % (x, r)
-                                      for x, r in zip(g['nodes'], g['r'])))
+                                      for x, r in zip(g['nodes'], g['r']))
+                           + ('; trimmed %s, %d beams beyond the span'
+                              % (','.join('%g' % t for t in g['trimmed_nodes']),
+                                 g['out_of_span_samples'])
+                              if g['trimmed_nodes'] else ''))
             else:
                 out.append('    r %g-%g deg: %s' % (g['lo_deg'], g['hi_deg'],
                                                     g['range_status']))

@@ -20,8 +20,8 @@
 # range_term: CW_50us_20000Hz_500kHz 10-30 zero: not identified, the within-angle-bin spread of log10 R is 0.010 decade (< 0.03)
 # range_term: CW_50us_20000Hz_500kHz 30-90 zero: 120 non-specular samples, fewer than 200
 # mode_summary: FMU_1000us_24000Hz_500kHz pings=93890 beams=24035840 declared_tvg=UNKNOWN offset_db=0.000 offset_se_db=0.000 anchored=true misfit_max_db=0.400 misfit_exceeded=no
-# range_term: FMU_1000us_24000Hz_500kHz 10-30 fitted nodes=3
-# range_term: FMU_1000us_24000Hz_500kHz 30-90 fitted nodes=2
+# range_term: FMU_1000us_24000Hz_500kHz 10-30 fitted nodes=3 span=-0.25..0.25 trimmed=none out_of_span=0
+# range_term: FMU_1000us_24000Hz_500kHz 30-90 fitted nodes=2 span=0..0.25 trimmed=-0.25,0.5 out_of_span=37
 mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,declared_tvg_absorption_db_per_km
 CW_50us_20000Hz_500kHz,angle,1.0,,,7.700,6000,12.000,+0.000,0.045,-17.250,0.310,true,40LOGR,80
 CW_50us_20000Hz_500kHz,angle,41.0,,,2.100,1,,-5.600,,-17.250,0.310,true,40LOGR,80
