@@ -1774,6 +1774,7 @@ def test_by_mode_refuses_remove_tl(capsys):
 @pytest.mark.parametrize('flag', [['--reference-mode', REF_KEY], ['--range-ref-m', '10'],
                                   ['--adjacency-window-s', '1'],
                                   ['--range-angle-edges', '30'],
+                                  ['--accumulation-cache', 'a.pkl'],
                                   ['--diagnostics-out', 'd.json']])
 def test_by_mode_flags_need_by_mode(flag, capsys):
     """The per-mode options are an error without --by-mode."""
@@ -2143,6 +2144,94 @@ def test_non_separable_range_term_needs_the_angle_groups():
     assert len(halves) == 2
     assert max(abs(m) for rows in halves.values() for _x, _n, m in rows) > 1.5
     assert max(abs(m) for _x, _n, m in one['binned_residuals']['all']) < 1.0
+
+
+def test_junk_end_node_is_trimmed_and_the_anchor_moves_to_the_span():
+    """
+    A sliver of junk at long range must not anchor the term (Appledore run 2).
+
+    A mode working at 5-25 m that also records a few hundred detections at
+    ~R0 * 4, 60 dB off: the end node those beams would hold is trimmed, the
+    term is anchored at the nearest kept node, the junk is out of span and the
+    good nodes keep the law.
+    """
+    def depth(t):
+        # 3 junk pings of 12000 (390 of 1.56 M beams: over 200, under 0.1 %).
+        return 250.0 if int(round(t * 20.0)) % 4000 == 0 else sweep_depth(t)
+
+    def law(inc, r, th, m):
+        return lambert_like(inc) - 10.0 * dar_log10(r) + dar_where(r > 150.0, 60.0, 0.0)
+
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY, law, depth=depth)
+    table = b.finish(REF_KEY, range_ref_m=60.0)     # R0 far beyond the working range
+    fit = table['modes'][REF_KEY]
+    for g in fit['groups']:
+        assert g['range_status'] == 'fitted', g
+        assert g['trimmed_nodes'] and max(g['trimmed_nodes']) > 0.5, g['trimmed_nodes']
+        assert g['out_of_span_samples'] > 0
+        assert g['span'][1] < 0.5
+        # Anchored at the nearest kept node: r = 0 there, 0 at no other node.
+        assert g['r'][-1] == pytest.approx(0.0, abs=1e-9)
+        for x, r, _se in supported(g):
+            assert r == pytest.approx(-10.0 * (x - g['nodes'][-1]), abs=0.5), (x, r)
+    assert not fit['misfit_exceeded'], fit['misfit_max_db']
+    header = '\n'.join(dar.mode_table_lines(table, ['s']))
+    assert 'out_of_span=' in header and 'trimmed=' in header
+
+
+def test_misfit_ignores_bins_below_the_share_floor():
+    """A 20 dB residual on a bin holding under 0.1 % of the group's beams is not reported."""
+    import numpy as np
+    x_rel = dar.cell_log10_range() - 1.0        # R0 = 10 m
+    cells = dar.RANGE_CELL_COUNT
+    nb = np.zeros((2, cells))
+    sb = np.zeros((2, cells))
+    # Two fit bins, a million good beams at -0.5..0 decade, mean 0 residual...
+    good = (x_rel >= -0.5) & (x_rel < 0.0)
+    nb[:, good] = 5e5 / good.sum()
+    # ...and 300 junk beams at +0.5 decade reading 20 dB high.
+    junk = int(np.argmin(np.abs(x_rel - 0.5)))
+    nb[0, junk] = 300
+    sb[0, junk] = 300 * 20.0
+    a = np.zeros(2)
+    r_bin = np.zeros((2, cells))
+    groups = [('g', np.ones(2, dtype=bool))]
+    without = dar._binned_residuals(nb, sb, a, r_bin, x_rel, groups, 200)
+    assert any(abs(m - 20.0) < 1e-6 and n == 300 for _x, n, m in without['all'])
+    with_floor = dar._binned_residuals(nb, sb, a, r_bin, x_rel, groups, 200,
+                                       dar.MISFIT_MIN_SHARE)
+    assert not any(n == 300 for _x, n, m in with_floor['all'])
+    assert all(n >= dar.MISFIT_MIN_SHARE * 1e6 for _x, n, _m in with_floor['g'])
+    assert dar._misfit_stats(with_floor)[0] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_accumulation_cache_round_trip(tmp_path, capsys):
+    """A second run with --accumulation-cache skips the bag pass and writes the same table."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    out1, out2 = tmp_path / 't1.csv', tmp_path / 't2.csv'
+    cache = tmp_path / 'acc.pkl'
+    base = [str(bag), '-t', TOPIC, '--by-mode', '--accumulation-cache', str(cache)]
+    assert dar.main(base + ['-o', str(out1)]) == 0
+    first = capsys.readouterr().out
+    assert 'wrote the accumulated statistics to' in first and cache.is_file()
+    assert dar.main(base + ['-o', str(out2)]) == 0
+    second = capsys.readouterr().out
+    assert 'bag pass skipped' in second
+    strip = (lambda p: [ln for ln in p.read_text().splitlines()
+                        if not ln.startswith('# source_bags')])
+    assert strip(out1) == strip(out2)
+    # A refit with other fit settings reuses the cache; other accumulation
+    # settings (box, bin width, edges) do not.
+    assert dar.main(base + ['-o', str(out2), '--misfit-threshold-db', '3']) == 0
+    capsys.readouterr()
+    with pytest.raises(SystemExit, match='different.*range_angle_edges'):
+        dar.main(base + ['-o', str(out2), '--range-angle-edges', 'none'])
+    with pytest.raises(SystemExit, match='not a derive-accumulation-cache'):
+        (tmp_path / 'junk.pkl').write_bytes(b'\x80\x04N.')
+        dar.main([str(bag), '-t', TOPIC, '--by-mode', '-o', str(out2),
+                  '--accumulation-cache', str(tmp_path / 'junk.pkl')])
 
 
 def test_variance_column_measures_the_beam_scatter():

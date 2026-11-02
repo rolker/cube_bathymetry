@@ -768,6 +768,12 @@ def parse_args(argv):
                            '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[1]))
     m.add_argument('--diagnostics-out', default=None,
                    help='also write every fit and offset diagnostic as JSON here')
+    m.add_argument('--accumulation-cache', default=None,
+                   help='pickle of the accumulated per-mode statistics: written '
+                        'after the bag pass, and when it already exists the bag '
+                        'pass is skipped and the table is refitted from it (same '
+                        'bags, topic, box and bin width required; a local cache for '
+                        'iterating on the fit, not an interchange format)')
     args = p.parse_args(argv)
     if not (math.isfinite(args.bin_width_deg) and 0.0 < args.bin_width_deg <= 90.0):
         p.error('--bin-width-deg must be > 0 and <= 90 degrees, got %r'
@@ -836,6 +842,7 @@ BY_MODE_ONLY_FLAGS = (('--sonar-info-topic', 'sonar_info_topic'),
                       ('--specular-exclusion-deg', 'specular_exclusion_deg'),
                       ('--misfit-threshold-db', 'misfit_threshold_db'),
                       ('--range-angle-edges', 'range_angle_edges'),
+                      ('--accumulation-cache', 'accumulation_cache'),
                       ('--diagnostics-out', 'diagnostics_out'))
 
 
@@ -2059,6 +2066,68 @@ class ModeTableBuilder:
         self.tracker.finish()
         return derive_mode_table(self, reference_mode, range_ref_m, misfit_threshold_db)
 
+    def to_state(self):
+        """
+        Return the accumulated statistics as plain Python/numpy data (the cache payload).
+
+        Closes the switch tracker and flushes every mode first. Only dicts,
+        lists, tuples, strings, numbers and numpy arrays, so the pickle does
+        not name this module's classes and loads however the script was
+        imported.
+        """
+        self.tracker.finish()
+        modes = {}
+        for key, acc in self.modes.items():
+            acc.flush()
+            modes[key] = {'n': acc.n, 's': acc.s, 'ss': acc.ss, 'pings': acc.pings,
+                          'beams': acc.beams, 'declared': list(acc.declared.items())}
+
+        def summary_state(sm):
+            sm.compact()
+            return {'n': sm.n, 's': sm.s, 'pings': sm.pings,
+                    'angle_counts': sm.angle_counts, 'cell_counts': sm.cell_counts}
+        events = [{'from_key': ev.from_key, 'to_key': ev.to_key, 't_ns': ev.t_ns,
+                   'before': summary_state(ev.before), 'after': summary_state(ev.after)}
+                  for ev in self.tracker.events]
+        return {'bin_width_deg': self.bin_width_deg,
+                'specular_exclusion_deg': self.specular_exclusion_deg,
+                'window_sec': self.window_sec,
+                'range_angle_edges_deg': list(self.range_angle_edges_deg),
+                'history': {'stamps': list(self.history.stamps),
+                            'entries': list(self.history.entries)},
+                'modes': modes, 'events': events,
+                'discarded': dict(self.tracker.discarded),
+                'pings_without_info': self.pings_without_info,
+                'pings_without_beams': self.pings_without_beams,
+                'sonar_models': dict(self.sonar_models)}
+
+    @classmethod
+    def from_state(cls, state):
+        """Rebuild a builder from to_state output (ready for finish, not for more pings)."""
+        b = cls(state['bin_width_deg'], state['specular_exclusion_deg'], state['window_sec'],
+                state['range_angle_edges_deg'])
+        b.history.stamps = list(state['history']['stamps'])
+        b.history.entries = [tuple(e) for e in state['history']['entries']]
+        for key, m in state['modes'].items():
+            acc = b.modes[key] = ModeAccumulator(b.n_half)
+            acc.n, acc.s, acc.ss = m['n'], m['s'], m['ss']
+            acc.pings, acc.beams = m['pings'], m['beams']
+            acc.declared = collections.Counter({tuple(k): v for k, v in m['declared']})
+
+        def summary(st):
+            sm = OffsetSummary(b.n_half, RANGE_CELL_COUNT, len(b.groups))
+            sm.n, sm.s, sm.pings = st['n'], st['s'], st['pings']
+            sm.angle_counts, sm.cell_counts = st['angle_counts'], st['cell_counts']
+            return sm
+        b.tracker.events = [SwitchEvent(ev['from_key'], ev['to_key'], ev['t_ns'],
+                                        summary(ev['before']), summary(ev['after']))
+                            for ev in state['events']]
+        b.tracker.discarded = collections.Counter(state['discarded'])
+        b.pings_without_info = state['pings_without_info']
+        b.pings_without_beams = state['pings_without_beams']
+        b.sonar_models = collections.Counter(state['sonar_models'])
+        return b
+
 
 def cell_log10_range():
     """Return the absolute log10 R (m) at each range cell's centre."""
@@ -2954,29 +3023,100 @@ def accumulate_by_mode(bag_paths, topic, info_topic, builder, box=None,
     return n_msgs
 
 
+ACCUMULATION_CACHE_FORMAT = 'derive-accumulation-cache v1'
+
+
+def accumulation_cache_identity(args, source_bags):
+    """Return the settings an accumulation cache must have been made with to be reused."""
+    return {'format': ACCUMULATION_CACHE_FORMAT, 'source_bags': list(source_bags),
+            'topic': args.topic, 'sonar_info_topic': args.sonar_info_topic,
+            'box': list(args.box) if args.box is not None else None,
+            'bin_width_deg': args.bin_width_deg,
+            'specular_exclusion_deg': args.specular_exclusion_deg,
+            'adjacency_window_s': args.adjacency_window_s,
+            'range_angle_edges': list(args.range_angle_edges)}
+
+
+def load_accumulation_cache(path, identity):
+    """
+    Return ``(builder, n_msgs)`` from a cache written by write_accumulation_cache.
+
+    SystemExit when the file is not such a cache or was made with other
+    settings (the mismatching keys are named). The cache is a pickle: only
+    load one this script wrote on this host.
+    """
+    import pickle
+    try:
+        with open(path, 'rb') as f:
+            data = pickle.load(f)
+    except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ValueError) as e:
+        raise SystemExit('error: --accumulation-cache %s cannot be read: %s' % (path, e))
+    if not isinstance(data, dict) or data.get('identity', {}).get('format') \
+            != ACCUMULATION_CACHE_FORMAT:
+        raise SystemExit('error: --accumulation-cache %s is not a %s file'
+                         % (path, ACCUMULATION_CACHE_FORMAT))
+    mismatch = sorted(k for k in identity if data['identity'].get(k) != identity[k])
+    if mismatch:
+        raise SystemExit('error: --accumulation-cache %s was made with different %s; '
+                         'delete it to re-accumulate' % (path, ', '.join(mismatch)))
+    try:
+        builder = ModeTableBuilder.from_state(data['state'])
+    except (KeyError, TypeError, ValueError) as e:
+        raise SystemExit('error: --accumulation-cache %s is not a complete %s file: %s'
+                         % (path, ACCUMULATION_CACHE_FORMAT, e))
+    return builder, data['n_msgs']
+
+
+def write_accumulation_cache(path, builder, n_msgs, identity):
+    """Write the accumulated statistics (builder.to_state) as a pickle, atomically."""
+    import pickle
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    fd, tmp = tempfile.mkstemp(prefix='.accumulation-cache-', dir=directory)
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            pickle.dump({'identity': identity, 'state': builder.to_state(), 'n_msgs': n_msgs},
+                        f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise SystemExit('error: cannot write --accumulation-cache %s: %s' % (path, e))
+
+
 def main_by_mode(args, source_bags):
-    """Run --by-mode: read, fit, write the table (and diagnostics); return 0."""
+    """Run --by-mode: read the bags (or the cache), fit, write the table and diagnostics."""
     import json
 
-    builder = ModeTableBuilder(args.bin_width_deg, args.specular_exclusion_deg,
-                               args.adjacency_window_s, args.range_angle_edges)
-    box_stats = new_box_stats() if args.box is not None else None
-    corrupt = collections.Counter()
-    n_msgs = accumulate_by_mode(args.bag, args.topic, args.sonar_info_topic, builder,
-                                box=args.box, box_stats=box_stats, corrupt=corrupt)
-    warning = corrupt_report(corrupt)
-    if warning is not None:
-        print(warning, file=sys.stderr)
-    if box_stats is not None:
-        print(box_report(args.box, box_stats, n_msgs))
-        warning = tf_rejected_warning(box_stats['tf_rejected'])
+    identity = accumulation_cache_identity(args, source_bags)
+    cache = args.accumulation_cache
+    if cache is not None and os.path.exists(cache):
+        builder, n_msgs = load_accumulation_cache(cache, identity)
+        print('loaded the accumulated statistics from %s (bag pass skipped)' % cache)
+    else:
+        builder = ModeTableBuilder(args.bin_width_deg, args.specular_exclusion_deg,
+                                   args.adjacency_window_s, args.range_angle_edges)
+        box_stats = new_box_stats() if args.box is not None else None
+        corrupt = collections.Counter()
+        n_msgs = accumulate_by_mode(args.bag, args.topic, args.sonar_info_topic, builder,
+                                    box=args.box, box_stats=box_stats, corrupt=corrupt)
+        warning = corrupt_report(corrupt)
         if warning is not None:
             print(warning, file=sys.stderr)
-        if box_stats['kept'] == 0:
-            raise SystemExit('error: no pings inside --box; nothing to derive')
-    if len(builder.history) == 0:
-        raise SystemExit("error: no SonarInfo message on '%s' could be read; --by-mode "
-                         'needs it' % args.sonar_info_topic)
+        if box_stats is not None:
+            print(box_report(args.box, box_stats, n_msgs))
+            warning = tf_rejected_warning(box_stats['tf_rejected'])
+            if warning is not None:
+                print(warning, file=sys.stderr)
+            if box_stats['kept'] == 0:
+                raise SystemExit('error: no pings inside --box; nothing to derive')
+        if len(builder.history) == 0:
+            raise SystemExit("error: no SonarInfo message on '%s' could be read; --by-mode "
+                             'needs it' % args.sonar_info_topic)
+        if cache is not None:
+            write_accumulation_cache(cache, builder, n_msgs, identity)
+            print('wrote the accumulated statistics to %s' % cache)
     table = builder.finish(args.reference_mode, args.range_ref_m, args.misfit_threshold_db)
     for warning in table['warnings']:
         print(warning, file=sys.stderr)

@@ -863,6 +863,15 @@ derive_angular_response.py <bags...> -t /bizzy/sensors/m3/detections \
     --diagnostics-out m3_mode_table_diagnostics.json
 ```
 
+**Iterating on the fit.** `--accumulation-cache <file>` writes the accumulated
+per-mode statistics (a pickle) after the bag pass and, when the file already
+exists, skips the bag pass and refits from it, so a 35-minute accumulation is
+read in seconds while the fit settings (reference mode, R0, threshold, window)
+are explored. The cache records the bags, topics, box, bin width, specular
+exclusion and angle edges it was made with and refuses to be reused with
+others. It is a local cache for this script on this host, not an interchange
+format: load only a file this script wrote.
+
 **The estimator does not read the table yet.** That is PR 2 of #172 (C++ table
 loader and mode resolver, per-ping correction in the estimator, `import_bag` and
 the live node, fingerprint, ADR-0007/0003 amendments). Today's single-curve
