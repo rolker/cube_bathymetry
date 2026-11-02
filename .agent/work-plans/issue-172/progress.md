@@ -182,3 +182,40 @@ Switches at the 2 s window: 1806 used, 1 discarded for a gap, 23 with no beams. 
 **Open for the operator:** whether the remaining 2-3 dB sub-node residual is acceptable for the product (the misfit flag stays on either way); PR 2 can start on this format.
 
 **Next:** `/review-code` pre-push on the branch, then push and open PR 1.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-02 11:57 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `acfef22`
+**Mode**: pre-push
+**Depth**: Deep (reason: 3477 lines over 10 files)
+**Must-fix**: 7 | **Suggestions**: 14
+**Round**: 1 | **Ship**: continue — seven contract/correctness must-fixes (all mechanical, all addressed in 98c03ac, 02498f0, 810eb9e before round 2)
+
+Specialists: static analysis (flake8, pep257, cpplint, lint_cmake, xmllint: clean), governance (no must-fix), plan drift (minor drift), Claude Adversarial Lens A + Lens B, cross-model Gemini + Codex (both ran). Repo has no `.agents/README.md` (context).
+
+### Findings
+- [x] (must-fix) NaN within-bin spread when a fit bin's beams all lie beyond the span lets an unidentified range term through as fitted — `derive_angular_response.py:_fit_group` (Lens A + Gemini, cross-model confirmed)
+- [x] (must-fix) Angular intercepts masked by group 0's span drop specular beams and whole specular-only modes — `fit_mode` (Gemini + Codex, cross-model confirmed)
+- [x] (must-fix) `x` written with 1-2 decimals: 0.125 nodes become 0.12, sub-0.2 deg bins collide — `mode_table_lines` (Lens B + Codex + Lens A)
+- [x] (must-fix) Unanchored mode written with offset 0.000; README apply rule gives no guard — writer + README "Applying it" (Lens B)
+- [x] (must-fix) README weighting rule `1/var_db2` undefined for the empty var_db2 the writer emits at n < 2 — README (Lens B)
+- [x] (must-fix) Cache identity keyed on bag basenames: same-named bag of another campaign or a replaced bag reuses stale statistics — `accumulation_cache_identity` (Codex; Lens A/B as suggestion)
+- [x] (must-fix) `abs_bin < n_half` admits beams at/beyond 90 deg when the bin width does not divide 90 — `ping_beams` (Codex)
+- [x] (suggestion) Trimmed junk cells re-counted onto the next end node via clamping — `_trim_span` (Lens A)
+- [x] (suggestion) Huge finite angle overflows the int cast into a negative bin, ValueError at flush — `ping_beams` (Lens A)
+- [x] (suggestion) `none` edges with coarse bins yields an empty first group without error — `range_angle_groups` (Lens A)
+- [x] (suggestion) Pickle trust boundary documented but not enforced; narrow except — cache loader (Lens B + Lens A)
+- [x] (suggestion) Cache write failure discards a 35-min bag pass; temp file left behind — `write_accumulation_cache` (Lens B)
+- [x] (suggestion) Cache hit skips the bag-pass reports (dropped pings, corrupt messages) — `main_by_mode` (Lens B)
+- [x] (suggestion) README does not list the nan/empty field cases — README (Lens B)
+- [x] (suggestion) `list(x or ())` fails on numpy arrays — `sector_mode_key` (Gemini)
+- [x] (suggestion) README cache paragraph lists the window as a refit setting although it is part of the identity — README (Gemini)
+- [x] (suggestion) Plan "Step 0" text stale (PR #171 merged) — plan.md (Governance)
+- [x] (suggestion) pytest TIMEOUT 120→300 without rationale — CMakeLists.txt (Governance)
+- [x] (suggestion) Plan Files table and decisions 2/4/5/7 missing the node-spacing flag, share floor, half-group rule, third zero reason, offset-chain details, extra header lines and tests — plan.md (Governance + Plan Drift)
+- [ ] (suggestion) marine_tools mirror follow-up issue not yet filed — plan Consequences (Governance; carried to PR 2 as planned)
+- [ ] (suggestion) Instruction-update candidates for a future `.agents/README.md`: angle/range confounding needs within-bin fitting; letter-first mode keys keep old loaders rejecting rows; "every existing loader reads a new format as empty" test pattern (Governance; proposals only)
