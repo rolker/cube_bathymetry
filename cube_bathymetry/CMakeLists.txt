@@ -434,8 +434,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
   # Golden curve written by derive_angular_response.py (#170): the Python test
   # checks the script still writes it, this test checks the C++ loader reads it.
+  # Per-mode table fixture (#172), written by the same Python test: the current
+  # single-curve loader must read it as an EMPTY curve, never as garbage rows.
   target_compile_definitions(test_angular_response_curve PRIVATE
-    DERIVED_CURVE_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/derived_curve_tier2_seawater.csv")
+    DERIVED_CURVE_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/derived_curve_tier2_seawater.csv"
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
 
   # derive_angular_response.py (#170): Francois-Garrison absorption, argument
   # validation, header provenance, freshwater byte-identity with the pre-#170
@@ -443,9 +446,12 @@ if(BUILD_TESTING)
   # (rosbag2 + tf2). Writes only under pytest's tmp_path; no DDS traffic, but
   # the isolated environment is applied like the other tests that import rclpy.
   find_package(ament_cmake_pytest REQUIRED)
+  # TIMEOUT 300: the --by-mode synthetic streams (#172) take ~25 s in all on the
+  # reference workstation; the 120 s it had left too little headroom on a
+  # loaded or slower machine.
   ament_add_pytest_test(test_derive_angular_response
     test/test_derive_angular_response.py
-    TIMEOUT 120
+    TIMEOUT 300
     ENV ${CUBE_ISOLATED_TEST_ENV})
 
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)

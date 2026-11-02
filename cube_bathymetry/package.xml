@@ -60,6 +60,9 @@
   <exec_depend>rosidl_runtime_py</exec_depend>
   <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>tf2_ros_py</exec_depend>
+  <!-- derive_angular_response.py fits the per-mode table (by-mode option) with numpy and
+       reads SonarInfo (marine_interfaces, already a <depend>) (#172) -->
+  <exec_depend>python3-numpy</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>

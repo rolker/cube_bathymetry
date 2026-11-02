@@ -850,6 +850,206 @@ reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:
 | `box` | with `--box` | `LATMIN LONMIN LATMAX LONMAX` |
 | `source_bags` | always | comma-separated basenames of the input bags |
 
+### Per-mode tables (`--by-mode`, #172)
+
+A sonar that switches pulse modes (the Kongsberg M3 has five) produces
+backscatter levels 10 to 17 dB apart between modes, and its own range gain
+differs per mode. One `|angle|` curve cannot remove that. `--by-mode` derives a
+table with one entry per pulse mode instead:
+
+```bash
+derive_angular_response.py <bags...> -t /bizzy/sensors/m3/detections \
+    -o m3_mode_table.csv --by-mode --box 42.976 -70.628 43.002 -70.596 \
+    --diagnostics-out m3_mode_table_diagnostics.json
+```
+
+**Iterating on the fit.** `--accumulation-cache <file>` writes the accumulated
+per-mode statistics (a pickle) after the bag pass and, when the file already
+exists, skips the bag pass and refits from it, so a 35-minute accumulation is
+read in seconds while the fit settings (reference mode, R0, misfit threshold,
+node spacing) are explored. The cache records what the accumulation depends
+on and refuses to be reused with anything else: the bags by real path and
+every bag file's size and mtime (a replaced bag or a same-named bag of another
+campaign does not match), the topics, box, bin width, specular exclusion,
+adjacency window (the switch events are accumulated with it) and angle edges,
+plus the accumulation code version and cell grid. A cache hit reprints the
+bag-pass reports (dropped pings, corrupt messages). A cache that cannot be
+written is a warning, the table is still derived. It is a local cache for
+this script on this host, not an interchange format: a pickle runs code when
+loaded, so the script loads only a regular file owned by the current user that
+nobody else can write, and refuses anything else.
+
+**The estimator does not read the table yet.** That is PR 2 of #172 (C++ table
+loader and mode resolver, per-ping correction in the estimator, `import_bag` and
+the live node, fingerprint, ADR-0007/0003 amendments). Today's single-curve
+loader, and the marine_tools SonarInfo mirror, read a table as an empty curve,
+which every caller already reports as an empty or unparseable curve; they never
+read rows out of it. PR 1 exists so the format is settled on real fits first.
+
+**Mode attribution.** Detections, `marine_interfaces/SonarInfo`
+(`--sonar-info-topic`, default the detections topic's sibling `sonar_info`) and,
+with `--box`, TF are read in one time-ordered pass over every bag. A ping uses
+the latest SonarInfo whose stamp is at or before the ping stamp; a SonarInfo
+recorded up to 1 s after the first ping it describes is still seen (with
+`--box`, the TF guard gives more). Pings before the first SonarInfo get no mode
+and are counted. The declared TVG state (`tvg_model`,
+`tvg_absorption_db_per_km`) is recorded per mode, never used in the maths; a
+mode seen under two states is written `MIXED` with a warning.
+
+**Mode key** (the spec PR 2's C++ must match, vectors in
+`test/data/mode_keys.json`): `<TYPE>_<pulse_us>us_<bw_Hz>Hz` per transmit
+sector, sectors joined with `+`, then `_<freq_kHz>kHz` from the ping's own
+`ping_info.frequency`, e.g. `FMU_1000us_24000Hz_500kHz`. TYPE is `CW`, `FMU`,
+`FMD` from `tx_signal_types`, or `UNK` (also for an empty array: never assume
+CW). Numbers are the float32 message values widened to double, rounded to 3
+significant figures with C `%.2e` and written as plain decimals (`0.45us`,
+`24000Hz`). A NaN, infinite, non-positive (tested before rounding) or missing
+value is `?`. Keys always start with a letter, which is what keeps the old
+loaders from parsing table rows. `SonarDetections` has no beam-to-sector map,
+so a multi-sector ping gets one key; transmit power and receiver gain settings
+are not in the key.
+
+**Model.** Per mode, `L(theta, R) = A(theta) + r_g(log10(R / R0))`, R the
+slant range `twtt * c / 2` and `g` the angle group `|theta|` falls in:
+
+- `r_g`, the range term, is fitted per **angle group** of `|theta|`
+  (`--range-angle-edges`, default `30,50`: groups 10-30, 30-50 and 50-90 deg,
+  the first starting at the specular exclusion; `none` fits one term per mode;
+  an edge snaps up to the next angle-bin boundary and the snapped bounds are
+  what the table writes). One term per mode was not enough on the M3: the
+  Appledore fit left 5-13 dB of range-dependent residual in the 10-30 deg beams
+  while the pooled residual was under 1 dB, so the sonar's residual range
+  dependence differs between inner and outer beams. A sonar whose range term
+  is separable gets the same `r_g` in every group, within noise. Each `r_g` is
+  fitted at nodes every quarter decade of `log10(R / R0)` and is linear between
+  nodes, clamped beyond the end nodes; it is 0 at R0. It is measured, not
+  modelled, so it carries whatever range gain the sonar applied, absorption
+  included (no `--remove-tl`: that combination is refused). It is fitted
+  jointly with one intercept per SIGNED 2-degree angle bin of the group,
+  leaving out the specular band (`--specular-exclusion-deg`, default 10); every
+  bin belongs to exactly one group, so the joint fit separates exactly into one
+  fit per group. The node grid covers the group's populated ranges, but an END
+  node carrying fewer beams than the larger of 200 and 0.1 % of the group's is
+  trimmed, repeatedly: such a node describes the mode's rare excursions outside its
+  operating range, typically junk detections, and on Appledore one of them
+  held the 20 µs mode's R0 node (6e3 of 1e8 beams, 60 dB off) and anchored the
+  whole term. Beams beyond the kept span do not shape the fit or the misfit;
+  they are corrected with the clamped end value at apply time and enter the
+  angular intercepts `A` the same way, and their count is written per group
+  (`out_of_span`). `r_g` is 0 at R0 when R0 lies
+  inside the span, else at the nearest end node. The node spacing is
+  `--range-node-spacing-decades` (default 0.25; the misfit bins are half of
+  it). Finer nodes follow finer structure at the cost of support per node; on
+  Appledore eighth-decade nodes did not lower the misfit, because what remains
+  there is step-like (see the diagnostics), so the default stays a quarter
+  decade. On a flat bottom angle and range are confounded
+  (R = h / cos(theta)), so only depth change within an angle bin identifies
+  `r_g`; signed bins keep a cross-track slope (shorter range with smaller
+  incidence on the up-slope side) out of it. A group with under 200
+  non-specular samples, or whose pooled within-bin spread of log10 R is under
+  0.03 decade, gets no range term (zero) and the reason is written per group.
+- `A`, per `|angle|` bin including the specular bins, is the bin mean of
+  `L - r_g` with the bin's own group's term (specular bins use the first
+  group's), the mode's level at R0, with its sample variance and n. R0 is the
+  reference mode's median slant range unless `--range-ref-m` sets it. A mode
+  whose ranges never reach R0 has each `r_g` anchored at that group's nearest
+  node, so the between-group anchor differences sit in `A` (and in
+  `db_relative_to_nadir`) and the between-mode difference in the offset; the
+  correction stays consistent, but such a mode's angle curve is not a pure
+  angular response.
+- **Offset.** At every mode switch the non-specular beams of the old mode's
+  pings within `--adjacency-window-s` (default 2 s) before the switch and of the
+  new mode's pings within it after, each corrected by its own mode's
+  `db_relative_to_nadir` and range term, give one difference: the level the
+  new mode reads above the old one on their nadir-referred, R0-referred scale.
+  A gap wider than the window discards the switch.
+  Per mode pair the mean and standard error are taken (pairs with fewer than 3
+  switches are not used), then chained to `--reference-mode` (default
+  `FMU_1000us_24000Hz_500kHz`, the M3's 1 ms / 24 kHz FM-up mode) by weighted
+  least squares. A mode with no switch path to the reference is written
+  `offset_anchored=false` and no offset (empty columns; the table must not be
+  applied to it). When the reference mode is absent the
+  most-sampled mode is used and the run warns that the offsets are not
+  comparable with tables from other campaigns.
+- **Known bias.** The switch happens because the depth changed, so the
+  shallower mode always sees the shallower patch of seabed. Where the seabed
+  type follows depth (rocky highs), that does not cancel. Errors in `r` also
+  enter through the range difference between the two sides. The run reports
+  the offset from up-switches and from down-switches separately and warns when
+  they differ by more than 1 dB and 3 standard errors.
+
+**Diagnostics** (stdout, and all of it in `--diagnostics-out` JSON): per mode
+the pings, beams, median range, offset and its SE, the range-term nodes per
+group, and the misfit: the mean residual after the fit per eighth-decade bin of
+`log10(R / R0)`, pooled, per range-term angle group and per **half** group,
+over bins holding at least 200 beams and at least 0.1 % of the group's fitted
+beams (a 20 dB residual on 0.001 % of the beams is noise, not structure). The
+halves matter: the per-bin intercepts
+make a group's pooled residual near zero even when its inner and outer bins
+still differ in range dependence, so a group is split in two to show that.
+A mode whose largest binned residual exceeds `--misfit-threshold-db` (default
+1.5) is flagged: the model leaves structure there (a step inside a quarter
+decade, or a range dependence that still changes with angle inside a group;
+narrower groups via `--range-angle-edges` are the remedy for the latter). The
+same cells fitted with one scalar slope per decade per group are reported
+beside it for comparison. Per mode pair: switch counts by direction,
+means, SEs and their agreement, and the switches discarded (gap, no beams, out
+of order).
+
+**Table format** `angular-response-table v1`: one CSV, first line
+`# format: angular-response-table v1`, then `# key: value` comments (reference
+mode and its source, `range_ref_m` and its source, node spacing, angle bin
+width, specular exclusion, window, misfit threshold, absorption handling, box,
+source bags, and one `mode_summary` and `range_term` line per mode), then:
+
+```
+mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,declared_tvg_absorption_db_per_km
+```
+
+| `term` | `x` | `angle_lo_deg`, `angle_hi_deg` | `value_db` | other columns |
+|---|---|---|---|---|
+| `angle` | absolute angle bin centre, deg | empty | `A`, dB at R0 | `n`, `var_db2` (sample variance, empty when n < 2), `db_relative_to_nadir` (`A` minus the nadir-most bin), `se_db` |
+| `range` | node, `log10(R / R0)` | the group's `|angle|` bounds, deg | `r_g`, dB | `n` (node support), `se_db` |
+
+Columns that do not apply to a row are empty. The last five columns are per mode
+and repeat on every row of it. The header carries the groups once
+(`# range_angle_groups_deg: 10-30,30-50,50-90`), one `# range_term:` line per
+mode AND group (fitted with its node count, or the zero reason), the lookup
+rule (`# range_term_lookup:`) and what the offset means (`# offset_meaning:`).
+
+**Applying it** (PR 2's loader, stated here so the format is the contract): a
+beam of mode `m` at `|angle|` and slant range R uses the `range` rows of `m`
+whose `angle_lo_deg <= |angle| < angle_hi_deg`, interpolated linearly in
+`log10(R / R0)` between nodes and clamped beyond the end nodes; below the first
+`angle_lo_deg` (the specular band) it uses the first group; a mode or group
+with no `range` rows has a zero term. The corrected value is
+`raw - db_relative_to_nadir - r_g - offset_db_vs_ref`, which puts every mode on
+the reference mode's nadir level at R0, and the beam is weighted by
+`1 / var_db2` of its angle bin. The cases the loader must handle are all
+written as EMPTY fields rather than plausible numbers: a mode with
+`offset_anchored=false` has no measured offset (both offset columns empty) and
+**must not be corrected by this table** (it is the fallback policy's case, or a
+loud failure, never a zero offset); an angle bin whose `var_db2` is empty
+(`n < 2`, or a variance under 0.0005 dB² that would print as 0.000) cannot be
+weighted, so a beam in it is uncorrectable in the same way, and a loader never
+divides by a zero variance; `se_db` is empty wherever it is not finite, on
+angle and range rows alike; columns that do not apply to a row are empty; and
+`declared_tvg_absorption_db_per_km` is `nan` for a `MIXED` or undeclared
+state (the only `nan` the table writes). `x` is written with 10 significant digits, so any
+bin width or node spacing round-trips; a loader matches nodes by value and
+angle bins by centre, never by re-deriving them from the header. The header
+states these rules once more (`# empty_fields:`, `# offset_meaning:`).
+
+**Decisions carried in the format (2026-11-02).** Rare modes keep their table
+entries however few pings they have (on Appledore the 10 ms and 5 ms FM modes
+had 530 and 169 pings against hundreds of thousands); their `n`, `se_db` and
+`offset_se_db` are the quality record, and what PR 2 does with a ping whose
+mode has no entry at all is its fallback policy, not a derive-time cut. The
+variance column stays although on the M3 it is nearly flat (105-145 dB^2, a
+10-12 dB per-beam scatter in every bin of every main mode), because a sonar
+whose scatter does vary with angle needs the weights, and the format must not
+change when one turns up.
+
 ## Live prior-gate prime (`prior_store_dir`)
 
 `cube_bathymetry_node` accepts an optional **`prior_store_dir`** parameter (empty

@@ -1668,3 +1668,1086 @@ def test_ping_locator_drops_non_geocentric_earth_transform():
     loc.add_tf(_mbes_static(), True)
     loc.add_tf(_earth_tf_at(100, 0, (1.0, 1.0, 1.0)), False)
     assert loc.locate('mbes', _ns(100)) == (None, 'bad_position')
+
+
+# ==========================================================================
+# --by-mode: per-pulse-mode table (cube_bathymetry#172)
+# ==========================================================================
+
+MODE_KEYS = HERE / 'data' / 'mode_keys.json'
+MODE_TABLE_FIXTURE = HERE / 'data' / 'angular_response_table_v1.csv'
+REF_KEY = 'FMU_1000us_24000Hz_500kHz'
+CW_KEY = 'CW_50us_20000Hz_500kHz'
+
+
+def _f32(value):
+    """Return a JSON vector value as the float32 a message would carry, widened."""
+    import struct
+    if isinstance(value, str):
+        return float(value)
+    return struct.unpack('f', struct.pack('f', value))[0]
+
+
+def _key_cases():
+    import json
+    return json.loads(MODE_KEYS.read_text())['cases']
+
+
+@pytest.mark.parametrize('case', _key_cases(), ids=lambda c: c['name'])
+def test_mode_key_vectors(case):
+    """The shared key vectors (the spec PR 2's C++ must match) hold."""
+    key = dar.canonical_mode_key([_f32(v) for v in case['pulse_lengths_s']],
+                                 [_f32(v) for v in case['bandwidths_hz']],
+                                 case['tx_signal_types'], _f32(case['frequency_hz']))
+    assert key == case['key']
+    # Letter first (the old loaders' numeric parse rejects the row), no field
+    # or line separators, never the reserved '*'.
+    assert key[0].isalpha()
+    assert not any(c in key for c in ', \t\r\n*')
+
+
+@pytest.mark.parametrize('value,scale,text', [
+    (1000.0, 1.0, '1000'), (24000.0, 1.0, '24000'), (20.0, 1.0, '20'),
+    (0.45, 1.0, '0.45'), (1.5, 1.0, '1.5'), (0.0200, 1.0, '0.02'),
+    (9.996, 1.0, '10'), (123456.0, 1.0, '123000'), (0.001, 1e6, '1000'),
+    (500000.0, 1e-3, '500'), (0.0, 1.0, '?'), (-1.0, 1.0, '?'),
+    (float('nan'), 1.0, '?'), (float('inf'), 1.0, '?'), ('x', 1.0, '?'),
+])
+def test_key_number(value, scale, text):
+    """Key numbers: 3 significant figures, plain decimal, '?' for bad raw values."""
+    assert dar.key_number(value, scale) == text
+
+
+def test_default_sonar_info_topic():
+    """The SonarInfo topic defaults to the detections topic's sibling."""
+    assert dar.default_sonar_info_topic('/bizzy/sensors/m3/detections') == \
+        '/bizzy/sensors/m3/sonar_info'
+    assert dar.default_sonar_info_topic('detections') == '/sonar_info'
+
+
+def test_by_mode_defaults():
+    """--by-mode fills the topic, reference and fit defaults."""
+    args = dar.parse_args(BASE + ['--by-mode'])
+    assert args.sonar_info_topic == '/sonar/sonar_info'
+    assert args.reference_mode == REF_KEY
+    assert (args.adjacency_window_s, args.specular_exclusion_deg,
+            args.misfit_threshold_db, args.range_ref_m) == (2.0, 10.0, 1.5, None)
+    assert args.range_angle_edges == (30.0, 50.0)
+    assert args.range_node_spacing_decades == 0.25
+
+
+@pytest.mark.parametrize('text, edges', [('none', ()), ('30', (30.0,)),
+                                         ('25,45,65', (25.0, 45.0, 65.0))])
+def test_range_angle_edges_parse(text, edges):
+    """--range-angle-edges: "none" is one group, else the edges in degrees."""
+    args = dar.parse_args(BASE + ['--by-mode', '--range-angle-edges', text])
+    assert args.range_angle_edges == edges
+    b = dar.ModeTableBuilder(range_angle_edges_deg=edges)
+    assert len(b.groups) == len(edges) + 1
+    assert b.groups[0][0] == b.first_nonspecular_bin and b.groups[-1][1] == b.n_half
+
+
+@pytest.mark.parametrize('text, reason', [
+    ('30,30', 'must increase strictly'), ('50,30', 'must increase strictly'),
+    ('abc', 'comma-separated'), ('10', 'empty group'), ('9', 'empty group'),
+    ('29.9,30', 'empty group'), ('90', 'empty group'), ('nan', 'not a finite number')])
+def test_range_angle_edges_rejected(text, reason, capsys):
+    """An edge list that is not increasing, not numeric or leaves a group empty is an error."""
+    assert reason in parse_error(['--by-mode', '--range-angle-edges', text], capsys)
+
+
+def test_range_angle_groups_snap_to_bins():
+    """Edges snap up to the next bin boundary; the snapped bounds are what the table says."""
+    groups = dar.range_angle_groups(4.0, 10.0, (30.0, 50.0))
+    assert groups == [(3, 8), (8, 13), (13, 23)]
+    assert [dar.group_bounds_deg(g, 4.0) for g in groups] == [
+        (12.0, 32.0), (32.0, 52.0), (52.0, 90.0)]
+    bg = dar.bin_groups(groups, 23)
+    assert list(bg[:3]) == [0, 0, 0] and bg[7] == 0 and bg[8] == 1 and bg[13] == 2
+
+
+def test_by_mode_refuses_remove_tl(capsys):
+    """A table never carries tl_removed: --by-mode --remove-tl is refused."""
+    err = parse_error(['--by-mode', '--remove-tl', '--water-temp-c', '15'], capsys)
+    assert '--by-mode is refused with --remove-tl' in err
+
+
+@pytest.mark.parametrize('flag', [['--reference-mode', REF_KEY], ['--range-ref-m', '10'],
+                                  ['--adjacency-window-s', '1'],
+                                  ['--range-angle-edges', '30'],
+                                  ['--accumulation-cache', 'a.pkl'],
+                                  ['--diagnostics-out', 'd.json']])
+def test_by_mode_flags_need_by_mode(flag, capsys):
+    """The per-mode options are an error without --by-mode."""
+    assert 'only applies with --by-mode' in parse_error(flag, capsys)
+
+
+@pytest.mark.parametrize('flag', [['--range-ref-m', '0'], ['--adjacency-window-s', '-1'],
+                                  ['--sonar-info-topic', '/sonar/detections'],
+                                  ['--range-node-spacing-decades', '0.01'],
+                                  ['--range-node-spacing-decades', '2'],
+                                  ['--specular-exclusion-deg', '85'],
+                                  ['--misfit-threshold-db', 'nan'],
+                                  ['--reference-mode', 'a,b']])
+def test_by_mode_values_checked(flag, capsys):
+    """Out-of-range per-mode values are argparse errors."""
+    parse_error(['--by-mode'] + flag, capsys)
+
+
+class _Ping:
+    """A PingRecord stand-in for synthetic streams."""
+
+    __slots__ = ('intensities', 'rx_angles', 'two_way_travel_times', 'sound_speed',
+                 'frequency', 'flags')
+
+
+SYNTH_ANGLES_DEG = [a + 0.5 for a in range(-65, 65)]
+MODES = {
+    REF_KEY: {'pulse': 0.001, 'bw': 24000.0, 'type': 2},
+    CW_KEY: {'pulse': 0.00005, 'bw': 20000.0, 'type': 1},
+    'CW_20us_50000Hz_500kHz': {'pulse': 0.00002, 'bw': 50000.0, 'type': 1},
+    'FMU_5000us_24000Hz_500kHz': {'pulse': 0.005, 'bw': 24000.0, 'type': 2},
+}
+
+
+def sweep_depth(t):
+    """Depth that sweeps 5..25 m every 120 s (identifies the range term)."""
+    return 15.0 + 10.0 * math.sin(2.0 * math.pi * t / 120.0)
+
+
+def two_mode_switch(threshold=15.0, hysteresis=1.0, shallow=REF_KEY, deep=CW_KEY):
+    """Return a mode chooser switching at ``threshold`` m depth with hysteresis."""
+    def choose(_t, h, cur):
+        if cur is None:
+            return shallow if h < threshold else deep
+        if cur == shallow and h > threshold + hysteresis:
+            return deep
+        if cur == deep and h < threshold - hysteresis:
+            return shallow
+        return cur
+    return choose
+
+
+def synth_stream(builder, mode_of, level, offsets=None, seconds=600.0, rate=20.0,
+                 depth=sweep_depth, slope_deg=0.0, noise_db=3.0, seed=1, t0=100.0,
+                 angles_deg=SYNTH_ANGLES_DEG, tvg=(0, float('nan'))):
+    """
+    Feed a synthetic multibeam stream into ``builder``.
+
+    Flat or cross-track sloping bottom (``slope_deg`` > 0 deepens to
+    starboard): a beam at angle theta meets it at R = h cos(s) / cos(theta + s)
+    with incidence |theta + s|. Each beam's dB is ``level(incidence_deg, R,
+    theta_deg, mode) + offsets[mode]`` plus Gaussian noise. A SonarInfo is
+    added (stamped 1 us before the ping, declaring ``tvg`` = (model, alpha))
+    whenever the mode changes.
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    offsets = offsets or {}
+    theta = np.radians(np.asarray(angles_deg, dtype=np.float64))
+    slope = math.radians(slope_deg)
+    cur = None
+    for i in range(int(seconds * rate)):
+        t = t0 + i / rate
+        h = depth(t)
+        mode = mode_of(t, h, cur)
+        if mode != cur:
+            m = MODES[mode]
+            builder.add_sonar_info(int(round(t * 1e9)) - 1000, [m['pulse']], [m['bw']],
+                                   [m['type']], tvg[0], tvg[1], 'synthetic')
+            cur = mode
+        rng_m = h * math.cos(slope) / np.cos(theta + slope)
+        inc = np.abs(np.degrees(theta + slope))
+        y = (level(inc, rng_m, np.degrees(theta), mode) + offsets.get(mode, 0.0)
+             + rng.normal(0.0, noise_db, len(theta)))
+        p = _Ping()
+        p.intensities = y.astype(np.float32)
+        p.rx_angles = theta.astype(np.float32)
+        p.two_way_travel_times = (2.0 * rng_m / 1500.0).astype(np.float32)
+        p.sound_speed = 1500.0
+        p.frequency = 500000.0
+        p.flags = None
+        builder.add_ping(int(round(t * 1e9)), p)
+
+
+def lambert_like(inc_deg):
+    """Return a smooth incidence-angle response, dB."""
+    import numpy as np
+    return -20.0 - 0.15 * np.asarray(inc_deg)
+
+
+def supported(group, min_support=2000.0):
+    """Return ``(node, r, se)`` of one angle group's well-supported range nodes."""
+    rows = zip(group['nodes'], group['r'], group['r_se'], group['r_support'])
+    return [(x, r, se) for x, r, se, n in rows if n >= min_support]
+
+
+def supported_all(fit, min_support=2000.0):
+    """Return ``(group, node, r, se)`` over every angle group's well-supported nodes."""
+    return [(g, x, r, se) for g in fit['groups'] for x, r, se in supported(g, min_support)]
+
+
+def test_two_mode_step_offset_recovered():
+    """A 12 dB step between two modes is recovered within 0.5 dB; directions agree."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, two_mode_switch(),
+                 lambda inc, r, th, m: lambert_like(inc) - 10.0 * dar_log10(r),
+                 offsets={CW_KEY: 12.0})
+    table = b.finish(REF_KEY)
+    assert table['reference_source'] == 'requested'
+    off = table['offsets']
+    assert off[REF_KEY] == {'offset_db': 0.0, 'se_db': 0.0, 'anchored': True}
+    assert off[CW_KEY]['offset_db'] == pytest.approx(12.0, abs=0.5)
+    assert off[CW_KEY]['anchored'] and off[CW_KEY]['se_db'] < 0.5
+    (pair,) = table['pairs']
+    assert pair['used'] and pair['count'] >= 6
+    assert pair['directions_agree'] is True
+    assert all(d['count'] >= 3 for d in pair['directions'].values())
+    assert table['switches']['events'] == pair['count']
+    # The table's meaning: raw - db_relative_to_nadir - r_g - offset puts both
+    # modes on the reference mode's nadir level at R0 (the header's offset_meaning).
+    levels = {}
+    for key in (REF_KEY, CW_KEY):
+        n, s, _ss = b.modes[key].cells()
+        fit = table['modes'][key]
+        n_half = n.shape[0] // 2
+        abs_n, abs_s = n[:n_half] + n[n_half:], s[:n_half] + s[n_half:]
+        r_bin = fit['range_db_per_cell'][b.bin_group]
+        corrected = abs_s.sum() - (abs_n * (fit['rel_db_per_bin'][:, None] + r_bin)).sum()
+        levels[key] = corrected / abs_n.sum() - off[key]['offset_db']
+    assert levels[CW_KEY] == pytest.approx(levels[REF_KEY], abs=0.5)
+
+
+def dar_log10(x):
+    """Return numpy log10 of ``x`` (the synthetic level laws)."""
+    import numpy as np
+    return np.log10(x)
+
+
+def test_offsets_chain_through_an_intermediate_mode_and_flag_unanchored():
+    """A mode that only meets an intermediate mode is chained; an isolated one is unanchored."""
+    deep = 'FMU_5000us_24000Hz_500kHz'
+    iso = 'CW_20us_50000Hz_500kHz'
+
+    def three(t, h, cur):
+        # shallow REF (< 11 m), CW (11-19 m), deep FMU 5 ms (> 19 m), with
+        # hysteresis, so the deep mode never borders the reference.
+        if cur is None:
+            return REF_KEY if h < 11 else (CW_KEY if h < 19 else deep)
+        if cur == REF_KEY and h > 12:
+            return CW_KEY
+        if cur == CW_KEY and h < 10:
+            return REF_KEY
+        if cur == CW_KEY and h > 20:
+            return deep
+        if cur == deep and h < 18:
+            return CW_KEY
+        return cur
+
+    b = dar.ModeTableBuilder()
+    law = (lambda inc, r, th, m: lambert_like(inc) - 15.0 * dar_log10(r))
+    synth_stream(b, three, law, offsets={CW_KEY: 8.0, deep: 17.0})
+    # An isolated mode recorded after a 60 s gap: no switch path to the rest.
+    synth_stream(b, lambda t, h, cur: iso, law, offsets={iso: -5.0}, seconds=60.0,
+                 t0=800.0, seed=2)
+    table = b.finish(REF_KEY)
+    off = table['offsets']
+    assert off[CW_KEY]['offset_db'] == pytest.approx(8.0, abs=0.5)
+    # The deep mode never reaches R0: its range term is anchored at its node
+    # nearest R0, and the offset carries the -15 dB/decade law between them.
+    nodes = table['modes'][deep]['groups'][0]['nodes']
+    anchor = min(max(0.0, nodes[0]), nodes[-1])
+    assert off[deep]['offset_db'] == pytest.approx(17.0 - 15.0 * anchor, abs=0.5)
+    assert off[deep]['anchored'] and off[deep]['se_db'] > off[CW_KEY]['se_db']
+    assert not any(set(p['modes']) == {REF_KEY, deep} for p in table['pairs'])
+    assert off[iso]['anchored'] is False
+    assert math.isnan(off[iso]['offset_db']) and math.isnan(off[iso]['se_db'])
+    assert any('no switch path to the reference mode for %s' % iso in w
+               for w in table['warnings'])
+    assert table['switches']['discarded'].get('gap', 0) >= 1
+    lines = dar.mode_table_lines(table, ['synthetic'])
+    assert any(ln.startswith('# mode_summary: %s ' % iso) and 'anchored=false' in ln
+               and 'offset_db=none' in ln for ln in lines)
+    # An unanchored mode's offset columns are EMPTY, never a 0.000 a loader would apply.
+    iso_rows = [ln.split(',') for ln in lines if ln.startswith(iso + ',')]
+    assert iso_rows and all(r[10] == '' and r[11] == '' and r[12] == 'false' for r in iso_rows)
+    cw_rows = [ln.split(',') for ln in lines if ln.startswith(CW_KEY + ',')]
+    assert all(r[10] != '' and r[12] == 'true' for r in cw_rows)
+
+
+def test_reference_fallback_is_loud():
+    """An absent reference mode falls back to the most-sampled one with a warning."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, two_mode_switch(threshold=12.0),
+                 lambda inc, r, th, m: lambert_like(inc), seconds=240.0)
+    table = b.finish('CW_1us_1Hz_1kHz')
+    assert table['reference_mode'] in (REF_KEY, CW_KEY)
+    assert 'NOT comparable across campaigns' in table['reference_source']
+    assert any('NOT comparable' in w for w in table['warnings'])
+    hd = table_header(dar.mode_table_lines(table, ['s']))
+    assert 'NOT comparable across campaigns' in hd['reference_mode_source']
+
+
+@pytest.mark.parametrize('slope_db_per_decade', [0.0, -20.0, 10.0])
+def test_range_term_recovers_the_compensation_residual(slope_db_per_decade):
+    """
+    40logR-, 20logR- and over-compensated streams: the nodes recover the shape.
+
+    A sonar compensating 40 log R leaves a flat level (0 dB/decade); one
+    compensating 20 log R of a 40 log R loss leaves -20 dB/decade; no law is
+    assumed by the fit.
+    """
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) + slope_db_per_decade * dar_log10(r))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    assert fit['range_status'] == 'fitted' and len(fit['groups']) == 3
+    for g in fit['groups']:
+        nodes = supported(g)
+        assert len(nodes) >= 3, g['lo_deg']
+        for x, r, _se in nodes:
+            assert r == pytest.approx(slope_db_per_decade * x, abs=0.5), (g['lo_deg'], x, r)
+        assert 0.0 in g['nodes']
+        assert g['r'][g['nodes'].index(0.0)] == pytest.approx(0.0, abs=1e-9)
+    assert not fit['misfit_exceeded']
+    for g in fit['scalar_comparison']['groups']:
+        assert g['slope_db_per_decade'] == pytest.approx(slope_db_per_decade, abs=0.5)
+    # Intercepts are referred to R0: the angle curve is the incidence law.
+    rows = {centre: rel for centre, _n, _a, _v, rel in fit['angle']}
+    assert rows[40.5 if 40.5 in rows else 41.0] == pytest.approx(
+        -0.15 * (41.0 - 1.0), abs=0.6)
+
+
+def test_absorption_curvature_needs_the_binned_term():
+    """An uncompensated 2*alpha*R loss: the nodes follow the curve, a scalar slope cannot."""
+    alpha = 0.13  # dB/m: 500 kHz in 15 C, 31 psu seawater (cube_bathymetry#170)
+
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 2.0 * alpha * r,
+                 depth=lambda t: 22.5 + 17.5 * math.sin(2.0 * math.pi * t / 120.0))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    r0 = table['range_ref_m']
+    assert supported_all(fit)
+    for g, x, r, _se in supported_all(fit):
+        if x in (g['nodes'][0], g['nodes'][-1]):
+            # An end node has data on one side only, so its value is a chord
+            # fit of the curve, not the curve's value; the misfit below is the
+            # check that the term still follows the data there.
+            continue
+        # Linear between quarter-decade nodes: within 0.5 dB of the curve at the nodes.
+        assert r == pytest.approx(-2.0 * alpha * r0 * (10.0 ** x - 1.0), abs=0.5), (
+            g['lo_deg'], x, r)
+    assert fit['misfit_max_db'] < table['misfit_threshold_db']
+    assert not fit['misfit_exceeded']
+    assert fit['scalar_comparison']['misfit_max_db'] > table['misfit_threshold_db']
+
+
+def test_sloping_bottom_signed_bins_keep_the_slope_out_of_the_range_term():
+    """
+    A cross-track slope pairs shorter range with smaller incidence on one side.
+
+    Signed angle bins recover the true range term; folding to |theta| bins
+    (shown for comparison) is biased.
+    """
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: -20.0 - 0.3 * inc - 10.0 * dar_log10(r),
+                 slope_deg=12.0, depth=lambda t: 17.0 + 5.0 * math.sin(2.0 * math.pi * t / 120.0))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    assert supported_all(fit)
+    for g, x, r, _se in supported_all(fit):
+        assert r == pytest.approx(-10.0 * x, abs=0.5), (g['lo_deg'], x, r)
+    n, s, ss = b.modes[REF_KEY].cells()
+    folded = dar.fit_mode(n, s, ss, b.bin_width_deg, b.groups, table['log_r0'], fold=True)
+    errors = [abs(r + 10.0 * x) for _g, x, r, _se in supported_all(folded)]
+    assert max(errors) > 1.5
+
+
+def test_specular_band_is_kept_out_of_the_range_fit():
+    """A range-dependent artefact inside 10 deg stays out of r; without the exclusion it leaks."""
+    law = (lambda inc, r, th, m: lambert_like(inc) - 10.0 * dar_log10(r)
+           + dar_where(abs_array(th) < 10.0, 30.0 * dar_log10(r), 0.0))
+    errors = {}
+    for exclusion in (10.0, 0.0):
+        b = dar.ModeTableBuilder(specular_exclusion_deg=exclusion)
+        synth_stream(b, lambda t, h, cur: REF_KEY, law)
+        fit = b.finish(REF_KEY)['modes'][REF_KEY]
+        errors[exclusion] = max(abs(r + 10.0 * x) for _g, x, r, _se in supported_all(fit))
+    assert errors[10.0] < 0.5
+    assert errors[0.0] > 1.0
+
+
+def dar_where(cond, a, b):
+    """Return numpy where."""
+    import numpy as np
+    return np.where(cond, a, b)
+
+
+def abs_array(x):
+    """Return numpy abs."""
+    import numpy as np
+    return np.abs(x)
+
+
+def test_misfit_flags_a_step_inside_a_node_interval():
+    """A 6 dB step between nodes is structure the binned term cannot carry: flagged."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) + dar_where(r > 21.0, -6.0, 0.0))
+    table = b.finish(REF_KEY, range_ref_m=10.0)
+    fit = table['modes'][REF_KEY]
+    assert fit['misfit_exceeded'] and fit['misfit_max_db'] > 1.5
+    assert any('misfit' in w and REF_KEY in w for w in table['warnings'])
+    assert 'misfit_exceeded=yes' in '\n'.join(dar.mode_table_lines(table, ['s']))
+
+
+def test_flat_single_depth_bottom_leaves_the_range_term_unidentified():
+    """Angle and range are confounded on a flat single-depth bottom: r = 0 with a reason."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 20.0 * dar_log10(r),
+                 depth=lambda t: 20.0, seconds=120.0)
+    fit = b.finish(REF_KEY)['modes'][REF_KEY]
+    assert fit['range_status'] == 'zero'
+    for g in fit['groups']:
+        assert g['range_status'].startswith('zero: not identified')
+        assert g['nodes'] == [] and g['within_bin_spread_decades'] < 0.03
+    assert not any(ln.split(',')[1] == 'range' for ln in dar.mode_table_lines(
+        b.finish(REF_KEY), ['s']) if not ln.startswith('#'))
+
+
+def test_non_separable_range_term_needs_the_angle_groups():
+    """
+    One range term per mode fails on a range dependence that differs with angle.
+
+    Inner and outer beams follow different log-range slopes: one term per
+    mode leaves structure the misfit flags; one per angle group recovers each.
+    """
+    def slope(th):
+        a = abs_array(th)
+        return dar_where(a < 30.0, -10.0, dar_where(a < 50.0, -17.0, -25.0))
+
+    law = (lambda inc, r, th, m: lambert_like(inc) + slope(th) * dar_log10(r))
+    grouped = dar.ModeTableBuilder()
+    synth_stream(grouped, lambda t, h, cur: REF_KEY, law)
+    fit = grouped.finish(REF_KEY)['modes'][REF_KEY]
+    assert [(g['lo_deg'], g['hi_deg']) for g in fit['groups']] == [
+        (10.0, 30.0), (30.0, 50.0), (50.0, 90.0)]
+    expected = dict(zip((10.0, 30.0, 50.0), (-10.0, -17.0, -25.0)))
+    for g, x, r, _se in supported_all(fit):
+        assert r == pytest.approx(expected[g['lo_deg']] * x, abs=0.5), (g['lo_deg'], x, r)
+    assert not fit['misfit_exceeded'], fit['misfit_max_db']
+
+    single = dar.ModeTableBuilder(range_angle_edges_deg=())
+    synth_stream(single, lambda t, h, cur: REF_KEY, law)
+    table = single.finish(REF_KEY)
+    one = table['modes'][REF_KEY]
+    assert len(one['groups']) == 1
+    assert one['misfit_exceeded'] and one['misfit_max_db'] > 1.5
+    # The pooled residual per range bin cancels; the half groups show it.
+    halves = {k: v for k, v in one['binned_residuals'].items() if 'half' in k}
+    assert len(halves) == 2
+    assert max(abs(m) for rows in halves.values() for _x, _n, m in rows) > 1.5
+    assert max(abs(m) for _x, _n, m in one['binned_residuals']['all']) < 1.0
+
+
+def test_finer_nodes_follow_a_step_the_quarter_decade_nodes_cannot():
+    """A 6 dB step inside a quarter decade: eighth-decade nodes carry it, the misfit drops."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) + dar_where(r > 21.0, -6.0, 0.0))
+    coarse = b.finish(REF_KEY, range_ref_m=10.0)['modes'][REF_KEY]
+    fine = b.finish(REF_KEY, range_ref_m=10.0, node_spacing_decades=0.125)['modes'][REF_KEY]
+    assert coarse['node_spacing_decades'] == 0.25 and fine['node_spacing_decades'] == 0.125
+    assert coarse['misfit_exceeded']
+    assert fine['misfit_max_db'] < coarse['misfit_max_db'] / 2.0
+    for g in fine['groups']:
+        assert all(abs(x / 0.125 - round(x / 0.125)) < 1e-9 for x in g['nodes'])
+    hd = table_header(dar.mode_table_lines(
+        b.finish(REF_KEY, range_ref_m=10.0, node_spacing_decades=0.125), ['s']))
+    assert hd['range_node_spacing_decades'] == '0.125'
+
+
+def test_fit_bin_emptied_by_the_span_is_dropped_not_nan():
+    """
+    A fit bin whose only beams lie beyond the trimmed span must not fail the guard open.
+
+    Flat single depth (range term unidentified) plus one outer bin whose only
+    beams are a junk sliver at long range: the spread stays finite, the term
+    is zero with the "not identified" reason, and no range rows are written.
+    """
+    import numpy as np
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 20.0 * dar_log10(r),
+                 depth=lambda t: 20.0, seconds=120.0, angles_deg=[a + 0.5 for a in range(-40, 40)])
+    # 300 junk beams in the 58-60 deg bin only, at 400 m.
+    for i in range(300):
+        p = _Ping()
+        p.intensities = np.asarray([-5.0], dtype=np.float32)
+        p.rx_angles = np.asarray([math.radians(59.0)], dtype=np.float32)
+        p.two_way_travel_times = np.asarray([2.0 * 400.0 / 1500.0], dtype=np.float32)
+        p.sound_speed, p.frequency, p.flags = 1500.0, 500000.0, None
+        b.add_ping(int((300.0 + i * 0.05) * 1e9), p)
+    fit = b.finish(REF_KEY)['modes'][REF_KEY]
+    outer = fit['groups'][-1]
+    assert math.isfinite(outer['within_bin_spread_decades'])
+    assert outer['range_status'].startswith('zero: not identified')
+    assert fit['range_status'] == 'zero'
+    assert fit['nonspecular_samples'] > 0
+
+
+def test_trimming_drops_the_weaker_end_first():
+    """Three nodes, both ends under the floor: the end with less support goes, not the first."""
+    import numpy as np
+    x_rel = dar.cell_log10_range() - 1.0
+    cell = (lambda x: int(np.argmin(np.abs(x_rel - x))))
+    nb = np.zeros((1, dar.RANGE_CELL_COUNT))
+    nb[0, cell(-0.25)] = 190                  # under the floor of 200...
+    nb[0, cell(0.0)] = 300
+    nb[0, cell(0.25)] = 1                     # ...but this end is the junk
+    nodes, _mask, trimmed = dar._trim_span(nb, x_rel)
+    # -0.5 is the empty grid node below the first populated cell; then, of the
+    # two ends under the floor, 0.25 (1 beam) goes and -0.25 (190) stays.
+    assert trimmed == [-0.5, 0.25] and list(nodes) == [-0.25, 0.0]
+
+
+def test_adjacent_junk_end_nodes_are_both_trimmed():
+    """Junk spread over two end nodes is trimmed node by node; a trimmed node lends no support."""
+    import numpy as np
+    x_rel = dar.cell_log10_range() - 1.0
+    cell = (lambda x: int(np.argmin(np.abs(x_rel - x))))
+    nb = np.zeros((1, dar.RANGE_CELL_COUNT))
+    nb[0, cell(0.005)] = 1e6                  # the good beams, just above R0
+    nb[0, cell(-0.245)] = 600                 # 600 junk beams under node -0.25
+    nb[0, cell(-0.495)] = 600                 # and 600 under node -0.5: floor is 1000
+    nodes, mask, trimmed = dar._trim_span(nb, x_rel)
+    # Clamping the -0.495 beams onto -0.25 once -0.5 is gone would have
+    # credited it 588 + 600 > 1000 and kept it.
+    assert trimmed == [-0.5, -0.25]
+    assert list(nodes) == [0.0, 0.25]
+    assert nb[0, mask].sum() == 1e6
+
+
+def test_beams_at_or_beyond_90_degrees_are_rejected_for_any_bin_width():
+    """A 4 deg bin grid reaches 92 deg; a 91 deg beam (or a huge angle) is still rejected."""
+    import numpy as np
+    p = _Ping()
+    p.intensities = np.asarray([-20.0, -21.0, -22.0, -23.0], dtype=np.float32)
+    p.rx_angles = np.asarray([math.radians(91.0), math.radians(45.0), 1e30, -math.radians(90.0)],
+                             dtype=np.float32)
+    p.two_way_travel_times = np.asarray([0.02] * 4, dtype=np.float32)
+    p.sound_speed, p.frequency, p.flags = 1500.0, 500000.0, None
+    abs_bin, _side, _cell, y = dar.ping_beams(p, 4.0, 23)
+    assert list(y) == [-21.0] and list(abs_bin) == [11]
+
+
+def test_edges_none_with_no_bin_outside_the_specular_band_is_an_error(capsys):
+    """A grid with no non-specular bin cannot carry a range term: refused, not an empty group."""
+    with pytest.raises(ValueError, match='no angle bin lies outside'):
+        dar.range_angle_groups(90.0, 10.0, ())
+    err = parse_error(['--by-mode', '--bin-width-deg', '45', '--specular-exclusion-deg', '79',
+                       '--range-angle-edges', 'none'], capsys)
+    assert 'no angle bin lies outside' in err
+    # The DEFAULT edges are validated too: 30 deg bins put both 30 and 50 on bin 1 / 2
+    # boundaries, but a 60 deg exclusion leaves the 30 edge inside the band.
+    err = parse_error(['--by-mode', '--bin-width-deg', '30', '--specular-exclusion-deg', '60'],
+                      capsys)
+    assert 'empty group' in err
+
+
+def test_mode_key_accepts_numpy_arrays():
+    """Message fields arriving as numpy arrays do not trip the truth-value check."""
+    import numpy as np
+    assert dar.sector_mode_key(np.asarray([0.001]), np.asarray([24000.0]),
+                               np.asarray([2])) == 'FMU_1000us_24000Hz'
+    assert dar.sector_mode_key(np.asarray([0.001, 0.002]), np.asarray([24000.0, 12000.0]),
+                               np.asarray([2, 1])) == 'FMU_1000us_24000Hz+CW_2000us_12000Hz'
+
+
+def test_junk_end_node_is_trimmed_and_the_anchor_moves_to_the_span():
+    """
+    A sliver of junk at long range must not anchor the term (Appledore run 2).
+
+    A mode working at 5-25 m that also records a few hundred detections at
+    ~R0 * 4, 60 dB off: the end node those beams would hold is trimmed, the
+    term is anchored at the nearest kept node, the junk is out of span and the
+    good nodes keep the law.
+    """
+    def depth(t):
+        # 3 junk pings of 12000 (390 of 1.56 M beams: over 200, under 0.1 %).
+        return 250.0 if int(round(t * 20.0)) % 4000 == 0 else sweep_depth(t)
+
+    def law(inc, r, th, m):
+        return lambert_like(inc) - 10.0 * dar_log10(r) + dar_where(r > 150.0, 60.0, 0.0)
+
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY, law, depth=depth)
+    table = b.finish(REF_KEY, range_ref_m=60.0)     # R0 far beyond the working range
+    fit = table['modes'][REF_KEY]
+    for g in fit['groups']:
+        assert g['range_status'] == 'fitted', g
+        assert g['trimmed_nodes'] and max(g['trimmed_nodes']) > 0.5, g['trimmed_nodes']
+        assert g['out_of_span_samples'] > 0
+        assert g['span'][1] < 0.5
+        # Anchored at the nearest kept node: r = 0 there, 0 at no other node.
+        assert g['r'][-1] == pytest.approx(0.0, abs=1e-9)
+        for x, r, _se in supported(g):
+            assert r == pytest.approx(-10.0 * (x - g['nodes'][-1]), abs=0.5), (x, r)
+    assert not fit['misfit_exceeded'], fit['misfit_max_db']
+    header = '\n'.join(dar.mode_table_lines(table, ['s']))
+    assert 'out_of_span=' in header and 'trimmed=' in header
+
+
+def test_misfit_ignores_bins_below_the_share_floor():
+    """A 20 dB residual on a bin holding under 0.1 % of the group's beams is not reported."""
+    import numpy as np
+    x_rel = dar.cell_log10_range() - 1.0        # R0 = 10 m
+    cells = dar.RANGE_CELL_COUNT
+    nb = np.zeros((2, cells))
+    sb = np.zeros((2, cells))
+    # Two fit bins, a million good beams at -0.5..0 decade, mean 0 residual...
+    good = (x_rel >= -0.5) & (x_rel < 0.0)
+    nb[:, good] = 5e5 / good.sum()
+    # ...and 300 junk beams at +0.5 decade reading 20 dB high.
+    junk = int(np.argmin(np.abs(x_rel - 0.5)))
+    nb[0, junk] = 300
+    sb[0, junk] = 300 * 20.0
+    a = np.zeros(2)
+    r_bin = np.zeros((2, cells))
+    groups = [('g', np.ones(2, dtype=bool))]
+    without = dar._binned_residuals(nb, sb, a, r_bin, x_rel, groups, 200)
+    assert any(abs(m - 20.0) < 1e-6 and n == 300 for _x, n, m in without['all'])
+    with_floor = dar._binned_residuals(nb, sb, a, r_bin, x_rel, groups, 200,
+                                       dar.MISFIT_MIN_SHARE)
+    assert not any(n == 300 for _x, n, m in with_floor['all'])
+    assert all(n >= dar.MISFIT_MIN_SHARE * 1e6 for _x, n, _m in with_floor['g'])
+    assert dar._misfit_stats(with_floor)[0] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_accumulation_cache_round_trip(tmp_path, capsys):
+    """A second run with --accumulation-cache skips the bag pass and writes the same table."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    out1, out2 = tmp_path / 't1.csv', tmp_path / 't2.csv'
+    cache = tmp_path / 'acc.pkl'
+    base = [str(bag), '-t', TOPIC, '--by-mode', '--accumulation-cache', str(cache)]
+    assert dar.main(base + ['-o', str(out1)]) == 0
+    first = capsys.readouterr().out
+    assert 'wrote the accumulated statistics to' in first and cache.is_file()
+    assert dar.main(base + ['-o', str(out2)]) == 0
+    second = capsys.readouterr().out
+    assert 'bag pass skipped' in second
+    strip = (lambda p: [ln for ln in p.read_text().splitlines()
+                        if not ln.startswith('# source_bags')])
+    assert strip(out1) == strip(out2)
+    # A refit with other fit settings reuses the cache; other accumulation
+    # settings (box, bin width, edges, window) do not.
+    assert dar.main(base + ['-o', str(out2), '--misfit-threshold-db', '3',
+                            '--range-node-spacing-decades', '0.125']) == 0
+    assert 'bag pass skipped' in capsys.readouterr().out
+    with pytest.raises(SystemExit, match='different.*range_angle_edges'):
+        dar.main(base + ['-o', str(out2), '--range-angle-edges', 'none'])
+    with pytest.raises(SystemExit, match='different.*adjacency_window_s'):
+        dar.main(base + ['-o', str(out2), '--adjacency-window-s', '1'])
+    with pytest.raises(SystemExit, match='not a derive-accumulation-cache'):
+        (tmp_path / 'junk.pkl').write_bytes(b'\x80\x04N.')
+        (tmp_path / 'junk.pkl').chmod(0o600)
+        dar.main([str(bag), '-t', TOPIC, '--by-mode', '-o', str(out2),
+                  '--accumulation-cache', str(tmp_path / 'junk.pkl')])
+    # The bag's CONTENT is part of the identity: a touched bag file misses the cache.
+    import time
+    victim = next(bag.iterdir())
+    before = victim.stat()
+    os.utime(victim, (time.time() + 100, time.time() + 100))
+    with pytest.raises(SystemExit, match='different.*bags'):
+        dar.main(base + ['-o', str(out2)])
+    os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))   # put it back exactly
+    # So is the path: the same bag reached through another directory name.
+    alias = tmp_path / 'elsewhere'
+    alias.mkdir()
+    (alias / 'mode_bag').symlink_to(bag)
+    assert dar.main([str(alias / 'mode_bag'), '-t', TOPIC, '--by-mode', '-o', str(out2),
+                     '--accumulation-cache', str(cache)]) == 0   # realpath: same bag
+    capsys.readouterr()
+
+
+def test_accumulation_cache_is_loaded_only_when_this_user_wrote_it(tmp_path, capsys):
+    """A group- or world-writable cache, or a non-regular file, is refused before unpickling."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    cache = tmp_path / 'acc.pkl'
+    base = [str(bag), '-t', TOPIC, '--by-mode', '-o', str(tmp_path / 't.csv'),
+            '--accumulation-cache', str(cache)]
+    assert dar.main(base) == 0
+    capsys.readouterr()
+    cache.chmod(0o666)
+    with pytest.raises(SystemExit, match='world-writable'):
+        dar.main(base)
+    cache.chmod(0o600)
+    assert dar.main(base) == 0
+    assert 'bag pass skipped' in capsys.readouterr().out
+    fifo = tmp_path / 'fifo.pkl'
+    os.mkfifo(fifo)
+    with pytest.raises(SystemExit, match='not a regular file'):
+        dar.main(base[:-1] + [str(fifo)])
+
+
+def test_accumulation_cache_write_failure_is_a_warning(tmp_path, capsys):
+    """A cache that cannot be written does not throw away the bag pass: warn, then fit."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    out = tmp_path / 't.csv'
+    assert dar.main([str(bag), '-t', TOPIC, '--by-mode', '-o', str(out),
+                     '--accumulation-cache', str(tmp_path / 'no_such_dir' / 'acc.pkl')]) == 0
+    captured = capsys.readouterr()
+    assert 'could not write --accumulation-cache' in captured.err
+    assert out.is_file() and 'wrote a 2-mode table' in captured.out
+
+
+def test_accumulation_cache_hit_reprints_the_bag_pass_reports(tmp_path, capsys):
+    """The pings-before-SonarInfo count (and box report) come back on a cache hit."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    cache = tmp_path / 'acc.pkl'
+    base = [str(bag), '-t', TOPIC, '--by-mode', '-o', str(tmp_path / 't.csv'),
+            '--accumulation-cache', str(cache)]
+    assert dar.main(base) == 0
+    first = capsys.readouterr().out
+    assert dar.main(base) == 0
+    second = capsys.readouterr().out
+    for line in ('5 pings before the first SonarInfo were left out',):
+        assert line in first and line in second
+
+
+def test_variance_column_measures_the_beam_scatter():
+    """The per-(mode, angle bin) variance is the scatter after the range term (noise^2)."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 20.0 * dar_log10(r),
+                 noise_db=2.0, seconds=300.0)
+    fit = b.finish(REF_KEY)['modes'][REF_KEY]
+    for centre, n, _level, var, _rel in fit['angle']:
+        if centre > 12.0 and n > 2000:
+            # Each 2 deg bin also spans ~0.3 dB of the incidence slope.
+            assert var == pytest.approx(4.0, rel=0.15), centre
+
+
+def test_sonar_info_history_dedupes_and_orders():
+    """Heartbeats repeating a stamp dedupe; an out-of-order SonarInfo is inserted in place."""
+    h = dar.SonarInfoHistory()
+    h.add(100, 'A', ('UNKNOWN', None))
+    h.add(100, 'A', ('UNKNOWN', None))
+    h.add(300, 'C', ('UNKNOWN', None))
+    h.add(200, 'B', ('40LOGR', 80.0))
+    assert len(h) == 3
+    assert h.at(99) is None
+    assert h.at(100)[0] == 'A' and h.at(250)[0] == 'B' and h.at(10 ** 12)[0] == 'C'
+
+
+def test_pings_before_the_first_sonar_info_are_counted_not_binned():
+    """A ping with no SonarInfo at or before it gets no mode."""
+    b = dar.ModeTableBuilder()
+    p = _Ping()
+    p.intensities, p.rx_angles = [-30.0], [0.3]
+    p.two_way_travel_times, p.sound_speed, p.frequency, p.flags = [0.02], 1500.0, 5e5, None
+    b.add_ping(50, p)
+    b.add_sonar_info(60, [0.001], [24000.0], [2])
+    b.add_ping(70, p)
+    assert b.pings_without_info == 1
+    assert list(b.modes) == [REF_KEY] and b.modes[REF_KEY].pings == 1
+
+
+def test_declared_state_per_mode_and_mixed():
+    """The declared TVG state is recorded per mode; two states in one mode are MIXED."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY, lambda inc, r, th, m: lambert_like(inc),
+                 seconds=30.0)
+    synth_stream(b, lambda t, h, cur: REF_KEY, lambda inc, r, th, m: lambert_like(inc),
+                 seconds=30.0, t0=200.5, tvg=(3, 80.0))
+    table = b.finish(REF_KEY)
+    fit = table['modes'][REF_KEY]
+    assert fit['declared_tvg_model'] == 'MIXED'
+    assert {(s['model'], s['absorption_db_per_km']) for s in fit['declared_states']} == {
+        ('UNKNOWN', None), ('40LOGR', 80.0)}
+    assert any('declared TVG states' in w for w in table['warnings'])
+
+
+def table_header(lines):
+    """Map every ``# key: value`` comment of a table to its value (the title is skipped)."""
+    out = {}
+    for line in lines:
+        m = HEADER_LINE.match(line)
+        if m and line.startswith('#'):
+            out.setdefault(m.group(1), m.group(2))
+    return out
+
+
+def hand_built_table():
+    """Return a small deterministic table dict, the shape derive_mode_table returns."""
+    nan = float('nan')
+
+    def group(lo, hi, nodes, r, se, support, status='fitted', trimmed=(), out_of_span=0):
+        return {'lo_deg': lo, 'hi_deg': hi, 'nodes': nodes, 'r': r, 'r_se': se,
+                'r_support': support, 'range_status': status,
+                'span': [nodes[0], nodes[-1]] if nodes else [0.0, 0.0],
+                'trimmed_nodes': list(trimmed), 'out_of_span_samples': out_of_span}
+
+    def mode(pings, angle, groups, declared=('UNKNOWN', nan), misfit=0.4):
+        return {'pings': pings, 'beams': pings * 256, 'angle': angle, 'groups': groups,
+                'range_status': dar.range_status_summary(groups),
+                'declared_tvg_model': declared[0],
+                'declared_tvg_absorption_db_per_km': declared[1],
+                'misfit_max_db': misfit, 'misfit_exceeded': misfit > 1.5}
+    unidentified = ('zero: not identified, the within-angle-bin spread of log10 R is '
+                    '0.010 decade (< 0.03)')
+    return {
+        'reference_mode': REF_KEY, 'reference_source': 'requested',
+        'range_ref_m': 18.9, 'range_ref_source': 'median slant range of the reference mode',
+        'bin_width_deg': 2.0, 'specular_exclusion_deg': 10.0, 'window_sec': 2.0,
+        'misfit_threshold_db': 1.5, 'range_angle_groups_deg': [(10.0, 30.0), (30.0, 90.0)],
+        'node_spacing_decades': 0.25,
+        'modes': {
+            REF_KEY: mode(93890, [(1.0, 5000, 25.5, 9.25, 0.0), (11.0, 4000, 24.7, 6.5, -0.8),
+                                  (41.0, 3000, 18.3, 7.0, -7.2)],
+                          [group(10.0, 30.0, [-0.25, 0.0, 0.25], [1.5, 0.0, -2.25],
+                                 [0.1, 0.0, 0.12], [3000.0, 5000.0, 2500.0]),
+                           group(30.0, 90.0, [0.0, 0.25], [0.0, -1.0], [0.0, 0.08],
+                                 [4000.0, 1500.0], trimmed=(-0.25, 0.5), out_of_span=37)]),
+            CW_KEY: mode(217255, [(1.0, 6000, 7.7, 12.0, 0.0), (41.0, 1, 2.1, nan, -5.6)],
+                         [group(10.0, 30.0, [], [], [], [], status=unidentified),
+                          group(30.0, 90.0, [], [], [], [],
+                                status='zero: 120 non-specular samples, fewer than 200')],
+                         declared=('40LOGR', 80.0), misfit=2.0),
+            # An unanchored mode (no switch path to the reference): empty offset
+            # columns; its 21 deg bin has identical beams (variance 0: empty too).
+            'FMU_5000us_24000Hz_500kHz': mode(
+                169, [(1.0, 40, 3.3, 8.0, 0.0), (21.0, 12, 1.1, 0.0, -2.2)],
+                [group(10.0, 30.0, [0.0, 0.25], [0.0, -0.4], [0.0, nan], [500.0, 300.0]),
+                 group(30.0, 90.0, [], [], [], [],
+                       status='zero: 96 non-specular samples, fewer than 200')],
+                misfit=4.1),
+        },
+        'offsets': {REF_KEY: {'offset_db': 0.0, 'se_db': 0.0, 'anchored': True},
+                    CW_KEY: {'offset_db': -17.25, 'se_db': 0.31, 'anchored': True},
+                    'FMU_5000us_24000Hz_500kHz': {'offset_db': 0.0, 'se_db': nan,
+                                                  'anchored': False}},
+    }
+
+
+def test_mode_table_format():
+    """The table: format line first, mode first, angle and range rows, scalars per row."""
+    lines = dar.mode_table_lines(hand_built_table(), ['bag_a', 'bag_b'],
+                                 box=(42.976, -70.628, 43.002, -70.596))
+    assert lines[0] == '# format: angular-response-table v1'
+    hd = table_header(lines)
+    assert hd['format'] == 'angular-response-table v1'
+    assert hd['reference_mode'] == REF_KEY and hd['range_ref_m'] == '18.9'
+    assert hd['box'] == '42.976 -70.628 43.002 -70.596'
+    assert hd['source_bags'] == 'bag_a,bag_b'
+    assert hd['range_angle_groups_deg'] == '10-30,30-90'
+    assert hd['range_node_spacing_decades'] == '0.25'
+    assert 'offset_meaning' in hd and 'range_term_lookup' in hd
+    assert 'tl_removed' not in hd and 'absorption_db_per_m' not in hd
+    terms = [ln for ln in lines if ln.startswith('# range_term: ')]
+    assert terms[:4] == [
+        '# range_term: %s 10-30 %s' % (CW_KEY, 'zero: not identified, the '
+                                       'within-angle-bin spread of log10 R is 0.010 decade '
+                                       '(< 0.03)'),
+        '# range_term: %s 30-90 zero: 120 non-specular samples, fewer than 200' % CW_KEY,
+        '# range_term: %s 10-30 fitted nodes=3 span=-0.25..0.25 trimmed=none out_of_span=0'
+        % REF_KEY,
+        '# range_term: %s 30-90 fitted nodes=2 span=0..0.25 trimmed=-0.25,0.5 out_of_span=37'
+        % REF_KEY]
+    rows = [ln for ln in lines if not ln.startswith('#')]
+    assert rows[0] == ','.join(dar.TABLE_COLUMNS)
+    assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1,,,7.700,6000,12.000,+0.000,'
+                       '0.045,-17.250,0.310,true,40LOGR,80')
+    assert rows[2] == ('CW_50us_20000Hz_500kHz,angle,41,,,2.100,1,,-5.600,,'
+                       '-17.250,0.310,true,40LOGR,80')
+    assert ('FMU_1000us_24000Hz_500kHz,range,0.25,10,30,-2.250,2500,,,0.120,'
+            '0.000,0.000,true,UNKNOWN,nan') in rows
+    assert ('FMU_1000us_24000Hz_500kHz,range,0.25,30,90,-1.000,1500,,,0.080,'
+            '0.000,0.000,true,UNKNOWN,nan') in rows
+    # Unanchored mode: empty offset columns; a zero variance is written empty (no
+    # 1/0 weight); a range-row SE that is not finite is empty, not 'nan'.
+    assert rows[-4] == ('FMU_5000us_24000Hz_500kHz,angle,1,,,3.300,40,8.000,+0.000,0.447,'
+                        ',,false,UNKNOWN,nan')
+    assert rows[-3] == ('FMU_5000us_24000Hz_500kHz,angle,21,,,1.100,12,,-2.200,,,,false,'
+                        'UNKNOWN,nan')
+    assert rows[-2] == ('FMU_5000us_24000Hz_500kHz,range,0,10,30,0.000,500,,,0.000,,,false,'
+                        'UNKNOWN,nan')
+    assert rows[-1] == ('FMU_5000us_24000Hz_500kHz,range,0.25,10,30,-0.400,300,,,,,,false,'
+                        'UNKNOWN,nan')
+    assert not any(',nan,' in r.replace(',UNKNOWN,nan', '').replace(',40LOGR,80', '')
+                   for r in rows[1:]), 'nan is written only in the declared-absorption column'
+    assert 'empty_fields' in hd
+    assert all(len(r.split(',')) == len(dar.TABLE_COLUMNS) for r in rows)
+    assert not any(r.split(',')[0] == CW_KEY and r.split(',')[1] == 'range' for r in rows)
+
+
+def test_mode_table_fixture_for_the_loader_tests():
+    """The table fixture the old-loader tests (C++ and the marine_tools mirror) read is current."""
+    content = ''.join(ln + '\n' for ln in dar.mode_table_lines(
+        hand_built_table(), ['bag_a'], box=(42.976, -70.628, 43.002, -70.596))).encode()
+    if os.environ.get('GOLDEN_REGENERATE') == '1':
+        MODE_TABLE_FIXTURE.write_bytes(content)
+    assert MODE_TABLE_FIXTURE.read_bytes() == content, (
+        '%s no longer matches mode_table_lines output; if intended, re-run with '
+        'GOLDEN_REGENERATE=1 and check test_angular_response_curve' % MODE_TABLE_FIXTURE)
+
+
+def _load_marine_tools_mirror():
+    """Import kongsberg_em_bridge.angular_response (read-only), or None."""
+    try:
+        from kongsberg_em_bridge import angular_response
+        return angular_response
+    except ImportError:
+        pass
+    path = (HERE.parents[2] / 'marine_tools' / 'kongsberg_em_bridge'
+            / 'kongsberg_em_bridge' / 'angular_response.py')
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location('mt_angular_response', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_marine_tools_mirror_ignores_a_mode_table():
+    """The SonarInfo-publishing mirror reads a table as an empty curve, never as garbage."""
+    mirror = _load_marine_tools_mirror()
+    if mirror is None:
+        pytest.skip('marine_tools kongsberg_em_bridge is not in this workspace')
+    points, tl_removed, alpha = mirror.load_angular_response_curve(str(MODE_TABLE_FIXTURE))
+    assert points == []
+    assert tl_removed is False and alpha is None
+
+
+# --- end to end over a bag with SonarInfo ---------------------------------
+
+INFO_TOPIC = '/bizzy/sonar/sonar_info'
+MODE_BAG_TOPICS = BAG_TOPICS + ((INFO_TOPIC, 'marine_interfaces/msg/SonarInfo'),)
+
+
+def _sonar_info(t_sec, mode_key):
+    """Return a SonarInfo for one of MODES stamped at t_sec."""
+    from marine_interfaces.msg import SonarInfo
+    m = MODES[mode_key]
+    msg = SonarInfo()
+    msg.header.stamp = _stamp(t_sec)
+    msg.header.frame_id = 'mbes'
+    msg.sonar_model = 'synthetic'
+    msg.pulse_lengths = [m['pulse']]
+    msg.bandwidths = [m['bw']]
+    msg.tx_signal_types = [m['type']]
+    msg.tvg_absorption_db_per_km = float('nan')
+    return msg
+
+
+def write_mode_bag(path, with_tf=False):
+    """
+    Bag alternating two modes every 50 pings at 20 Hz, the second 12 dB brighter.
+
+    The first five pings come before any SonarInfo. Each SonarInfo is stamped
+    just before the first ping of its mode but RECORDED 10 ms after it, so a
+    ping must be attributed by stamp, not by arrival order. ``with_tf`` adds a
+    static mbes frame and an earth transform inside the test box every second.
+    """
+    inside = geodetic_to_ecef(INSIDE[0], INSIDE[1], 0.0)
+    events = []
+    if with_tf:
+        events.append((99.0, '/bizzy/tf_static', _mbes_static()))
+        events += [(99.0 + k, '/bizzy/tf', _earth_tf(99.0 + k, inside)) for k in range(30)]
+    for i in range(400):
+        ts = 100.0 + 0.05 * i
+        mode = CW_KEY if (i // 50) % 2 else REF_KEY
+        if i == 5 or (i % 50 == 0 and i):
+            events.append((ts + 0.01, INFO_TOPIC, _sonar_info(ts - 0.001, mode)))
+        events.append((ts, TOPIC, _ping(ts, 'mbes', -30.0 + (12.0 if mode == CW_KEY else 0.0))))
+    events.sort(key=lambda e: e[0])
+    write_bag(path, events, MODE_BAG_TOPICS)
+
+
+def test_end_to_end_by_mode_attributes_pings_by_stamp(tmp_path, capsys):
+    """--by-mode over a bag: every ping lands in its own mode, the step is the offset."""
+    import json
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    out = tmp_path / 'table.csv'
+    diag = tmp_path / 'diag.json'
+    assert dar.main([str(bag), '-t', TOPIC, '-o', str(out), '--by-mode',
+                     '--diagnostics-out', str(diag)]) == 0
+    stdout = capsys.readouterr().out
+    assert '5 pings before the first SonarInfo were left out' in stdout
+    lines = out.read_text().splitlines()
+    assert lines[0] == '# format: angular-response-table v1'
+    summaries = {ln.split()[2]: ln for ln in lines if ln.startswith('# mode_summary:')}
+    assert set(summaries) == {REF_KEY, CW_KEY}
+    assert ' pings=195 ' in summaries[REF_KEY] and ' pings=200 ' in summaries[CW_KEY]
+    assert 'offset_db=12.000' in summaries[CW_KEY]
+    d = json.loads(diag.read_text())
+    assert d['pings_without_info'] == 5 and d['detections_read'] == 400
+    assert d['modes'][CW_KEY]['declared_tvg_model'] == 'UNKNOWN'
+    # The old loaders see nothing in the table.
+    mirror = _load_marine_tools_mirror()
+    if mirror is not None:
+        assert mirror.load_angular_response_curve(str(out))[0] == []
+
+
+def test_end_to_end_by_mode_with_box(tmp_path, capsys):
+    """--by-mode --box positions the pings and still attributes every kept one."""
+    bag = tmp_path / 'mode_bag_tf'
+    write_mode_bag(bag, with_tf=True)
+    out = tmp_path / 'table.csv'
+    assert dar.main([str(bag), '-t', TOPIC, '-o', str(out), '--by-mode',
+                     '--box'] + TEST_BOX) == 0
+    stdout = capsys.readouterr().out
+    assert 'kept 400 of 400 pings' in stdout
+    text = out.read_text()
+    assert '# box: 42.95 -70.65 43 -70.58' in text
+    assert 'offset_db=12.000' in text
+
+
+def test_by_mode_without_a_sonar_info_topic_is_an_error(tmp_path):
+    """--by-mode needs SonarInfo in at least one bag."""
+    bag = tmp_path / 'site_bag'
+    write_synthetic_bag(bag)
+    with pytest.raises(SystemExit, match='needs the SonarInfo topic'):
+        dar.main([str(bag), '-t', TOPIC, '-o', str(tmp_path / 'x.csv'), '--by-mode'])
+
+
+def test_switch_tracker_gap_discards_the_switch():
+    """A switch across a gap wider than the window has no before side."""
+    tr = dar.SwitchTracker(int(2e9), 45, dar.RANGE_CELL_COUNT)
+
+    def summary():
+        s = dar.OffsetSummary(45, dar.RANGE_CELL_COUNT)
+        s.n, s.s, s.pings = 10, -300.0, 1
+        return s
+    tr.add(int(1e9), 'A', summary())
+    tr.add(int(5e9), 'B', summary())          # 4 s gap: discarded
+    tr.add(int(5.5e9), 'A', summary())        # adjacent: kept
+    tr.add(int(5.4e9), 'A', summary())        # out of order: breaks the run
+    tr.finish()
+    assert len(tr.events) == 1 and tr.events[0].from_key == 'B'
+    assert tr.discarded == {'gap': 1, 'out_of_order': 1}
+
+
+def test_offset_summary_compact_gives_the_same_level():
+    """A compacted (sparse) summary corrects to the same level as the dense one."""
+    import numpy as np
+    s = dar.OffsetSummary(45, dar.RANGE_CELL_COUNT)
+    s.n, s.s, s.pings = 6, -180.0, 2
+    s.angle_counts[[5, 20]] = (4, 2)
+    s.cell_counts[[110, 111, 300]] = (1, 3, 2)
+    rel = np.linspace(0.0, -9.0, 45)
+    rng = np.linspace(5.0, -20.0, dar.RANGE_CELL_COUNT)
+    dense = s.level(rel, rng)
+    s.compact()
+    assert isinstance(s.cell_counts, tuple) and len(s.cell_counts[0]) == 3
+    assert s.level(rel, rng) == pytest.approx(dense, abs=1e-12)
