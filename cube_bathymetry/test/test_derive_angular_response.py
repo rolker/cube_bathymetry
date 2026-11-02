@@ -1733,6 +1733,7 @@ def test_by_mode_defaults():
     assert (args.adjacency_window_s, args.specular_exclusion_deg,
             args.misfit_threshold_db, args.range_ref_m) == (2.0, 10.0, 1.5, None)
     assert args.range_angle_edges == (30.0, 50.0)
+    assert args.range_node_spacing_decades == 0.25
 
 
 @pytest.mark.parametrize('text, edges', [('none', ()), ('30', (30.0,)),
@@ -1782,6 +1783,8 @@ def test_by_mode_flags_need_by_mode(flag, capsys):
 
 
 @pytest.mark.parametrize('flag', [['--range-ref-m', '0'], ['--adjacency-window-s', '-1'],
+                                  ['--range-node-spacing-decades', '0.01'],
+                                  ['--range-node-spacing-decades', '2'],
                                   ['--specular-exclusion-deg', '85'],
                                   ['--misfit-threshold-db', 'nan'],
                                   ['--reference-mode', 'a,b']])
@@ -2146,6 +2149,23 @@ def test_non_separable_range_term_needs_the_angle_groups():
     assert max(abs(m) for _x, _n, m in one['binned_residuals']['all']) < 1.0
 
 
+def test_finer_nodes_follow_a_step_the_quarter_decade_nodes_cannot():
+    """A 6 dB step inside a quarter decade: eighth-decade nodes carry it, the misfit drops."""
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) + dar_where(r > 21.0, -6.0, 0.0))
+    coarse = b.finish(REF_KEY, range_ref_m=10.0)['modes'][REF_KEY]
+    fine = b.finish(REF_KEY, range_ref_m=10.0, node_spacing_decades=0.125)['modes'][REF_KEY]
+    assert coarse['node_spacing_decades'] == 0.25 and fine['node_spacing_decades'] == 0.125
+    assert coarse['misfit_exceeded']
+    assert fine['misfit_max_db'] < coarse['misfit_max_db'] / 2.0
+    for g in fine['groups']:
+        assert all(abs(x / 0.125 - round(x / 0.125)) < 1e-9 for x in g['nodes'])
+    hd = table_header(dar.mode_table_lines(
+        b.finish(REF_KEY, range_ref_m=10.0, node_spacing_decades=0.125), ['s']))
+    assert hd['range_node_spacing_decades'] == '0.125'
+
+
 def test_junk_end_node_is_trimmed_and_the_anchor_moves_to_the_span():
     """
     A sliver of junk at long range must not anchor the term (Appledore run 2).
@@ -2320,6 +2340,7 @@ def hand_built_table():
         'range_ref_m': 18.9, 'range_ref_source': 'median slant range of the reference mode',
         'bin_width_deg': 2.0, 'specular_exclusion_deg': 10.0, 'window_sec': 2.0,
         'misfit_threshold_db': 1.5, 'range_angle_groups_deg': [(10.0, 30.0), (30.0, 90.0)],
+        'node_spacing_decades': 0.25,
         'modes': {
             REF_KEY: mode(93890, [(1.0, 5000, 25.5, 9.25, 0.0), (11.0, 4000, 24.7, 6.5, -0.8),
                                   (41.0, 3000, 18.3, 7.0, -7.2)],
@@ -2349,6 +2370,7 @@ def test_mode_table_format():
     assert hd['box'] == '42.976 -70.628 43.002 -70.596'
     assert hd['source_bags'] == 'bag_a,bag_b'
     assert hd['range_angle_groups_deg'] == '10-30,30-90'
+    assert hd['range_node_spacing_decades'] == '0.25'
     assert 'offset_meaning' in hd and 'range_term_lookup' in hd
     assert 'tl_removed' not in hd and 'absorption_db_per_m' not in hd
     terms = [ln for ln in lines if ln.startswith('# range_term: ')]

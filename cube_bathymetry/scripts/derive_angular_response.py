@@ -755,6 +755,11 @@ def parse_args(argv):
     m.add_argument('--misfit-threshold-db', type=float, default=None,
                    help='flag a mode whose binned post-fit residual exceeds this '
                         '(default %g dB)' % DEFAULT_MISFIT_THRESHOLD_DB)
+    m.add_argument('--range-node-spacing-decades', type=float, default=None,
+                   help='spacing of the range-term nodes in decades of log10(R / R0) '
+                        '(default %g; the misfit bins are half of it; finer nodes '
+                        'follow sub-node structure at the cost of support per node)'
+                        % DEFAULT_RANGE_NODE_SPACING_DECADES)
     m.add_argument('--range-angle-edges', default=None,
                    help='|angle| edges, degrees, comma-separated, that split the '
                         'beams outside the specular band into the groups the range '
@@ -842,6 +847,7 @@ BY_MODE_ONLY_FLAGS = (('--sonar-info-topic', 'sonar_info_topic'),
                       ('--specular-exclusion-deg', 'specular_exclusion_deg'),
                       ('--misfit-threshold-db', 'misfit_threshold_db'),
                       ('--range-angle-edges', 'range_angle_edges'),
+                      ('--range-node-spacing-decades', 'range_node_spacing_decades'),
                       ('--accumulation-cache', 'accumulation_cache'),
                       ('--diagnostics-out', 'diagnostics_out'))
 
@@ -869,7 +875,12 @@ def check_by_mode_args(p, args):
         args.specular_exclusion_deg = DEFAULT_SPECULAR_EXCLUSION_DEG
     if args.misfit_threshold_db is None:
         args.misfit_threshold_db = DEFAULT_MISFIT_THRESHOLD_DB
+    if args.range_node_spacing_decades is None:
+        args.range_node_spacing_decades = DEFAULT_RANGE_NODE_SPACING_DECADES
     for flag, value, ok in (
+            ('--range-node-spacing-decades', args.range_node_spacing_decades,
+             math.isfinite(args.range_node_spacing_decades)
+             and 2.0 * RANGE_CELL_DECADES <= args.range_node_spacing_decades <= 1.0),
             ('--range-ref-m', args.range_ref_m,
              args.range_ref_m is None or (math.isfinite(args.range_ref_m)
                                           and 0.0 < args.range_ref_m < 10000.0)),
@@ -1526,7 +1537,7 @@ DEFAULT_ADJACENCY_WINDOW_SEC = 2.0
 DEFAULT_SPECULAR_EXCLUSION_DEG = 10.0
 DEFAULT_MISFIT_THRESHOLD_DB = 1.5
 # The range term's nodes: every quarter decade of log10(R / R0), node 0 at R0.
-RANGE_NODE_SPACING_DECADES = 0.25
+DEFAULT_RANGE_NODE_SPACING_DECADES = 0.25
 # Samples are accumulated in fixed cells of log10(R) (absolute, metres) so the
 # node grid can be placed relative to R0 after the pass, when R0 is known. A
 # cell is a hundredth of a decade; the fit evaluates each cell at its centre, so
@@ -1536,7 +1547,7 @@ RANGE_CELL_LOG10_MIN = -1.0          # 0.1 m
 RANGE_CELL_COUNT = 500               # up to 10 km
 # The misfit diagnostic bins residuals at half the node spacing, so structure
 # between two nodes (a step inside a quarter decade) shows.
-MISFIT_BIN_DECADES = 0.125
+MISFIT_BINS_PER_NODE = 2
 # The range term is identified only by range variation WITHIN an angle bin
 # (depth change); below this pooled within-bin standard deviation of log10 R
 # it is not fitted (a flat single-depth bottom spreads ~0.005 decade).
@@ -2061,10 +2072,12 @@ class ModeTableBuilder:
         self.tracker.add(ping_ns, key, summary)
 
     def finish(self, reference_mode=DEFAULT_REFERENCE_MODE, range_ref_m=None,
-               misfit_threshold_db=DEFAULT_MISFIT_THRESHOLD_DB):
+               misfit_threshold_db=DEFAULT_MISFIT_THRESHOLD_DB,
+               node_spacing_decades=DEFAULT_RANGE_NODE_SPACING_DECADES):
         """Fit every mode and the offsets; return the result dict (see derive_mode_table)."""
         self.tracker.finish()
-        return derive_mode_table(self, reference_mode, range_ref_m, misfit_threshold_db)
+        return derive_mode_table(self, reference_mode, range_ref_m, misfit_threshold_db,
+                                 node_spacing_decades)
 
     def to_state(self):
         """
@@ -2199,7 +2212,8 @@ def _solve_additive(nb, sb, ssb, basis, penalty):
     return beta[:n_bins], beta[n_bins:], sigma2 * inv[n_bins:, n_bins:], sigma2
 
 
-def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n, min_share=0.0):
+def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n, min_share=0.0,
+                      bin_decades=DEFAULT_RANGE_NODE_SPACING_DECADES / MISFIT_BINS_PER_NODE):
     """
     Mean post-fit residual per eighth-decade bin of log10(R/R0), pooled and per angle group.
 
@@ -2211,7 +2225,7 @@ def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n, min_share=0.0):
     """
     import numpy as np
     resid = sb - nb * (a[:, None] + r_bin)
-    q = np.round(x_rel / MISFIT_BIN_DECADES).astype(np.int64)
+    q = np.round(x_rel / bin_decades).astype(np.int64)
     out = {}
     for name, mask in (('all', np.ones(nb.shape[0], dtype=bool)),) + tuple(groups):
         rows = []
@@ -2223,7 +2237,7 @@ def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n, min_share=0.0):
                 sel = q == qi
                 n = float(n_c[sel].sum())
                 if n >= floor:
-                    rows.append((float(qi * MISFIT_BIN_DECADES), int(round(n)),
+                    rows.append((float(qi * bin_decades), int(round(n)),
                                  float(e_c[sel].sum() / n)))
         out[name] = rows
     return out
@@ -2299,11 +2313,11 @@ def parse_range_angle_edges(text):
     return edges
 
 
-def _trim_span(nb, x_rel):
+def _trim_span(nb, x_rel, spacing=DEFAULT_RANGE_NODE_SPACING_DECADES):
     """
     Return ``(nodes, cell_mask, trimmed)`` for one group: its node grid after trimming the ends.
 
-    The candidate grid covers every populated cell at RANGE_NODE_SPACING_DECADES;
+    The candidate grid covers every populated cell at ``spacing`` decades;
     an END node carrying under ``max(MIN_SAMPLES_PER_BIN, NODE_MIN_SHARE *
     total)`` beams is dropped, repeatedly, down to two nodes. ``cell_mask``
     keeps the cells within the kept span (so the fit, the intercepts and the
@@ -2316,9 +2330,9 @@ def _trim_span(nb, x_rel):
     populated = np.nonzero(counts > 0)[0]
     if not len(populated):
         return np.zeros(1), np.zeros(nb.shape[1], dtype=bool), []
-    lo = math.floor(x_rel[populated[0]] / RANGE_NODE_SPACING_DECADES)
-    hi = math.ceil(x_rel[populated[-1]] / RANGE_NODE_SPACING_DECADES)
-    nodes = np.arange(lo, hi + 1) * RANGE_NODE_SPACING_DECADES
+    lo = math.floor(x_rel[populated[0]] / spacing)
+    hi = math.ceil(x_rel[populated[-1]] / spacing)
+    nodes = np.arange(lo, hi + 1) * spacing
     floor = max(float(MIN_SAMPLES_PER_BIN), NODE_MIN_SHARE * float(counts.sum()))
     trimmed = []
     while len(nodes) > 2:
@@ -2335,7 +2349,8 @@ def _trim_span(nb, x_rel):
     return nodes, cell_mask, sorted(trimmed)
 
 
-def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model):
+def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model,
+               spacing=DEFAULT_RANGE_NODE_SPACING_DECADES):
     """
     Fit ``y = a_bin + r(log10(R / R0))`` on one angle group's cell statistics.
 
@@ -2353,7 +2368,7 @@ def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model):
     ``slope_db_per_decade``/``slope_se``.
     """
     import numpy as np
-    nodes, cell_mask, trimmed = _trim_span(nb, x_rel)
+    nodes, cell_mask, trimmed = _trim_span(nb, x_rel, spacing)
     all_total = float(nb.sum())
     nb = np.where(cell_mask[None, :], nb, 0.0)
     sb = np.where(cell_mask[None, :], sb, 0.0)
@@ -2439,7 +2454,8 @@ def range_status_summary(groups):
     return 'partial (%d of %d groups fitted)' % (fitted, len(groups))
 
 
-def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='nodes'):
+def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='nodes',
+             spacing=DEFAULT_RANGE_NODE_SPACING_DECADES):
     """
     Fit one mode's model ``L = A(theta) + r_g(log10(R / R0))``, ``g`` the angle group of ``theta``.
 
@@ -2481,7 +2497,8 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
         bin_abs = np.concatenate([np.arange(n_half), np.arange(n_half)])
     bin_group = bin_groups(groups, n_half)
     populated_bins = fit_n.sum(axis=1) > 0
-    result = {'range_model': range_model, 'groups': [], 'nonspecular_samples': 0}
+    result = {'range_model': range_model, 'groups': [], 'nonspecular_samples': 0,
+              'node_spacing_decades': spacing}
     r_cell = np.zeros((len(groups), RANGE_CELL_COUNT))
     cell_masks = np.zeros((len(groups), RANGE_CELL_COUNT), dtype=bool)
     a_all = np.zeros(fit_n.shape[0])
@@ -2489,7 +2506,7 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
     for g, (lo_bin, hi_bin) in enumerate(groups):
         use = (bin_abs >= lo_bin) & (bin_abs < hi_bin) & populated_bins
         a, r_g, cell_mask, info = _fit_group(fit_n[use], fit_s[use], fit_ss[use], x_abs,
-                                             x_rel, range_model)
+                                             x_rel, range_model, spacing)
         info['lo_deg'], info['hi_deg'] = group_bounds_deg((lo_bin, hi_bin), bin_width_deg)
         info['lo_bin'], info['hi_bin'] = lo_bin, hi_bin
         r_cell[g] = r_g
@@ -2545,7 +2562,8 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
             diag_groups.append(('%g-%g deg%s' % (lo_deg, hi_deg, tag),
                                 (lower_bin >= p_lo) & (lower_bin < p_hi)))
     binned = _binned_residuals(nb, sb, a_all[use_all], r_bin, x_rel, diag_groups,
-                               MIN_SAMPLES_PER_BIN, MISFIT_MIN_SHARE)
+                               MIN_SAMPLES_PER_BIN, MISFIT_MIN_SHARE,
+                               spacing / MISFIT_BINS_PER_NODE)
     result['binned_residuals'] = binned
     result['misfit_max_db'], result['misfit_rms_db'] = _misfit_stats(binned)
     return result
@@ -2666,7 +2684,8 @@ def solve_offsets(events, fits, reference):
     return offsets, pairs, {'chi2': chi2, 'dof': dof}
 
 
-def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db):
+def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db,
+                      node_spacing_decades=DEFAULT_RANGE_NODE_SPACING_DECADES):
     """
     Fit every mode and the offsets; return the table as a dict.
 
@@ -2703,9 +2722,10 @@ def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db)
     for key in sorted(sampled):
         n, s, ss = cells[key]
         acc = builder.modes[key]
-        fit = fit_mode(n, s, ss, builder.bin_width_deg, builder.groups, log_r0)
+        fit = fit_mode(n, s, ss, builder.bin_width_deg, builder.groups, log_r0,
+                       spacing=node_spacing_decades)
         scalar = fit_mode(n, s, ss, builder.bin_width_deg, builder.groups, log_r0,
-                          range_model='scalar')
+                          range_model='scalar', spacing=node_spacing_decades)
         fit['scalar_comparison'] = {
             'misfit_max_db': scalar['misfit_max_db'],
             'misfit_rms_db': scalar['misfit_rms_db'],
@@ -2766,6 +2786,7 @@ def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db)
                                        for g in builder.groups],
             'range_angle_edges_deg': list(builder.range_angle_edges_deg),
             'window_sec': builder.window_sec, 'misfit_threshold_db': misfit_threshold_db,
+            'node_spacing_decades': node_spacing_decades,
             'modes': fits, 'offsets': offsets, 'pairs': pairs, 'chain': chain,
             'switches': {'events': len(builder.tracker.events),
                          'discarded': dict(builder.tracker.discarded)},
@@ -2794,7 +2815,7 @@ def mode_table_lines(table, source_bags, box=None):
              '# reference_mode_source: %s' % table['reference_source'],
              '# range_ref_m: %.6g' % table['range_ref_m'],
              '# range_ref_source: %s' % table['range_ref_source'],
-             '# range_node_spacing_decades: %g' % RANGE_NODE_SPACING_DECADES,
+             '# range_node_spacing_decades: %g' % table['node_spacing_decades'],
              '# range_angle_groups_deg: %s' % ','.join(
                  '%g-%g' % (lo, hi) for lo, hi in table['range_angle_groups_deg']),
              '# range_term_lookup: a beam uses the range rows whose angle_lo_deg <= '
@@ -3117,7 +3138,8 @@ def main_by_mode(args, source_bags):
         if cache is not None:
             write_accumulation_cache(cache, builder, n_msgs, identity)
             print('wrote the accumulated statistics to %s' % cache)
-    table = builder.finish(args.reference_mode, args.range_ref_m, args.misfit_threshold_db)
+    table = builder.finish(args.reference_mode, args.range_ref_m, args.misfit_threshold_db,
+                           args.range_node_spacing_decades)
     for warning in table['warnings']:
         print(warning, file=sys.stderr)
     write_text_atomically(args.output, ''.join(
