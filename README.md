@@ -929,13 +929,14 @@ slant range `twtt * c / 2` and `g` the angle group `|theta|` falls in:
   leaving out the specular band (`--specular-exclusion-deg`, default 10); every
   bin belongs to exactly one group, so the joint fit separates exactly into one
   fit per group. The node grid covers the group's populated ranges, but an END
-  node carrying under 0.1 % of the group's beams (and under 200) is trimmed,
-  repeatedly: such a node describes the mode's rare excursions outside its
+  node carrying fewer beams than the larger of 200 and 0.1 % of the group's is
+  trimmed, repeatedly: such a node describes the mode's rare excursions outside its
   operating range, typically junk detections, and on Appledore one of them
   held the 20 µs mode's R0 node (6e3 of 1e8 beams, 60 dB off) and anchored the
-  whole term. Beams beyond the kept span do not shape the fit, the intercepts
-  or the misfit; they are corrected with the clamped end value, and their
-  count is written per group (`out_of_span`). `r_g` is 0 at R0 when R0 lies
+  whole term. Beams beyond the kept span do not shape the fit or the misfit;
+  they are corrected with the clamped end value at apply time and enter the
+  angular intercepts `A` the same way, and their count is written per group
+  (`out_of_span`). `r_g` is 0 at R0 when R0 lies
   inside the span, else at the nearest end node. The node spacing is
   `--range-node-spacing-decades` (default 0.25; the misfit bins are half of
   it). Finer nodes follow finer structure at the cost of support per node; on
@@ -966,7 +967,8 @@ slant range `twtt * c / 2` and `g` the angle group `|theta|` falls in:
   switches are not used), then chained to `--reference-mode` (default
   `FMU_1000us_24000Hz_500kHz`, the M3's 1 ms / 24 kHz FM-up mode) by weighted
   least squares. A mode with no switch path to the reference is written
-  `offset_anchored=false` with offset 0. When the reference mode is absent the
+  `offset_anchored=false` and no offset (empty columns; the table must not be
+  applied to it). When the reference mode is absent the
   most-sampled mode is used and the run warns that the offsets are not
   comparable with tables from other campaigns.
 - **Known bias.** The switch happens because the depth changed, so the
@@ -1023,14 +1025,17 @@ whose `angle_lo_deg <= |angle| < angle_hi_deg`, interpolated linearly in
 with no `range` rows has a zero term. The corrected value is
 `raw - db_relative_to_nadir - r_g - offset_db_vs_ref`, which puts every mode on
 the reference mode's nadir level at R0, and the beam is weighted by
-`1 / var_db2` of its angle bin. Three cases the loader must handle, all
+`1 / var_db2` of its angle bin. The cases the loader must handle are all
 written as EMPTY fields rather than plausible numbers: a mode with
 `offset_anchored=false` has no measured offset (both offset columns empty) and
 **must not be corrected by this table** (it is the fallback policy's case, or a
-loud failure, never a zero offset); an angle bin with `n < 2` has an empty
-`var_db2` and `se_db` and cannot be weighted, so a beam in it is uncorrectable
-in the same way; and `declared_tvg_absorption_db_per_km` is `nan` for a
-`MIXED` or undeclared state. `x` is written with 10 significant digits, so any
+loud failure, never a zero offset); an angle bin whose `var_db2` is empty
+(`n < 2`, or a variance under 0.0005 dB² that would print as 0.000) cannot be
+weighted, so a beam in it is uncorrectable in the same way, and a loader never
+divides by a zero variance; `se_db` is empty wherever it is not finite, on
+angle and range rows alike; columns that do not apply to a row are empty; and
+`declared_tvg_absorption_db_per_km` is `nan` for a `MIXED` or undeclared
+state (the only `nan` the table writes). `x` is written with 10 significant digits, so any
 bin width or node spacing round-trips; a loader matches nodes by value and
 angle bins by centre, never by re-deriving them from the header. The header
 states these rules once more (`# empty_fields:`, `# offset_meaning:`).

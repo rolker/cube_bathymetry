@@ -867,6 +867,9 @@ def check_by_mode_args(p, args):
                 '40*log10(R) + 2*alpha*R add-back (cube_bathymetry#172)')
     if args.sonar_info_topic is None:
         args.sonar_info_topic = default_sonar_info_topic(args.topic)
+    if args.sonar_info_topic == args.topic:
+        p.error('--sonar-info-topic %r is the detections topic itself; the SonarInfo '
+                'stream must be a separate topic' % args.topic)
     if args.reference_mode is None:
         args.reference_mode = DEFAULT_REFERENCE_MODE
     if args.adjacency_window_s is None:
@@ -896,15 +899,17 @@ def check_by_mode_args(p, args):
             p.error('%s %r is out of range' % (flag, value))
     if not args.reference_mode or any(c in args.reference_mode for c in ', \t\r\n'):
         p.error('--reference-mode %r is not a mode key' % args.reference_mode)
-    if args.range_angle_edges is None:
-        args.range_angle_edges = DEFAULT_RANGE_ANGLE_EDGES_DEG
-    else:
-        try:
+    try:
+        if args.range_angle_edges is None:
+            args.range_angle_edges = DEFAULT_RANGE_ANGLE_EDGES_DEG
+        else:
             args.range_angle_edges = parse_range_angle_edges(args.range_angle_edges)
-            range_angle_groups(args.bin_width_deg, args.specular_exclusion_deg,
-                               args.range_angle_edges)
-        except ValueError as e:
-            p.error(str(e))
+        # The default edges can leave an empty group too (a wide bin width or a
+        # large specular exclusion): validate whatever will be used.
+        range_angle_groups(args.bin_width_deg, args.specular_exclusion_deg,
+                           args.range_angle_edges)
+    except ValueError as e:
+        p.error(str(e))
 
 
 def francois_garrison_absorption_db_per_m(
@@ -1569,6 +1574,10 @@ NODE_MIN_SHARE = 1e-3
 # share of its group's fitted beams (and MIN_SAMPLES_PER_BIN), for the same
 # reason: a 20 dB residual on 0.001 % of the beams is noise, not structure.
 MISFIT_MIN_SHARE = 1e-3
+# An angle bin's variance below this (it would print as 0.000 dB^2 with the
+# table's three decimals) is written EMPTY: a loader weighting by 1/var_db2
+# must never see a zero.
+MIN_WRITTEN_VARIANCE_DB2 = 0.0005
 # A mode pair needs this many switches before its offset is used.
 MIN_SWITCHES_PER_PAIR = 3
 # Up- vs down-switch offsets disagree when they differ by more than this AND by
@@ -2353,7 +2362,9 @@ def _trim_span(nb, x_rel, spacing=DEFAULT_RANGE_NODE_SPACING_DECADES):
         # of a node just trimmed to its neighbour (cross-model review, #172).
         inside = (x_rel >= nodes[0] - 1e-9) & (x_rel <= nodes[-1] + 1e-9)
         support = tent_weights(x_rel, nodes).T @ (counts * inside)
-        if support[0] < floor:
+        # The weaker end goes first: with three nodes and both ends under the
+        # floor only one can go, and it must be the one with less support.
+        if support[0] < floor and support[0] <= support[-1]:
             trimmed.append(float(nodes[0]))
             nodes = nodes[1:]
         elif support[-1] < floor:
@@ -2676,7 +2687,8 @@ def solve_offsets(events, fits, reference):
                 component.add(nxt)
                 stack.append(nxt)
     unknown = sorted(component - {reference})
-    offsets = {key: {'offset_db': 0.0, 'se_db': float('nan'), 'anchored': False}
+    # An unanchored mode has NO offset: NaN (null in the JSON), never 0.0.
+    offsets = {key: {'offset_db': float('nan'), 'se_db': float('nan'), 'anchored': False}
                for key in fits}
     if reference in offsets:
         offsets[reference] = {'offset_db': 0.0, 'se_db': 0.0, 'anchored': True}
@@ -2796,9 +2808,9 @@ def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db,
     offsets, pairs, chain = solve_offsets(builder.tracker.events, fits, reference)
     unanchored = sorted(k for k, v in offsets.items() if not v['anchored'])
     if unanchored:
-        warnings.append('warning: no switch path to the reference mode for %s; their '
-                        'offsets are 0 and offset_anchored=false'
-                        % ', '.join(unanchored))
+        warnings.append('warning: no switch path to the reference mode for %s; they have '
+                        'no offset (offset_anchored=false, empty offset columns) and the '
+                        'table must not be applied to them' % ', '.join(unanchored))
     for p in pairs:
         if p['directions_agree'] is False:
             warnings.append('warning: offset %s disagrees between switch directions by '
@@ -2860,10 +2872,14 @@ def mode_table_lines(table, source_bags, box=None):
              'raw - db_relative_to_nadir - r - offset_db_vs_ref, on the reference '
              "mode's nadir level at R0; a mode with offset_anchored=false has NO "
              'offset (the columns are empty) and must not be corrected by this table',
-             '# empty_fields: var_db2 and se_db are empty where n < 2 (the bin cannot be '
-             'weighted: treat the beam as uncorrectable); offset columns are empty for '
-             'an unanchored mode; declared_tvg_absorption_db_per_km is nan for MIXED or '
-             'an undeclared absorption; x is written with 10 significant digits']
+             '# empty_fields: var_db2 is empty where it cannot weight a beam (n < 2, or a '
+             'variance under %g dB^2 that would print as 0.000): treat such a beam as '
+             'uncorrectable; se_db is empty wherever it is not finite; the offset columns '
+             'are empty for an unanchored mode; declared_tvg_absorption_db_per_km is nan '
+             'for MIXED or an undeclared absorption; columns that do not apply to a row '
+             '(var_db2 and db_relative_to_nadir on range rows, the angle bounds on angle '
+             'rows) are empty; x is written with 10 significant digits'
+             % MIN_WRITTEN_VARIANCE_DB2]
     if box is not None:
         lines.append('# box: %s' % ' '.join('%.9g' % v for v in box))
     lines.append('# source_bags: %s' % ','.join(source_bags))
@@ -2897,19 +2913,22 @@ def mode_table_lines(table, source_bags, box=None):
                          fit['declared_tvg_model'],
                          _fmt(fit['declared_tvg_absorption_db_per_km'], '%.6g')))
         for centre, cnt, level, var, rel in fit['angle']:
-            se = math.sqrt(var / cnt) if math.isfinite(var) else float('nan')
-            var_text = _fmt(var, '%.3f') if math.isfinite(var) else ''
+            # A variance that is not finite, or would print as 0.000 (identical
+            # beams), cannot weight anything: the field is left EMPTY, so a
+            # loader never divides by zero (review round 2).
+            weighable = math.isfinite(var) and var >= MIN_WRITTEN_VARIANCE_DB2
+            se = math.sqrt(var / cnt) if weighable else float('nan')
             # x is written with %.10g so any bin width or node spacing round-trips.
             lines.append('%s,angle,%.10g,,,%.3f,%d,%s,%+.3f,%s,%s'
-                         % (key, centre, level, cnt, var_text, rel,
-                            _fmt(se, '%.3f') if math.isfinite(se) else '', tail))
+                         % (key, centre, level, cnt, _fmt(var, '%.3f') if weighable else '',
+                            rel, _fmt(se, '%.3f') if math.isfinite(se) else '', tail))
         for g in fit['groups']:
             if g['range_status'] != 'fitted':
                 continue
             for x, r, se, sup in zip(g['nodes'], g['r'], g['r_se'], g['r_support']):
-                lines.append('%s,range,%.10g,%g,%g,%.3f,%d,,,%.3f,%s'
+                lines.append('%s,range,%.10g,%g,%g,%.3f,%d,,,%s,%s'
                              % (key, x, g['lo_deg'], g['hi_deg'], r, int(round(sup)),
-                                se, tail))
+                                _fmt(se, '%.3f') if math.isfinite(se) else '', tail))
     return lines
 
 
@@ -3010,10 +3029,11 @@ def accumulate_by_mode(bag_paths, topic, info_topic, builder, box=None,
                      if kind is not None and type_name == 'tf2_msgs/msg/TFMessage'}
         wanted = [t for t in (topic, info_topic) if t in type_map] + sorted(kinds)
         if not wanted:
-            if box is None:
-                raise SystemExit("error: bag %s has neither '%s' nor '%s'"
-                                 % (path, topic, info_topic))
-            continue
+            # A bag with none of the wanted topics is not part of this survey,
+            # with or without --box: refusing beats listing it in source_bags.
+            raise SystemExit("error: bag %s has neither '%s' nor '%s'%s"
+                             % (path, topic, info_topic,
+                                ' nor a TF topic' if box is not None else ''))
         sources.append((start_ns, functools.partial(open_reader, path, wanted)))
         tf_topics.append(kinds)
         msg_types.append({t: get_message(type_map[t]) for t in (topic, info_topic)
@@ -3103,10 +3123,10 @@ def bag_identity(bag_path):
         if os.path.isdir(real):
             for name in sorted(os.listdir(real)):
                 st = os.stat(os.path.join(real, name))
-                files.append([name, st.st_size, int(st.st_mtime)])
+                files.append([name, st.st_size, st.st_mtime_ns])
         else:
             st = os.stat(real)
-            files.append([os.path.basename(real), st.st_size, int(st.st_mtime)])
+            files.append([os.path.basename(real), st.st_size, st.st_mtime_ns])
     except OSError:
         files.append(['?', -1, -1])
     return [real, files]
@@ -3126,16 +3146,18 @@ def accumulation_cache_identity(args, source_bags):
             'range_angle_edges': list(args.range_angle_edges)}
 
 
-def check_cache_trust(path):
+def check_cache_trust(path, fd):
     """
     Refuse a cache file this user does not own or that others can write (SystemExit).
 
     The cache is a pickle, which runs code when loaded; the documented rule
     is to load only a file this script wrote for this user, and this is the
-    check that enforces the part a stat can see.
+    check that enforces the part a stat can see. ``fd`` is the already-open
+    descriptor the bytes will be read from, so what is checked is what is
+    loaded (no window between a stat by name and the open).
     """
     try:
-        st = os.stat(path)
+        st = os.fstat(fd)
     except OSError as e:
         raise SystemExit('error: --accumulation-cache %s cannot be read: %s' % (path, e))
     if not stat.S_ISREG(st.st_mode):
@@ -3159,12 +3181,24 @@ def load_accumulation_cache(path, identity):
     are named).
     """
     import pickle
-    check_cache_trust(path)
     try:
-        with open(path, 'rb') as f:
+        # O_NONBLOCK so a FIFO at the path cannot stall the open; the regular-file
+        # check then rejects it before anything is read.
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
+    except OSError as e:
+        raise SystemExit('error: --accumulation-cache %s cannot be read: %s' % (path, e))
+    try:
+        check_cache_trust(path, fd)
+        with os.fdopen(fd, 'rb') as f:
+            fd = None
             data = pickle.load(f)
+    except SystemExit:
+        raise
     except Exception as e:   # any unpickling failure is "not a cache"
         raise SystemExit('error: --accumulation-cache %s cannot be read: %s' % (path, e))
+    finally:
+        if fd is not None:
+            os.close(fd)
     found = data.get('identity') if isinstance(data, dict) else None
     if not isinstance(found, dict) or found.get('format') != ACCUMULATION_CACHE_FORMAT:
         raise SystemExit('error: --accumulation-cache %s is not a %s file'
@@ -3231,6 +3265,10 @@ def main_by_mode(args, source_bags):
                                     box=args.box, box_stats=box_stats, corrupt=corrupt)
         usable = box_stats is None or box_stats['kept'] > 0
         if usable and len(builder.history) == 0:
+            # The corrupt-message report is often the reason: print it first.
+            warning = corrupt_report(corrupt)
+            if warning is not None:
+                print(warning, file=sys.stderr)
             raise SystemExit("error: no SonarInfo message on '%s' could be read; --by-mode "
                              'needs it' % args.sonar_info_topic)
         if cache is not None and usable:

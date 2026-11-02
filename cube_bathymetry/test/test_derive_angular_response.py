@@ -1783,6 +1783,7 @@ def test_by_mode_flags_need_by_mode(flag, capsys):
 
 
 @pytest.mark.parametrize('flag', [['--range-ref-m', '0'], ['--adjacency-window-s', '-1'],
+                                  ['--sonar-info-topic', '/sonar/detections'],
                                   ['--range-node-spacing-decades', '0.01'],
                                   ['--range-node-spacing-decades', '2'],
                                   ['--specular-exclusion-deg', '85'],
@@ -1959,8 +1960,8 @@ def test_offsets_chain_through_an_intermediate_mode_and_flag_unanchored():
     assert off[deep]['offset_db'] == pytest.approx(17.0 - 15.0 * anchor, abs=0.5)
     assert off[deep]['anchored'] and off[deep]['se_db'] > off[CW_KEY]['se_db']
     assert not any(set(p['modes']) == {REF_KEY, deep} for p in table['pairs'])
-    assert off[iso] == {'offset_db': 0.0, 'se_db': off[iso]['se_db'], 'anchored': False}
-    assert math.isnan(off[iso]['se_db'])
+    assert off[iso]['anchored'] is False
+    assert math.isnan(off[iso]['offset_db']) and math.isnan(off[iso]['se_db'])
     assert any('no switch path to the reference mode for %s' % iso in w
                for w in table['warnings'])
     assert table['switches']['discarded'].get('gap', 0) >= 1
@@ -2200,6 +2201,21 @@ def test_fit_bin_emptied_by_the_span_is_dropped_not_nan():
     assert fit['nonspecular_samples'] > 0
 
 
+def test_trimming_drops_the_weaker_end_first():
+    """Three nodes, both ends under the floor: the end with less support goes, not the first."""
+    import numpy as np
+    x_rel = dar.cell_log10_range() - 1.0
+    cell = (lambda x: int(np.argmin(np.abs(x_rel - x))))
+    nb = np.zeros((1, dar.RANGE_CELL_COUNT))
+    nb[0, cell(-0.25)] = 190                  # under the floor of 200...
+    nb[0, cell(0.0)] = 300
+    nb[0, cell(0.25)] = 1                     # ...but this end is the junk
+    nodes, _mask, trimmed = dar._trim_span(nb, x_rel)
+    # -0.5 is the empty grid node below the first populated cell; then, of the
+    # two ends under the floor, 0.25 (1 beam) goes and -0.25 (190) stays.
+    assert trimmed == [-0.5, 0.25] and list(nodes) == [-0.25, 0.0]
+
+
 def test_adjacent_junk_end_nodes_are_both_trimmed():
     """Junk spread over two end nodes is trimmed node by node; a trimmed node lends no support."""
     import numpy as np
@@ -2237,6 +2253,11 @@ def test_edges_none_with_no_bin_outside_the_specular_band_is_an_error(capsys):
     err = parse_error(['--by-mode', '--bin-width-deg', '45', '--specular-exclusion-deg', '79',
                        '--range-angle-edges', 'none'], capsys)
     assert 'no angle bin lies outside' in err
+    # The DEFAULT edges are validated too: 30 deg bins put both 30 and 50 on bin 1 / 2
+    # boundaries, but a 60 deg exclusion leaves the 30 edge inside the band.
+    err = parse_error(['--by-mode', '--bin-width-deg', '30', '--specular-exclusion-deg', '60'],
+                      capsys)
+    assert 'empty group' in err
 
 
 def test_mode_key_accepts_numpy_arrays():
@@ -2341,10 +2362,11 @@ def test_accumulation_cache_round_trip(tmp_path, capsys):
     # The bag's CONTENT is part of the identity: a touched bag file misses the cache.
     import time
     victim = next(bag.iterdir())
+    before = victim.stat()
     os.utime(victim, (time.time() + 100, time.time() + 100))
     with pytest.raises(SystemExit, match='different.*bags'):
         dar.main(base + ['-o', str(out2)])
-    os.utime(victim, None)
+    os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))   # put it back exactly
     # So is the path: the same bag reached through another directory name.
     alias = tmp_path / 'elsewhere'
     alias.mkdir()
@@ -2501,9 +2523,19 @@ def hand_built_table():
                           group(30.0, 90.0, [], [], [], [],
                                 status='zero: 120 non-specular samples, fewer than 200')],
                          declared=('40LOGR', 80.0), misfit=2.0),
+            # An unanchored mode (no switch path to the reference): empty offset
+            # columns; its 21 deg bin has identical beams (variance 0: empty too).
+            'FMU_5000us_24000Hz_500kHz': mode(
+                169, [(1.0, 40, 3.3, 8.0, 0.0), (21.0, 12, 1.1, 0.0, -2.2)],
+                [group(10.0, 30.0, [0.0, 0.25], [0.0, -0.4], [0.0, nan], [500.0, 300.0]),
+                 group(30.0, 90.0, [], [], [], [],
+                       status='zero: 96 non-specular samples, fewer than 200')],
+                misfit=4.1),
         },
         'offsets': {REF_KEY: {'offset_db': 0.0, 'se_db': 0.0, 'anchored': True},
-                    CW_KEY: {'offset_db': -17.25, 'se_db': 0.31, 'anchored': True}},
+                    CW_KEY: {'offset_db': -17.25, 'se_db': 0.31, 'anchored': True},
+                    'FMU_5000us_24000Hz_500kHz': {'offset_db': 0.0, 'se_db': nan,
+                                                  'anchored': False}},
     }
 
 
@@ -2522,24 +2554,37 @@ def test_mode_table_format():
     assert 'offset_meaning' in hd and 'range_term_lookup' in hd
     assert 'tl_removed' not in hd and 'absorption_db_per_m' not in hd
     terms = [ln for ln in lines if ln.startswith('# range_term: ')]
-    assert terms == ['# range_term: %s 10-30 %s' % (CW_KEY, 'zero: not identified, the '
-                     'within-angle-bin spread of log10 R is 0.010 decade (< 0.03)'),
-                     '# range_term: %s 30-90 zero: 120 non-specular samples, fewer than 200'
-                     % CW_KEY,
-                     '# range_term: %s 10-30 fitted nodes=3 span=-0.25..0.25 trimmed=none '
-                     'out_of_span=0' % REF_KEY,
-                     '# range_term: %s 30-90 fitted nodes=2 span=0..0.25 trimmed=-0.25,0.5 '
-                     'out_of_span=37' % REF_KEY]
+    assert terms[:4] == [
+        '# range_term: %s 10-30 %s' % (CW_KEY, 'zero: not identified, the '
+                                       'within-angle-bin spread of log10 R is 0.010 decade '
+                                       '(< 0.03)'),
+        '# range_term: %s 30-90 zero: 120 non-specular samples, fewer than 200' % CW_KEY,
+        '# range_term: %s 10-30 fitted nodes=3 span=-0.25..0.25 trimmed=none out_of_span=0'
+        % REF_KEY,
+        '# range_term: %s 30-90 fitted nodes=2 span=0..0.25 trimmed=-0.25,0.5 out_of_span=37'
+        % REF_KEY]
     rows = [ln for ln in lines if not ln.startswith('#')]
     assert rows[0] == ','.join(dar.TABLE_COLUMNS)
     assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1,,,7.700,6000,12.000,+0.000,'
                        '0.045,-17.250,0.310,true,40LOGR,80')
     assert rows[2] == ('CW_50us_20000Hz_500kHz,angle,41,,,2.100,1,,-5.600,,'
                        '-17.250,0.310,true,40LOGR,80')
-    assert rows[-3] == ('FMU_1000us_24000Hz_500kHz,range,0.25,10,30,-2.250,2500,,,0.120,'
-                        '0.000,0.000,true,UNKNOWN,nan')
-    assert rows[-1] == ('FMU_1000us_24000Hz_500kHz,range,0.25,30,90,-1.000,1500,,,0.080,'
-                        '0.000,0.000,true,UNKNOWN,nan')
+    assert ('FMU_1000us_24000Hz_500kHz,range,0.25,10,30,-2.250,2500,,,0.120,'
+            '0.000,0.000,true,UNKNOWN,nan') in rows
+    assert ('FMU_1000us_24000Hz_500kHz,range,0.25,30,90,-1.000,1500,,,0.080,'
+            '0.000,0.000,true,UNKNOWN,nan') in rows
+    # Unanchored mode: empty offset columns; a zero variance is written empty (no
+    # 1/0 weight); a range-row SE that is not finite is empty, not 'nan'.
+    assert rows[-4] == ('FMU_5000us_24000Hz_500kHz,angle,1,,,3.300,40,8.000,+0.000,0.447,'
+                        ',,false,UNKNOWN,nan')
+    assert rows[-3] == ('FMU_5000us_24000Hz_500kHz,angle,21,,,1.100,12,,-2.200,,,,false,'
+                        'UNKNOWN,nan')
+    assert rows[-2] == ('FMU_5000us_24000Hz_500kHz,range,0,10,30,0.000,500,,,0.000,,,false,'
+                        'UNKNOWN,nan')
+    assert rows[-1] == ('FMU_5000us_24000Hz_500kHz,range,0.25,10,30,-0.400,300,,,,,,false,'
+                        'UNKNOWN,nan')
+    assert not any(',nan,' in r.replace(',UNKNOWN,nan', '').replace(',40LOGR,80', '')
+                   for r in rows[1:]), 'nan is written only in the declared-absorption column'
     assert 'empty_fields' in hd
     assert all(len(r.split(',')) == len(dar.TABLE_COLUMNS) for r in rows)
     assert not any(r.split(',')[0] == CW_KEY and r.split(',')[1] == 'range' for r in rows)
