@@ -1634,9 +1634,9 @@ def sector_mode_key(pulse_lengths, bandwidths, tx_signal_types):
 
     One ``<TYPE>_<pulse_us>us_<bw_Hz>Hz`` per sector, joined with ``+``.
     """
-    pulses = list(pulse_lengths or ())
-    widths = list(bandwidths or ())
-    types = list(tx_signal_types or ())
+    pulses = [] if pulse_lengths is None else list(pulse_lengths)
+    widths = [] if bandwidths is None else list(bandwidths)
+    types = [] if tx_signal_types is None else list(tx_signal_types)
     n_sectors = max(len(pulses), len(widths), len(types), 1)
     parts = []
     for i in range(n_sectors):
@@ -1943,10 +1943,18 @@ def ping_beams(ping, bin_width_deg, n_half):
         return None
     y, ang, rng = y[ok], ang[ok], rng[ok]
     deg = np.degrees(ang)
+    # |theta| < 90 explicitly, BEFORE the bin cast: the last bin reaches past
+    # 90 when the bin width does not divide 90, a beam at or beyond 90 deg is
+    # not a seabed return, and a huge finite angle would overflow the cast.
+    in_range = np.abs(deg) < 90.0
+    if not in_range.all():
+        if not in_range.any():
+            return None
+        y, rng, deg = y[in_range], rng[in_range], deg[in_range]
     abs_bin = np.floor(np.abs(deg) / bin_width_deg).astype(np.int64)
     cell = np.floor((np.log10(rng) - RANGE_CELL_LOG10_MIN)
                     / RANGE_CELL_DECADES).astype(np.int64)
-    keep = (abs_bin < n_half) & (cell >= 0) & (cell < RANGE_CELL_COUNT)
+    keep = (abs_bin >= 0) & (abs_bin < n_half) & (cell >= 0) & (cell < RANGE_CELL_COUNT)
     if not keep.all():
         if not keep.any():
             return None
@@ -2265,6 +2273,10 @@ def range_angle_groups(bin_width_deg, specular_exclusion_deg, edges_deg):
     """
     n_half = int(math.ceil(90.0 / bin_width_deg - 1e-9))
     bounds = [int(math.ceil(specular_exclusion_deg / bin_width_deg - 1e-9))]
+    if bounds[0] >= n_half:
+        raise ValueError('no angle bin lies outside the specular band (bins of %g deg, '
+                         'specular exclusion %g deg): nothing to fit a range term on'
+                         % (bin_width_deg, specular_exclusion_deg))
     for edge in edges_deg:
         if not (isinstance(edge, (int, float)) and math.isfinite(edge)):
             raise ValueError('range angle edge %r is not a finite number' % (edge,))
@@ -2336,7 +2348,11 @@ def _trim_span(nb, x_rel, spacing=DEFAULT_RANGE_NODE_SPACING_DECADES):
     floor = max(float(MIN_SAMPLES_PER_BIN), NODE_MIN_SHARE * float(counts.sum()))
     trimmed = []
     while len(nodes) > 2:
-        support = tent_weights(x_rel, nodes).T @ counts
+        # Only the cells inside the current span count: tent_weights clamps a
+        # cell beyond the ends onto the end node, which would credit the beams
+        # of a node just trimmed to its neighbour (cross-model review, #172).
+        inside = (x_rel >= nodes[0] - 1e-9) & (x_rel <= nodes[-1] + 1e-9)
+        support = tent_weights(x_rel, nodes).T @ (counts * inside)
         if support[0] < floor:
             trimmed.append(float(nodes[0]))
             nodes = nodes[1:]
@@ -2370,9 +2386,16 @@ def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model,
     import numpy as np
     nodes, cell_mask, trimmed = _trim_span(nb, x_rel, spacing)
     all_total = float(nb.sum())
+    n_rows = nb.shape[0]
     nb = np.where(cell_mask[None, :], nb, 0.0)
     sb = np.where(cell_mask[None, :], sb, 0.0)
     ssb = np.where(cell_mask[None, :], ssb, 0.0)
+    # A fit bin whose every beam lay beyond the span has no intercept to fit:
+    # drop it here (its intercept is reported as 0 and never used), or its
+    # zero count makes the within-bin spread NaN and skips the identifiability
+    # check (cross-model review, #172).
+    keep_rows = nb.sum(axis=1) > 0
+    nb, sb, ssb = nb[keep_rows], sb[keep_rows], ssb[keep_rows]
     total = float(nb.sum())
     info = {'range_model': range_model, 'nonspecular_samples': int(total),
             'out_of_span_samples': int(round(all_total - total)),
@@ -2396,7 +2419,7 @@ def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model,
     if total < MIN_SAMPLES_PER_BIN:
         status = ('zero: %d non-specular samples, fewer than %d'
                   % (int(total), MIN_SAMPLES_PER_BIN))
-    elif spread < MIN_WITHIN_BIN_SPREAD_DECADES:
+    elif not spread >= MIN_WITHIN_BIN_SPREAD_DECADES:   # a NaN spread is "not identified"
         status = ('zero: not identified, the within-angle-bin spread of log10 R '
                   'is %.3f decade (< %g)' % (spread, MIN_WITHIN_BIN_SPREAD_DECADES))
     if range_model == 'scalar':
@@ -2441,7 +2464,9 @@ def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model,
         a = np.where(tot > 0, sb.sum(axis=1) / np.maximum(tot, 1), 0.0)
     info['range_status'] = status
     info['sigma_db'] = math.sqrt(sigma2) if math.isfinite(sigma2) else float('nan')
-    return a, r_cell, cell_mask, info
+    a_full = np.zeros(n_rows)
+    a_full[keep_rows] = a
+    return a_full, r_cell, cell_mask, info
 
 
 def range_status_summary(groups):
@@ -2519,19 +2544,22 @@ def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='n
     result['range_db_per_cell'] = r_cell
 
     # Angular intercepts per |theta| bin (specular bins included), referred to
-    # R0 with the bin's own group's range term, over the group's in-span cells.
+    # R0 with the bin's own group's range term, over EVERY cell of the bin: a
+    # beam beyond the group's span is corrected with the clamped end value at
+    # apply time, so it enters A the same way (the trimming only decides what
+    # shapes r_g). Specular beams and modes with no range fit keep all their
+    # beams (cross-model review, #172).
     rows = []
     rel_per_bin = np.zeros(n_half)
     nadir = None
     for j in range(n_half):
-        m = cell_masks[bin_group[j]]
-        cnt = float(abs_n[j][m].sum())
+        cnt = float(abs_n[j].sum())
         if cnt <= 0:
             continue
-        r_j = r_cell[bin_group[j]][m]
-        level = float((abs_s[j][m].sum() - abs_n[j][m] @ r_j) / cnt)
+        r_j = r_cell[bin_group[j]]
+        level = float((abs_s[j].sum() - abs_n[j] @ r_j) / cnt)
         if cnt >= 2:
-            sse = float((abs_ss[j][m] - 2.0 * r_j * abs_s[j][m] + abs_n[j][m] * r_j ** 2).sum())
+            sse = float((abs_ss[j] - 2.0 * r_j * abs_s[j] + abs_n[j] * r_j ** 2).sum())
             var = max(sse - cnt * level * level, 0.0) / (cnt - 1.0)
         else:
             var = float('nan')
@@ -2830,7 +2858,12 @@ def mode_table_lines(table, source_bags, box=None):
              'reference mode after db_relative_to_nadir and its range term are removed '
              'from both, measured at mode switches; the corrected beam is '
              'raw - db_relative_to_nadir - r - offset_db_vs_ref, on the reference '
-             "mode's nadir level at R0"]
+             "mode's nadir level at R0; a mode with offset_anchored=false has NO "
+             'offset (the columns are empty) and must not be corrected by this table',
+             '# empty_fields: var_db2 and se_db are empty where n < 2 (the bin cannot be '
+             'weighted: treat the beam as uncorrectable); offset columns are empty for '
+             'an unanchored mode; declared_tvg_absorption_db_per_km is nan for MIXED or '
+             'an undeclared absorption; x is written with 10 significant digits']
     if box is not None:
         lines.append('# box: %s' % ' '.join('%.9g' % v for v in box))
     lines.append('# source_bags: %s' % ','.join(source_bags))
@@ -2840,7 +2873,8 @@ def mode_table_lines(table, source_bags, box=None):
                      'offset_db=%s offset_se_db=%s anchored=%s misfit_max_db=%s '
                      'misfit_exceeded=%s'
                      % (key, fit['pings'], fit['beams'], fit['declared_tvg_model'],
-                        _fmt(off['offset_db'], '%.3f'), _fmt(off['se_db'], '%.3f'),
+                        _fmt(off['offset_db'], '%.3f') if off['anchored'] else 'none',
+                        _fmt(off['se_db'], '%.3f') if off['anchored'] else 'none',
                         'true' if off['anchored'] else 'false',
                         _fmt(fit['misfit_max_db'], '%.3f'),
                         'yes' if fit['misfit_exceeded'] else 'no'))
@@ -2855,21 +2889,25 @@ def mode_table_lines(table, source_bags, box=None):
     lines.append(','.join(TABLE_COLUMNS))
     for key, fit in sorted(table['modes'].items()):
         off = table['offsets'][key]
-        tail = ','.join((_fmt(off['offset_db'], '%.3f'), _fmt(off['se_db'], '%.3f'),
+        # An unanchored mode has NO measured offset: the columns are left empty
+        # (never 0.000, which a loader would apply) and offset_anchored=false.
+        tail = ','.join((_fmt(off['offset_db'], '%.3f') if off['anchored'] else '',
+                         _fmt(off['se_db'], '%.3f') if off['anchored'] else '',
                          'true' if off['anchored'] else 'false',
                          fit['declared_tvg_model'],
                          _fmt(fit['declared_tvg_absorption_db_per_km'], '%.6g')))
         for centre, cnt, level, var, rel in fit['angle']:
             se = math.sqrt(var / cnt) if math.isfinite(var) else float('nan')
             var_text = _fmt(var, '%.3f') if math.isfinite(var) else ''
-            lines.append('%s,angle,%.1f,,,%.3f,%d,%s,%+.3f,%s,%s'
+            # x is written with %.10g so any bin width or node spacing round-trips.
+            lines.append('%s,angle,%.10g,,,%.3f,%d,%s,%+.3f,%s,%s'
                          % (key, centre, level, cnt, var_text, rel,
                             _fmt(se, '%.3f') if math.isfinite(se) else '', tail))
         for g in fit['groups']:
             if g['range_status'] != 'fitted':
                 continue
             for x, r, se, sup in zip(g['nodes'], g['r'], g['r_se'], g['r_support']):
-                lines.append('%s,range,%.2f,%g,%g,%.3f,%d,,,%.3f,%s'
+                lines.append('%s,range,%.10g,%g,%g,%.3f,%d,,,%.3f,%s'
                              % (key, x, g['lo_deg'], g['hi_deg'], r, int(round(sup)),
                                 se, tail))
     return lines

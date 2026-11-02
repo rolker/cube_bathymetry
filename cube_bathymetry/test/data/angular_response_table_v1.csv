@@ -13,7 +13,8 @@
 # adjacency_window_s: 2
 # misfit_threshold_db: 1.5
 # absorption: not modelled separately; the per-mode range term carries it
-# offset_meaning: offset_db_vs_ref is the level a mode reads above the reference mode after db_relative_to_nadir and its range term are removed from both, measured at mode switches; the corrected beam is raw - db_relative_to_nadir - r - offset_db_vs_ref, on the reference mode's nadir level at R0
+# offset_meaning: offset_db_vs_ref is the level a mode reads above the reference mode after db_relative_to_nadir and its range term are removed from both, measured at mode switches; the corrected beam is raw - db_relative_to_nadir - r - offset_db_vs_ref, on the reference mode's nadir level at R0; a mode with offset_anchored=false has NO offset (the columns are empty) and must not be corrected by this table
+# empty_fields: var_db2 and se_db are empty where n < 2 (the bin cannot be weighted: treat the beam as uncorrectable); offset columns are empty for an unanchored mode; declared_tvg_absorption_db_per_km is nan for MIXED or an undeclared absorption; x is written with 10 significant digits
 # box: 42.976 -70.628 43.002 -70.596
 # source_bags: bag_a
 # mode_summary: CW_50us_20000Hz_500kHz pings=217255 beams=55617280 declared_tvg=40LOGR offset_db=-17.250 offset_se_db=0.310 anchored=true misfit_max_db=2.000 misfit_exceeded=yes
@@ -23,13 +24,13 @@
 # range_term: FMU_1000us_24000Hz_500kHz 10-30 fitted nodes=3 span=-0.25..0.25 trimmed=none out_of_span=0
 # range_term: FMU_1000us_24000Hz_500kHz 30-90 fitted nodes=2 span=0..0.25 trimmed=-0.25,0.5 out_of_span=37
 mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,declared_tvg_absorption_db_per_km
-CW_50us_20000Hz_500kHz,angle,1.0,,,7.700,6000,12.000,+0.000,0.045,-17.250,0.310,true,40LOGR,80
-CW_50us_20000Hz_500kHz,angle,41.0,,,2.100,1,,-5.600,,-17.250,0.310,true,40LOGR,80
-FMU_1000us_24000Hz_500kHz,angle,1.0,,,25.500,5000,9.250,+0.000,0.043,0.000,0.000,true,UNKNOWN,nan
-FMU_1000us_24000Hz_500kHz,angle,11.0,,,24.700,4000,6.500,-0.800,0.040,0.000,0.000,true,UNKNOWN,nan
-FMU_1000us_24000Hz_500kHz,angle,41.0,,,18.300,3000,7.000,-7.200,0.048,0.000,0.000,true,UNKNOWN,nan
+CW_50us_20000Hz_500kHz,angle,1,,,7.700,6000,12.000,+0.000,0.045,-17.250,0.310,true,40LOGR,80
+CW_50us_20000Hz_500kHz,angle,41,,,2.100,1,,-5.600,,-17.250,0.310,true,40LOGR,80
+FMU_1000us_24000Hz_500kHz,angle,1,,,25.500,5000,9.250,+0.000,0.043,0.000,0.000,true,UNKNOWN,nan
+FMU_1000us_24000Hz_500kHz,angle,11,,,24.700,4000,6.500,-0.800,0.040,0.000,0.000,true,UNKNOWN,nan
+FMU_1000us_24000Hz_500kHz,angle,41,,,18.300,3000,7.000,-7.200,0.048,0.000,0.000,true,UNKNOWN,nan
 FMU_1000us_24000Hz_500kHz,range,-0.25,10,30,1.500,3000,,,0.100,0.000,0.000,true,UNKNOWN,nan
-FMU_1000us_24000Hz_500kHz,range,0.00,10,30,0.000,5000,,,0.000,0.000,0.000,true,UNKNOWN,nan
+FMU_1000us_24000Hz_500kHz,range,0,10,30,0.000,5000,,,0.000,0.000,0.000,true,UNKNOWN,nan
 FMU_1000us_24000Hz_500kHz,range,0.25,10,30,-2.250,2500,,,0.120,0.000,0.000,true,UNKNOWN,nan
-FMU_1000us_24000Hz_500kHz,range,0.00,30,90,0.000,4000,,,0.000,0.000,0.000,true,UNKNOWN,nan
+FMU_1000us_24000Hz_500kHz,range,0,30,90,0.000,4000,,,0.000,0.000,0.000,true,UNKNOWN,nan
 FMU_1000us_24000Hz_500kHz,range,0.25,30,90,-1.000,1500,,,0.080,0.000,0.000,true,UNKNOWN,nan

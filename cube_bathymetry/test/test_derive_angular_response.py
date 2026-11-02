@@ -1966,7 +1966,12 @@ def test_offsets_chain_through_an_intermediate_mode_and_flag_unanchored():
     assert table['switches']['discarded'].get('gap', 0) >= 1
     lines = dar.mode_table_lines(table, ['synthetic'])
     assert any(ln.startswith('# mode_summary: %s ' % iso) and 'anchored=false' in ln
-               for ln in lines)
+               and 'offset_db=none' in ln for ln in lines)
+    # An unanchored mode's offset columns are EMPTY, never a 0.000 a loader would apply.
+    iso_rows = [ln.split(',') for ln in lines if ln.startswith(iso + ',')]
+    assert iso_rows and all(r[10] == '' and r[11] == '' and r[12] == 'false' for r in iso_rows)
+    cw_rows = [ln.split(',') for ln in lines if ln.startswith(CW_KEY + ',')]
+    assert all(r[10] != '' and r[12] == 'true' for r in cw_rows)
 
 
 def test_reference_fallback_is_loud():
@@ -2164,6 +2169,83 @@ def test_finer_nodes_follow_a_step_the_quarter_decade_nodes_cannot():
     hd = table_header(dar.mode_table_lines(
         b.finish(REF_KEY, range_ref_m=10.0, node_spacing_decades=0.125), ['s']))
     assert hd['range_node_spacing_decades'] == '0.125'
+
+
+def test_fit_bin_emptied_by_the_span_is_dropped_not_nan():
+    """
+    A fit bin whose only beams lie beyond the trimmed span must not fail the guard open.
+
+    Flat single depth (range term unidentified) plus one outer bin whose only
+    beams are a junk sliver at long range: the spread stays finite, the term
+    is zero with the "not identified" reason, and no range rows are written.
+    """
+    import numpy as np
+    b = dar.ModeTableBuilder()
+    synth_stream(b, lambda t, h, cur: REF_KEY,
+                 lambda inc, r, th, m: lambert_like(inc) - 20.0 * dar_log10(r),
+                 depth=lambda t: 20.0, seconds=120.0, angles_deg=[a + 0.5 for a in range(-40, 40)])
+    # 300 junk beams in the 58-60 deg bin only, at 400 m.
+    for i in range(300):
+        p = _Ping()
+        p.intensities = np.asarray([-5.0], dtype=np.float32)
+        p.rx_angles = np.asarray([math.radians(59.0)], dtype=np.float32)
+        p.two_way_travel_times = np.asarray([2.0 * 400.0 / 1500.0], dtype=np.float32)
+        p.sound_speed, p.frequency, p.flags = 1500.0, 500000.0, None
+        b.add_ping(int((300.0 + i * 0.05) * 1e9), p)
+    fit = b.finish(REF_KEY)['modes'][REF_KEY]
+    outer = fit['groups'][-1]
+    assert math.isfinite(outer['within_bin_spread_decades'])
+    assert outer['range_status'].startswith('zero: not identified')
+    assert fit['range_status'] == 'zero'
+    assert fit['nonspecular_samples'] > 0
+
+
+def test_adjacent_junk_end_nodes_are_both_trimmed():
+    """Junk spread over two end nodes is trimmed node by node; a trimmed node lends no support."""
+    import numpy as np
+    x_rel = dar.cell_log10_range() - 1.0
+    cell = (lambda x: int(np.argmin(np.abs(x_rel - x))))
+    nb = np.zeros((1, dar.RANGE_CELL_COUNT))
+    nb[0, cell(0.005)] = 1e6                  # the good beams, just above R0
+    nb[0, cell(-0.245)] = 600                 # 600 junk beams under node -0.25
+    nb[0, cell(-0.495)] = 600                 # and 600 under node -0.5: floor is 1000
+    nodes, mask, trimmed = dar._trim_span(nb, x_rel)
+    # Clamping the -0.495 beams onto -0.25 once -0.5 is gone would have
+    # credited it 588 + 600 > 1000 and kept it.
+    assert trimmed == [-0.5, -0.25]
+    assert list(nodes) == [0.0, 0.25]
+    assert nb[0, mask].sum() == 1e6
+
+
+def test_beams_at_or_beyond_90_degrees_are_rejected_for_any_bin_width():
+    """A 4 deg bin grid reaches 92 deg; a 91 deg beam (or a huge angle) is still rejected."""
+    import numpy as np
+    p = _Ping()
+    p.intensities = np.asarray([-20.0, -21.0, -22.0, -23.0], dtype=np.float32)
+    p.rx_angles = np.asarray([math.radians(91.0), math.radians(45.0), 1e30, -math.radians(90.0)],
+                             dtype=np.float32)
+    p.two_way_travel_times = np.asarray([0.02] * 4, dtype=np.float32)
+    p.sound_speed, p.frequency, p.flags = 1500.0, 500000.0, None
+    abs_bin, _side, _cell, y = dar.ping_beams(p, 4.0, 23)
+    assert list(y) == [-21.0] and list(abs_bin) == [11]
+
+
+def test_edges_none_with_no_bin_outside_the_specular_band_is_an_error(capsys):
+    """A grid with no non-specular bin cannot carry a range term: refused, not an empty group."""
+    with pytest.raises(ValueError, match='no angle bin lies outside'):
+        dar.range_angle_groups(90.0, 10.0, ())
+    err = parse_error(['--by-mode', '--bin-width-deg', '45', '--specular-exclusion-deg', '79',
+                       '--range-angle-edges', 'none'], capsys)
+    assert 'no angle bin lies outside' in err
+
+
+def test_mode_key_accepts_numpy_arrays():
+    """Message fields arriving as numpy arrays do not trip the truth-value check."""
+    import numpy as np
+    assert dar.sector_mode_key(np.asarray([0.001]), np.asarray([24000.0]),
+                               np.asarray([2])) == 'FMU_1000us_24000Hz'
+    assert dar.sector_mode_key(np.asarray([0.001, 0.002]), np.asarray([24000.0, 12000.0]),
+                               np.asarray([2, 1])) == 'FMU_1000us_24000Hz+CW_2000us_12000Hz'
 
 
 def test_junk_end_node_is_trimmed_and_the_anchor_moves_to_the_span():
@@ -2384,14 +2466,15 @@ def test_mode_table_format():
                      'out_of_span=37' % REF_KEY]
     rows = [ln for ln in lines if not ln.startswith('#')]
     assert rows[0] == ','.join(dar.TABLE_COLUMNS)
-    assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1.0,,,7.700,6000,12.000,+0.000,'
+    assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1,,,7.700,6000,12.000,+0.000,'
                        '0.045,-17.250,0.310,true,40LOGR,80')
-    assert rows[2] == ('CW_50us_20000Hz_500kHz,angle,41.0,,,2.100,1,,-5.600,,'
+    assert rows[2] == ('CW_50us_20000Hz_500kHz,angle,41,,,2.100,1,,-5.600,,'
                        '-17.250,0.310,true,40LOGR,80')
     assert rows[-3] == ('FMU_1000us_24000Hz_500kHz,range,0.25,10,30,-2.250,2500,,,0.120,'
                         '0.000,0.000,true,UNKNOWN,nan')
     assert rows[-1] == ('FMU_1000us_24000Hz_500kHz,range,0.25,30,90,-1.000,1500,,,0.080,'
                         '0.000,0.000,true,UNKNOWN,nan')
+    assert 'empty_fields' in hd
     assert all(len(r.split(',')) == len(dar.TABLE_COLUMNS) for r in rows)
     assert not any(r.split(',')[0] == CW_KEY and r.split(',')[1] == 'range' for r in rows)
 
