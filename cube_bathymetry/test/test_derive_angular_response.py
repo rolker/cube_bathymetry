@@ -2325,15 +2325,81 @@ def test_accumulation_cache_round_trip(tmp_path, capsys):
                         if not ln.startswith('# source_bags')])
     assert strip(out1) == strip(out2)
     # A refit with other fit settings reuses the cache; other accumulation
-    # settings (box, bin width, edges) do not.
-    assert dar.main(base + ['-o', str(out2), '--misfit-threshold-db', '3']) == 0
-    capsys.readouterr()
+    # settings (box, bin width, edges, window) do not.
+    assert dar.main(base + ['-o', str(out2), '--misfit-threshold-db', '3',
+                            '--range-node-spacing-decades', '0.125']) == 0
+    assert 'bag pass skipped' in capsys.readouterr().out
     with pytest.raises(SystemExit, match='different.*range_angle_edges'):
         dar.main(base + ['-o', str(out2), '--range-angle-edges', 'none'])
+    with pytest.raises(SystemExit, match='different.*adjacency_window_s'):
+        dar.main(base + ['-o', str(out2), '--adjacency-window-s', '1'])
     with pytest.raises(SystemExit, match='not a derive-accumulation-cache'):
         (tmp_path / 'junk.pkl').write_bytes(b'\x80\x04N.')
+        (tmp_path / 'junk.pkl').chmod(0o600)
         dar.main([str(bag), '-t', TOPIC, '--by-mode', '-o', str(out2),
                   '--accumulation-cache', str(tmp_path / 'junk.pkl')])
+    # The bag's CONTENT is part of the identity: a touched bag file misses the cache.
+    import time
+    victim = next(bag.iterdir())
+    os.utime(victim, (time.time() + 100, time.time() + 100))
+    with pytest.raises(SystemExit, match='different.*bags'):
+        dar.main(base + ['-o', str(out2)])
+    os.utime(victim, None)
+    # So is the path: the same bag reached through another directory name.
+    alias = tmp_path / 'elsewhere'
+    alias.mkdir()
+    (alias / 'mode_bag').symlink_to(bag)
+    assert dar.main([str(alias / 'mode_bag'), '-t', TOPIC, '--by-mode', '-o', str(out2),
+                     '--accumulation-cache', str(cache)]) == 0   # realpath: same bag
+    capsys.readouterr()
+
+
+def test_accumulation_cache_is_loaded_only_when_this_user_wrote_it(tmp_path, capsys):
+    """A group- or world-writable cache, or a non-regular file, is refused before unpickling."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    cache = tmp_path / 'acc.pkl'
+    base = [str(bag), '-t', TOPIC, '--by-mode', '-o', str(tmp_path / 't.csv'),
+            '--accumulation-cache', str(cache)]
+    assert dar.main(base) == 0
+    capsys.readouterr()
+    cache.chmod(0o666)
+    with pytest.raises(SystemExit, match='world-writable'):
+        dar.main(base)
+    cache.chmod(0o600)
+    assert dar.main(base) == 0
+    assert 'bag pass skipped' in capsys.readouterr().out
+    fifo = tmp_path / 'fifo.pkl'
+    os.mkfifo(fifo)
+    with pytest.raises(SystemExit, match='not a regular file'):
+        dar.main(base[:-1] + [str(fifo)])
+
+
+def test_accumulation_cache_write_failure_is_a_warning(tmp_path, capsys):
+    """A cache that cannot be written does not throw away the bag pass: warn, then fit."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    out = tmp_path / 't.csv'
+    assert dar.main([str(bag), '-t', TOPIC, '--by-mode', '-o', str(out),
+                     '--accumulation-cache', str(tmp_path / 'no_such_dir' / 'acc.pkl')]) == 0
+    captured = capsys.readouterr()
+    assert 'could not write --accumulation-cache' in captured.err
+    assert out.is_file() and 'wrote a 2-mode table' in captured.out
+
+
+def test_accumulation_cache_hit_reprints_the_bag_pass_reports(tmp_path, capsys):
+    """The pings-before-SonarInfo count (and box report) come back on a cache hit."""
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    cache = tmp_path / 'acc.pkl'
+    base = [str(bag), '-t', TOPIC, '--by-mode', '-o', str(tmp_path / 't.csv'),
+            '--accumulation-cache', str(cache)]
+    assert dar.main(base) == 0
+    first = capsys.readouterr().out
+    assert dar.main(base) == 0
+    second = capsys.readouterr().out
+    for line in ('5 pings before the first SonarInfo were left out',):
+        assert line in first and line in second
 
 
 def test_variance_column_measures_the_beam_scatter():

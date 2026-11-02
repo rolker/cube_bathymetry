@@ -3083,11 +3083,41 @@ def accumulate_by_mode(bag_paths, topic, info_topic, builder, box=None,
 
 
 ACCUMULATION_CACHE_FORMAT = 'derive-accumulation-cache v1'
+# Bump when the accumulation changes (ping_beams filters, the cell grid, the
+# mode key, OffsetSummary, ModeAccumulator): a cache made by older code must
+# not be refitted as if it were current.
+ACCUMULATION_VERSION = 1
+
+
+def bag_identity(bag_path):
+    """
+    Return what identifies a bag's CONTENT for the accumulation cache.
+
+    The real path plus, for a bag directory, every file's name, size and
+    mtime (for a single file, its own): a bag replaced under the same name,
+    or the same basename in another campaign's directory, no longer matches.
+    """
+    real = os.path.realpath(bag_path)
+    files = []
+    try:
+        if os.path.isdir(real):
+            for name in sorted(os.listdir(real)):
+                st = os.stat(os.path.join(real, name))
+                files.append([name, st.st_size, int(st.st_mtime)])
+        else:
+            st = os.stat(real)
+            files.append([os.path.basename(real), st.st_size, int(st.st_mtime)])
+    except OSError:
+        files.append(['?', -1, -1])
+    return [real, files]
 
 
 def accumulation_cache_identity(args, source_bags):
     """Return the settings an accumulation cache must have been made with to be reused."""
-    return {'format': ACCUMULATION_CACHE_FORMAT, 'source_bags': list(source_bags),
+    return {'format': ACCUMULATION_CACHE_FORMAT, 'version': ACCUMULATION_VERSION,
+            'cell_grid': [RANGE_CELL_LOG10_MIN, RANGE_CELL_DECADES, RANGE_CELL_COUNT],
+            'source_bags': list(source_bags),
+            'bags': [bag_identity(b) for b in args.bag],
             'topic': args.topic, 'sonar_info_topic': args.sonar_info_topic,
             'box': list(args.box) if args.box is not None else None,
             'bin_width_deg': args.bin_width_deg,
@@ -3096,52 +3126,91 @@ def accumulation_cache_identity(args, source_bags):
             'range_angle_edges': list(args.range_angle_edges)}
 
 
+def check_cache_trust(path):
+    """
+    Refuse a cache file this user does not own or that others can write (SystemExit).
+
+    The cache is a pickle, which runs code when loaded; the documented rule
+    is to load only a file this script wrote for this user, and this is the
+    check that enforces the part a stat can see.
+    """
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        raise SystemExit('error: --accumulation-cache %s cannot be read: %s' % (path, e))
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit('error: --accumulation-cache %s is not a regular file' % path)
+    if hasattr(os, 'getuid') and st.st_uid != os.getuid():
+        raise SystemExit('error: --accumulation-cache %s is not owned by this user; a '
+                         'cache is a pickle and is loaded only when this user wrote it'
+                         % path)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit('error: --accumulation-cache %s is group- or world-writable; a '
+                         'cache is a pickle and is loaded only when nobody else could '
+                         'have written it' % path)
+
+
 def load_accumulation_cache(path, identity):
     """
-    Return ``(builder, n_msgs)`` from a cache written by write_accumulation_cache.
+    Return ``(builder, n_msgs, box_stats, corrupt)`` from write_accumulation_cache's file.
 
-    SystemExit when the file is not such a cache or was made with other
-    settings (the mismatching keys are named). The cache is a pickle: only
-    load one this script wrote on this host.
+    SystemExit when the file fails check_cache_trust, is not such a cache, or
+    was made with other settings, code or bag contents (the mismatching keys
+    are named).
     """
     import pickle
+    check_cache_trust(path)
     try:
         with open(path, 'rb') as f:
             data = pickle.load(f)
-    except (OSError, pickle.UnpicklingError, EOFError, AttributeError, ValueError) as e:
+    except Exception as e:   # any unpickling failure is "not a cache"
         raise SystemExit('error: --accumulation-cache %s cannot be read: %s' % (path, e))
-    if not isinstance(data, dict) or data.get('identity', {}).get('format') \
-            != ACCUMULATION_CACHE_FORMAT:
+    found = data.get('identity') if isinstance(data, dict) else None
+    if not isinstance(found, dict) or found.get('format') != ACCUMULATION_CACHE_FORMAT:
         raise SystemExit('error: --accumulation-cache %s is not a %s file'
                          % (path, ACCUMULATION_CACHE_FORMAT))
-    mismatch = sorted(k for k in identity if data['identity'].get(k) != identity[k])
+    mismatch = sorted(k for k in identity if found.get(k) != identity[k])
     if mismatch:
         raise SystemExit('error: --accumulation-cache %s was made with different %s; '
                          'delete it to re-accumulate' % (path, ', '.join(mismatch)))
     try:
         builder = ModeTableBuilder.from_state(data['state'])
-    except (KeyError, TypeError, ValueError) as e:
+        n_msgs = int(data['n_msgs'])
+        box_stats = data.get('box_stats')
+        corrupt = collections.Counter(data.get('corrupt') or {})
+    except Exception as e:   # a half-written or foreign payload
         raise SystemExit('error: --accumulation-cache %s is not a complete %s file: %s'
                          % (path, ACCUMULATION_CACHE_FORMAT, e))
-    return builder, data['n_msgs']
+    return builder, n_msgs, box_stats, corrupt
 
 
-def write_accumulation_cache(path, builder, n_msgs, identity):
-    """Write the accumulated statistics (builder.to_state) as a pickle, atomically."""
+def write_accumulation_cache(path, builder, n_msgs, identity, box_stats, corrupt):
+    """
+    Write the accumulated statistics (builder.to_state) as a pickle, atomically.
+
+    Returns None on success, else the reason as text: a cache that cannot be
+    written is a warning, never the end of a run whose bag pass is done.
+    """
     import pickle
     directory = os.path.dirname(os.path.abspath(path)) or '.'
-    fd, tmp = tempfile.mkstemp(prefix='.accumulation-cache-', dir=directory)
+    tmp = None
     try:
+        fd, tmp = tempfile.mkstemp(prefix='.accumulation-cache-', dir=directory)
         with os.fdopen(fd, 'wb') as f:
-            pickle.dump({'identity': identity, 'state': builder.to_state(), 'n_msgs': n_msgs},
+            pickle.dump({'identity': identity, 'state': builder.to_state(), 'n_msgs': n_msgs,
+                         'box_stats': box_stats, 'corrupt': dict(corrupt or {})},
                         f, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp, path)
-    except OSError as e:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise SystemExit('error: cannot write --accumulation-cache %s: %s' % (path, e))
+        tmp = None
+        return None
+    except Exception as e:   # reported to the caller as text
+        return str(e)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def main_by_mode(args, source_bags):
@@ -3151,7 +3220,7 @@ def main_by_mode(args, source_bags):
     identity = accumulation_cache_identity(args, source_bags)
     cache = args.accumulation_cache
     if cache is not None and os.path.exists(cache):
-        builder, n_msgs = load_accumulation_cache(cache, identity)
+        builder, n_msgs, box_stats, corrupt = load_accumulation_cache(cache, identity)
         print('loaded the accumulated statistics from %s (bag pass skipped)' % cache)
     else:
         builder = ModeTableBuilder(args.bin_width_deg, args.specular_exclusion_deg,
@@ -3160,22 +3229,30 @@ def main_by_mode(args, source_bags):
         corrupt = collections.Counter()
         n_msgs = accumulate_by_mode(args.bag, args.topic, args.sonar_info_topic, builder,
                                     box=args.box, box_stats=box_stats, corrupt=corrupt)
-        warning = corrupt_report(corrupt)
-        if warning is not None:
-            print(warning, file=sys.stderr)
-        if box_stats is not None:
-            print(box_report(args.box, box_stats, n_msgs))
-            warning = tf_rejected_warning(box_stats['tf_rejected'])
-            if warning is not None:
-                print(warning, file=sys.stderr)
-            if box_stats['kept'] == 0:
-                raise SystemExit('error: no pings inside --box; nothing to derive')
-        if len(builder.history) == 0:
+        usable = box_stats is None or box_stats['kept'] > 0
+        if usable and len(builder.history) == 0:
             raise SystemExit("error: no SonarInfo message on '%s' could be read; --by-mode "
                              'needs it' % args.sonar_info_topic)
-        if cache is not None:
-            write_accumulation_cache(cache, builder, n_msgs, identity)
-            print('wrote the accumulated statistics to %s' % cache)
+        if cache is not None and usable:
+            failure = write_accumulation_cache(cache, builder, n_msgs, identity, box_stats,
+                                               corrupt)
+            if failure is None:
+                print('wrote the accumulated statistics to %s' % cache)
+            else:
+                print('warning: could not write --accumulation-cache %s (%s); the table '
+                      'is still derived from this run' % (cache, failure), file=sys.stderr)
+    # The bag-pass reports are printed on a cache hit too: the table is built
+    # from the same data, so the same dropped pings and corrupt messages apply.
+    warning = corrupt_report(corrupt)
+    if warning is not None:
+        print(warning, file=sys.stderr)
+    if box_stats is not None:
+        print(box_report(args.box, box_stats, n_msgs))
+        warning = tf_rejected_warning(box_stats['tf_rejected'])
+        if warning is not None:
+            print(warning, file=sys.stderr)
+        if box_stats['kept'] == 0:
+            raise SystemExit('error: no pings inside --box; nothing to derive')
     table = builder.finish(args.reference_mode, args.range_ref_m, args.misfit_threshold_db,
                            args.range_node_spacing_decades)
     for warning in table['warnings']:
