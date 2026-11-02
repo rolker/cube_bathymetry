@@ -1732,6 +1732,37 @@ def test_by_mode_defaults():
     assert args.reference_mode == REF_KEY
     assert (args.adjacency_window_s, args.specular_exclusion_deg,
             args.misfit_threshold_db, args.range_ref_m) == (2.0, 10.0, 1.5, None)
+    assert args.range_angle_edges == (30.0, 50.0)
+
+
+@pytest.mark.parametrize('text, edges', [('none', ()), ('30', (30.0,)),
+                                         ('25,45,65', (25.0, 45.0, 65.0))])
+def test_range_angle_edges_parse(text, edges):
+    """--range-angle-edges: "none" is one group, else the edges in degrees."""
+    args = dar.parse_args(BASE + ['--by-mode', '--range-angle-edges', text])
+    assert args.range_angle_edges == edges
+    b = dar.ModeTableBuilder(range_angle_edges_deg=edges)
+    assert len(b.groups) == len(edges) + 1
+    assert b.groups[0][0] == b.first_nonspecular_bin and b.groups[-1][1] == b.n_half
+
+
+@pytest.mark.parametrize('text, reason', [
+    ('30,30', 'must increase strictly'), ('50,30', 'must increase strictly'),
+    ('abc', 'comma-separated'), ('10', 'empty group'), ('9', 'empty group'),
+    ('29.9,30', 'empty group'), ('90', 'empty group'), ('nan', 'not a finite number')])
+def test_range_angle_edges_rejected(text, reason, capsys):
+    """An edge list that is not increasing, not numeric or leaves a group empty is an error."""
+    assert reason in parse_error(['--by-mode', '--range-angle-edges', text], capsys)
+
+
+def test_range_angle_groups_snap_to_bins():
+    """Edges snap up to the next bin boundary; the snapped bounds are what the table says."""
+    groups = dar.range_angle_groups(4.0, 10.0, (30.0, 50.0))
+    assert groups == [(3, 8), (8, 13), (13, 23)]
+    assert [dar.group_bounds_deg(g, 4.0) for g in groups] == [
+        (12.0, 32.0), (32.0, 52.0), (52.0, 90.0)]
+    bg = dar.bin_groups(groups, 23)
+    assert list(bg[:3]) == [0, 0, 0] and bg[7] == 0 and bg[8] == 1 and bg[13] == 2
 
 
 def test_by_mode_refuses_remove_tl(capsys):
@@ -1742,6 +1773,7 @@ def test_by_mode_refuses_remove_tl(capsys):
 
 @pytest.mark.parametrize('flag', [['--reference-mode', REF_KEY], ['--range-ref-m', '10'],
                                   ['--adjacency-window-s', '1'],
+                                  ['--range-angle-edges', '30'],
                                   ['--diagnostics-out', 'd.json']])
 def test_by_mode_flags_need_by_mode(flag, capsys):
     """The per-mode options are an error without --by-mode."""
@@ -1839,10 +1871,15 @@ def lambert_like(inc_deg):
     return -20.0 - 0.15 * np.asarray(inc_deg)
 
 
-def supported(fit, min_support=2000.0):
-    """Return ``(node, r, se)`` of the well-supported range nodes."""
-    rows = zip(fit['nodes'], fit['r'], fit['r_se'], fit['r_support'])
+def supported(group, min_support=2000.0):
+    """Return ``(node, r, se)`` of one angle group's well-supported range nodes."""
+    rows = zip(group['nodes'], group['r'], group['r_se'], group['r_support'])
     return [(x, r, se) for x, r, se, n in rows if n >= min_support]
+
+
+def supported_all(fit, min_support=2000.0):
+    """Return ``(group, node, r, se)`` over every angle group's well-supported nodes."""
+    return [(g, x, r, se) for g in fit['groups'] for x, r, se in supported(g, min_support)]
 
 
 def test_two_mode_step_offset_recovered():
@@ -1862,6 +1899,18 @@ def test_two_mode_step_offset_recovered():
     assert pair['directions_agree'] is True
     assert all(d['count'] >= 3 for d in pair['directions'].values())
     assert table['switches']['events'] == pair['count']
+    # The table's meaning: raw - db_relative_to_nadir - r_g - offset puts both
+    # modes on the reference mode's nadir level at R0 (the header's offset_meaning).
+    levels = {}
+    for key in (REF_KEY, CW_KEY):
+        n, s, _ss = b.modes[key].cells()
+        fit = table['modes'][key]
+        n_half = n.shape[0] // 2
+        abs_n, abs_s = n[:n_half] + n[n_half:], s[:n_half] + s[n_half:]
+        r_bin = fit['range_db_per_cell'][b.bin_group]
+        corrected = abs_s.sum() - (abs_n * (fit['rel_db_per_bin'][:, None] + r_bin)).sum()
+        levels[key] = corrected / abs_n.sum() - off[key]['offset_db']
+    assert levels[CW_KEY] == pytest.approx(levels[REF_KEY], abs=0.5)
 
 
 def dar_log10(x):
@@ -1901,7 +1950,7 @@ def test_offsets_chain_through_an_intermediate_mode_and_flag_unanchored():
     assert off[CW_KEY]['offset_db'] == pytest.approx(8.0, abs=0.5)
     # The deep mode never reaches R0: its range term is anchored at its node
     # nearest R0, and the offset carries the -15 dB/decade law between them.
-    nodes = table['modes'][deep]['nodes']
+    nodes = table['modes'][deep]['groups'][0]['nodes']
     anchor = min(max(0.0, nodes[0]), nodes[-1])
     assert off[deep]['offset_db'] == pytest.approx(17.0 - 15.0 * anchor, abs=0.5)
     assert off[deep]['anchored'] and off[deep]['se_db'] > off[CW_KEY]['se_db']
@@ -1943,16 +1992,17 @@ def test_range_term_recovers_the_compensation_residual(slope_db_per_decade):
                  lambda inc, r, th, m: lambert_like(inc) + slope_db_per_decade * dar_log10(r))
     table = b.finish(REF_KEY)
     fit = table['modes'][REF_KEY]
-    assert fit['range_status'] == 'fitted'
-    nodes = supported(fit)
-    assert len(nodes) >= 4
-    for x, r, _se in nodes:
-        assert r == pytest.approx(slope_db_per_decade * x, abs=0.5), (x, r)
-    assert 0.0 in fit['nodes']
-    assert fit['r'][fit['nodes'].index(0.0)] == pytest.approx(0.0, abs=1e-9)
+    assert fit['range_status'] == 'fitted' and len(fit['groups']) == 3
+    for g in fit['groups']:
+        nodes = supported(g)
+        assert len(nodes) >= 3, g['lo_deg']
+        for x, r, _se in nodes:
+            assert r == pytest.approx(slope_db_per_decade * x, abs=0.5), (g['lo_deg'], x, r)
+        assert 0.0 in g['nodes']
+        assert g['r'][g['nodes'].index(0.0)] == pytest.approx(0.0, abs=1e-9)
     assert not fit['misfit_exceeded']
-    assert fit['scalar_comparison']['slope_db_per_decade'] == pytest.approx(
-        slope_db_per_decade, abs=0.5)
+    for g in fit['scalar_comparison']['groups']:
+        assert g['slope_db_per_decade'] == pytest.approx(slope_db_per_decade, abs=0.5)
     # Intercepts are referred to R0: the angle curve is the incidence law.
     rows = {centre: rel for centre, _n, _a, _v, rel in fit['angle']}
     assert rows[40.5 if 40.5 in rows else 41.0] == pytest.approx(
@@ -1970,9 +2020,16 @@ def test_absorption_curvature_needs_the_binned_term():
     table = b.finish(REF_KEY)
     fit = table['modes'][REF_KEY]
     r0 = table['range_ref_m']
-    for x, r, _se in supported(fit):
+    assert supported_all(fit)
+    for g, x, r, _se in supported_all(fit):
+        if x in (g['nodes'][0], g['nodes'][-1]):
+            # An end node has data on one side only, so its value is a chord
+            # fit of the curve, not the curve's value; the misfit below is the
+            # check that the term still follows the data there.
+            continue
         # Linear between quarter-decade nodes: within 0.5 dB of the curve at the nodes.
-        assert r == pytest.approx(-2.0 * alpha * r0 * (10.0 ** x - 1.0), abs=0.5), (x, r)
+        assert r == pytest.approx(-2.0 * alpha * r0 * (10.0 ** x - 1.0), abs=0.5), (
+            g['lo_deg'], x, r)
     assert fit['misfit_max_db'] < table['misfit_threshold_db']
     assert not fit['misfit_exceeded']
     assert fit['scalar_comparison']['misfit_max_db'] > table['misfit_threshold_db']
@@ -1991,12 +2048,12 @@ def test_sloping_bottom_signed_bins_keep_the_slope_out_of_the_range_term():
                  slope_deg=12.0, depth=lambda t: 17.0 + 5.0 * math.sin(2.0 * math.pi * t / 120.0))
     table = b.finish(REF_KEY)
     fit = table['modes'][REF_KEY]
-    for x, r, _se in supported(fit):
-        assert r == pytest.approx(-10.0 * x, abs=0.5), (x, r)
+    assert supported_all(fit)
+    for g, x, r, _se in supported_all(fit):
+        assert r == pytest.approx(-10.0 * x, abs=0.5), (g['lo_deg'], x, r)
     n, s, ss = b.modes[REF_KEY].cells()
-    folded = dar.fit_mode(n, s, ss, b.bin_width_deg, b.first_nonspecular_bin,
-                          table['log_r0'], fold=True)
-    errors = [abs(r + 10.0 * x) for x, r, _se in supported(folded)]
+    folded = dar.fit_mode(n, s, ss, b.bin_width_deg, b.groups, table['log_r0'], fold=True)
+    errors = [abs(r + 10.0 * x) for _g, x, r, _se in supported_all(folded)]
     assert max(errors) > 1.5
 
 
@@ -2009,7 +2066,7 @@ def test_specular_band_is_kept_out_of_the_range_fit():
         b = dar.ModeTableBuilder(specular_exclusion_deg=exclusion)
         synth_stream(b, lambda t, h, cur: REF_KEY, law)
         fit = b.finish(REF_KEY)['modes'][REF_KEY]
-        errors[exclusion] = max(abs(r + 10.0 * x) for x, r, _se in supported(fit))
+        errors[exclusion] = max(abs(r + 10.0 * x) for _g, x, r, _se in supported_all(fit))
     assert errors[10.0] < 0.5
     assert errors[0.0] > 1.0
 
@@ -2045,8 +2102,47 @@ def test_flat_single_depth_bottom_leaves_the_range_term_unidentified():
                  lambda inc, r, th, m: lambert_like(inc) - 20.0 * dar_log10(r),
                  depth=lambda t: 20.0, seconds=120.0)
     fit = b.finish(REF_KEY)['modes'][REF_KEY]
-    assert fit['range_status'].startswith('zero: not identified')
-    assert fit['nodes'] == [] and fit['within_bin_spread_decades'] < 0.03
+    assert fit['range_status'] == 'zero'
+    for g in fit['groups']:
+        assert g['range_status'].startswith('zero: not identified')
+        assert g['nodes'] == [] and g['within_bin_spread_decades'] < 0.03
+    assert not any(ln.split(',')[1] == 'range' for ln in dar.mode_table_lines(
+        b.finish(REF_KEY), ['s']) if not ln.startswith('#'))
+
+
+def test_non_separable_range_term_needs_the_angle_groups():
+    """
+    One range term per mode fails on a range dependence that differs with angle.
+
+    Inner and outer beams follow different log-range slopes: one term per
+    mode leaves structure the misfit flags; one per angle group recovers each.
+    """
+    def slope(th):
+        a = abs_array(th)
+        return dar_where(a < 30.0, -10.0, dar_where(a < 50.0, -17.0, -25.0))
+
+    law = (lambda inc, r, th, m: lambert_like(inc) + slope(th) * dar_log10(r))
+    grouped = dar.ModeTableBuilder()
+    synth_stream(grouped, lambda t, h, cur: REF_KEY, law)
+    fit = grouped.finish(REF_KEY)['modes'][REF_KEY]
+    assert [(g['lo_deg'], g['hi_deg']) for g in fit['groups']] == [
+        (10.0, 30.0), (30.0, 50.0), (50.0, 90.0)]
+    expected = dict(zip((10.0, 30.0, 50.0), (-10.0, -17.0, -25.0)))
+    for g, x, r, _se in supported_all(fit):
+        assert r == pytest.approx(expected[g['lo_deg']] * x, abs=0.5), (g['lo_deg'], x, r)
+    assert not fit['misfit_exceeded'], fit['misfit_max_db']
+
+    single = dar.ModeTableBuilder(range_angle_edges_deg=())
+    synth_stream(single, lambda t, h, cur: REF_KEY, law)
+    table = single.finish(REF_KEY)
+    one = table['modes'][REF_KEY]
+    assert len(one['groups']) == 1
+    assert one['misfit_exceeded'] and one['misfit_max_db'] > 1.5
+    # The pooled residual per range bin cancels; the half groups show it.
+    halves = {k: v for k, v in one['binned_residuals'].items() if 'half' in k}
+    assert len(halves) == 2
+    assert max(abs(m) for rows in halves.values() for _x, _n, m in rows) > 1.5
+    assert max(abs(m) for _x, _n, m in one['binned_residuals']['all']) < 1.0
 
 
 def test_variance_column_measures_the_beam_scatter():
@@ -2116,27 +2212,34 @@ def hand_built_table():
     """Return a small deterministic table dict, the shape derive_mode_table returns."""
     nan = float('nan')
 
-    def mode(pings, angle, nodes, r, se, support, status='fitted', declared=('UNKNOWN', nan),
-             misfit=0.4):
-        return {'pings': pings, 'beams': pings * 256, 'angle': angle, 'nodes': nodes,
-                'r': r, 'r_se': se, 'r_support': support, 'range_status': status,
+    def group(lo, hi, nodes, r, se, support, status='fitted'):
+        return {'lo_deg': lo, 'hi_deg': hi, 'nodes': nodes, 'r': r, 'r_se': se,
+                'r_support': support, 'range_status': status}
+
+    def mode(pings, angle, groups, declared=('UNKNOWN', nan), misfit=0.4):
+        return {'pings': pings, 'beams': pings * 256, 'angle': angle, 'groups': groups,
+                'range_status': dar.range_status_summary(groups),
                 'declared_tvg_model': declared[0],
                 'declared_tvg_absorption_db_per_km': declared[1],
                 'misfit_max_db': misfit, 'misfit_exceeded': misfit > 1.5}
+    unidentified = ('zero: not identified, the within-angle-bin spread of log10 R is '
+                    '0.010 decade (< 0.03)')
     return {
         'reference_mode': REF_KEY, 'reference_source': 'requested',
         'range_ref_m': 18.9, 'range_ref_source': 'median slant range of the reference mode',
         'bin_width_deg': 2.0, 'specular_exclusion_deg': 10.0, 'window_sec': 2.0,
-        'misfit_threshold_db': 1.5,
+        'misfit_threshold_db': 1.5, 'range_angle_groups_deg': [(10.0, 30.0), (30.0, 90.0)],
         'modes': {
             REF_KEY: mode(93890, [(1.0, 5000, 25.5, 9.25, 0.0), (11.0, 4000, 24.7, 6.5, -0.8),
                                   (41.0, 3000, 18.3, 7.0, -7.2)],
-                          [-0.25, 0.0, 0.25], [1.5, 0.0, -2.25], [0.1, 0.0, 0.12],
-                          [3000.0, 5000.0, 2500.0]),
+                          [group(10.0, 30.0, [-0.25, 0.0, 0.25], [1.5, 0.0, -2.25],
+                                 [0.1, 0.0, 0.12], [3000.0, 5000.0, 2500.0]),
+                           group(30.0, 90.0, [0.0, 0.25], [0.0, -1.0], [0.0, 0.08],
+                                 [4000.0, 1500.0])]),
             CW_KEY: mode(217255, [(1.0, 6000, 7.7, 12.0, 0.0), (41.0, 1, 2.1, nan, -5.6)],
-                         [], [], [], [],
-                         status='zero: not identified, the within-angle-bin spread of '
-                                'log10 R is 0.010 decade (< 0.03)',
+                         [group(10.0, 30.0, [], [], [], [], status=unidentified),
+                          group(30.0, 90.0, [], [], [], [],
+                                status='zero: 120 non-specular samples, fewer than 200')],
                          declared=('40LOGR', 80.0), misfit=2.0),
         },
         'offsets': {REF_KEY: {'offset_db': 0.0, 'se_db': 0.0, 'anchored': True},
@@ -2154,14 +2257,25 @@ def test_mode_table_format():
     assert hd['reference_mode'] == REF_KEY and hd['range_ref_m'] == '18.9'
     assert hd['box'] == '42.976 -70.628 43.002 -70.596'
     assert hd['source_bags'] == 'bag_a,bag_b'
+    assert hd['range_angle_groups_deg'] == '10-30,30-90'
+    assert 'offset_meaning' in hd and 'range_term_lookup' in hd
     assert 'tl_removed' not in hd and 'absorption_db_per_m' not in hd
+    terms = [ln for ln in lines if ln.startswith('# range_term: ')]
+    assert terms == ['# range_term: %s 10-30 %s' % (CW_KEY, 'zero: not identified, the '
+                     'within-angle-bin spread of log10 R is 0.010 decade (< 0.03)'),
+                     '# range_term: %s 30-90 zero: 120 non-specular samples, fewer than 200'
+                     % CW_KEY,
+                     '# range_term: %s 10-30 fitted nodes=3' % REF_KEY,
+                     '# range_term: %s 30-90 fitted nodes=2' % REF_KEY]
     rows = [ln for ln in lines if not ln.startswith('#')]
     assert rows[0] == ','.join(dar.TABLE_COLUMNS)
-    assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1.0,7.700,6000,12.000,+0.000,'
+    assert rows[1] == ('CW_50us_20000Hz_500kHz,angle,1.0,,,7.700,6000,12.000,+0.000,'
                        '0.045,-17.250,0.310,true,40LOGR,80')
-    assert rows[2] == ('CW_50us_20000Hz_500kHz,angle,41.0,2.100,1,,-5.600,,'
+    assert rows[2] == ('CW_50us_20000Hz_500kHz,angle,41.0,,,2.100,1,,-5.600,,'
                        '-17.250,0.310,true,40LOGR,80')
-    assert rows[-1] == ('FMU_1000us_24000Hz_500kHz,range,0.25,-2.250,2500,,,0.120,'
+    assert rows[-3] == ('FMU_1000us_24000Hz_500kHz,range,0.25,10,30,-2.250,2500,,,0.120,'
+                        '0.000,0.000,true,UNKNOWN,nan')
+    assert rows[-1] == ('FMU_1000us_24000Hz_500kHz,range,0.25,30,90,-1.000,1500,,,0.080,'
                         '0.000,0.000,true,UNKNOWN,nan')
     assert all(len(r.split(',')) == len(dar.TABLE_COLUMNS) for r in rows)
     assert not any(r.split(',')[0] == CW_KEY and r.split(',')[1] == 'range' for r in rows)

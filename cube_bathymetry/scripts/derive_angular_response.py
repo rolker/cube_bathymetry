@@ -112,10 +112,12 @@ Per-mode table (cube_bathymetry#172): with ``--by-mode`` each ping is attributed
 to the latest ``marine_interfaces/SonarInfo`` at or before its stamp (one
 time-ordered pass over detections, SonarInfo and, with ``--box``, TF) and keyed
 by its pulse mode (canonical_mode_key: ``FMU_1000us_24000Hz_500kHz``). Per mode
-the tool fits ``L = A(theta) + r(log10(R / R0))``: ``r`` on quarter-decade
-nodes of log10(R / R0), linear between them, fitted with one intercept per
-SIGNED angle bin outside the specular band (so only depth change identifies
-it); ``A`` per ``|theta|`` bin referred to R0, with its sample variance; the
+the tool fits ``L = A(theta) + r_g(log10(R / R0))``: ``r_g`` per angle group
+``g`` of ``|theta|`` (``--range-angle-edges``, default 10-30, 30-50 and 50-90
+deg) on quarter-decade nodes of log10(R / R0), linear between them, fitted
+with one intercept per SIGNED angle bin outside the specular band (so only
+depth change identifies it); ``A`` per ``|theta|`` bin referred to R0, with
+its sample variance; the
 offset of each mode against ``--reference-mode`` from the beams either side of
 every mode switch, chained by least squares. It writes an
 ``angular-response-table v1`` CSV (first line ``# format: angular-response-table
@@ -753,6 +755,17 @@ def parse_args(argv):
     m.add_argument('--misfit-threshold-db', type=float, default=None,
                    help='flag a mode whose binned post-fit residual exceeds this '
                         '(default %g dB)' % DEFAULT_MISFIT_THRESHOLD_DB)
+    m.add_argument('--range-angle-edges', default=None,
+                   help='|angle| edges, degrees, comma-separated, that split the '
+                        'beams outside the specular band into the groups the range '
+                        'term is fitted per (default %s, i.e. groups %g-%s, %s-%s and '
+                        '%s-90 deg); "none" fits one term per mode'
+                        % (','.join('%g' % e for e in DEFAULT_RANGE_ANGLE_EDGES_DEG),
+                           DEFAULT_SPECULAR_EXCLUSION_DEG,
+                           '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[0],
+                           '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[0],
+                           '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[1],
+                           '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[1]))
     m.add_argument('--diagnostics-out', default=None,
                    help='also write every fit and offset diagnostic as JSON here')
     args = p.parse_args(argv)
@@ -822,6 +835,7 @@ BY_MODE_ONLY_FLAGS = (('--sonar-info-topic', 'sonar_info_topic'),
                       ('--adjacency-window-s', 'adjacency_window_s'),
                       ('--specular-exclusion-deg', 'specular_exclusion_deg'),
                       ('--misfit-threshold-db', 'misfit_threshold_db'),
+                      ('--range-angle-edges', 'range_angle_edges'),
                       ('--diagnostics-out', 'diagnostics_out'))
 
 
@@ -864,6 +878,15 @@ def check_by_mode_args(p, args):
             p.error('%s %r is out of range' % (flag, value))
     if not args.reference_mode or any(c in args.reference_mode for c in ', \t\r\n'):
         p.error('--reference-mode %r is not a mode key' % args.reference_mode)
+    if args.range_angle_edges is None:
+        args.range_angle_edges = DEFAULT_RANGE_ANGLE_EDGES_DEG
+    else:
+        try:
+            args.range_angle_edges = parse_range_angle_edges(args.range_angle_edges)
+            range_angle_groups(args.bin_width_deg, args.specular_exclusion_deg,
+                               args.range_angle_edges)
+        except ValueError as e:
+            p.error(str(e))
 
 
 def francois_garrison_absorption_db_per_m(
@@ -1527,14 +1550,20 @@ OFFSET_AGREEMENT_SE = 3.0
 # far past the ping, so a SonarInfo recorded just after the first ping it
 # describes (stamped before it) is still seen.
 SONAR_INFO_GUARD_SEC = 1.0
-# Misfit angle groups (deg); the first starts at the specular exclusion.
-MISFIT_ANGLE_EDGES_DEG = (30.0, 50.0)
+# The range term is fitted per ANGLE GROUP of |theta| (deg): the first group
+# starts at the specular exclusion, the last ends at 90. On the M3 the
+# residual range dependence differs between the inner and the outer beams
+# (Appledore, cube_bathymetry#172: 5-13 dB left in the 10-30 deg group by one
+# term per mode), so one r per mode is not enough; a sonar whose range term
+# IS separable gets the same r in every group, within noise. The edges snap
+# to angle-bin boundaries and the snapped bounds are written in the table.
+DEFAULT_RANGE_ANGLE_EDGES_DEG = (30.0, 50.0)
 
 SIGNAL_TYPE_NAMES = {1: 'CW', 2: 'FMU', 3: 'FMD'}
 TVG_MODEL_NAMES = {0: 'UNKNOWN', 1: 'NONE', 2: '20LOGR', 3: '40LOGR', 4: 'CUSTOM'}
 
-TABLE_COLUMNS = ('mode', 'term', 'x', 'value_db', 'n', 'var_db2',
-                 'db_relative_to_nadir', 'se_db', 'offset_db_vs_ref',
+TABLE_COLUMNS = ('mode', 'term', 'x', 'angle_lo_deg', 'angle_hi_deg', 'value_db', 'n',
+                 'var_db2', 'db_relative_to_nadir', 'se_db', 'offset_db_vs_ref',
                  'offset_se_db', 'offset_anchored', 'declared_tvg_model',
                  'declared_tvg_absorption_db_per_km')
 
@@ -1653,20 +1682,21 @@ class OffsetSummary:
     Pooled non-specular beams of one or more pings, for the offset levels.
 
     ``n``, ``s``: beam count and dB sum; ``angle_counts`` per ``|theta|`` bin and
-    ``cell_counts`` per range cell, so the level corrected by any mode's
-    curve and range term is ``(s - angle_counts . g - cell_counts . r) / n``,
-    computed once the fit is known.
+    ``cell_counts`` per (angle group, range cell), flat with the group as the
+    slow index, so the level corrected by any mode's curve and per-group
+    range term is ``(s - angle_counts . g - cell_counts . r) / n``, computed
+    once the fit is known.
     """
 
     __slots__ = ('n', 's', 'angle_counts', 'cell_counts', 'pings')
 
-    def __init__(self, n_abs=0, n_cells=0):
-        """Create an empty summary for ``n_abs`` angle bins and ``n_cells`` cells."""
+    def __init__(self, n_abs=0, n_cells=0, n_groups=1):
+        """Create an empty summary: ``n_abs`` angle bins, ``n_groups`` x ``n_cells`` range cells."""
         import numpy as np
         self.n = 0
         self.s = 0.0
         self.angle_counts = np.zeros(n_abs, dtype=np.int64)
-        self.cell_counts = np.zeros(n_cells, dtype=np.int64)
+        self.cell_counts = np.zeros(n_groups * n_cells, dtype=np.int64)
         self.pings = 0
 
     def add(self, other):
@@ -1693,14 +1723,19 @@ class OffsetSummary:
                 setattr(self, name, (nz.astype(np.int32), counts[nz].astype(np.int32)))
 
     def level(self, rel_db, range_db):
-        """Mean corrected dB given a mode's per-bin curve and per-cell range term."""
+        """
+        Mean corrected dB given a mode's per-bin curve and per-(group, cell) range term.
+
+        ``range_db`` is (groups, cells) or already flat in the same order.
+        """
         import numpy as np
         if self.n == 0:
             return float('nan')
         total = self.s
-        for counts, values in ((self.angle_counts, rel_db), (self.cell_counts, range_db)):
+        for counts, values in ((self.angle_counts, np.asarray(rel_db).ravel()),
+                               (self.cell_counts, np.asarray(range_db).ravel())):
             if isinstance(counts, tuple):
-                total -= float(np.dot(counts[1], np.asarray(values)[counts[0]]))
+                total -= float(np.dot(counts[1], values[counts[0]]))
             else:
                 total -= float(np.dot(counts, values))
         return float(total / self.n)
@@ -1733,11 +1768,12 @@ class SwitchTracker:
     breaks the run.
     """
 
-    def __init__(self, window_ns, n_abs, n_cells):
+    def __init__(self, window_ns, n_abs, n_cells, n_groups=1):
         """Track switches with an adjacency window of ``window_ns``."""
         self.window_ns = window_ns
         self.n_abs = n_abs
         self.n_cells = n_cells
+        self.n_groups = n_groups
         self.recent = collections.deque()    # (t_ns, key, summary)
         self.open = []
         self.events = []
@@ -1776,7 +1812,7 @@ class SwitchTracker:
         self.open = still_open
         if self.recent and self.recent[-1][1] != key:
             prev_key = self.recent[-1][1]
-            before = OffsetSummary(self.n_abs, self.n_cells)
+            before = OffsetSummary(self.n_abs, self.n_cells, self.n_groups)
             for t_prev, k_prev, s_prev in reversed(self.recent):
                 if k_prev != prev_key or t_ns - t_prev > self.window_ns:
                     break
@@ -1784,7 +1820,7 @@ class SwitchTracker:
             if before.pings == 0:
                 self.discarded['gap'] += 1
             else:
-                after = OffsetSummary(self.n_abs, self.n_cells)
+                after = OffsetSummary(self.n_abs, self.n_cells, self.n_groups)
                 after.add(summary)
                 self.open.append(SwitchEvent(prev_key, key, t_ns, before, after))
         self.recent.append((t_ns, key, summary))
@@ -1934,21 +1970,26 @@ class ModeTableBuilder:
 
     def __init__(self, bin_width_deg=2.0,
                  specular_exclusion_deg=DEFAULT_SPECULAR_EXCLUSION_DEG,
-                 window_sec=DEFAULT_ADJACENCY_WINDOW_SEC):
-        """Create an empty builder."""
+                 window_sec=DEFAULT_ADJACENCY_WINDOW_SEC,
+                 range_angle_edges_deg=DEFAULT_RANGE_ANGLE_EDGES_DEG):
+        """Create an empty builder (ValueError on an edge list that leaves a group empty)."""
         self.bin_width_deg = bin_width_deg
         self.n_half = int(math.ceil(90.0 / bin_width_deg - 1e-9))
         self.specular_exclusion_deg = specular_exclusion_deg
         # First |theta| bin whose lower edge is outside the specular band.
         self.first_nonspecular_bin = int(math.ceil(
             specular_exclusion_deg / bin_width_deg - 1e-9))
+        self.range_angle_edges_deg = tuple(range_angle_edges_deg)
+        self.groups = range_angle_groups(bin_width_deg, specular_exclusion_deg,
+                                         self.range_angle_edges_deg)
+        self.bin_group = bin_groups(self.groups, self.n_half)
         self.window_sec = window_sec
         self.history = SonarInfoHistory()
         self.modes = {}
         self.pings_without_info = 0
         self.pings_without_beams = 0
         self.tracker = SwitchTracker(int(round(window_sec * 1e9)), self.n_half,
-                                     RANGE_CELL_COUNT)
+                                     RANGE_CELL_COUNT, len(self.groups))
         self.sonar_models = collections.Counter()
 
     def add_sonar_info(self, stamp_ns, pulse_lengths, bandwidths, tx_signal_types,
@@ -1982,7 +2023,7 @@ class ModeTableBuilder:
             acc = self.modes[key] = ModeAccumulator(self.n_half)
         acc.pings += 1
         acc.declared[declared] += 1
-        summary = OffsetSummary(self.n_half, RANGE_CELL_COUNT)
+        summary = OffsetSummary(self.n_half, RANGE_CELL_COUNT, len(self.groups))
         summary.pings = 1
         beams = ping_beams(ping, self.bin_width_deg, self.n_half)
         if beams is None:
@@ -1996,7 +2037,9 @@ class ModeTableBuilder:
                 summary.n = int(ns.sum())
                 summary.s = float(y[ns].sum())
                 summary.angle_counts = np.bincount(abs_bin[ns], minlength=self.n_half)
-                summary.cell_counts = np.bincount(cell[ns], minlength=RANGE_CELL_COUNT)
+                summary.cell_counts = np.bincount(
+                    self.bin_group[abs_bin[ns]] * RANGE_CELL_COUNT + cell[ns],
+                    minlength=len(self.groups) * RANGE_CELL_COUNT)
         self.tracker.add(ping_ns, key, summary)
 
     def finish(self, reference_mode=DEFAULT_REFERENCE_MODE, range_ref_m=None,
@@ -2076,16 +2119,17 @@ def _solve_additive(nb, sb, ssb, basis, penalty):
     return beta[:n_bins], beta[n_bins:], sigma2 * inv[n_bins:, n_bins:], sigma2
 
 
-def _binned_residuals(nb, sb, a, r_cell, x_rel, groups, min_n):
+def _binned_residuals(nb, sb, a, r_bin, x_rel, groups, min_n):
     """
     Mean post-fit residual per eighth-decade bin of log10(R/R0), pooled and per angle group.
 
-    ``groups`` maps a group name to a boolean mask over the fit bins. Returns
-    ``{name: [(bin_centre, n, mean_db), ...]}`` with only bins of at least
-    ``min_n`` samples; ``'all'`` is the pooled one.
+    ``r_bin`` is each fit bin's range term per cell, (bins, cells); ``groups``
+    maps a group name to a boolean mask over the fit bins. Returns ``{name:
+    [(bin_centre, n, mean_db), ...]}`` with only bins of at least ``min_n``
+    samples; ``'all'`` is the pooled one.
     """
     import numpy as np
-    resid = sb - nb * (a[:, None] + r_cell[None, :])
+    resid = sb - nb * (a[:, None] + r_bin)
     q = np.round(x_rel / MISFIT_BIN_DECADES).astype(np.int64)
     out = {}
     for name, mask in (('all', np.ones(nb.shape[0], dtype=bool)),) + tuple(groups):
@@ -2113,45 +2157,82 @@ def _misfit_stats(binned):
             math.sqrt(sum(n * m * m for n, m in values) / total))
 
 
-def fit_mode(n, s, ss, bin_width_deg, first_nonspecular_bin, log_r0,
-             fold=False, range_model='nodes'):
+def range_angle_groups(bin_width_deg, specular_exclusion_deg, edges_deg):
     """
-    Fit one mode's separable model ``L = A(theta) + r(log10(R / R0))``.
+    Return the range-term angle groups as ``[(lo_bin, hi_bin), ...]`` over ``|theta|`` bins.
 
-    ``n``, ``s``, ``ss``: (2 * n_half, RANGE_CELL_COUNT) cell statistics (see
-    ModeAccumulator). The range term is fitted jointly with one intercept per
-    SIGNED angle bin (``fold=True`` folds to ``|theta|`` bins, for comparison
-    only) over the bins outside the specular band. ``range_model`` is
-    ``'nodes'`` (quarter-decade nodes of log10(R/R0), linear between them,
-    clamped beyond the ends: the table's term) or ``'scalar'`` (one slope per
-    decade, the diagnostic comparison).
+    The first group starts at the first bin outside the specular band, the
+    last ends at the last bin below 90 deg; each edge in ``edges_deg`` snaps
+    up to the first bin whose lower edge is at or above it. Raises ValueError
+    when an edge is not finite, not strictly increasing, or snaps onto the
+    previous bound or past the last bin (an empty group).
+    """
+    n_half = int(math.ceil(90.0 / bin_width_deg - 1e-9))
+    bounds = [int(math.ceil(specular_exclusion_deg / bin_width_deg - 1e-9))]
+    for edge in edges_deg:
+        if not (isinstance(edge, (int, float)) and math.isfinite(edge)):
+            raise ValueError('range angle edge %r is not a finite number' % (edge,))
+        b = int(math.ceil(edge / bin_width_deg - 1e-9))
+        if b <= bounds[-1] or b >= n_half:
+            raise ValueError('range angle edge %g deg gives an empty group (bins of %g '
+                             'deg, specular exclusion %g deg, previous bound %g deg)'
+                             % (edge, bin_width_deg, specular_exclusion_deg,
+                                bounds[-1] * bin_width_deg))
+        bounds.append(b)
+    bounds.append(n_half)
+    return list(zip(bounds[:-1], bounds[1:]))
 
-    Returns a dict: ``range_status`` (``'fitted'`` or ``'zero: <reason>'``),
-    ``nodes``/``r``/``r_se``/``r_support`` (the range term, 0 at R0), ``angle``
-    rows ``(centre, n, A, var, rel)`` per populated ``|theta|`` bin (A = mean of
-    ``L - r``, the level at R0; rel = A minus the nadir-most bin's A),
-    ``within_bin_spread_decades``, ``binned_residuals``, ``misfit_max_db``,
-    ``misfit_rms_db``, ``sigma_db``, ``range_db_per_cell`` and
-    ``rel_db_per_bin`` (for the offsets), and for ``'scalar'`` the slope.
+
+def group_bounds_deg(group, bin_width_deg):
+    """Return ``(lo_deg, hi_deg)`` of a ``(lo_bin, hi_bin)`` group (hi clamped to 90)."""
+    return group[0] * bin_width_deg, min(group[1] * bin_width_deg, 90.0)
+
+
+def bin_groups(groups, n_half):
+    """
+    Return the group index of every ``|theta|`` bin, length ``n_half``.
+
+    Specular bins (below the first group) take the first group, the rule the
+    estimator applies to a beam below the first ``angle_lo_deg`` of a mode.
     """
     import numpy as np
-    n_half = n.shape[0] // 2
-    x_abs = cell_log10_range()
-    x_rel = x_abs - log_r0
-    abs_n = n[:n_half] + n[n_half:]
-    abs_s = s[:n_half] + s[n_half:]
-    abs_ss = ss[:n_half] + ss[n_half:]
-    if fold:
-        fit_n, fit_s, fit_ss = abs_n, abs_s, abs_ss
-        bin_abs = np.arange(n_half)
-    else:
-        fit_n, fit_s, fit_ss = n, s, ss
-        bin_abs = np.concatenate([np.arange(n_half), np.arange(n_half)])
-    use = (bin_abs >= first_nonspecular_bin) & (fit_n.sum(axis=1) > 0)
-    nb, sb, ssb = fit_n[use], fit_s[use], fit_ss[use]
+    out = np.zeros(n_half, dtype=np.int64)
+    for g, (lo, hi) in enumerate(groups):
+        out[lo:hi] = g
+    return out
+
+
+def parse_range_angle_edges(text):
+    """Parse ``--range-angle-edges``: ``none`` -> (), else comma-separated degrees."""
+    if text.strip().lower() == 'none':
+        return ()
+    try:
+        edges = tuple(float(v) for v in text.split(','))
+    except ValueError:
+        raise ValueError('--range-angle-edges %r is not a comma-separated list of '
+                         'degrees or "none"' % text)
+    for a, b in zip(edges, edges[1:]):
+        if not b > a:
+            raise ValueError('--range-angle-edges %r must increase strictly' % text)
+    return edges
+
+
+def _fit_group(nb, sb, ssb, x_abs, x_rel, range_model):
+    """
+    Fit ``y = a_bin + r(log10(R / R0))`` on one angle group's cell statistics.
+
+    ``nb``, ``sb``, ``ssb``: (fit bins of the group, cells). Returns ``(a,
+    r_cell, info)``: the per-bin intercepts, the range term per range cell
+    (zeros when not fitted) and a dict with ``range_status`` (``'fitted'`` or
+    ``'zero: <reason>'``), ``nonspecular_samples``,
+    ``within_bin_spread_decades``, ``sigma_db`` and, for ``'nodes'``,
+    ``nodes``/``r``/``r_se``/``r_support`` (0 at R0), for ``'scalar'``
+    ``slope_db_per_decade``/``slope_se``.
+    """
+    import numpy as np
     total = float(nb.sum())
-    result = {'range_model': range_model, 'nonspecular_samples': int(total),
-              'nodes': [], 'r': [], 'r_se': [], 'r_support': []}
+    info = {'range_model': range_model, 'nonspecular_samples': int(total),
+            'nodes': [], 'r': [], 'r_se': [], 'r_support': []}
 
     # Within-angle-bin spread of log10 R: what identifies the range term.
     if total > 0:
@@ -2161,13 +2242,13 @@ def fit_mode(n, s, ss, bin_width_deg, first_nonspecular_bin, log_r0,
                            / total)
     else:
         spread = 0.0
-    result['within_bin_spread_decades'] = spread
+    info['within_bin_spread_decades'] = spread
 
     r_cell = np.zeros(RANGE_CELL_COUNT)
     a = np.zeros(nb.shape[0])
     sigma2 = float('nan')
     status = 'fitted'
-    populated = np.nonzero(nb.sum(axis=0) > 0)[0]
+    populated = np.nonzero(nb.sum(axis=0) > 0)[0] if nb.shape[0] else np.zeros(0, dtype=int)
     if total < MIN_SAMPLES_PER_BIN:
         status = ('zero: %d non-specular samples, fewer than %d'
                   % (int(total), MIN_SAMPLES_PER_BIN))
@@ -2194,8 +2275,8 @@ def fit_mode(n, s, ss, bin_width_deg, first_nonspecular_bin, log_r0,
     if status == 'fitted':
         a, r, cov, sigma2 = _solve_additive(nb, sb, ssb, basis, penalty)
         if range_model == 'scalar':
-            result['slope_db_per_decade'] = float(r[0])
-            result['slope_se'] = float(math.sqrt(max(cov[0, 0], 0.0)))
+            info['slope_db_per_decade'] = float(r[0])
+            info['slope_se'] = float(math.sqrt(max(cov[0, 0], 0.0)))
             r_cell = basis @ r
         else:
             # Refer the term to R0: r(0) = 0, the constant moves to the intercepts.
@@ -2206,31 +2287,104 @@ def fit_mode(n, s, ss, bin_width_deg, first_nonspecular_bin, log_r0,
             t = np.eye(len(nodes)) - np.outer(np.ones(len(nodes)), c0)
             cov = t @ cov @ t.T
             r_cell = basis @ r
-            result['nodes'] = [float(v) for v in nodes]
-            result['r'] = [float(v) for v in r]
-            result['r_se'] = [float(math.sqrt(max(v, 0.0))) for v in np.diag(cov)]
-            result['r_support'] = [float(v) for v in basis.T @ nb.sum(axis=0)]
+            info['nodes'] = [float(v) for v in nodes]
+            info['r'] = [float(v) for v in r]
+            info['r_se'] = [float(math.sqrt(max(v, 0.0))) for v in np.diag(cov)]
+            info['r_support'] = [float(v) for v in basis.T @ nb.sum(axis=0)]
     elif range_model == 'scalar':
-        result['slope_db_per_decade'] = 0.0
-        result['slope_se'] = float('nan')
-    if status != 'fitted':
+        info['slope_db_per_decade'] = 0.0
+        info['slope_se'] = float('nan')
+    if status != 'fitted' and nb.shape[0]:
         # Intercepts only: per-bin means.
         tot = nb.sum(axis=1)
         a = np.where(tot > 0, sb.sum(axis=1) / np.maximum(tot, 1), 0.0)
-    result['range_status'] = status
-    result['sigma_db'] = math.sqrt(sigma2) if math.isfinite(sigma2) else float('nan')
+    info['range_status'] = status
+    info['sigma_db'] = math.sqrt(sigma2) if math.isfinite(sigma2) else float('nan')
+    return a, r_cell, info
+
+
+def range_status_summary(groups):
+    """One word for a mode's range terms: ``fitted``, ``zero`` or ``partial (k of G fitted)``."""
+    fitted = sum(1 for g in groups if g['range_status'] == 'fitted')
+    if fitted == len(groups):
+        return 'fitted'
+    if fitted == 0:
+        return 'zero'
+    return 'partial (%d of %d groups fitted)' % (fitted, len(groups))
+
+
+def fit_mode(n, s, ss, bin_width_deg, groups, log_r0, fold=False, range_model='nodes'):
+    """
+    Fit one mode's model ``L = A(theta) + r_g(log10(R / R0))``, ``g`` the angle group of ``theta``.
+
+    ``n``, ``s``, ``ss``: (2 * n_half, RANGE_CELL_COUNT) cell statistics (see
+    ModeAccumulator). ``groups`` is the ``[(lo_bin, hi_bin), ...]`` list from
+    range_angle_groups: the range term is fitted per group, jointly with one
+    intercept per SIGNED angle bin of the group (``fold=True`` folds to
+    ``|theta|`` bins, for comparison only); the bins below the first group
+    (the specular band) are left out of every fit. Every angle bin belongs to
+    exactly one group and no parameter is shared, so the joint least squares
+    separates exactly into one fit per group. ``range_model`` is ``'nodes'``
+    (quarter-decade nodes of log10(R/R0), linear between them, clamped beyond
+    the ends: the table's term) or ``'scalar'`` (one slope per decade, the
+    diagnostic comparison).
+
+    Returns a dict: ``groups`` (one dict per group, in order: ``lo_deg``,
+    ``hi_deg``, ``lo_bin``, ``hi_bin`` and the _fit_group info —
+    ``range_status``, ``nodes``/``r``/``r_se``/``r_support``,
+    ``within_bin_spread_decades``, ``nonspecular_samples``, ``sigma_db``, for
+    ``'scalar'`` the slope), ``range_status`` (the summary word),
+    ``nonspecular_samples`` (all groups), ``angle`` rows ``(centre, n, A, var,
+    rel)`` per populated ``|theta|`` bin (A = mean of ``L - r_g``, the level at
+    R0; rel = A minus the nadir-most bin's A), ``binned_residuals``,
+    ``misfit_max_db``, ``misfit_rms_db``, ``range_db_per_cell`` ((groups,
+    cells)) and ``rel_db_per_bin`` (for the offsets).
+    """
+    import numpy as np
+    n_half = n.shape[0] // 2
+    x_abs = cell_log10_range()
+    x_rel = x_abs - log_r0
+    abs_n = n[:n_half] + n[n_half:]
+    abs_s = s[:n_half] + s[n_half:]
+    abs_ss = ss[:n_half] + ss[n_half:]
+    if fold:
+        fit_n, fit_s, fit_ss = abs_n, abs_s, abs_ss
+        bin_abs = np.arange(n_half)
+    else:
+        fit_n, fit_s, fit_ss = n, s, ss
+        bin_abs = np.concatenate([np.arange(n_half), np.arange(n_half)])
+    bin_group = bin_groups(groups, n_half)
+    populated_bins = fit_n.sum(axis=1) > 0
+    result = {'range_model': range_model, 'groups': [], 'nonspecular_samples': 0}
+    r_cell = np.zeros((len(groups), RANGE_CELL_COUNT))
+    a_all = np.zeros(fit_n.shape[0])
+    use_all = np.zeros(fit_n.shape[0], dtype=bool)
+    for g, (lo_bin, hi_bin) in enumerate(groups):
+        use = (bin_abs >= lo_bin) & (bin_abs < hi_bin) & populated_bins
+        a, r_g, info = _fit_group(fit_n[use], fit_s[use], fit_ss[use], x_abs, x_rel,
+                                  range_model)
+        info['lo_deg'], info['hi_deg'] = group_bounds_deg((lo_bin, hi_bin), bin_width_deg)
+        info['lo_bin'], info['hi_bin'] = lo_bin, hi_bin
+        r_cell[g] = r_g
+        a_all[use] = a
+        use_all |= use
+        result['groups'].append(info)
+        result['nonspecular_samples'] += info['nonspecular_samples']
+    result['range_status'] = range_status_summary(result['groups'])
     result['range_db_per_cell'] = r_cell
 
-    # Angular intercepts per |theta| bin (specular bins included), referred to R0.
+    # Angular intercepts per |theta| bin (specular bins included), referred to
+    # R0 with the bin's own group's range term.
     nj = abs_n.sum(axis=1)
     rows = []
     rel_per_bin = np.zeros(n_half)
     nadir = None
     for j in np.nonzero(nj > 0)[0]:
         cnt = float(nj[j])
-        level = float((abs_s[j].sum() - abs_n[j] @ r_cell) / cnt)
+        r_j = r_cell[bin_group[j]]
+        level = float((abs_s[j].sum() - abs_n[j] @ r_j) / cnt)
         if cnt >= 2:
-            sse = float((abs_ss[j] - 2.0 * r_cell * abs_s[j] + abs_n[j] * r_cell ** 2).sum())
+            sse = float((abs_ss[j] - 2.0 * r_j * abs_s[j] + abs_n[j] * r_j ** 2).sum())
             var = max(sse - cnt * level * level, 0.0) / (cnt - 1.0)
         else:
             var = float('nan')
@@ -2241,14 +2395,25 @@ def fit_mode(n, s, ss, bin_width_deg, first_nonspecular_bin, log_r0,
     result['angle'] = rows
     result['rel_db_per_bin'] = rel_per_bin
 
-    # Misfit: binned residuals after the fit, pooled and per angle group.
-    lower = bin_abs[use] * bin_width_deg
-    edges = (first_nonspecular_bin * bin_width_deg,) + MISFIT_ANGLE_EDGES_DEG + (90.0,)
-    groups = []
-    for g_lo, g_hi in zip(edges[:-1], edges[1:]):
-        if g_hi > g_lo:
-            groups.append(('%g-%g deg' % (g_lo, g_hi), (lower >= g_lo) & (lower < g_hi)))
-    binned = _binned_residuals(nb, sb, a, r_cell, x_rel, groups, MIN_SAMPLES_PER_BIN)
+    # Misfit: binned residuals after the fit, pooled, per fit group and per
+    # HALF group. The per-bin intercepts make the pooled mean residual of a
+    # group near zero even when the range dependence still differs between
+    # its inner and outer bins, so each group is also split in two.
+    nb, sb = fit_n[use_all], fit_s[use_all]
+    r_bin = r_cell[bin_group[bin_abs[use_all]]]
+    lower_bin = bin_abs[use_all]
+    diag_groups = []
+    for lo_bin, hi_bin in groups:
+        parts = [(lo_bin, hi_bin, '')]
+        if hi_bin - lo_bin >= 2:
+            mid = lo_bin + (hi_bin - lo_bin) // 2
+            parts += [(lo_bin, mid, ' (lower half)'), (mid, hi_bin, ' (upper half)')]
+        for p_lo, p_hi, tag in parts:
+            lo_deg, hi_deg = group_bounds_deg((p_lo, p_hi), bin_width_deg)
+            diag_groups.append(('%g-%g deg%s' % (lo_deg, hi_deg, tag),
+                                (lower_bin >= p_lo) & (lower_bin < p_hi)))
+    binned = _binned_residuals(nb, sb, a_all[use_all], r_bin, x_rel, diag_groups,
+                               MIN_SAMPLES_PER_BIN)
     result['binned_residuals'] = binned
     result['misfit_max_db'], result['misfit_rms_db'] = _misfit_stats(binned)
     return result
@@ -2406,16 +2571,18 @@ def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db)
     for key in sorted(sampled):
         n, s, ss = cells[key]
         acc = builder.modes[key]
-        fit = fit_mode(n, s, ss, builder.bin_width_deg, builder.first_nonspecular_bin,
-                       log_r0)
-        scalar = fit_mode(n, s, ss, builder.bin_width_deg,
-                          builder.first_nonspecular_bin, log_r0, range_model='scalar')
+        fit = fit_mode(n, s, ss, builder.bin_width_deg, builder.groups, log_r0)
+        scalar = fit_mode(n, s, ss, builder.bin_width_deg, builder.groups, log_r0,
+                          range_model='scalar')
         fit['scalar_comparison'] = {
-            'slope_db_per_decade': scalar.get('slope_db_per_decade'),
-            'slope_se': scalar.get('slope_se'),
             'misfit_max_db': scalar['misfit_max_db'],
             'misfit_rms_db': scalar['misfit_rms_db'],
-            'range_status': scalar['range_status']}
+            'range_status': scalar['range_status'],
+            'groups': [{'lo_deg': g['lo_deg'], 'hi_deg': g['hi_deg'],
+                        'slope_db_per_decade': g.get('slope_db_per_decade'),
+                        'slope_se': g.get('slope_se'),
+                        'range_status': g['range_status']}
+                       for g in scalar['groups']]}
         fit['pings'] = acc.pings
         fit['beams'] = acc.beams
         fit['median_range_m'] = 10.0 ** median_log10_range(n)
@@ -2463,6 +2630,9 @@ def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db)
             'log_r0': log_r0, 'range_ref_m': 10.0 ** log_r0, 'range_ref_source': r0_source,
             'bin_width_deg': builder.bin_width_deg,
             'specular_exclusion_deg': builder.specular_exclusion_deg,
+            'range_angle_groups_deg': [group_bounds_deg(g, builder.bin_width_deg)
+                                       for g in builder.groups],
+            'range_angle_edges_deg': list(builder.range_angle_edges_deg),
             'window_sec': builder.window_sec, 'misfit_threshold_db': misfit_threshold_db,
             'modes': fits, 'offsets': offsets, 'pairs': pairs, 'chain': chain,
             'switches': {'events': len(builder.tracker.events),
@@ -2493,11 +2663,21 @@ def mode_table_lines(table, source_bags, box=None):
              '# range_ref_m: %.6g' % table['range_ref_m'],
              '# range_ref_source: %s' % table['range_ref_source'],
              '# range_node_spacing_decades: %g' % RANGE_NODE_SPACING_DECADES,
+             '# range_angle_groups_deg: %s' % ','.join(
+                 '%g-%g' % (lo, hi) for lo, hi in table['range_angle_groups_deg']),
+             '# range_term_lookup: a beam uses the range rows whose angle_lo_deg <= '
+             '|angle| < angle_hi_deg; below the first angle_lo_deg (the specular band) '
+             'it uses the first group; a mode or group with no range rows has a zero term',
              '# angle_bin_width_deg: %g' % table['bin_width_deg'],
              '# specular_exclusion_deg: %g' % table['specular_exclusion_deg'],
              '# adjacency_window_s: %g' % table['window_sec'],
              '# misfit_threshold_db: %g' % table['misfit_threshold_db'],
-             '# absorption: not modelled separately; the per-mode range term carries it']
+             '# absorption: not modelled separately; the per-mode range term carries it',
+             '# offset_meaning: offset_db_vs_ref is the level a mode reads above the '
+             'reference mode after db_relative_to_nadir and its range term are removed '
+             'from both, measured at mode switches; the corrected beam is '
+             'raw - db_relative_to_nadir - r - offset_db_vs_ref, on the reference '
+             "mode's nadir level at R0"]
     if box is not None:
         lines.append('# box: %s' % ' '.join('%.9g' % v for v in box))
     lines.append('# source_bags: %s' % ','.join(source_bags))
@@ -2511,9 +2691,11 @@ def mode_table_lines(table, source_bags, box=None):
                         'true' if off['anchored'] else 'false',
                         _fmt(fit['misfit_max_db'], '%.3f'),
                         'yes' if fit['misfit_exceeded'] else 'no'))
-        lines.append('# range_term: %s %s' % (
-            key, ('fitted nodes=%d' % len(fit['nodes']))
-            if fit['range_status'] == 'fitted' else fit['range_status']))
+        for g in fit['groups']:
+            lines.append('# range_term: %s %g-%g %s' % (
+                key, g['lo_deg'], g['hi_deg'],
+                ('fitted nodes=%d' % len(g['nodes']))
+                if g['range_status'] == 'fitted' else g['range_status']))
     lines.append(','.join(TABLE_COLUMNS))
     for key, fit in sorted(table['modes'].items()):
         off = table['offsets'][key]
@@ -2524,13 +2706,16 @@ def mode_table_lines(table, source_bags, box=None):
         for centre, cnt, level, var, rel in fit['angle']:
             se = math.sqrt(var / cnt) if math.isfinite(var) else float('nan')
             var_text = _fmt(var, '%.3f') if math.isfinite(var) else ''
-            lines.append('%s,angle,%.1f,%.3f,%d,%s,%+.3f,%s,%s'
+            lines.append('%s,angle,%.1f,,,%.3f,%d,%s,%+.3f,%s,%s'
                          % (key, centre, level, cnt, var_text, rel,
                             _fmt(se, '%.3f') if math.isfinite(se) else '', tail))
-        if fit['range_status'] == 'fitted':
-            for x, r, se, sup in zip(fit['nodes'], fit['r'], fit['r_se'], fit['r_support']):
-                lines.append('%s,range,%.2f,%.3f,%d,,,%.3f,%s'
-                             % (key, x, r, int(round(sup)), se, tail))
+        for g in fit['groups']:
+            if g['range_status'] != 'fitted':
+                continue
+            for x, r, se, sup in zip(g['nodes'], g['r'], g['r_se'], g['r_support']):
+                lines.append('%s,range,%.2f,%g,%g,%.3f,%d,,,%.3f,%s'
+                             % (key, x, g['lo_deg'], g['hi_deg'], r, int(round(sup)),
+                                se, tail))
     return lines
 
 
@@ -2551,9 +2736,14 @@ def mode_report_lines(table):
                       _fmt(fit['misfit_max_db'], '%.2f'),
                       _fmt(fit['scalar_comparison']['misfit_max_db'], '%.2f'),
                       fit['range_status']))
-        if fit['range_status'] == 'fitted':
-            out.append('    r(log10 R/R0): ' + ' '.join(
-                '%+.2f:%+.1f' % (x, r) for x, r in zip(fit['nodes'], fit['r'])))
+        for g in fit['groups']:
+            if g['range_status'] == 'fitted':
+                out.append('    r(log10 R/R0) %g-%g deg: ' % (g['lo_deg'], g['hi_deg'])
+                           + ' '.join('%+.2f:%+.1f' % (x, r)
+                                      for x, r in zip(g['nodes'], g['r'])))
+            else:
+                out.append('    r %g-%g deg: %s' % (g['lo_deg'], g['hi_deg'],
+                                                    g['range_status']))
     sw = table['switches']
     out.append('switches: %d used; discarded %s'
                % (sw['events'], ', '.join('%d %s' % (v, k)
@@ -2699,7 +2889,7 @@ def main_by_mode(args, source_bags):
     import json
 
     builder = ModeTableBuilder(args.bin_width_deg, args.specular_exclusion_deg,
-                               args.adjacency_window_s)
+                               args.adjacency_window_s, args.range_angle_edges)
     box_stats = new_box_stats() if args.box is not None else None
     corrupt = collections.Counter()
     n_msgs = accumulate_by_mode(args.bag, args.topic, args.sonar_info_topic, builder,
