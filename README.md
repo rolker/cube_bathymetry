@@ -929,8 +929,12 @@ slant range `twtt * c / 2` and `g` the angle group `|theta|` falls in:
   whole term. Beams beyond the kept span do not shape the fit, the intercepts
   or the misfit; they are corrected with the clamped end value, and their
   count is written per group (`out_of_span`). `r_g` is 0 at R0 when R0 lies
-  inside the span, else at the nearest end node. On a flat bottom angle and
-  range are confounded
+  inside the span, else at the nearest end node. The node spacing is
+  `--range-node-spacing-decades` (default 0.25; the misfit bins are half of
+  it). Finer nodes follow finer structure at the cost of support per node; on
+  Appledore eighth-decade nodes did not lower the misfit, because what remains
+  there is step-like (see the diagnostics), so the default stays a quarter
+  decade. On a flat bottom angle and range are confounded
   (R = h / cos(theta)), so only depth change within an angle bin identifies
   `r_g`; signed bins keep a cross-track slope (shorter range with smaller
   incidence on the up-slope side) out of it. A group with under 200
