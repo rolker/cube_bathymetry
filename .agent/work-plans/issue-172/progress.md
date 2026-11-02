@@ -219,3 +219,32 @@ Specialists: static analysis (flake8, pep257, cpplint, lint_cmake, xmllint: clea
 - [x] (suggestion) Plan Files table and decisions 2/4/5/7 missing the node-spacing flag, share floor, half-group rule, third zero reason, offset-chain details, extra header lines and tests — plan.md (Governance + Plan Drift)
 - [ ] (suggestion) marine_tools mirror follow-up issue not yet filed — plan Consequences (Governance; carried to PR 2 as planned)
 - [ ] (suggestion) Instruction-update candidates for a future `.agents/README.md`: angle/range confounding needs within-bin fitting; letter-first mode keys keep old loaders rejecting rows; "every existing loader reads a new format as empty" test pattern (Governance; proposals only)
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-02 12:07 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: approved
+
+**Branch**: feature/issue-172 at `c5bf5b7`
+**Mode**: pre-push
+**Depth**: Deep (reason: 3477-line diff; round 2 reviewed the round-1 fix commits 98c03ac..810eb9e plus the whole branch cross-model)
+**Must-fix**: 2 (cross-model; both mechanical, both fixed in c5bf5b7) | **Suggestions**: 9
+**Round**: 2 | **Ship**: recommended — Claude Lens A + Lens B found no must-fix and confirmed all seven round-1 items fixed; the two cross-model must-fixes (fstat on the opened descriptor; a variance printing as 0.000) and every suggestion are addressed in c5bf5b7; 506 derive tests pass, lint clean
+
+Specialists: Claude Adversarial Lens A + Lens B on the fix commits (fresh context), cross-model Gemini + Codex on the branch (both ran; first launch failed outside the worktree and was re-run with --work-plans-dir). Static analysis re-run on the changed files: clean.
+
+### Findings
+- [x] (must-fix) Cache trust check stat-by-name then open: substitute window — `load_accumulation_cache` now fstat's the opened descriptor (Codex; Gemini as suggestion)
+- [x] (must-fix) A positive variance under 0.0005 dB² printed as 0.000 breaks the 1/var_db2 rule — written EMPTY (unweighable), rule in README/header/plan/fixture; Codex's alternative (write the small value) declined: a near-zero variance is clipped/identical beams and would dominate a cell (Codex + Lens B)
+- [x] (suggestion) Range-row se_db could print 'nan' — empty when not finite, documented (Lens B)
+- [x] (suggestion) No unanchored-mode example in the shipped fixture — added, with a zero-variance bin (Lens B)
+- [x] (suggestion) Corrupt-message report lost on the no-SonarInfo exit — printed first (Lens A + Lens B)
+- [x] (suggestion) Default angle edges not validated in parse_args — validated like explicit ones (Lens A + Lens B)
+- [x] (suggestion) Unanchored offset 0.0 in the fit dict/JSON/warning contradicts the empty CSV columns — NaN/null everywhere, warning reworded, README line fixed (Gemini)
+- [x] (suggestion) _trim_span dropped nodes[0] first when both ends were under the floor — weaker end first (Gemini)
+- [x] (suggestion) --sonar-info-topic equal to the detections topic silently swallowed the detections — refused (Gemini)
+- [x] (suggestion) A bag with none of the wanted topics skipped silently under --box — refused (Gemini)
+- [x] (suggestion) bag_identity mtime in whole seconds — mtime_ns (Gemini)
+- [x] (suggestion) README said the trimming floor needs both thresholds and that out-of-span beams do not shape the intercepts — wording matches the code (Codex)
+- [ ] (suggestion) README "Header provenance" key table still lists only the single-curve keys — cosmetic, the by-mode section describes its own header (Governance round 1; carried)
