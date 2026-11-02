@@ -1691,7 +1691,7 @@ class OffsetSummary:
     __slots__ = ('n', 's', 'angle_counts', 'cell_counts', 'pings')
 
     def __init__(self, n_abs=0, n_cells=0, n_groups=1):
-        """Create an empty summary: ``n_abs`` angle bins, ``n_groups`` x ``n_cells`` range cells."""
+        """Create an empty summary: ``n_abs`` angle bins, ``n_groups`` x ``n_cells`` cells."""
         import numpy as np
         self.n = 0
         self.s = 0.0
