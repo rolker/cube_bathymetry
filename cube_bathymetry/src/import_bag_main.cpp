@@ -1338,6 +1338,11 @@ void feedSonarInfo(
   const rosbag2_storage::SerializedBagMessage & message, cube::BackscatterModeResolver & resolver,
   const Pending & pending)
 {
+  // pending.front() is taken as the OLDEST waiting ping: detections are
+  // appended in stamp order, the same assumption the drain loop makes when
+  // it pops from the front once the TF frontier passes. A bag whose
+  // detections are out of stamp order would hold from a newer ping, and the
+  // cap could then drop the state an older waiting ping needs.
   resolver.holdFrom(
     pending.empty() ? std::nullopt : std::optional<int64_t>(pending.front().first));
   try {
