@@ -153,6 +153,17 @@ TEST(DeclaredTvgState, EqualityTreatsNaNAbsorptionAsOneState)
   a.absorption_db_per_km = 0.0f;
   b.absorption_db_per_km = 0.0f;
   EXPECT_EQ(a, b);
+  // An infinite declaration (a SonarInfo may carry one) equals only itself:
+  // the relative test would call it equal to any finite value (review round 2).
+  const float inf = std::numeric_limits<float>::infinity();
+  a.absorption_db_per_km = inf;
+  b.absorption_db_per_km = 80.0f;
+  EXPECT_NE(a, b);
+  EXPECT_NE(b, a);
+  b.absorption_db_per_km = inf;
+  EXPECT_EQ(a, b);
+  b.absorption_db_per_km = -inf;
+  EXPECT_NE(a, b);
   a.absorption_db_per_km = 80.0f;
   b.absorption_db_per_km = 80.0f;
   EXPECT_EQ(a.toString(), "40LOGR/80 dB/km");
@@ -461,6 +472,15 @@ TEST(BackscatterTable, RejectsMalformedTablesWhole)
       "# mode_summary: FMU_1000us_24000Hz_500kHz pings=99 beams=1\n" +
       header.substr(header.find("mode,term")) + good,
       "two '# mode_summary:' lines"},
+    {"inf_absorption", header +
+      "FMU_1000us_24000Hz_500kHz,angle,1,,,-20,100,9,0,0.3,0,0,true,40LOGR,inf\n",
+      "malformed declared_tvg_absorption_db_per_km"},
+    {"neg_inf_absorption", header +
+      "FMU_1000us_24000Hz_500kHz,angle,1,,,-20,100,9,0,0.3,0,0,true,40LOGR,-inf\n",
+      "malformed declared_tvg_absorption_db_per_km"},
+    {"float_overflow_absorption", header +
+      "FMU_1000us_24000Hz_500kHz,angle,1,,,-20,100,9,0,0.3,0,0,true,40LOGR,1e300\n",
+      "malformed declared_tvg_absorption_db_per_km"},
     {"summary_no_pings",
       "# format: angular-response-table v1\n# reference_mode: X\n# range_ref_m: 10\n"
       "# mode_summary: FMU_1000us_24000Hz_500kHz beams=345\n" +

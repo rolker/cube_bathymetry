@@ -414,6 +414,12 @@ bool DeclaredTvgState::operator==(const DeclaredTvgState & other) const
   if (a_nan || b_nan) {
     return a_nan && b_nan;
   }
+  // An infinite declaration (the loader refuses one; a SonarInfo may carry
+  // it) equals only the same infinity: the relative test below would call
+  // inf equal to any finite value, and inf - inf is NaN.
+  if (std::isinf(absorption_db_per_km) || std::isinf(other.absorption_db_per_km)) {
+    return absorption_db_per_km == other.absorption_db_per_km;
+  }
   // The table writes the absorption with %.6g, so a declared float32 comes
   // back rounded to 6 significant digits (relative error up to 5e-6): equal
   // within a relative 1e-5, never compared bit for bit.
@@ -785,8 +791,13 @@ BackscatterTable loadBackscatterTable(
         return fail(line_no, "malformed declared_tvg_model '" + scalars.tvg_model + "'");
       }
       double alpha = 0.0;
-      if (!parseNumber(scalars.tvg_absorption, alpha)) {
-        return fail(line_no, "malformed declared_tvg_absorption_db_per_km");
+      // A number or `nan` (MIXED / undeclared); never an infinity, and
+      // never a value float32 cannot hold (it would become one).
+      if (!parseNumber(scalars.tvg_absorption, alpha) || std::isinf(alpha) ||
+        (std::isfinite(alpha) && std::abs(alpha) > std::numeric_limits<float>::max()))
+      {
+        return fail(line_no, "malformed declared_tvg_absorption_db_per_km '" +
+                 scalars.tvg_absorption + "' (a finite number or nan)");
       }
       b.entry.declared.absorption_db_per_km = static_cast<float>(alpha);
       const auto sc = summary_counts.find(mode);
