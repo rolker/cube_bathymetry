@@ -1135,6 +1135,43 @@ TEST_F(NodeLifecycle, UnresolvedCloudsWarnWithTheReasonsThrottled)
   EXPECT_TRUE(log.contains("since configure (they span any ~/reset)")) << log.all();
 }
 
+// cube_bathymetry#172 review round 2: once pings resolve, an unresolved cloud
+// is the normal case (a rare mode with no entry, the ping floor); warning
+// about it every minute disagreed with import_bag, which treats only "nothing
+// resolved" as an error. Each reason is warned about once per configuration.
+TEST_F(NodeLifecycle, UnresolvedCloudsAfterResolvedOnesWarnOncePerReason)
+{
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  marine_interfaces::msg::SonarInfo info;
+  info.header.stamp.sec = 100;
+  info.pulse_lengths = {0.001f};
+  info.bandwidths = {24000.0f};
+  info.tx_signal_types = {marine_interfaces::msg::SonarInfo::SIGNAL_TYPE_FM_UP};
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
+  const int64_t s = 1000000000LL;
+  ASSERT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 150 * s, 500000.0f), 2);
+  // A cloud without the frequency field: no entry. Warned once, not again.
+  for (int i = 1; i <= 5; ++i) {
+    CubeBathymetryTestAccess::resolveMode(*node, (150 + i) * s, NAN);
+  }
+  EXPECT_EQ(log.count("not corrected by the table (no table entry for the mode)"), 1u)
+    << log.all();
+  // A new reason: the pings before the SonarInfo stamp. Warned once too.
+  for (int i = 1; i <= 5; ++i) {
+    CubeBathymetryTestAccess::resolveMode(*node, (100 * s) - i, 500000.0f);
+  }
+  EXPECT_EQ(log.count("not corrected by the table (no SonarInfo at or before the ping)"), 1u)
+    << log.all();
+  EXPECT_EQ(log.count("not corrected by the table"), 2u) << log.all();
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
 // cube_bathymetry#172 review: an empty (or all-dropped) cloud carries no
 // frequency and no soundings; it must not be resolved as a `?kHz` ping. A
 // cloud with soundings is resolved once and its index stamped on each.

@@ -748,7 +748,9 @@ fingerprint (2) keeps its code, and a `--level-plan-out` preflight, which
 writes neither, keeps its own code and says it resolved nothing, so a wrong
 topic is caught before the import. The live node warns at the first
 unresolved cloud after each configure, with the count and the reasons so far,
-at most once a minute.
+at most once a minute while nothing has resolved; once clouds do resolve, an
+unresolved one is the normal case (a rare mode, the ping floor) and each
+reason is warned about once per configuration.
 
 ### Deriving a curve (`derive_angular_response.py`)
 

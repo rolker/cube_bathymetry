@@ -183,6 +183,7 @@ public:
     bs_table_ = cube::BackscatterTable();
     bs_resolver_.reset();
     bs_unresolved_warned_at_.reset();
+    bs_unresolved_warned_reasons_.clear();
     const std::string bs_fallback_str =
       declareOnce<std::string>("backscatter_mode_fallback", "identity");
     if (!cube::parseBackscatterModeFallback(bs_fallback_str, bs_fallback_)) {
@@ -954,11 +955,16 @@ private:
   /// The correction index the per-mode resolver gives a cloud at @p stamp_ns
   /// with @p frequency_hz (the `frequency` field), or unresolved without a
   /// table. One call per cloud (one ping); pingCallback stamps it on every
-  /// sounding. A cloud the table does not correct is warned about, throttled
-  /// to once a minute, with the count and the reasons so far (cube#172
-  /// review): a wrong sonar_info topic, no SonarInfo publisher, or clouds
-  /// without the `frequency` field would otherwise leave a configured table
-  /// correcting nothing with only the cleanup report to say so.
+  /// sounding. A cloud the table does not correct is warned about with the
+  /// count and the reasons so far (cube#172 review): while NOTHING has
+  /// resolved -- a wrong sonar_info topic, no SonarInfo publisher, clouds
+  /// without the `frequency` field, which would otherwise leave a configured
+  /// table correcting nothing with only the cleanup report to say so -- at
+  /// most once a minute; once pings do resolve, an unresolved cloud is the
+  /// normal case (a rare mode with no entry, the ping floor, the pings before
+  /// the first SonarInfo) and each reason is warned about once per
+  /// configuration (review round 2), as import_bag treats only "nothing
+  /// resolved" as an error.
   uint16_t resolveCloudMode(int64_t stamp_ns, float frequency_hz)
   {
     if (!bs_resolver_) {
@@ -967,11 +973,15 @@ private:
     cube::ModeResolution why = cube::ModeResolution::Resolved;
     const uint16_t idx = bs_resolver_->resolve(stamp_ns, frequency_hz, why);
     if (why != cube::ModeResolution::Resolved) {
-      // Throttled per configuration (a member, not the macro's call-site
+      // Throttled per configuration (members, not the macro's call-site
       // static, so the first unresolved cloud after every configure warns).
       // A clock that went backwards (sim restart) warns at once.
       const int64_t now = get_clock()->now().nanoseconds();
-      if (cube::warnIntervalDue(bs_unresolved_warned_at_, now, kUnresolvedWarnIntervalNs)) {
+      const bool new_reason = bs_unresolved_warned_reasons_.insert(why).second;
+      if (bs_resolver_->resolvedNothing() ?
+        cube::warnIntervalDue(bs_unresolved_warned_at_, now, kUnresolvedWarnIntervalNs) :
+        new_reason)
+      {
         RCLCPP_WARN(get_logger(),
           "Per-pulse-mode table: a cloud was not corrected by the table (%s). %s",
           cube::toString(why), bs_resolver_->unresolvedSummary().c_str());
@@ -1001,8 +1011,9 @@ private:
   }
   static constexpr int64_t kUnresolvedWarnIntervalNs = 60LL * 1000000000LL;
   /// When the unresolved-cloud warning last fired in this configuration
-  /// (node clock, ns).
+  /// (node clock, ns), and the reasons it has named.
   std::optional<int64_t> bs_unresolved_warned_at_;
+  std::set<cube::ModeResolution> bs_unresolved_warned_reasons_;
 
   // Latch-first curve adoption (#102). The latched (transient_local)
   // producer normally delivers before activation, so the whole grid is

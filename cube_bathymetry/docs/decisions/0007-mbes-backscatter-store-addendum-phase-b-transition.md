@@ -281,8 +281,9 @@ curve corrects their mean and leaves each mode offset from it.
    "table-unresolved"`, never `table`, and `import_bag` exits 4 with the
    reasons (only when that store and fingerprint were written: exits 1 and
    2 keep their code, and a `--level-plan-out` preflight keeps its own and
-   says it resolved nothing); the live node warns (once a minute) from the first unresolved
-   cloud.
+   says it resolved nothing); the live node warns from the first unresolved
+   cloud (once a minute while nothing has resolved, then once per new
+   reason).
 
 **Not done here, deliberately.** The inverse-variance beam weighting the
 table's `var_db2` column was written for (plan decision 6) is not applied:
