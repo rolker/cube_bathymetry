@@ -706,14 +706,20 @@ the SonarInfo topic in the main pass and the live node keeps the SonarInfo
 history (deduplicated, and bounded to 60 s behind the newest ping plus the
 state in force at that cut, at most 4096 states), and a ping's mode is the latest SonarInfo at or before its stamp plus
 the ping's frequency (`ping_info.frequency` offline; the `frequency` field
-`detections_to_pointcloud` now writes on every point, live). Two settings
+`detections_to_pointcloud` now writes on every point, live — a cloud from an
+older `detections_to_pointcloud` has no such field, so its pings key as
+`?kHz`, match no entry and get the fallback). Two settings
 decide what a ping the table cannot correct gets — no SonarInfo yet, a mode
 with no entry or no measured offset, an entry under the ping floor, or a beam
 in an angle bin the table could not weight, at or beyond 90°, or with no
 finite angle or range: `--backscatter-mode-fallback
 identity|exclude` (node: `backscatter_mode_fallback`; default `identity`
 records the beam uncorrected, `exclude` drops its backscatter and keeps its
-depth) and `--backscatter-mode-min-pings <N>` (node:
+depth; **for a mode-switching sonar `exclude` is the safe choice**: an
+`identity` beam is raw intensity, 10 to 17 dB off the reference mode's level,
+and it is averaged into the same cells as the table-corrected beams, so every
+uncorrected mode puts its own step back into the mosaic) and
+`--backscatter-mode-min-pings <N>` (node:
 `backscatter_mode_min_pings`; default 0 keeps every entry, a floor treats a
 rarer mode's entry as absent). The pass ends with a per-mode count of
 resolved pings and every unresolved reason, per ping, and the beams of
