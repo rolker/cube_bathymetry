@@ -475,6 +475,31 @@ TEST(BackscatterModeResolver, MismatchWarningSaysWhenTheEntryIsNotApplied)
   EXPECT_NE(warnings[1].find("the table is applied as is"), std::string::npos) << warnings[1];
 }
 
+// cube_bathymetry#172 review round 2: a sonar whose declared absorption
+// drifts must not mint a new warning and a new counter key per value.
+TEST(BackscatterModeResolver, ADriftingDeclaredAbsorptionWarnsOncePerModel)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table);
+  std::vector<std::string> warnings;
+  r.setMismatchWarning([&](const std::string & w) {warnings.push_back(w);});
+  // The table records CW 50 us as 40LOGR / 80 dB/km.
+  for (int i = 1; i <= 200; ++i) {
+    r.addSonarInfo(state(i * 10, 5e-5f, 20000.0f, 1, DeclaredTvg::Log40R, 80.0f + i));
+    EXPECT_EQ(r.resolve(i * 10 + 5, kF), 1) << i;
+  }
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("40LOGR/81 dB/km"), std::string::npos) << warnings[0];
+  ASSERT_EQ(r.counts().declared_mismatch.size(), 1u);
+  EXPECT_EQ(r.counts().declared_mismatch.at({"CW_50us_20000Hz_500kHz", "40LOGR"}), 200u);
+  // Another model is another warning.
+  r.addSonarInfo(state(5000, 5e-5f, 20000.0f, 1, DeclaredTvg::Log20R, 80.0f));
+  r.resolve(5005, kF);
+  EXPECT_EQ(warnings.size(), 2u);
+  EXPECT_NE(r.report().find("declared TVG 40LOGR (any absorption), differs from the table"),
+    std::string::npos) << r.report();
+}
+
 TEST(BackscatterModeResolver, MixedDeclarationAlwaysMismatches)
 {
   const std::string path = (std::filesystem::temp_directory_path() /

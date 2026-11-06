@@ -302,12 +302,15 @@ uint16_t BackscatterModeResolver::resolve(
   resolution = decision.resolution;
 
   // Declared-state check (decision 8): a check, not an input. Compared on
-  // every ping so the count is per ping; warned once per (mode, state).
+  // every ping so the count is per ping; warned once per (mode, declared TVG
+  // model). Keyed on the model, not the state's text: a declared absorption
+  // that drifts would otherwise mint a new warning and a new key per value,
+  // without bound (review round 2). The warning names the first value seen.
   if (const auto idx = table_ ? table_->find(key) : std::nullopt) {
     const ModeEntry * entry = table_->entry(*idx);
     const bool mixed = entry->declared.model == DeclaredTvg::Mixed;
     if (mixed || entry->declared != state->declared) {
-      const auto pair = std::make_pair(key, state->declared.toString());
+      const auto pair = std::make_pair(key, std::string(cube::toString(state->declared.model)));
       ++counts_.declared_mismatch[pair];
       if (!warned_[pair]) {
         warned_[pair] = true;
@@ -432,7 +435,7 @@ std::string BackscatterModeResolver::report() const
   }
   for (const auto & kv : counts_.declared_mismatch) {
     os << "  " << kv.first.first << ": " << kv.second << " ping(s) declared TVG "
-       << kv.first.second << ", differs from the table\n";
+       << kv.first.second << " (any absorption), differs from the table\n";
   }
   uint64_t beam_fallbacks = 0;
   for (const auto & kv : counts_.beam_fallback) {

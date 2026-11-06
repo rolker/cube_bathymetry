@@ -138,7 +138,8 @@ public:
     static constexpr std::size_t kMaxHistory = 4096;
 
   /// Counters for the report. Keys are mode keys; the mismatch map is keyed
-  /// by (mode key, declared state as text).
+  /// by (mode key, declared TVG model as text) -- the model only, so a
+  /// drifting declared absorption cannot grow it.
     struct Counts
     {
       uint64_t pings = 0;
@@ -187,7 +188,8 @@ public:
     BackscatterModeFallback fallback = BackscatterModeFallback::Identity,
     uint64_t min_pings = 0);
 
-  /// Called once per (mode key, declared state) mismatch with a message.
+  /// Called once per (mode key, declared TVG model) mismatch with a message
+  /// naming the first declared state seen.
     void setMismatchWarning(std::function < void(const std::string &) > warn);
 
   /// Record a SonarInfo. Same stamp and state = the same message (a
