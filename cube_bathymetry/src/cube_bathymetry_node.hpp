@@ -239,6 +239,10 @@ public:
         bs_table_.reference_mode.c_str(), bs_table_.range_ref_m,
         cube::toString(bs_fallback_),
         bs_min_pings_ > 0 ? " (entries under the ping floor count as absent)" : "");
+      for (const std::string & warning : bs_table_.warnings) {
+        RCLCPP_WARN(get_logger(), "backscatter_curve_file='%s': %s", bs_curve_file.c_str(),
+          warning.c_str());
+      }
     }
     if (bs_mode != cube::BackscatterAngleCorrection::None &&
       !bs_curve_file.empty() && !bs_file_is_table)

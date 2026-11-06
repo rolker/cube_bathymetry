@@ -244,6 +244,11 @@ namespace cube
     std::string source_bags;
   /// Entry k corresponds to `correction_idx == k + 1`.
     std::vector < ModeEntry > entries;
+  /// Problems that do not refuse the table, one sentence each, for the
+  /// caller to print as warnings (cube_bathymetry#172 review round 3): a
+  /// table with more than one angle bin per mode but no
+  /// `# angle_bin_width_deg:` header.
+    std::vector < std::string > warnings;
 
     bool empty() const {return entries.empty();}
   /// The `correction_idx` of a mode key (1-based), or nullopt when the table
@@ -328,7 +333,8 @@ private:
   /// is not a measurement there (the same reasoning as the 90 deg rule). A
   /// gap BETWEEN written bins is interpolated between the two measured
   /// neighbours and is not this case; a table without
-  /// `# angle_bin_width_deg:` skips the test.
+  /// `# angle_bin_width_deg:` skips the test, and the loader warns about it
+  /// (`BackscatterTable::warnings`).
     OutsideAngleBins,
   /// No finite positive slant range (the range term needs `log10 R`).
     NoFiniteRange,

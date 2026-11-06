@@ -937,7 +937,7 @@ record of how the table was made:
 | `range_node_spacing_decades` | read | range-term node spacing in `log10(R / R0)` |
 | `range_angle_groups_deg` | read | every range-term group, `lo-hi` comma-separated; the loader creates each declared group per mode, an unfitted one as a zero term |
 | `range_term_lookup`, `offset_meaning`, `empty_fields` | record | the apply rule, the offset's meaning and the empty-field cases, stated once more in the file |
-| `angle_bin_width_deg`, `specular_exclusion_deg` | read | the angle binning and the specular band left out of the range fit |
+| `angle_bin_width_deg`, `specular_exclusion_deg` | read | the angle binning and the specular band left out of the range fit; without `angle_bin_width_deg` a beam beyond the outermost written bin cannot be told from one inside it, so a table with more than one bin per mode loads with a warning |
 | `key_spec` | record | where the mode-key spec and its shared vectors live |
 | `adjacency_window_s`, `misfit_threshold_db`, `absorption` | record | the switch window, the misfit flag threshold, and that absorption is carried by the range term |
 | `box`, `source_bags` | record / read (reports) | the `--box`, and the input bags |

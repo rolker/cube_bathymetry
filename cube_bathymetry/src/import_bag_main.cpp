@@ -1028,6 +1028,10 @@ bool resolveBackscatterCorrection(
                 << backscatter_table.entries.size() << " mode(s), reference "
                 << backscatter_table.reference_mode << ", R0 " << backscatter_table.range_ref_m
                 << " m" << std::endl;
+      for (const std::string & warning : backscatter_table.warnings) {
+        std::cerr << "warning: --backscatter-curve " << backscatter_curve_file << ": " << warning
+                  << "\n";
+      }
       for (const auto & e : backscatter_table.entries) {
         // Every declared group is present, an unfitted one as a zero term.
         const auto fitted = std::count_if(

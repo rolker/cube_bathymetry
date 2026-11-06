@@ -394,6 +394,42 @@ TEST(BackscatterTable, AMinimalTableLoads)
   std::filesystem::remove(path);
 }
 
+// cube_bathymetry#172 review round 3: without `# angle_bin_width_deg:` the
+// OutsideAngleBins test cannot run, so a beam far past the outermost bin gets
+// its clamped value. The table still loads, with a warning for the caller to
+// print; a header, or a single bin per mode (a flat curve on purpose), has none.
+TEST(BackscatterTable, AMissingBinWidthIsWarnedAboutWhenItMatters)
+{
+  std::string error;
+  const auto bare = writeTemp("no_width", std::string(kHeader) + kGoodRows);
+  const auto table = loadBackscatterTable(bare, error);
+  ASSERT_TRUE(error.empty()) << error;
+  ASSERT_EQ(table.warnings.size(), 1u);
+  EXPECT_NE(table.warnings[0].find("'# angle_bin_width_deg:'"), std::string::npos);
+  EXPECT_EQ(tableBeamStatus(60.0, 100.0, table, 1), TableBeamStatus::Corrected)
+    << "the test it warns about is indeed skipped";
+  std::filesystem::remove(bare);
+
+  std::string with_width(kHeader);
+  with_width.insert(with_width.find("mode,term"), "# angle_bin_width_deg: 10\n");
+  const auto headed = writeTemp("with_width", with_width + kGoodRows);
+  const auto good = loadBackscatterTable(headed, error);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_TRUE(good.warnings.empty());
+  EXPECT_EQ(tableBeamStatus(60.0, 100.0, good, 1), TableBeamStatus::OutsideAngleBins);
+  std::filesystem::remove(headed);
+
+  std::string one_bin(kGoodRows);
+  one_bin.erase(one_bin.find("FMU_1000us_24000Hz_500kHz,angle,11"),
+    one_bin.find("FMU_1000us_24000Hz_500kHz,range") -
+    one_bin.find("FMU_1000us_24000Hz_500kHz,angle,11"));
+  const auto flat = writeTemp("one_bin", std::string(kHeader) + one_bin);
+  const auto single = loadBackscatterTable(flat, error);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_TRUE(single.warnings.empty());
+  std::filesystem::remove(flat);
+}
+
 // A table is read whole or not at all: every malformation names its line and
 // yields an EMPTY table, never a partial one.
 TEST(BackscatterTable, RejectsMalformedTablesWhole)

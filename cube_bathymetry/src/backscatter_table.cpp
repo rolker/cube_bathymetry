@@ -967,6 +967,22 @@ BackscatterTable loadBackscatterTable(
     error = path + ": no table rows";
     return BackscatterTable();
   }
+  // Without the bin width the OutsideAngleBins test cannot run, so a beam
+  // far past the outermost written bin silently gets that bin's clamped
+  // value (review round 3). Every table derive_angular_response.py writes
+  // carries the header; a hand-written one may not. One bin per entry is a
+  // flat curve on purpose and is not warned about.
+  if (!std::isfinite(table.angle_bin_width_deg) &&
+    std::any_of(
+      table.entries.begin(), table.entries.end(),
+      [](const ModeEntry & e) {return e.angle.size() > 1;}))
+  {
+    table.warnings.push_back(
+      "the table has no '# angle_bin_width_deg:' header, so a beam beyond the outermost "
+      "written angle bin cannot be told from one inside it: it gets that bin's value "
+      "(clamped) instead of the fallback. Tables written by derive_angular_response.py "
+      "carry the header.");
+  }
   if (bytes_out) {
     *bytes_out = std::move(content);
   }

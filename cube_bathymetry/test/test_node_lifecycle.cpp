@@ -57,6 +57,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <utility>
 #include <fstream>
 #include <limits>
@@ -1206,6 +1207,29 @@ TEST_F(NodeLifecycle, AnUnreadableOrNonRegularBackscatterFileFailsConfigure)
   std::filesystem::permissions(unreadable, std::filesystem::perms::owner_all);
   std::filesystem::remove(unreadable);
   std::filesystem::remove(fifo);
+}
+
+// cube_bathymetry#172 review round 3: a table without `# angle_bin_width_deg:`
+// loads, and configure warns that beams past the outermost bin are clamped.
+TEST_F(NodeLifecycle, ATableWithoutABinWidthIsWarnedAboutAtConfigure)
+{
+  std::ifstream in(MODE_TABLE_FIXTURE_FILE);
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::size_t at = text.find("# angle_bin_width_deg:");
+  ASSERT_NE(at, std::string::npos);
+  text.erase(at, text.find('\n', at) + 1 - at);
+  const std::string path = (std::filesystem::temp_directory_path() /
+    ("cube_node_no_width_" + std::to_string(::getpid()) + ".csv")).string();
+  {
+    std::ofstream(path) << text;
+  }
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_curve_file", path)}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE) << log.all();
+  EXPECT_TRUE(log.contains("no '# angle_bin_width_deg:' header")) << log.all();
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  std::filesystem::remove(path);
 }
 
 // cube_bathymetry#172 review round 3: a reason first seen while the throttle
