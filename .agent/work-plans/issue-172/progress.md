@@ -560,3 +560,32 @@ Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1429 tests, 0 err
 
 ### Next
 `/review-code` pre-push (round 4) on `1e64a13..8376812`. Per the round-3 Ship note, a Light review is enough unless the reviewer finds the must-fix fix itself warrants more.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 12:48 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `73e393f`
+**Mode**: pre-push
+**Depth**: Light (reason: host-directed re-check of the round-3 fix commits `1e64a13..8376812`, read as `a74d084..8376812`, +655 / -79 over 17 files; the round-3 Ship note asked for Light)
+**Must-fix**: 1 | **Suggestions**: 1
+**Round**: 4 of PR 2 | **Ship**: recommended — must-fixes went 8, 3, 1, 1. The one left is the same finding, partly closed, and its correction is small and fits the contract the header already states. Fix it, then a test run is enough; another review round is not needed.
+
+Specialists:
+- Static analysis: ament_cpplint and ament_uncrustify on the 12 changed C++ files report no problems.
+- Claude Adversarial, Lens A, one fresh-context pass (Sonnet). It found must-fix 1 on its own, so the finding is cross-pass confirmed (Lens A + lead).
+- Lead probe: a temporary gtest (not committed; the file was restored) was built and run against the branch head to reproduce must-fix 1.
+- Cross-Model: not run (Light). Local Adversarial: off (the default).
+
+Round-3 closure:
+- The must-fix is closed in order (b), where SonarInfo comes first. That includes the cap case: a behind-window state is no longer erased by the main cap, and it has a cap of its own.
+- Order (a), where the ping comes first, is closed only for old entries more than the window ahead of the new ping. See must-fix 1.
+- Every suggestion is closed as described: the warned-reason bookkeeping, the FIFO/device/unreadable refusal in import_bag, batch_regen and the node, preflight exit 4, the "done!" ordering, the missing-bin-width warning, the capped quote, and the stamp-order comment. batch_regen's guard covers exactly the mode in which its loader reads the file (Empirical).
+
+Dropped from Lens A: a restart jump under 60 s is not detected (the header states the floor, and `--loop` replays the same modes); the behind-window cap drops the oldest states (they are unresolved, not wrong); a TOCTOU window on a path that does not exist; a reason that is only ever muted (the summary names it).
+
+### Findings
+- [ ] (must-fix) Order (a) is still open when the old run's in-force SonarInfo is stamped near the new run's start. The publishers send SonarInfo only on change, and the heartbeat keeps the original stamp, so a single-mode run's only entry is near its start. That is exactly what `prune` keeps. The re-anchoring ping keeps every entry `<= ping + window`, so the old entry survives. Reproduced: old SonarInfo CW at 5 s, pings 6..1000 s; restart, ping at 10 s, then the new run's FMU SonarInfo at 3 s. The pings at 10, 20 and 500 s all get the old CW correction (idx 1), silently and for the rest of the run. That contradicts the header and `.cpp` claim "never the old run's mode". Fix: on a re-anchor with no behind-window SonarInfo, drop every entry, not only those more than the window ahead. A stray ping more than 60 s late then costs unresolved pings until the next SonarInfo or heartbeat, which is the cost the header already accepts. Update the `lone` and `late` cases in `TimeGoingBackwardsReAnchorsTheWindow` to match, and add the reproduction above as a test. — `cube_bathymetry/src/backscatter_mode.cpp:344-351`, `cube_bathymetry/include/cube_bathymetry/backscatter_mode.h:132-140` (Lens A + lead probe)
+- [ ] (suggestion) The re-anchor erase ignores `held()`. In import_bag, a ping more than 60 s behind the anchor drops SonarInfo states that were read ahead for pings still waiting on the TF frontier. With the must-fix applied, it drops all of them. That needs a bag whose stamps are not in order, which is the same assumption the new `feedSonarInfo` comment names, so a sentence there or in the re-anchor comment is enough. — `cube_bathymetry/src/backscatter_mode.cpp:344-351` (Lens A)
