@@ -267,7 +267,11 @@ curve corrects their mean and leaves each mode offset from it.
 6. **Provenance.** The build fingerprint's `backscatter_correction` key
    records the mode, the curve/table kind and SHA-256, the fallback and the
    ping floor (ADR-0003); a store built under another table is stale.
-   `batch_regen_bag` refuses a table (it reads no SonarInfo).
+   `batch_regen_bag` refuses a table (it reads no SonarInfo). A table run in
+   which not one ping resolved to an entry is recorded as `kind:
+   "table-unresolved"`, never `table`, and `import_bag` exits 4 with the
+   reasons; the live node warns (once a minute) from the first unresolved
+   cloud.
 
 **Not done here, deliberately.** The inverse-variance beam weighting the
 table's `var_db2` column was written for (plan decision 6) is not applied:

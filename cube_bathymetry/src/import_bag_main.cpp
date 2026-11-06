@@ -298,7 +298,12 @@ bool loadCurveFromBagSonarInfo(
     "2 = the store is complete but build_fingerprint.json could not be written, "
     "so a later incremental regen must do a FULL regen (ADR-0003); "
     "3 = the store and its fingerprint are both complete, only the "
-    "--tile-size-report CSV could not be written (a diagnostic, not the data).\n";
+    "--tile-size-report CSV could not be written (a diagnostic, not the data); "
+    "4 = the store and its fingerprint are both complete, but a per-pulse-mode "
+    "table was loaded and NOT ONE ping resolved to a table entry, so the "
+    "backscatter layer carries no table correction (fingerprint kind "
+    "'table-unresolved'; a wrong --sonar-info-topic or no SonarInfo in the bags is "
+    "the usual cause). 1 and 2 outrank 4, and 4 outranks 3.\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
     "to the survey/campaign id). Per-cell source interning was retired for the "
@@ -1155,6 +1160,48 @@ void setupBackscatter(
     }
     std::cout << "." << std::endl;
   }
+}
+
+/// After the pass (cube#172 review): print the mode-resolution report, and when
+/// a table was loaded but NOT ONE ping resolved to a table entry, say so as an
+/// error naming the likely causes and record the fingerprint kind as
+/// `table-unresolved`, so the store can never pass for a table-corrected one.
+/// Returns true in that case (the run then exits 4, see withTableResolution).
+bool reportModeResolution(BackscatterSetup & backscatter)
+{
+  if (!backscatter.resolver) {
+    return false;
+  }
+  const cube::BackscatterModeResolver & resolver = *backscatter.resolver;
+  std::cout << resolver.report();
+  if (!resolver.resolvedNothing()) {
+    return false;
+  }
+  std::cerr << "error: the per-pulse-mode table " << backscatter.table.path
+            << " was loaded, but NOT ONE of the " << resolver.counts().pings
+            << " ping(s) resolved to a table entry, so the backscatter layer carries no "
+    "table correction at all. " << resolver.unresolvedSummary() << ". Likely causes: a "
+    "wrong --sonar-info-topic (this run read '" << backscatter.sonar_info_topic
+            << "'), no SonarInfo recorded in the bags, or pings without a frequency. The "
+    "store is otherwise complete; its fingerprint records kind 'table-unresolved' and the "
+    "run exits 4." << std::endl;
+  backscatter.provenance.kind = "table-unresolved";
+  return true;
+}
+
+/// The exit code once the finish step has returned @p finish_code (cube#172
+/// review): a table run that corrected no ping exits 4. 1 (the store may be
+/// incomplete) and 2 (no fingerprint) outrank it, since they say more about
+/// what is on disk; 4 outranks 3 (only the tile-size CSV is missing). A
+/// recon-only run (--level-plan-out) wrote no store, so it keeps its code.
+int withTableResolution(int finish_code, bool table_unresolved, bool recon_only)
+{
+  if (!table_unresolved || recon_only || finish_code == 1 || finish_code == 2) {
+    return finish_code;
+  }
+  std::cerr << "error: exit 4 -- the per-pulse-mode table corrected no ping (see the error "
+    "after the pass)." << std::endl;
+  return 4;
 }
 
 /// Print the main-pass progress line once per report interval of wall time.
@@ -2694,22 +2741,20 @@ int main(int argc, char * argv[])
   std::cout << "\ndone." << std::endl;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
   cube::report_projection_summary(proj_totals, std::cout, std::cerr);
-  if (mode_resolver) {
-    std::cout << mode_resolver->report();
-  }
+  const bool table_unresolved = reportModeResolution(backscatter);
 
   if (recon) {
-    return cube_depth_adaptive_finish(
+    return withTableResolution(cube_depth_adaptive_finish(
       *recon, level_policy, level_plan_in, level_plan_out, count_grid_out, store_dir,
       reference_store_dir, bs_store_dir, max_resident_tiles, iho_order,
       capture_spacing_scale, capture_spacing_scale_given, backscatter.mode,
       backscatter.curve, backscatter.table, backscatter.fallback, backscatter.provenance,
-      store_metadata, bs_metadata, projection_secs);
+      store_metadata, bs_metadata, projection_secs), table_unresolved, !level_plan_out.empty());
   }
 
-  return cube_fixed_level_finish(
+  return withTableResolution(cube_fixed_level_finish(
     accumulator, geo_map_sheet, store_dir, bs_store_dir, resolution, iho_order,
     store_metadata, bs_metadata, tile_reporter, tile_size_report_path,
     tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs(),
-    backscatter.provenance);
+    backscatter.provenance), table_unresolved, false);
 }

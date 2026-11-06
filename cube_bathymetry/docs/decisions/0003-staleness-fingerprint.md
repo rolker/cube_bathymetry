@@ -193,7 +193,7 @@ Written beside `tiling`, always, by `import_bag`:
 ```json
 "backscatter_correction": {
   "mode": "none" | "empirical" | "auto",
-  "kind": "none" | "curve" | "table",
+  "kind": "none" | "curve" | "table" | "table-unresolved",
   "source": "<curve/table path, or sonar_info:<topic>>",
   "sha256": "<hex>" | null,
   "fallback": "identity" | "exclude" | null,
@@ -204,7 +204,12 @@ Written beside `tiling`, always, by `import_bag`:
 `sha256` is of the curve or table file's bytes, or of a canonical rendering
 of a SonarInfo-delivered curve (there is no file to hash); `fallback` and
 `min_pings` are the per-pulse-mode table's policy and are `null` for a curve
-or none. `isStale` compares `mode`, `kind`, `sha256`, `fallback` and
+or none (they are written for `table-unresolved` too). `kind:
+"table-unresolved"` records a table run in which not one ping resolved to a
+table entry — a wrong `--sonar-info-topic`, no SonarInfo in the bags, or pings
+without a frequency: the table was loaded and hashed, but the backscatter
+layer carries none of its correction, so the store must never pass for a
+table-corrected one (`import_bag` also exits 4 then). `isStale` compares `mode`, `kind`, `sha256`, `fallback` and
 `min_pings` — not `source`, so the same table under another path is the same
 correction. A fingerprint without the key (written before #172) is stale
 against one that has it: what correction built its backscatter layer cannot

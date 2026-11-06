@@ -1028,6 +1028,14 @@ public:
       lines().begin(), lines().end(),
       [&](const std::string & l) {return l.find(needle) != std::string::npos;});
   }
+  std::size_t count(const std::string & needle) const
+  {
+    std::size_t n = 0;
+    for (const auto & l : lines()) {
+      n += l.find(needle) != std::string::npos ? 1u : 0u;
+    }
+    return n;
+  }
   std::string all() const
   {
     std::string out;
@@ -1085,6 +1093,35 @@ TEST_F(NodeLifecycle, EmpiricalWithATableIsNotReportedAsANoOp)
     EXPECT_TRUE(log.contains("NO-OP")) << "control: no curve and no table\n" << log.all();
     EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   }
+}
+
+// cube_bathymetry#172 review: a configured table that corrects no cloud (a
+// wrong sonar_info topic, no publisher, clouds without `frequency`) must say
+// so while the node runs, not only in the cleanup report: a WARN at the first
+// unresolved cloud with the count and the reasons, throttled to once a minute.
+TEST_F(NodeLifecycle, UnresolvedCloudsWarnWithTheReasonsThrottled)
+{
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_FALSE(log.contains("not corrected by the table"));
+  CubeBathymetryTestAccess::resolveMode(*node, 150LL * 1000000000LL, 500000.0f);
+  EXPECT_TRUE(log.contains("not corrected by the table (no SonarInfo at or before the ping)"))
+    << log.all();
+  EXPECT_TRUE(log.contains("1 of 1 ping(s) not corrected")) << log.all();
+  EXPECT_TRUE(log.contains("1 before any SonarInfo (0 SonarInfo message(s) seen)")) << log.all();
+  const std::size_t after_first = log.count("not corrected by the table");
+  EXPECT_EQ(after_first, 1u);
+  for (int i = 1; i <= 20; ++i) {
+    CubeBathymetryTestAccess::resolveMode(*node, (150LL + i) * 1000000000LL, NAN);
+  }
+  EXPECT_EQ(log.count("not corrected by the table"), after_first) << "throttled\n" << log.all();
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_TRUE(log.contains("0 of 21 pings resolved")) << "the cleanup report stays\n" << log.all();
 }
 
 // A table that does not load, or an invalid fallback, fails the configure

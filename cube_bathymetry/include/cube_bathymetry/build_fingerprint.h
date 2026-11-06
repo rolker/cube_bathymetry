@@ -77,13 +77,19 @@
 /// ```json
 ///   "backscatter_correction": {
 ///     "mode": "none" | "empirical" | "auto",
-///     "kind": "none" | "curve" | "table",
+///     "kind": "none" | "curve" | "table" | "table-unresolved",
 ///     "source": "<file path or sonar_info topic>",   // informational
 ///     "sha256": "<hex of the file, or of the SonarInfo curve>" | null,
 ///     "fallback": "identity" | "exclude" | null,       // tables only
 ///     "min_pings": 0 | null                            // tables only
 ///   }
 /// ```
+///
+/// `table-unresolved` is a table run in which not one ping resolved to a
+/// table entry (wrong SonarInfo topic, no SonarInfo, no frequency): the
+/// table was loaded and hashed, but the backscatter layer carries none of
+/// its correction, so the kind differs from `table` and a staleness check
+/// can never take such a store for a corrected one. import_bag exits 4 then.
 ///
 /// `isStale` compares mode, kind, sha256, fallback and min_pings (not the
 /// source path: the same table under another name is the same correction).
@@ -131,11 +137,16 @@ namespace cube
     struct BackscatterCorrection
     {
       std::string mode = "none";
+    /// `none`, `curve`, `table`, or `table-unresolved` (above).
       std::string kind = "none";
       std::string source;
       std::string sha256;
       std::string fallback;
       uint64_t min_pings = 0;
+
+    /// True for `table` and `table-unresolved`: the kinds that carry the
+    /// table's fallback and ping floor.
+      bool isTableKind() const {return kind == "table" || kind == "table-unresolved";}
 
     /// Equal when the correction is the same: mode, kind, hash, fallback,
     /// ping floor. `source` is informational.

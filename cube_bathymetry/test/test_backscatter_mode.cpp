@@ -255,6 +255,32 @@ TEST(BackscatterModeResolver, HistoryIsBoundedByTheWindowAndTheCap)
   EXPECT_EQ(idle.stateAt(0), nullptr) << "the oldest ones went first";
 }
 
+// cube_bathymetry#172 review: a table run in which nothing resolved must be
+// detectable, with the reasons, so import_bag can fail it and the node warn.
+TEST(BackscatterModeResolver, ResolvedNothingAndTheUnresolvedSummary)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table, BackscatterModeFallback::Exclude);
+  EXPECT_FALSE(r.resolvedNothing()) << "no pings yet is not 'nothing resolved'";
+  r.resolve(50, kF);                                    // no SonarInfo yet
+  EXPECT_TRUE(r.resolvedNothing());
+  r.addSonarInfo(state(100, 0.001f, 24000.0f, 2));
+  r.resolve(150, std::numeric_limits<float>::quiet_NaN());   // no frequency: ?kHz
+  r.addSonarInfo(state(200, 0.005f, 24000.0f, 2));
+  r.resolve(250, kF);                                   // unanchored
+  EXPECT_TRUE(r.resolvedNothing());
+  const std::string summary = r.unresolvedSummary();
+  EXPECT_NE(summary.find("3 of 3 ping(s) not corrected"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("fallback exclude"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("1 before any SonarInfo (2 SonarInfo message(s) seen)"),
+    std::string::npos) << summary;
+  EXPECT_NE(summary.find("1 with no table entry (1 of them without a usable frequency"),
+    std::string::npos) << summary;
+  EXPECT_NE(summary.find("1 unanchored, 0 under the ping floor"), std::string::npos) << summary;
+  EXPECT_EQ(r.resolve(160, kF), 2);
+  EXPECT_FALSE(r.resolvedNothing()) << "one resolved ping is a corrected run";
+}
+
 TEST(BackscatterModeResolver, MixedDeclarationAlwaysMismatches)
 {
   const std::string path = (std::filesystem::temp_directory_path() /

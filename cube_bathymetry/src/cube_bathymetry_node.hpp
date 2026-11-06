@@ -182,6 +182,7 @@ public:
     // configure: a half-applied table would corrupt every beam it touched.
     bs_table_ = cube::BackscatterTable();
     bs_resolver_.reset();
+    bs_unresolved_warned_at_.reset();
     const std::string bs_fallback_str =
       declareOnce<std::string>("backscatter_mode_fallback", "identity");
     if (!cube::parseBackscatterModeFallback(bs_fallback_str, bs_fallback_)) {
@@ -940,14 +941,36 @@ private:
   /// The correction index the per-mode resolver gives a cloud at @p stamp_ns
   /// with @p frequency_hz (the `frequency` field), or unresolved without a
   /// table. One call per cloud (one ping); pingCallback stamps it on every
-  /// sounding.
+  /// sounding. A cloud the table does not correct is warned about, throttled
+  /// to once a minute, with the count and the reasons so far (cube#172
+  /// review): a wrong sonar_info topic, no SonarInfo publisher, or clouds
+  /// without the `frequency` field would otherwise leave a configured table
+  /// correcting nothing with only the cleanup report to say so.
   uint16_t resolveCloudMode(int64_t stamp_ns, float frequency_hz)
   {
     if (!bs_resolver_) {
       return cube::kCorrectionUnresolved;
     }
-    return bs_resolver_->resolve(stamp_ns, frequency_hz);
+    cube::ModeResolution why = cube::ModeResolution::Resolved;
+    const uint16_t idx = bs_resolver_->resolve(stamp_ns, frequency_hz, why);
+    if (why != cube::ModeResolution::Resolved) {
+      // Throttled per configuration (a member, not the macro's call-site
+      // static, so the first unresolved cloud after every configure warns).
+      const rclcpp::Time now = get_clock()->now();
+      if (!bs_unresolved_warned_at_ ||
+        (now - *bs_unresolved_warned_at_).seconds() >= kUnresolvedWarnIntervalS)
+      {
+        RCLCPP_WARN(get_logger(),
+          "Per-pulse-mode table: a cloud was not corrected by the table (%s). %s",
+          cube::toString(why), bs_resolver_->unresolvedSummary().c_str());
+        bs_unresolved_warned_at_ = now;
+      }
+    }
+    return idx;
   }
+  static constexpr double kUnresolvedWarnIntervalS = 60.0;
+  /// When the unresolved-cloud warning last fired in this configuration.
+  std::optional<rclcpp::Time> bs_unresolved_warned_at_;
 
   // Latch-first curve adoption (#102). The latched (transient_local)
   // producer normally delivers before activation, so the whole grid is

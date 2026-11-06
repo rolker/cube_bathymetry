@@ -152,7 +152,7 @@ std::string BuildFingerprint::toJson() const
     } else {
       b["sha256"] = backscatter_correction->sha256;
     }
-    if (backscatter_correction->kind == "table") {
+    if (backscatter_correction->isTableKind()) {
       b["fallback"] = backscatter_correction->fallback;
       b["min_pings"] = backscatter_correction->min_pings;
     } else {

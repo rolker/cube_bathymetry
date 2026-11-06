@@ -506,3 +506,29 @@ TEST(RealBagSmoke, AnUnwritableFingerprintIsReportedAsCompleteButUnstampable)
     "archive a good build\n" << out;
   EXPECT_EQ(out.find("done!"), std::string::npos) << out;
 }
+
+// cube_bathymetry#172 review: a per-pulse-mode table run in which no ping
+// resolves (this excerpt records no SonarInfo at all) is not a corrected
+// store. import_bag says so, exits 4, and stamps the fingerprint
+// `table-unresolved` so no staleness check can take it for a corrected one.
+TEST(RealBagSmoke, ATableRunThatResolvesNoPingExitsFourAndSaysSo)
+{
+  SKIP_WITHOUT_EXCERPT();
+  TempDir dir("unresolved_table");
+  const std::string store = dir.sub("store");
+  int status = -1;
+  const std::string out = run(
+    std::string(IMPORT_BAG_EXE) + " -o " + store + kProjectorArgs +
+    " -r 1.0 -l 200 --backscatter-correction empirical --backscatter-curve " +
+    MODE_TABLE_FIXTURE_FILE + " " + excerptPath(), &status);
+  EXPECT_EQ(status, 4) << out;
+  EXPECT_NE(out.find("NOT ONE of the 200 ping(s) resolved to a table entry"), std::string::npos)
+    << out;
+  EXPECT_NE(out.find("200 before any SonarInfo (0 SonarInfo message(s) seen)"),
+    std::string::npos) << out;
+  EXPECT_NE(out.find("--sonar-info-topic"), std::string::npos) << out;
+  const std::string fingerprint = readFile(store + "/build_fingerprint.json");
+  EXPECT_NE(fingerprint.find("\"kind\": \"table-unresolved\""), std::string::npos)
+    << fingerprint;
+  EXPECT_NE(fingerprint.find("\"fallback\": \"identity\""), std::string::npos) << fingerprint;
+}

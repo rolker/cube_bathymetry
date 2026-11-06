@@ -577,7 +577,8 @@ in short:
   a truncated spill and a failed `finalize()` both abort through
   `abortDirtyReplay` (exit 1, "NOT empty and NOT complete"), while an
   unwritable `build_fingerprint.json` over a store that IS complete is exit 2
-  and says so. Every other test drives the library directly, so nothing else
+  and says so. A per-pulse-mode table run over the excerpt (it records no
+  SonarInfo) is exit 4 with the fingerprint kind `table-unresolved`. Every other test drives the library directly, so nothing else
   reaches `import_bag`'s `main()` past argument validation. It runs against a
   3,000-ping excerpt of the 2026-06-09 UNH pier M3 bag, which is **survey data
   referenced by path**, not a committed fixture (18 MB); it lives beside its
@@ -716,7 +717,14 @@ once per mode and counted; the table is applied as is). The build fingerprint
 records the correction (mode, curve/table SHA-256, fallback, floor). A table
 that does not load is an error (`import_bag`) or a failed configure (node),
 never a silent identity; `batch_regen_bag` refuses a table, since it reads no
-SonarInfo.
+SonarInfo. A table that loads but corrects NOTHING — not one ping resolved to
+an entry, the usual causes being a wrong `--sonar-info-topic`, no SonarInfo in
+the bags, or clouds without `frequency` — is loud too: `import_bag` prints an
+error with the reason counts, still writes the store and the fingerprint but
+with `kind` `table-unresolved` (so no staleness check takes it for a
+table-corrected store), and exits 4; the live node warns at the first
+unresolved cloud after each configure, with the count and the reasons so far,
+at most once a minute.
 
 ### Deriving a curve (`derive_angular_response.py`)
 

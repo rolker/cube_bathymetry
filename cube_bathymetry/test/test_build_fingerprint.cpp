@@ -212,6 +212,24 @@ TEST(BuildFingerprint, BackscatterCorrectionRoundTripsAndDecidesStaleness)
   floor.backscatter_correction->min_pings = 0;
   EXPECT_TRUE(with_table.isStale(floor));
 
+  // A table run that resolved no ping (cube#172 review) is recorded under its
+  // own kind, keeps the table's hash and policy, and is never taken for a
+  // table-corrected build -- in either direction.
+  auto unresolved = with_table;
+  unresolved.backscatter_correction->kind = "table-unresolved";
+  EXPECT_TRUE(unresolved.backscatter_correction->isTableKind());
+  const std::string unresolved_json = unresolved.toJson();
+  EXPECT_NE(unresolved_json.find("\"table-unresolved\""), std::string::npos) << unresolved_json;
+  EXPECT_NE(unresolved_json.find("\"fallback\": \"exclude\""), std::string::npos)
+    << unresolved_json;
+  const auto unresolved_back = BuildFingerprint::fromJson(unresolved_json);
+  ASSERT_TRUE(unresolved_back.backscatter_correction.has_value());
+  EXPECT_EQ(*unresolved_back.backscatter_correction, *unresolved.backscatter_correction);
+  EXPECT_EQ(unresolved_back.backscatter_correction->min_pings, 200u);
+  EXPECT_TRUE(with_table.isStale(unresolved));
+  EXPECT_TRUE(unresolved.isStale(with_table));
+  EXPECT_FALSE(unresolved.isStale(unresolved_back));
+
   // None: written as an object with null hash; a pre-#172 file (no key) is
   // stale against any fingerprint that records the correction.
   auto none = fixed(1.0);

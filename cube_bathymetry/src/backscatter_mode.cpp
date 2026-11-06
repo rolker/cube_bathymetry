@@ -264,6 +264,40 @@ uint16_t BackscatterModeResolver::resolve(
   return fallbackIdx();
 }
 
+std::string BackscatterModeResolver::unresolvedSummary() const
+{
+  auto sum = [](const std::map<std::string, uint64_t> & m) {
+      uint64_t n = 0;
+      for (const auto & kv : m) {
+        n += kv.second;
+      }
+      return n;
+    };
+  uint64_t no_frequency = 0;
+  const std::string unknown_frequency = "_?kHz";
+  for (const auto & kv : counts_.no_entry_by_mode) {
+    const std::string & key = kv.first;
+    if (key.size() >= unknown_frequency.size() &&
+      key.compare(key.size() - unknown_frequency.size(), unknown_frequency.size(),
+      unknown_frequency) == 0)
+    {
+      no_frequency += kv.second;
+    }
+  }
+  std::ostringstream os;
+  os << counts_.unresolved() << " of " << counts_.pings
+     << " ping(s) not corrected by the table so far (fallback " << toString(fallback_)
+     << "): " << counts_.no_sonar_info << " before any SonarInfo ("
+     << counts_.sonar_info_seen << " SonarInfo message(s) seen), "
+     << sum(counts_.no_entry_by_mode) << " with no table entry";
+  if (no_frequency > 0) {
+    os << " (" << no_frequency << " of them without a usable frequency, key '?kHz')";
+  }
+  os << ", " << sum(counts_.unanchored_by_mode) << " unanchored, "
+     << sum(counts_.under_floor_by_mode) << " under the ping floor";
+  return os.str();
+}
+
 std::string BackscatterModeResolver::report() const
 {
   std::ostringstream os;

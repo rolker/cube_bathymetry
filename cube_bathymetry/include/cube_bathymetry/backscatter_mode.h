@@ -176,6 +176,17 @@ public:
     uint64_t minPings() const {return min_pings_;}
     const BackscatterTable & table() const {return *table_;}
 
+  /// True when pings were resolved against a table and NOT ONE got a table
+  /// entry: the run's backscatter carries no table correction at all. The
+  /// usual causes are a wrong SonarInfo topic, no SonarInfo in the input, or
+  /// pings without a frequency (cube_bathymetry#172 review).
+    bool resolvedNothing() const {return counts_.pings > 0 && counts_.resolvedTotal() == 0;}
+
+  /// One line for a warning: how many pings are unresolved so far and why
+  /// (no SonarInfo / no entry / unanchored / under the floor), naming the
+  /// pings that carried no usable frequency (their key reads `?kHz`).
+    std::string unresolvedSummary() const;
+
   /// Multi-line summary for the import report / the node log: resolved
   /// pings per mode, every unresolved reason with its count, declared-state
   /// mismatches, stale pings.
