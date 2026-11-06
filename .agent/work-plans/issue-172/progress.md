@@ -248,3 +248,39 @@ Specialists: Claude Adversarial Lens A + Lens B on the fix commits (fresh contex
 - [x] (suggestion) bag_identity mtime in whole seconds — mtime_ns (Gemini)
 - [x] (suggestion) README said the trimming floor needs both thresholds and that out-of-span beams do not shape the intercepts — wording matches the code (Codex)
 - [ ] (suggestion) README "Header provenance" key table still lists only the single-curve keys — cosmetic, the by-mode section describes its own header (Governance round 1; carried)
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 10:22 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+
+**Scope**: PR 2 of #172 — the per-pulse-mode table applied in the estimator, the offline importer and the live node (PR 1, the derive side, merged as PR #174). Not pushed, no PR.
+**Branch**: feature/issue-172 at `6c8ad85` (six commits on jazzy `7437948`)
+
+### Commits
+- `32dfda8` backscatter_table: load the per-mode table and share the mode-key spec
+- `d67cb73` estimator: carry a per-ping correction index to the record-time backscatter correction
+- `6440bdc` backscatter_mode: resolve each ping's pulse mode against the table
+- `3ccbc8f` build_fingerprint: record the backscatter correction beside the tiling (ADR-0003)
+- `de9d930` import_bag + live node: apply a per-pulse-mode table per ping
+- `6c8ad85` docs: per-pulse-mode addendum to ADR-0007, the fingerprint key in ADR-0003, applying the table
+
+### What landed
+- `backscatter_table.{h,cpp}`: `keyNumber` / `canonicalModeKey` (tested on every case of `test/data/mode_keys.json`), the strict `angular-response-table v1` loader (a table is read whole or refused with the line named; per-mode scalar disagreement, overlapping groups, missing header keys all refuse), `correctWithTable` = `raw - db_relative_to_nadir - r_g(log10 R/R0) - offset` with the angle-group lookup rule, node interpolation clamped beyond the ends, nearest-centre bin for the unweighable check, fallback identity|exclude.
+- `backscatter_mode.{h,cpp}`: resolver (stamp-keyed deduplicated SonarInfo history, latest at or before the ping, declared-TVG check warned once per (mode, state) and counted per ping, fallback for NoSonarInfo / NoEntry / Unanchored / UnderPingFloor, late-SonarInfo stale count, report). `sonarInfoStateFrom` in `sonar_info_curve`.
+- `Sounding::correction_idx` (0 unresolved → legacy curve path byte-identical, 0xFFFE exclude, 0xFFFF identity, 1..0xFFFD entries) through `DepthAndUncertainty` (22 bytes), `Node::update`/`queueEstimate`, `Hypothesis::recordBeam` (NaN back = skipped), the recon spill; `GeoMapSheet::setBackscatterTable`; `MultiLevelAccumulatorConfig`.
+- import_bag: table via `--backscatter-curve` (format line), `--backscatter-mode-fallback`, `--backscatter-mode-min-pings`, SonarInfo topic in the main-pass read filter and resolved at drain time, resolver report, fingerprint record; main() refactored into five helpers (cpplint fn_size). Live node: `backscatter_mode_fallback`, `backscatter_mode_min_pings`, broken table fails configure, SonarInfo depth 10, table re-installed on reset, report at cleanup. `detections_to_pointcloud` writes a `frequency` field per point. batch_regen refuses a table.
+- Fingerprint `backscatter_correction` {mode, kind, source, sha256 (OpenSSL, `libssl-dev`), fallback, min_pings}; a pre-#172 file is stale.
+- marine_tools mirror follow-up filed: rolker/marine_tools#96.
+
+### Deviations from the plan (recorded in plan.md + the ADR-0007 addendum)
+- Decision 6: inverse-variance Welford weights are NOT applied — the persisted statistic is the unweighted `{n, mean, M2}` (eviction spill + the 3-band MbesCell round trip), and a weighted Welford needs the weight sums carried through both; the column serves only the unweighable-bin cut. Flat on the M3, so the product is unchanged; follow-up listed in the ADR's Deferred section.
+- Decision 9: `nearest` fallback dropped (no honest metric; a neighbour's entry reintroduces the mode steps); `--backscatter-mode-min-pings` added as the apply-time answer for the 5 ms FM mode.
+- Decision 10: the live node's clouds carried no frequency; `detections_to_pointcloud` now writes it (point_step 28 → 32), an older cloud keys as `?kHz` and gets the fallback.
+- Per-beam uncorrectable cases (unweighable bin, no finite range) take the fallback but are not counted per beam (const parameters inside the estimator); the loader reports unweighable bins per mode at load time.
+
+### Tests
+Full package suite: 1395 tests, 0 failures (96 cppcheck skips, as before). New: `test_backscatter_table` (9), `test_backscatter_mode` (5), fingerprint key + SHA-256 vectors (2), `correctBeamIntensity` index paths, `recordBeam` exclude, `Node` queue carries the index, recon spill round trip, two live-node lifecycle tests. Lint (uncrustify, cpplint, xmllint, lint_cmake, cppcheck) clean. Not covered: import_bag's main-pass SonarInfo ordering end to end (no C++ synthetic bag with SonarInfo; the Appledore re-import is the integration run).
+
+### Next
+`/review-code` pre-push on the branch; after the PR, the Appledore re-import with the run-4 table (`--backscatter-mode-fallback exclude`) → candidate D for the operator's eyes.
