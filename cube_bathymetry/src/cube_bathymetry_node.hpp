@@ -853,7 +853,11 @@ private:
     // The per-mode resolver's counters are the run's record (cube#172): say
     // what was resolved before the configuration is torn down.
     if (bs_resolver_) {
-      RCLCPP_INFO(get_logger(), "%s", bs_resolver_->report().c_str());
+      // The resolver survives ~/reset by design (its SonarInfo history is not
+      // redelivered), so its counts span every session since configure.
+      RCLCPP_INFO(get_logger(),
+        "Per-mode counts since configure (they span any ~/reset):\n%s",
+        bs_resolver_->report().c_str());
       bs_resolver_.reset();
     }
     bs_table_ = cube::BackscatterTable();

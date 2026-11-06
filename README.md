@@ -120,8 +120,12 @@ activated (`reset_cube_nodes.sh` then activates it, see below).
 **`cube_bathymetry_node`.** It builds the new session aside and swaps it in only when
 complete, so a failure (the response says why) leaves the running session untouched. The
 new session has the same sheet-level settings as the old one (`capture_spacing_scale`, the
-backscatter curve that arrived on `sonar_info`, which is not redelivered) and re-reads
-`prior_store_dir`, so the blunder gate is active from the first ping. A prior that cannot be
+backscatter curve that arrived on `sonar_info`, which is not redelivered, and a per-pulse-mode
+table with its fallback) and re-reads
+`prior_store_dir`, so the blunder gate is active from the first ping. The per-mode
+resolver is kept too, by design: its SonarInfo history is not redelivered either. So are
+its counters, so the per-mode report logged at `cleanup` covers every ping since the
+`configure`, before and after any reset, and says so. A prior that cannot be
 loaded **fails the reset** (the running session, which has the gate, is kept and the response
 says why), whereas a `configure` only warns and runs ungated: replacing a gated session
 with an ungated one is worse than keeping the old one. The same holds for a prior that

@@ -1132,6 +1132,7 @@ TEST_F(NodeLifecycle, UnresolvedCloudsWarnWithTheReasonsThrottled)
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   EXPECT_TRUE(log.contains("0 of 21 pings resolved")) << "the cleanup report stays\n" << log.all();
+  EXPECT_TRUE(log.contains("since configure (they span any ~/reset)")) << log.all();
 }
 
 // cube_bathymetry#172 review: an empty (or all-dropped) cloud carries no
