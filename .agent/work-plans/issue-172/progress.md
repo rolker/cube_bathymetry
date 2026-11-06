@@ -589,3 +589,34 @@ Dropped from Lens A: a restart jump under 60 s is not detected (the header state
 ### Findings
 - [x] (must-fix) Order (a) is still open when the old run's in-force SonarInfo is stamped near the new run's start. The publishers send SonarInfo only on change, and the heartbeat keeps the original stamp, so a single-mode run's only entry is near its start. That is exactly what `prune` keeps. The re-anchoring ping keeps every entry `<= ping + window`, so the old entry survives. Reproduced: old SonarInfo CW at 5 s, pings 6..1000 s; restart, ping at 10 s, then the new run's FMU SonarInfo at 3 s. The pings at 10, 20 and 500 s all get the old CW correction (idx 1), silently and for the rest of the run. That contradicts the header and `.cpp` claim "never the old run's mode". Fix: on a re-anchor with no behind-window SonarInfo, drop every entry, not only those more than the window ahead. A stray ping more than 60 s late then costs unresolved pings until the next SonarInfo or heartbeat, which is the cost the header already accepts. Update the `lone` and `late` cases in `TimeGoingBackwardsReAnchorsTheWindow` to match, and add the reproduction above as a test. — `cube_bathymetry/src/backscatter_mode.cpp:344-351`, `cube_bathymetry/include/cube_bathymetry/backscatter_mode.h:132-140` (Lens A + lead probe)
 - [x] (suggestion) The re-anchor erase ignores `held()`. In import_bag, a ping more than 60 s behind the anchor drops SonarInfo states that were read ahead for pings still waiting on the TF frontier. With the must-fix applied, it drops all of them. That needs a bag whose stamps are not in order, which is the same assumption the new `feedSonarInfo` comment names, so a sentence there or in the re-anchor comment is enough. — `cube_bathymetry/src/backscatter_mode.cpp:344-351` (Lens A)
+
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 13:01 -05:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-172 at `7f11455`
+**Addressed**: `## Local Review (Pre-Push)` of 2026-11-06 12:48 -05:00 (round 4 of PR 2, at `73e393f`, progress commit `2bf6902`): 1 must-fix, 1 suggestion
+**Commits**: `bc9b0fe` `7f11455` (boxes checked in those commits). Not pushed.
+
+### Actions
+- [x] (must-fix) Order (a) with the old run's in-force SonarInfo stamped near the new run's start. With no SonarInfo stored behind the window, the re-anchoring ping now drops EVERY history entry rather than only those more than the window ahead, so the old run's mode can never decide the new run's pings. A stray ping more than 60 s late leaves pings unresolved until the next SonarInfo or heartbeat. That is the accepted cost, now stated in the header, README, ADR-0007 addendum and plan decision 10. New test `ANewTimelineNeverInheritsAnOldStateStampedNearItsStart` is the reviewer's reproduction: old CW at 5 s, pings 6..1000 s, restart, ping at 10 s, new FMU at 3 s. The 10 s ping is unresolved and counted stale; the 20 s and 500 s pings get FMU. The `lone` and `late` cases in `TimeGoingBackwardsReAnchorsTheWindow` now expect the drop; `lone` also shows a heartbeat at the original stamp resolving again. `NodeLifecycle.PerModeTableResolvesCloudsAndSurvivesReset` sent its "before the SonarInfo" ping 100 s behind the anchor, which is now a stray-ping re-anchor, so it moves to 99 s, inside the window, keeping what it checks — `cube_bathymetry/src/backscatter_mode.cpp`, `cube_bathymetry/include/cube_bathymetry/backscatter_mode.h`, `bc9b0fe`
+- [x] (suggestion) One sentence in the re-anchor comment: the erase ignores the hold (`holdFrom`), so in import_bag it can drop SonarInfo read ahead for pings waiting on the TF frontier, but only on a bag with out-of-order detection stamps, which the hold already assumes away (see `feedSonarInfo`) — `cube_bathymetry/src/backscatter_mode.cpp`, `7f11455`
+
+### For the PR body (host), carried forward
+- **Known gap, predates #172:** `batch_regen_bag` refuses a per-mode table file, but it never reads `build_fingerprint.json`. So `--backscatter-correction none` (or another curve) can rebuild tiles inside a table-built store without any check. The fingerprint records the correction; a consumer that compares it is the ADR-0003 `--incremental` follow-up.
+- **Rebuild:** `Sounding`, `DepthAndUncertainty` and `Parameters` changed layout (`DepthAndUncertainty` 20 → 22 bytes, `Parameters` carries the table). ui_ws `marine_perception_tools` must be rebuilt with this PR, and the main tree's sensors_ws and ui_ws rebuilt after merge.
+- **Exit 4 (new):** a per-pulse-mode table was given and no ping resolved a pulse mode. On a full run the store and its fingerprint (kind `table-unresolved`) were still written; exits 1 and 2 outrank it, and it outranks 3. A `--level-plan-out` preflight exits 4 too, so `preflight && import` stops before the import.
+- **Follow-up (PR 1's writer):** a last angle bin centred past 90 deg (100 deg at width 40) is used as that bin's interpolation x, although its beams lie between 80 and 90 deg. A beam at 85 deg is pulled only 0.625 of the way to the bin's value. Fix it in `derive_angular_response.py` (write the clipped centre `(lo + min(hi, 90)) / 2`) or clip in the loader.
+- **Behaviour change:** an explicit `--backscatter-curve` / `backscatter_curve_file` that is a FIFO, a device, a directory or unreadable is now an error (exit, or a failed configure) rather than an EMPTY-curve warning. A missing file is unchanged.
+
+### Tests
+`test_backscatter_mode` (19 tests) and `test_node_lifecycle` (45 tests) pass, run directly with `ROS_DOMAIN_ID=87 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`. Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1430 tests, 0 errors, 0 failures, 96 skipped**, the same 96 cppcheck skips (was 1429; +1 is the new test). uncrustify and cpplint are clean on the four touched C++ files.
+
+### Left open
+- Suggestion 8 of round 3, the writer follow-up above.
+- Still open from round 2: an interior gap between written bins is interpolated rather than refused (an operator decision).
+
+### Next
+Per the round-4 Ship note (recommended; a test run is enough, no further review round needed), the branch is ready for the host to push and open or update the PR.
