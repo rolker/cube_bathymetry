@@ -471,7 +471,7 @@ TEST(BackscatterTable, RejectsMalformedTablesWhole)
       header.substr(0, header.find("mode,term")) +
       "# mode_summary: FMU_1000us_24000Hz_500kHz pings=99 beams=1\n" +
       header.substr(header.find("mode,term")) + good,
-      "two '# mode_summary:' lines"},
+      ":5: two '# mode_summary:' lines"},
     {"inf_absorption", header +
       "FMU_1000us_24000Hz_500kHz,angle,1,,,-20,100,9,0,0.3,0,0,true,40LOGR,inf\n",
       "malformed declared_tvg_absorption_db_per_km"},
@@ -485,7 +485,7 @@ TEST(BackscatterTable, RejectsMalformedTablesWhole)
       "# format: angular-response-table v1\n# reference_mode: X\n# range_ref_m: 10\n"
       "# mode_summary: FMU_1000us_24000Hz_500kHz beams=345\n" +
       header.substr(header.find("mode,term")) + good,
-      "has no pings="},
+      ":4: '# mode_summary: FMU_1000us_24000Hz_500kHz beams=345' has no pings="},
   };
   for (const auto & c : cases) {
     const auto path = writeTemp(c.tag, c.content);

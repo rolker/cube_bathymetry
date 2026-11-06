@@ -616,7 +616,8 @@ BackscatterTable loadBackscatterTable(
 
   // Header comments, then the column line.
   std::map<std::string, std::string> header;
-  std::vector<std::string> summaries;
+  /// (line number, text): an error names the summary's own line.
+  std::vector<std::pair<std::size_t, std::string>> summaries;
   bool columns_seen = false;
   while (std::getline(in, line)) {
     ++line_no;
@@ -636,7 +637,7 @@ BackscatterTable loadBackscatterTable(
       const std::string key = trim(body.substr(0, colon));
       const std::string value = trim(body.substr(colon + 1));
       if (key == "mode_summary") {
-        summaries.push_back(value);
+        summaries.emplace_back(line_no, value);
       } else if (!header.count(key)) {
         header[key] = value;
       }
@@ -694,7 +695,7 @@ BackscatterTable loadBackscatterTable(
 
   // Per-mode summaries: pings and beams.
   std::map<std::string, std::pair<uint64_t, uint64_t>> summary_counts;
-  for (const auto & s : summaries) {
+  for (const auto & [summary_line, s] : summaries) {
     std::istringstream is(s);
     std::string key;
     is >> key;
@@ -703,16 +704,16 @@ BackscatterTable loadBackscatterTable(
     // The ping count decides the ping floor (--backscatter-mode-min-pings):
     // a summary without it would read as 0 and quietly fall under any floor.
     if (!kv.count("pings")) {
-      return fail(line_no, "'# mode_summary: " + s + "' has no pings=");
+      return fail(summary_line, "'# mode_summary: " + s + "' has no pings=");
     }
     if (!parseCount(kv.at("pings"), pings) || trim(kv.at("pings")).empty()) {
-      return fail(line_no, "malformed pings in '# mode_summary: " + s + "'");
+      return fail(summary_line, "malformed pings in '# mode_summary: " + s + "'");
     }
     if (kv.count("beams") && !parseCount(kv.at("beams"), beams)) {
-      return fail(line_no, "malformed beams in '# mode_summary: " + s + "'");
+      return fail(summary_line, "malformed beams in '# mode_summary: " + s + "'");
     }
     if (summary_counts.count(key)) {
-      return fail(line_no, "two '# mode_summary:' lines for '" + key + "'");
+      return fail(summary_line, "two '# mode_summary:' lines for '" + key + "'");
     }
     summary_counts[key] = {pings, beams};
   }
