@@ -352,8 +352,10 @@ TEST(BackscatterModeResolver, TimeGoingBackwardsReAnchorsTheWindow)
   EXPECT_NE(r.report().find("re-anchored"), std::string::npos) << r.report();
 
   // A lone ping more than the window late, with no SonarInfo behind the
-  // window, moves the anchor; the current timeline keeps the entries within
-  // the window ahead of it.
+  // window, moves the anchor and drops every entry (review round 4): it
+  // cannot be told from a new timeline's first ping. The pings after it are
+  // unresolved until the next SonarInfo or a heartbeat, which keeps the
+  // original stamp, never given a wrong mode.
   BackscatterModeResolver lone(&f.table);
   lone.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));
   for (int64_t t = 100; t <= 200; ++t) {
@@ -362,38 +364,46 @@ TEST(BackscatterModeResolver, TimeGoingBackwardsReAnchorsTheWindow)
   lone.resolve(50 * s, kF, why);
   EXPECT_EQ(why, ModeResolution::NoSonarInfo);
   EXPECT_EQ(lone.counts().window_reanchored, 1u);
-  EXPECT_EQ(lone.resolve(201 * s, kF), 2) << "the current state survives a stray late ping";
+  EXPECT_EQ(lone.historySize(), 0u) << "the 100 s entry goes, though only 50 s ahead";
+  lone.resolve(201 * s, kF, why);
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "unresolved, not a wrong mode";
+  lone.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));   // the heartbeat
+  EXPECT_EQ(lone.resolve(202 * s, kF), 2) << "the heartbeat resolves again";
 
   // A late SonarInfo behind the window, followed by an in-window ping, was a
-  // late message, not a new timeline: a later stray ping drops nothing.
+  // late message, not a new timeline: it does not make a later stray ping's
+  // re-anchor keep anything. Every entry goes (review round 4).
   BackscatterModeResolver late(&f.table);
   late.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));
   ASSERT_EQ(late.resolve(200 * s, kF), 2);
   late.addSonarInfo(state(50 * s, 5e-5f, 20000.0f, 1));     // 150 s behind: stored as is
   EXPECT_EQ(late.resolve(201 * s, kF), 2);
-  EXPECT_EQ(late.resolve(60 * s, kF), 1) << "re-anchored, the 50 s state kept";
-  EXPECT_EQ(late.resolve(202 * s, kF), 2) << "and the 100 s state too";
+  late.resolve(60 * s, kF, why);
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "re-anchored, the 50 s state dropped";
+  EXPECT_EQ(late.historySize(), 0u) << "and the 100 s state too";
+  late.resolve(202 * s, kF, why);
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo);
 
-  // The accepted cost of reading arrival order (review round 3): a lone ping
-  // more than the window late is taken as a restart, so the current
-  // timeline's entries more than the window ahead of it go. The pings after
-  // it are unresolved until the next SonarInfo, never given a wrong mode.
+  // The accepted cost of reading arrival order (review rounds 3 and 4): a
+  // lone ping more than the window late is taken as a restart, so every entry
+  // of the current timeline goes. The pings after it are unresolved until the
+  // next SonarInfo, never given a wrong mode.
   BackscatterModeResolver stray(&f.table);
   stray.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));
   ASSERT_EQ(stray.resolve(200 * s, kF), 2);
   stray.resolve(20 * s, kF, why);                           // 180 s late
   EXPECT_EQ(why, ModeResolution::NoSonarInfo);
   stray.resolve(201 * s, kF, why);
-  EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "the 100 s entry was > 60 s ahead of 20 s";
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "the 100 s entry went with the rest";
   stray.addSonarInfo(state(202 * s, 0.001f, 24000.0f, 2));
   EXPECT_EQ(stray.resolve(203 * s, kF), 2) << "the next SonarInfo resolves again";
 }
 
 // cube_bathymetry#172 review round 3, order (a): the new timeline's first
 // PING arrives before its first SonarInfo, so no SonarInfo is behind the
-// window when the ping re-anchors it. The old timeline's entries more than the
-// window ahead of the ping still go: once the new run reaches their stamps,
-// a ping there gets the new run's mode, not the old one.
+// window when the ping re-anchors it. The old timeline's entries still go:
+// once the new run reaches their stamps, a ping there gets the new run's
+// mode, not the old one.
 TEST(BackscatterModeResolver, ANewTimelineWhosePingComesFirstDropsTheOldOne)
 {
   Fixture f;
@@ -406,7 +416,7 @@ TEST(BackscatterModeResolver, ANewTimelineWhosePingComesFirstDropsTheOldOne)
   EXPECT_EQ(r.resolve(10 * s, kF, why), kCorrectionUnresolved);
   EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "not the old run's mode";
   EXPECT_EQ(r.counts().window_reanchored, 1u);
-  EXPECT_EQ(r.historySize(), 0u) << "the 990 s entry is > 60 s ahead of 10 s";
+  EXPECT_EQ(r.historySize(), 0u) << "the old 990 s entry goes";
   // Then its SonarInfo (in the re-anchored window) and its pings.
   r.addSonarInfo(state(11 * s, 0.001f, 24000.0f, 2));       // FMU 1 ms -> idx 2
   EXPECT_EQ(r.resolve(12 * s, kF), 2);
@@ -422,6 +432,37 @@ TEST(BackscatterModeResolver, ANewTimelineWhosePingComesFirstDropsTheOldOne)
   EXPECT_EQ(o.counts().window_reanchored, 1u);
   EXPECT_EQ(o.historySize(), 1u);
   EXPECT_EQ(o.resolve(995 * s, kF), 2);
+}
+
+// cube_bathymetry#172 review round 4, order (a) with the old run's state
+// stamped near the new run's start. Publishers send SonarInfo only on change
+// and a heartbeat keeps the original stamp, so a single-mode run's one entry
+// sits near its start: the window prune keeps it, and it lies within the
+// window AHEAD of the new run's first ping. Keeping it handed every later
+// ping of the new run the old run's CW correction. The re-anchoring ping now
+// drops every entry.
+TEST(BackscatterModeResolver, ANewTimelineNeverInheritsAnOldStateStampedNearItsStart)
+{
+  Fixture f;
+  const int64_t s = 1000000000LL;
+  BackscatterModeResolver r(&f.table);
+  r.addSonarInfo(state(5 * s, 5e-5f, 20000.0f, 1));         // old run: CW 50 us -> idx 1
+  for (int64_t t = 6; t <= 1000; ++t) {
+    ASSERT_EQ(r.resolve(t * s, kF), 1) << t;
+  }
+  ASSERT_NE(r.stateAt(1000 * s), nullptr) << "the in-force 5 s entry is kept by the prune";
+  // Restart: the new run's first ping, then its SonarInfo stamped before it.
+  ModeResolution why = ModeResolution::Resolved;
+  EXPECT_EQ(r.resolve(10 * s, kF, why), kCorrectionUnresolved);
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "not the old run's CW";
+  EXPECT_EQ(r.counts().window_reanchored, 1u);
+  EXPECT_EQ(r.historySize(), 0u);
+  r.addSonarInfo(state(3 * s, 0.001f, 24000.0f, 2));        // new run: FMU 1 ms -> idx 2
+  EXPECT_EQ(r.counts().stale, 1u) << "the 10 s ping, resolved before its SonarInfo";
+  for (const int64_t t : {20LL, 500LL}) {
+    EXPECT_EQ(r.resolve(t * s, kF, why), 2) << t;
+    EXPECT_EQ(why, ModeResolution::Resolved) << t;
+  }
 }
 
 // cube_bathymetry#172 review round 3, order (b) at the cap: with the history

@@ -998,7 +998,10 @@ TEST_F(NodeLifecycle, PerModeTableResolvesCloudsAndSurvivesReset)
   CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
   EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 150LL * 1000000000LL, f), 2)
     << "FMU_1000us_24000Hz_500kHz is the fixture's second entry";
-  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 50LL * 1000000000LL, f),
+  // 99 s: before the SonarInfo stamp but inside the 60 s window. A ping more
+  // than the window behind the newest one is read as a restart and drops the
+  // history (review round 4), which is not what this checks.
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 99LL * 1000000000LL, f),
     cube::kCorrectionExclude) << "a ping before the SonarInfo stamp stays unresolved";
   // Without the frequency field the key cannot match any entry.
   EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 160LL * 1000000000LL, NAN),

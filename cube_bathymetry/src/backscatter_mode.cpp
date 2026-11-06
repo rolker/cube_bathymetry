@@ -328,26 +328,24 @@ uint16_t BackscatterModeResolver::resolve(
     //  - SonarInfo arrived behind the window too, and nothing of the old
     //    timeline since: that is the new timeline's history, and every other
     //    entry is the old one's.
-    //  - either way, an entry more than the window AHEAD of this ping is the
-    //    old timeline's. That covers the new timeline's first ping arriving
-    //    before its first SonarInfo (review round 3): the ping is unresolved
-    //    ("no SonarInfo") rather than given the old run's mode, and so is
-    //    every ping until the new run's SonarInfo arrives.
+    //  - otherwise every entry goes (review round 4). The new timeline's
+    //    first ping arrived before its first SonarInfo, and no stamp tells
+    //    the old run's entries from the new run's: publishers send SonarInfo
+    //    only on change and a heartbeat keeps the original stamp, so a
+    //    single-mode run's only entry sits near its start, where the new
+    //    run's pings land. Keeping any entry could hand the new run the old
+    //    run's mode for the rest of the run. The ping is unresolved ("no
+    //    SonarInfo"), and so is every ping until the new run's SonarInfo
+    //    (or a heartbeat of it) arrives.
     // Arrival order cannot tell a restart from a ping (or a SonarInfo and a
     // ping) delivered more than the window late: a lone late ping also drops
-    // the current timeline's entries more than the window ahead of it. That
-    // is accepted -- a sonar ping 60 s late is not a live link, offline input
-    // is merged in stamp order, and the cost is unresolved pings until the
-    // next SonarInfo, never a wrong mode applied. See the header for why a
-    // clock-jump callback is not the answer.
-    const int64_t ahead_cut =
-      ping_stamp_ns > std::numeric_limits<int64_t>::max() - kHistoryWindowNs ?
-      std::numeric_limits<int64_t>::max() : ping_stamp_ns + kHistoryWindowNs;
-    const bool new_history = !behind_stamps_.empty();
+    // every entry of the current timeline. That is accepted -- a sonar ping
+    // 60 s late is not a live link, offline input is merged in stamp order,
+    // and the cost is unresolved pings until the next SonarInfo or heartbeat,
+    // never a wrong mode applied. See the header for why a clock-jump
+    // callback is not the answer.
     for (auto it = history_.begin(); it != history_.end(); ) {
-      const bool keep = behind_stamps_.count(it->first) > 0 ||
-        (!new_history && it->first <= ahead_cut);
-      it = keep ? std::next(it) : history_.erase(it);
+      it = behind_stamps_.count(it->first) > 0 ? std::next(it) : history_.erase(it);
     }
     behind_stamps_.clear();
   } else {

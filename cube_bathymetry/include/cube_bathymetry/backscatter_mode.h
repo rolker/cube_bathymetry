@@ -130,15 +130,19 @@ namespace cube
 /// new timeline's states survive until its first ping re-anchors. Without
 /// both, the anchor (a running maximum) would stay on the old timeline and
 /// prune the new one to one entry. The re-anchoring ping also drops the old
-/// timeline: every entry more than the window ahead of it, and, when such
-/// SonarInfo arrived and nothing in the window since, every entry that did
-/// not. So a new timeline whose first ping comes before its first SonarInfo
-/// gets "no SonarInfo" until that SonarInfo arrives, never the old run's mode.
+/// timeline: when such SonarInfo arrived and nothing in the window since, it
+/// keeps only those entries; otherwise it drops EVERY entry (review round
+/// 4). No stamp tells the old run's entries from the new run's: SonarInfo is
+/// sent on change and a heartbeat keeps the original stamp, so the old run's
+/// state in force can sit near the new run's start, inside the window ahead
+/// of its first ping. So a new timeline whose first ping comes before its
+/// first SonarInfo gets "no SonarInfo" until that SonarInfo (or a heartbeat
+/// of it) arrives, never the old run's mode.
 /// Arrival order cannot tell a restart from input delivered more than the
 /// window late (a lone ping, or a SonarInfo and a ping with nothing in the
-/// window between them): those are taken as a restart too, and the current
-/// timeline's entries more than the window ahead of them go. The cost is
-/// unresolved pings until the next SonarInfo, not a wrong correction.
+/// window between them): those are taken as a restart too, and every entry
+/// of the current timeline goes. The cost is unresolved pings until the next
+/// SonarInfo or heartbeat, not a wrong correction.
 ///
 /// Why not a clock-jump callback (`rclcpp::Clock::create_jump_callback`): it
 /// fires only for a clock on the ROS time source, i.e. under use_sim_time
