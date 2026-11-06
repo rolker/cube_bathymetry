@@ -234,9 +234,13 @@ public:
           "Fix or clear the parameter.", bs_curve_file.c_str());
       }
     }
-    if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.points.empty()) {
+    if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.points.empty() &&
+      !bs_file_is_table)
+    {
       // Loud, not silent: the operator asked for the correction but no curve was
-      // loaded (empty/missing/unparseable file), so it degrades to a no-op.
+      // loaded (empty/missing/unparseable file), so it degrades to a no-op. A
+      // loaded per-mode table (cube#172) IS the correction, so it is not this
+      // case even though no single curve was read.
       RCLCPP_WARN(get_logger(),
         "backscatter_angle_correction=empirical but no curve was loaded from "
         "backscatter_curve_file='%s' -- the correction is ENABLED but a NO-OP "

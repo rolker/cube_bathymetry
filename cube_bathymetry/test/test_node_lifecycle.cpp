@@ -50,6 +50,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -65,6 +67,7 @@
 #include <vector>
 
 #include "lifecycle_msgs/msg/state.hpp"
+#include "rcutils/logging.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/tile_io.hpp"
 #include "marine_interfaces/msg/sonar_info.hpp"
@@ -1000,6 +1003,88 @@ TEST_F(NodeLifecycle, PerModeTableResolvesCloudsAndSurvivesReset)
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   EXPECT_EQ(CubeBathymetryTestAccess::tableModes(*node), 0u) << "cleanup releases it";
+}
+
+namespace
+{
+/// Captures every log line emitted while it lives (rcutils output handler),
+/// then restores the previous handler. One at a time; tests run serially.
+class LogCapture
+{
+public:
+  LogCapture()
+  : previous_(rcutils_logging_get_output_handler())
+  {
+    lines().clear();
+    rcutils_logging_set_output_handler(&LogCapture::handler);
+  }
+  ~LogCapture() {rcutils_logging_set_output_handler(previous_);}
+  LogCapture(const LogCapture &) = delete;
+  LogCapture & operator=(const LogCapture &) = delete;
+
+  bool contains(const std::string & needle) const
+  {
+    return std::any_of(
+      lines().begin(), lines().end(),
+      [&](const std::string & l) {return l.find(needle) != std::string::npos;});
+  }
+  std::string all() const
+  {
+    std::string out;
+    for (const auto & l : lines()) {
+      out += l + "\n";
+    }
+    return out;
+  }
+
+private:
+  static std::vector<std::string> & lines()
+  {
+    static std::vector<std::string> captured;
+    return captured;
+  }
+  static void handler(
+    const rcutils_log_location_t *, int, const char *, rcutils_time_point_value_t,
+    const char * format, va_list * args)
+  {
+    va_list copy;
+    va_copy(copy, *args);
+    char buffer[4096];
+    std::vsnprintf(buffer, sizeof(buffer), format, copy);
+    va_end(copy);
+    lines().emplace_back(buffer);
+  }
+  rcutils_logging_output_handler_t previous_;
+};
+}  // namespace
+
+// cube_bathymetry#172 review: backscatter_angle_correction=empirical with a
+// per-mode table loaded is the correction working, not the "enabled but no
+// curve, NO-OP" case -- the configure must not claim the intensity goes out
+// uncorrected. The control (empirical, no file) shows the capture sees it.
+TEST_F(NodeLifecycle, EmpiricalWithATableIsNotReportedAsANoOp)
+{
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_angle_correction", std::string("empirical")),
+      rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(CubeBathymetryTestAccess::tableModes(*node), 3u);
+    EXPECT_TRUE(log.contains("per-pulse-mode table")) << log.all();
+    EXPECT_FALSE(log.contains("NO-OP")) << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_angle_correction", std::string("empirical"))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_TRUE(log.contains("NO-OP")) << "control: no curve and no table\n" << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
 }
 
 // A table that does not load, or an invalid fallback, fails the configure
