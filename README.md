@@ -705,13 +705,16 @@ the ping's frequency (`ping_info.frequency` offline; the `frequency` field
 `detections_to_pointcloud` now writes on every point, live). Two settings
 decide what a ping the table cannot correct gets — no SonarInfo yet, a mode
 with no entry or no measured offset, an entry under the ping floor, or a beam
-in an angle bin the table could not weight: `--backscatter-mode-fallback
+in an angle bin the table could not weight, at or beyond 90°, or with no
+finite angle or range: `--backscatter-mode-fallback
 identity|exclude` (node: `backscatter_mode_fallback`; default `identity`
 records the beam uncorrected, `exclude` drops its backscatter and keeps its
 depth) and `--backscatter-mode-min-pings <N>` (node:
 `backscatter_mode_min_pings`; default 0 keeps every entry, a floor treats a
 rarer mode's entry as absent). The pass ends with a per-mode count of
-resolved pings and every unresolved reason, and the SonarInfo-declared TVG
+resolved pings and every unresolved reason, per ping, and the beams of
+resolved pings the table still could not correct, per mode and reason (counted
+as they are handed to the estimator); the SonarInfo-declared TVG
 state is compared with what the table recorded per mode (a mismatch is warned
 once per mode and counted; the table is applied as is). The build fingerprint
 records the correction (mode, curve/table SHA-256, fallback, floor). A table

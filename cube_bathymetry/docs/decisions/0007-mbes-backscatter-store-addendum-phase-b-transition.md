@@ -259,11 +259,13 @@ curve corrects their mean and leaves each mode offset from it.
    A ping before the first SonarInfo, a mode with no entry or no measured
    offset (`offset_anchored=false`), an entry under the operator's ping
    floor, a beam in an angle bin whose variance the table could not write,
-   or a beam with no finite range, gets `identity` (recorded uncorrected,
-   the default) or `exclude` (backscatter dropped, depth kept) —
-   `--backscatter-mode-fallback`, `backscatter_mode_fallback`. Every case is
-   counted per reason in the pass report. A table that does not load is an
-   error, not an identity.
+   a beam at or beyond 90°, or a beam with no finite angle or range, gets
+   `identity` (recorded uncorrected, the default) or `exclude` (backscatter
+   dropped, depth kept) — `--backscatter-mode-fallback`,
+   `backscatter_mode_fallback`. Every case is counted per reason in the pass
+   report: the ping-level cases per ping, the beam-level ones per beam and
+   mode (counted as the beams are handed to the estimator, by the same test
+   it applies). A table that does not load is an error, not an identity.
 6. **Provenance.** The build fingerprint's `backscatter_correction` key
    records the mode, the curve/table kind and SHA-256, the fallback and the
    ping floor (ADR-0003); a store built under another table is stale.

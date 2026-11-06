@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include <cmath>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -279,6 +280,41 @@ TEST(BackscatterModeResolver, ResolvedNothingAndTheUnresolvedSummary)
   EXPECT_NE(summary.find("1 unanchored, 0 under the ping floor"), std::string::npos) << summary;
   EXPECT_EQ(r.resolve(160, kF), 2);
   EXPECT_FALSE(r.resolvedNothing()) << "one resolved ping is a corrected run";
+}
+
+// cube_bathymetry#172 review: a resolved ping can still have beams the table
+// cannot correct; they take the fallback and must be counted per reason, so a
+// run cannot report every ping resolved while dropping its backscatter.
+TEST(BackscatterModeResolver, BeamsTheTableCannotCorrectAreCountedPerReason)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table, BackscatterModeFallback::Exclude);
+  r.addSonarInfo(state(100, 5e-5f, 20000.0f, 1));   // CW 50 us: bins 1 (ok) and 41 (no var)
+  const uint16_t idx = r.resolve(150, kF);
+  ASSERT_EQ(idx, 1);
+  const float deg = static_cast<float>(M_PI / 180.0);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  r.countBeam(idx, -30.0f, 1.0f * deg, 3.0f);     // correctable
+  r.countBeam(idx, -30.0f, -2.0f * deg, 3.0f);    // correctable (|angle|)
+  r.countBeam(idx, -30.0f, 41.0f * deg, 3.0f);    // unweighable bin
+  r.countBeam(idx, -30.0f, nan, 3.0f);            // no angle
+  r.countBeam(idx, -30.0f, 1.0f * deg, nan);      // no range
+  r.countBeam(idx, -30.0f, 90.0f * deg, 3.0f);    // at 90 deg
+  r.countBeam(idx, nan, 1.0f * deg, 3.0f);        // no intensity: not a sample
+  r.countBeam(kCorrectionExclude, -30.0f, 1.0f * deg, 3.0f);  // the ping's reason counts it
+  const auto & c = r.counts();
+  EXPECT_EQ(c.beams_correctable, 2u);
+  const std::string mode = "CW_50us_20000Hz_500kHz";
+  EXPECT_EQ(c.beam_fallback.at({mode, "unweighable angle bin"}), 1u);
+  EXPECT_EQ(c.beam_fallback.at({mode, "no finite beam angle"}), 1u);
+  EXPECT_EQ(c.beam_fallback.at({mode, "no finite positive slant range"}), 1u);
+  EXPECT_EQ(c.beam_fallback.at({mode, "beam angle at or beyond 90 deg"}), 1u);
+  EXPECT_EQ(c.beam_fallback.size(), 4u);
+  const std::string report = r.report();
+  EXPECT_NE(report.find("beams of resolved pings: 2 correctable, 4 not (exclude)"),
+    std::string::npos) << report;
+  EXPECT_NE(report.find(mode + ": 1 beam(s), unweighable angle bin: exclude"),
+    std::string::npos) << report;
 }
 
 TEST(BackscatterModeResolver, MixedDeclarationAlwaysMismatches)

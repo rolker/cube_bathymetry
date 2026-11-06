@@ -202,10 +202,12 @@ bool loadCurveFromBagSonarInfo(
     "it plus the ping's frequency. A table that does not load is an error.\n";
   std::cout << "  --backscatter-mode-fallback identity|exclude: with a table, what a ping "
     "the table cannot correct gets -- no SonarInfo yet, a mode with no entry or no "
-    "measured offset, an entry under the ping floor -- and likewise a beam in an "
-    "angle bin the table could not weight: 'identity' records it uncorrected "
-    "(default), 'exclude' drops its backscatter and keeps its depth. Counts per "
-    "reason are printed after the pass (cube#172).\n";
+    "measured offset, an entry under the ping floor -- and likewise a beam of a "
+    "resolved ping the table cannot correct (an angle bin it could not weight, an "
+    "angle at or beyond 90 deg, no finite angle or range): 'identity' records it "
+    "uncorrected (default), 'exclude' drops its backscatter and keeps its depth. "
+    "Counts per reason, per ping and per beam, are printed after the pass "
+    "(cube#172).\n";
   std::cout << "  --backscatter-mode-min-pings <N>: with a table, treat an entry derived "
     "from fewer than N pings as absent (the fallback applies); default 0 keeps every "
     "entry, however rare the mode (cube#172).\n";
@@ -1240,12 +1242,20 @@ void feedOdometry(
   }
 }
 
-/// Stamp one ping's correction index on every sounding of it (cube#172), so
-/// the record-time correction picks the ping's table entry.
-void stampCorrectionIndex(std::vector<cube::GeoSounding> & soundings, uint16_t correction_idx)
+/// Resolve one ping's pulse mode (cube#172) -- the latest SonarInfo at or
+/// before the ping stamp plus the ping's own frequency -- and stamp the
+/// correction index on every sounding of it, so the record-time correction
+/// picks the ping's table entry; each beam is counted against the table (a
+/// beam of a resolved ping the table cannot correct is reported per reason).
+void stampCorrectionIndex(
+  std::vector<cube::GeoSounding> & soundings, int64_t ping_ns, float frequency_hz,
+  cube::BackscatterModeResolver & resolver)
 {
+  const uint16_t correction_idx = resolver.resolve(ping_ns, frequency_hz);
   for (auto & s : soundings) {
     s.sounding.correction_idx = correction_idx;
+    resolver.countBeam(
+      correction_idx, s.sounding.intensity, s.sounding.beam_angle, s.sounding.slant_range);
   }
 }
 
@@ -2594,8 +2604,7 @@ int main(int argc, char * argv[])
         if (mode_resolver) {
           // One pulse mode per ping (cube#172): the latest SonarInfo at or
           // before the ping stamp plus the ping's own frequency.
-          stampCorrectionIndex(
-            soundings, mode_resolver->resolve(ping_ns, detections.ping_info.frequency));
+          stampCorrectionIndex(soundings, ping_ns, detections.ping_info.frequency, *mode_resolver);
         }
         if (recon) {
           // Recon pass (cube#143): count, reservoir and spill; no estimation.

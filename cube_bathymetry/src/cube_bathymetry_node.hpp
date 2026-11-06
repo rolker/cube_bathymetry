@@ -2731,6 +2731,8 @@ private:
       const uint16_t correction_idx = resolveCloudMode(stamp_ns, cloud_frequency);
       for (auto & s : soundings) {
         s.sounding.correction_idx = correction_idx;
+        bs_resolver_->countBeam(
+          correction_idx, s.sounding.intensity, s.sounding.beam_angle, s.sounding.slant_range);
       }
     }
 

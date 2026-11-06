@@ -23,6 +23,7 @@
 #include "cube_bathymetry/backscatter_mode.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -264,6 +265,25 @@ uint16_t BackscatterModeResolver::resolve(
   return fallbackIdx();
 }
 
+void BackscatterModeResolver::countBeam(
+  uint16_t correction_idx, float raw_intensity, float beam_angle_rad, float range_m)
+{
+  if (!table_ || std::isnan(raw_intensity)) {
+    return;
+  }
+  const ModeEntry * entry = table_->entry(correction_idx);
+  if (!entry) {
+    return;  // a reserved index: the ping's own reason already counts it
+  }
+  const TableBeamStatus status = tableBeamStatus(
+    beamAbsAngleDeg(beam_angle_rad), static_cast<double>(range_m), *table_, correction_idx);
+  if (status == TableBeamStatus::Corrected) {
+    ++counts_.beams_correctable;
+  } else {
+    ++counts_.beam_fallback[{entry->key, toString(status)}];
+  }
+}
+
 std::string BackscatterModeResolver::unresolvedSummary() const
 {
   auto sum = [](const std::map<std::string, uint64_t> & m) {
@@ -330,6 +350,18 @@ std::string BackscatterModeResolver::report() const
   for (const auto & kv : counts_.declared_mismatch) {
     os << "  " << kv.first.first << ": " << kv.second << " ping(s) declared TVG "
        << kv.first.second << ", differs from the table\n";
+  }
+  uint64_t beam_fallbacks = 0;
+  for (const auto & kv : counts_.beam_fallback) {
+    beam_fallbacks += kv.second;
+  }
+  if (counts_.beams_correctable + beam_fallbacks > 0) {
+    os << "  beams of resolved pings: " << counts_.beams_correctable << " correctable, "
+       << beam_fallbacks << " not (" << toString(fallback_) << ")\n";
+  }
+  for (const auto & kv : counts_.beam_fallback) {
+    os << "  " << kv.first.first << ": " << kv.second << " beam(s), " << kv.first.second
+       << ": " << toString(fallback_) << "\n";
   }
   if (counts_.stale > 0) {
     os << "  " << counts_.stale << " ping(s) resolved before a later-arriving SonarInfo ("
