@@ -937,7 +937,7 @@ and are counted. The declared TVG state (`tvg_model`,
 `tvg_absorption_db_per_km`) is recorded per mode, never used in the maths; a
 mode seen under two states is written `MIXED` with a warning.
 
-**Mode key** (the spec PR 2's C++ must match, vectors in
+**Mode key** (the spec the C++ `canonicalModeKey` matches, vectors in
 `test/data/mode_keys.json`): `<TYPE>_<pulse_us>us_<bw_Hz>Hz` per transmit
 sector, sectors joined with `+`, then `_<freq_kHz>kHz` from the ping's own
 `ping_info.frequency`, e.g. `FMU_1000us_24000Hz_500kHz`. TYPE is `CW`, `FMU`,
@@ -1058,7 +1058,8 @@ and repeat on every row of it. The header carries the groups once
 mode AND group (fitted with its node count, or the zero reason), the lookup
 rule (`# range_term_lookup:`) and what the offset means (`# offset_meaning:`).
 
-**Applying it** (PR 2's loader, stated here so the format is the contract): a
+**Applying it** (what the C++ loader, `backscatter_table.h`, implements;
+stated here so the format is the contract): a
 beam of mode `m` at `|angle|` and slant range R uses the `range` rows of `m`
 whose `angle_lo_deg <= |angle| < angle_hi_deg`, interpolated linearly in
 `log10(R / R0)` between nodes and clamped beyond the end nodes; below the first
@@ -1070,8 +1071,11 @@ every declared group for every mode (an unfitted one as a zero term), and the
 specular band takes the first DECLARED group. Only a table without that header
 line falls back to the groups its rows name. The corrected value is
 `raw - db_relative_to_nadir - r_g - offset_db_vs_ref`, which puts every mode on
-the reference mode's nadir level at R0, and the beam is weighted by
-`1 / var_db2` of its angle bin. The cases the loader must handle are all
+the reference mode's nadir level at R0. The `var_db2` column was written so
+a beam could be weighted by `1 / var_db2` of its angle bin; the estimator does
+NOT apply that weight yet (every corrected beam enters the cell's Welford
+mean with weight 1, see the ADR-0007 per-mode addendum, "Not done here") and
+uses the column only to tell an unweighable bin. The cases the loader must handle are all
 written as EMPTY fields rather than plausible numbers: a mode with
 `offset_anchored=false` has no measured offset (both offset columns empty) and
 **must not be corrected by this table** (it is the fallback policy's case, or a
@@ -1089,12 +1093,15 @@ states these rules once more (`# empty_fields:`, `# offset_meaning:`).
 **Decisions carried in the format (2026-11-02).** Rare modes keep their table
 entries however few pings they have (on Appledore the 10 ms and 5 ms FM modes
 had 530 and 169 pings against hundreds of thousands); their `n`, `se_db` and
-`offset_se_db` are the quality record, and what PR 2 does with a ping whose
-mode has no entry at all is its fallback policy, not a derive-time cut. The
-variance column stays although on the M3 it is nearly flat (105-145 dB^2, a
-10-12 dB per-beam scatter in every bin of every main mode), because a sonar
-whose scatter does vary with angle needs the weights, and the format must not
-change when one turns up.
+`offset_se_db` are the quality record, and what the estimator does with a
+ping whose mode has no entry at all is its fallback policy
+(`--backscatter-mode-fallback`, and `--backscatter-mode-min-pings` to treat a
+thin entry as absent), not a derive-time cut. The variance column stays
+although on the M3 it is nearly flat (105-145 dB^2, a 10-12 dB per-beam
+scatter in every bin of every main mode), because a sonar whose scatter does
+vary with angle needs the weights, and the format must not change when one
+turns up; the estimator applying them is the follow-up named in the ADR-0007
+addendum.
 
 ## Live prior-gate prime (`prior_store_dir`)
 
