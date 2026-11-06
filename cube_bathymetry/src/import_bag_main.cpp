@@ -1777,8 +1777,9 @@ int cube_fixed_level_finish(
   reportPersisted(
     accumulator, store_dir, bs_store_dir, evicted_count,
     resident_before_final, phase_secs);
-  // Build fingerprint (ADR-0003 schema 2, tiling only -- cube#143): a fixed-level
-  // store records its mode, the requested cell size and the capture policy.
+  // Build fingerprint (ADR-0003 schema 2: tiling, cube#143, and the backscatter
+  // correction, cube#172): a fixed-level store records its mode, the requested
+  // cell size, the capture policy and how its backscatter was corrected.
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
     iho_order, nullptr, {geo_map_sheet.gridLevel().level()}, backscatter_correction);
