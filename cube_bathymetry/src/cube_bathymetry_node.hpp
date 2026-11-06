@@ -198,6 +198,17 @@ public:
       return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
     }
     bs_min_pings_ = static_cast<uint64_t>(bs_min_pings);
+    if (bs_mode != cube::BackscatterAngleCorrection::None && !bs_curve_file.empty()) {
+      // Before either loader (cube#172 review round 3): a FIFO would block
+      // configure, a device reads without bound, and an unreadable file cannot
+      // be probed, so a table there would load as an empty curve.
+      const std::string problem = cube::explicitBackscatterFileProblem(bs_curve_file);
+      if (!problem.empty()) {
+        RCLCPP_ERROR(get_logger(), "backscatter_curve_file='%s' %s.",
+          bs_curve_file.c_str(), problem.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
+    }
     const bool bs_file_is_table = bs_mode != cube::BackscatterAngleCorrection::None &&
       !bs_curve_file.empty() && cube::isAngularResponseTable(bs_curve_file);
     if (!bs_file_is_table &&

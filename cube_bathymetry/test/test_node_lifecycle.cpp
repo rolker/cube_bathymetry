@@ -45,6 +45,8 @@
 // that one path forgets fails in both.
 
 #include <gtest/gtest.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1170,6 +1172,40 @@ TEST_F(NodeLifecycle, UnresolvedCloudsAfterResolvedOnesWarnOncePerReason)
   EXPECT_EQ(log.count("not corrected by the table"), 2u) << log.all();
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// cube_bathymetry#172 review round 3: an explicit backscatter file that is
+// not a regular file, or cannot be read, fails configure before either
+// loader runs: a FIFO would block configure, /dev/zero reads without bound,
+// and an unreadable table would load as an EMPTY single curve.
+TEST_F(NodeLifecycle, AnUnreadableOrNonRegularBackscatterFileFailsConfigure)
+{
+  const std::string fifo =
+    (std::filesystem::temp_directory_path() / ("cube_node_bs_fifo_" +
+    std::to_string(::getpid()))).string();
+  std::filesystem::remove(fifo);
+  ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+  const std::string unreadable = fifo + ".csv";
+  std::filesystem::copy_file(MODE_TABLE_FIXTURE_FILE, unreadable,
+    std::filesystem::copy_options::overwrite_existing);
+  std::filesystem::permissions(unreadable, std::filesystem::perms::none);
+  std::vector<std::string> paths = {fifo, "/dev/zero"};
+  if (::geteuid() != 0) {
+    paths.push_back(unreadable);
+  }
+  for (const std::string & path : paths) {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_angle_correction", std::string("empirical")),
+      rclcpp::Parameter("backscatter_curve_file", path)}));
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED) << path;
+    EXPECT_TRUE(log.contains("backscatter_curve_file='" + path + "'")) << log.all();
+    EXPECT_FALSE(log.contains("EMPTY curve")) << log.all();
+  }
+  std::filesystem::permissions(unreadable, std::filesystem::perms::owner_all);
+  std::filesystem::remove(unreadable);
+  std::filesystem::remove(fifo);
 }
 
 // cube_bathymetry#172 review round 3: a reason first seen while the throttle

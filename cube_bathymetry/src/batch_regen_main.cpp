@@ -838,6 +838,23 @@ int main(int argc, char * argv[])
     usage();
   }
 
+  // The explicit backscatter file is checked before any bag opens and before
+  // either loader (cube#172 review round 3): a FIFO or device would block or
+  // read without bound, and an unreadable file cannot be probed, so a table
+  // there would reach the curve loader and run as a NO-OP.
+  cube::BackscatterAngleCorrection requested_mode = cube::BackscatterAngleCorrection::None;
+  if (!backscatter_curve_file.empty() &&
+    cube::parseBackscatterAngleCorrection(backscatter_correction_str, requested_mode) &&
+    requested_mode == cube::BackscatterAngleCorrection::Empirical)
+  {
+    const std::string problem = cube::explicitBackscatterFileProblem(backscatter_curve_file);
+    if (!problem.empty()) {
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "' " << problem
+                << "\n";
+      usage();
+    }
+  }
+
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;
   std::cout << "Store dir: " << store_dir << std::endl;

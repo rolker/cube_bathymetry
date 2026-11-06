@@ -556,6 +556,27 @@ bool isAngularResponseTable(const std::string & path)
   return firstContentLine(in, line, line_no) && hasFormatPrefix(line);
 }
 
+std::string explicitBackscatterFileProblem(const std::string & path)
+{
+  std::error_code ec;
+  const auto status = std::filesystem::status(path, ec);
+  if (status.type() == std::filesystem::file_type::not_found) {
+    return "";
+  }
+  if (ec) {
+    return "cannot be read (" + ec.message() + ")";
+  }
+  if (!std::filesystem::is_regular_file(status)) {
+    return "is not a regular file (a curve or table is read from a file, never a FIFO, "
+           "device or directory)";
+  }
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return "cannot be opened for reading";
+  }
+  return "";
+}
+
 BackscatterTable loadBackscatterTable(
   const std::string & path, std::string & error, std::string * bytes_out)
 {

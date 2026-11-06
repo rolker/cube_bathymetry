@@ -612,12 +612,14 @@ if(BUILD_TESTING)
     marine_bathymetry_store::marine_bathymetry_store
     marine_mbes_backscatter_store::marine_mbes_backscatter_store
   )
-  # The CLI-contract cases run the built import_bag binary for its argument
-  # validation (a bad depth-adaptive policy must fail before any bag opens).
+  # The CLI-contract cases run the built import_bag (and batch_regen_bag)
+  # binaries for their argument validation (a bad depth-adaptive policy, an
+  # unreadable --backscatter-curve, must fail before any bag opens).
   target_compile_definitions(test_mixed_level_import PRIVATE
     IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
+    BATCH_REGEN_EXE="$<TARGET_FILE:batch_regen_bag>"
   )
-  add_dependencies(test_mixed_level_import import_bag)
+  add_dependencies(test_mixed_level_import import_bag batch_regen_bag)
 
   # End-to-end smoke test over a REAL sonar bag (#143/#162). Nothing else in
   # the suite reaches import_bag's main() past argument validation, so the

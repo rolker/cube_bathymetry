@@ -269,6 +269,17 @@ private:
 /// on it or consume what the loader needs, and reads at most 64 KiB.
   bool isAngularResponseTable(const std::string & path);
 
+/// Why @p path cannot be read as an explicit backscatter file -- a single
+/// curve OR a table, before either loader runs -- or an empty string when it
+/// can (cube_bathymetry#172 review round 3). Refused: a path that is not a
+/// regular file (a FIFO would block configure or the import, a device such as
+/// /dev/zero reads without bound) and a regular file that cannot be opened
+/// for reading (it cannot be probed, so a table there would otherwise reach
+/// the legacy curve loader and run uncorrected). A path that does not exist
+/// is NOT refused here: it stays the loaders' loud "EMPTY curve" warning
+/// (#102), unchanged.
+  std::string explicitBackscatterFileProblem(const std::string & path);
+
 /// Load a table. On any failure returns an EMPTY table and sets @p error
 /// (the file, the line, and why); a table is read whole or not at all.
 /// The file is read ONCE, into memory, bounded (at most 64 MiB; a path that

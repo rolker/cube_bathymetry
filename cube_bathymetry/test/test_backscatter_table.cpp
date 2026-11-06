@@ -719,6 +719,27 @@ TEST(BackscatterTable, NonRegularFilesAreRefusedAndTheParsedBytesAreReturned)
   EXPECT_TRUE(loadBackscatterTable("/dev/zero", error).empty());
   EXPECT_NE(error.find("not a regular file"), std::string::npos) << error;
 
+  // cube_bathymetry#172 review round 3: the up-front check the callers run
+  // before EITHER loader (a curve CSV goes to the unguarded legacy loader).
+  ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+  EXPECT_NE(explicitBackscatterFileProblem(fifo).find("not a regular file"), std::string::npos);
+  std::filesystem::remove(fifo);
+  EXPECT_NE(explicitBackscatterFileProblem("/dev/zero").find("not a regular file"),
+    std::string::npos);
+  EXPECT_NE(explicitBackscatterFileProblem(std::filesystem::temp_directory_path().string())
+    .find("not a regular file"), std::string::npos) << "a directory";
+  EXPECT_EQ(explicitBackscatterFileProblem(tempPath("does_not_exist")), "")
+    << "a missing file stays the loaders' EMPTY-curve warning";
+  const auto readable = writeTemp("readable", kHeader + std::string(kGoodRows));
+  EXPECT_EQ(explicitBackscatterFileProblem(readable), "");
+  if (::geteuid() != 0) {
+    std::filesystem::permissions(readable, std::filesystem::perms::none);
+    EXPECT_NE(explicitBackscatterFileProblem(readable).find("cannot be opened"),
+      std::string::npos) << "an unreadable table cannot be probed";
+    std::filesystem::permissions(readable, std::filesystem::perms::owner_all);
+  }
+  std::filesystem::remove(readable);
+
   // A flood of comment lines is bounded like rows.
   std::string flood(kHeader);
   flood.reserve(flood.size() + 2100000);

@@ -994,6 +994,15 @@ bool resolveBackscatterCorrection(
     return true;
   }
   if (!backscatter_curve_file.empty()) {
+    // Before either loader: a FIFO or device would block or read without
+    // bound, and an unreadable file cannot be probed, so a table there would
+    // reach the curve loader and run uncorrected (cube#172 review round 3).
+    const std::string problem = cube::explicitBackscatterFileProblem(backscatter_curve_file);
+    if (!problem.empty()) {
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "' " << problem
+                << "\n";
+      return false;
+    }
     if (cube::isAngularResponseTable(backscatter_curve_file)) {
       // A per-pulse-mode table (cube#172): one entry per mode, selected per
       // ping from the SonarInfo stream. Read whole or refused -- a table that

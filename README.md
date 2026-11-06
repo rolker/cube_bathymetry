@@ -697,6 +697,10 @@ stay uncorrected, exactly the pre-SonarInfo behavior. Pass
 `backscatter_curve_file`) to override the published curve with an explicit
 CSV (e.g. reprocessing with a better curve; `--sonar-info-topic` overrides
 the scanned topic, default = the detections topic's sibling `sonar_info`).
+An explicit file (curve or table) that is not a regular file (a FIFO, a
+device, a directory) or cannot be opened for reading is refused before it is
+read: `import_bag` and `batch_regen` exit with an error, the node fails
+configure. A missing file is still the loud "EMPTY curve" warning.
 See
 `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
 
