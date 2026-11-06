@@ -264,7 +264,9 @@ curve corrects their mean and leaves each mode offset from it.
    A ping before the first SonarInfo, a mode with no entry or no measured
    offset (`offset_anchored=false`), an entry under the operator's ping
    floor, a beam in an angle bin whose variance the table could not write,
-   a beam at or beyond 90°, or a beam with no finite angle or range, gets
+   a beam at or beyond 90°, a beam more than half a bin width beyond the
+   outermost angle bin the table wrote (or short of the nadir-most one),
+   or a beam with no finite angle or range, gets
    `identity` (recorded uncorrected, the default) or `exclude` (backscatter
    dropped, depth kept) — `--backscatter-mode-fallback`,
    `backscatter_mode_fallback`. Every case is counted per reason in the pass

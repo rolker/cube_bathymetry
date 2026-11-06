@@ -715,7 +715,9 @@ older `detections_to_pointcloud` has no such field, so its pings key as
 `?kHz`, match no entry and get the fallback). Two settings
 decide what a ping the table cannot correct gets — no SonarInfo yet, a mode
 with no entry or no measured offset, an entry under the ping floor, or a beam
-in an angle bin the table could not weight, at or beyond 90°, or with no
+in an angle bin the table could not weight, at or beyond 90°, more than half
+a bin width beyond the outermost angle bin the table wrote (or short of the
+nadir-most one; a gap between written bins is interpolated), or with no
 finite angle or range: `--backscatter-mode-fallback
 identity|exclude` (node: `backscatter_mode_fallback`; default `identity`
 records the beam uncorrected, `exclude` drops its backscatter and keeps its

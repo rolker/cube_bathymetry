@@ -309,11 +309,20 @@ TEST(BackscatterTable, LookupFollowsTheTableContract)
   // between the 1 and 11 deg centres.
   EXPECT_NEAR(correctWithTable(-20.0, 5.0, r0 * std::pow(10.0, -0.25), table, 2, id),
     -20.0 + 0.32 - 1.5, 1e-9);
-  // 60 deg: second group; angle beyond the last centre clamps to -7.2.
-  EXPECT_NEAR(correctWithTable(-20.0, 60.0, r0 * std::pow(10.0, 0.25), table, 2, id),
+  // 41.5 deg: second group; inside the last bin (41 +/- 1) but past its
+  // centre, the angle term clamps to -7.2.
+  EXPECT_NEAR(correctWithTable(-20.0, 41.5, r0 * std::pow(10.0, 0.25), table, 2, id),
     -20.0 + 7.2 + 1.0, 1e-9);
   // Beyond the end nodes the range term clamps.
-  EXPECT_NEAR(correctWithTable(-20.0, 60.0, r0 * 100.0, table, 2, id), -20.0 + 7.2 + 1.0, 1e-9);
+  EXPECT_NEAR(correctWithTable(-20.0, 41.5, r0 * 100.0, table, 2, id), -20.0 + 7.2 + 1.0, 1e-9);
+  // Past the outermost written bin (41 deg, width 2: up to 42) no bin covers
+  // the beam: uncorrectable, never the clamped -7.2 (review round 2).
+  EXPECT_EQ(tableBeamStatus(42.0, r0, table, 2), TableBeamStatus::Corrected);
+  EXPECT_EQ(tableBeamStatus(42.01, r0, table, 2), TableBeamStatus::OutsideAngleBins);
+  EXPECT_DOUBLE_EQ(correctWithTable(-20.0, 60.0, r0, table, 2, id), -20.0);
+  EXPECT_TRUE(std::isnan(correctWithTable(-20.0, 60.0, r0, table, 2, ex)));
+  // A gap between written bins (11 and 41) interpolates between them: not this case.
+  EXPECT_EQ(tableBeamStatus(25.0, r0, table, 2), TableBeamStatus::Corrected);
   // 20 deg sits 0.3 of the way from the 11 deg centre to the 41 deg one.
   EXPECT_NEAR(correctWithTable(-20.0, 20.0, r0 * 100.0, table, 2, id),
     -20.0 + (0.8 + 0.3 * 6.4) + 2.25, 1e-9);
@@ -345,7 +354,6 @@ TEST(BackscatterTable, LookupFollowsTheTableContract)
   // beams): uncorrectable, never a clamped angle term with a zero range term.
   EXPECT_DOUBLE_EQ(correctWithTable(-30.0, 90.0, r0, table, 2, id), -30.0);
   EXPECT_TRUE(std::isnan(correctWithTable(-30.0, 95.0, r0, table, 2, ex)));
-  EXPECT_FALSE(std::isnan(correctWithTable(-30.0, 89.9, r0, table, 2, ex)));
 
   // The status each of those cases reports (what the per-beam counts use).
   EXPECT_EQ(tableBeamStatus(11.0, r0, table, 2), TableBeamStatus::Corrected);

@@ -162,7 +162,8 @@ public:
       uint64_t sonar_info_seen = 0;
     /// Beams of resolved pings handed to the estimator (`countBeam`), and
     /// those the table still cannot correct per (mode key, reason): no finite
-    /// angle, >= 90 deg, no finite range, unweighable bin. They take the
+    /// angle, >= 90 deg, outside the written angle bins, no finite range,
+    /// unweighable bin. They take the
     /// fallback at record time. Counted as submitted, before CUBE's own gates.
       uint64_t beams_correctable = 0;
       std::map < std::pair < std::string, std::string >, uint64_t > beam_fallback;

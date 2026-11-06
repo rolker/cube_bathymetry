@@ -431,6 +431,7 @@ TEST(BackscatterModeResolver, BeamsTheTableCannotCorrectAreCountedPerReason)
   r.countBeam(idx, -30.0f, nan, 3.0f);            // no angle
   r.countBeam(idx, -30.0f, 1.0f * deg, nan);      // no range
   r.countBeam(idx, -30.0f, 90.0f * deg, 3.0f);    // at 90 deg
+  r.countBeam(idx, -30.0f, 60.0f * deg, 3.0f);    // past the outermost bin (41 +/- 1)
   r.countBeam(idx, nan, 1.0f * deg, 3.0f);        // no intensity: not a sample
   r.countBeam(kCorrectionExclude, -30.0f, 1.0f * deg, 3.0f);  // the ping's reason counts it
   const auto & c = r.counts();
@@ -440,9 +441,10 @@ TEST(BackscatterModeResolver, BeamsTheTableCannotCorrectAreCountedPerReason)
   EXPECT_EQ(c.beam_fallback.at({mode, "no finite beam angle"}), 1u);
   EXPECT_EQ(c.beam_fallback.at({mode, "no finite positive slant range"}), 1u);
   EXPECT_EQ(c.beam_fallback.at({mode, "beam angle at or beyond 90 deg"}), 1u);
-  EXPECT_EQ(c.beam_fallback.size(), 4u);
+  EXPECT_EQ(c.beam_fallback.at({mode, "beam angle outside the written angle bins"}), 1u);
+  EXPECT_EQ(c.beam_fallback.size(), 5u);
   const std::string report = r.report();
-  EXPECT_NE(report.find("beams of resolved pings: 2 correctable, 4 not (exclude)"),
+  EXPECT_NE(report.find("beams of resolved pings: 2 correctable, 5 not (exclude)"),
     std::string::npos) << report;
   EXPECT_NE(report.find(mode + ": 1 beam(s), unweighable angle bin: exclude"),
     std::string::npos) << report;

@@ -904,6 +904,7 @@ const char * toString(TableBeamStatus status)
     case TableBeamStatus::Unanchored: return "unanchored entry";
     case TableBeamStatus::NoFiniteAngle: return "no finite beam angle";
     case TableBeamStatus::AngleAtOrBeyond90: return "beam angle at or beyond 90 deg";
+    case TableBeamStatus::OutsideAngleBins: return "beam angle outside the written angle bins";
     case TableBeamStatus::NoFiniteRange: return "no finite positive slant range";
     case TableBeamStatus::UnweighableBin: return "unweighable angle bin";
     default: return "?";
@@ -932,6 +933,15 @@ TableBeamStatus tableBeamStatus(
   }
   if (abs_angle_deg >= 90.0) {
     return TableBeamStatus::AngleAtOrBeyond90;
+  }
+  const double half_width = 0.5 * table.angle_bin_width_deg;
+  // A relative 1e-9 on the half width: a beam on the outer edge of the
+  // outermost bin is inside it (the centres round-trip with 10 digits).
+  if (std::isfinite(half_width) && half_width > 0.0 && !entry->angle.empty() &&
+    (abs_angle_deg > entry->angle.back().abs_angle_deg + half_width * (1.0 + 1e-9) ||
+    abs_angle_deg < entry->angle.front().abs_angle_deg - half_width * (1.0 + 1e-9)))
+  {
+    return TableBeamStatus::OutsideAngleBins;
   }
   if (!std::isfinite(range_m) || range_m <= 0.0 || !(table.range_ref_m > 0.0)) {
     return TableBeamStatus::NoFiniteRange;

@@ -302,6 +302,14 @@ private:
   /// (it drops such beams), so neither the angle nor the range term is
   /// measured there.
     AngleAtOrBeyond90,
+  /// The beam lies more than half `angle_bin_width_deg` outside the written
+  /// angle bins (beyond the outermost centre, or short of the nadir-most
+  /// one): no bin the writer measured covers it, and the clamped end value
+  /// is not a measurement there (the same reasoning as the 90 deg rule). A
+  /// gap BETWEEN written bins is interpolated between the two measured
+  /// neighbours and is not this case; a table without
+  /// `# angle_bin_width_deg:` skips the test.
+    OutsideAngleBins,
   /// No finite positive slant range (the range term needs `log10 R`).
     NoFiniteRange,
   /// The nearest angle bin's variance is EMPTY (unweighable).
