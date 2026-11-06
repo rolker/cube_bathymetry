@@ -51,6 +51,7 @@ find_package(nlohmann_json REQUIRED)  # level plan JSON (#143)
 
 add_library(cube_bathymetry
   src/angular_response_curve.cpp
+  src/backscatter_table.cpp   # per-pulse-mode table + mode-key spec (#172)
   src/detections_projector.cpp
   src/error_model.cpp
   src/geo_grid.cpp
@@ -432,6 +433,15 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
+
+  # Per-mode table loader + the shared mode-key vectors (#172): the C++ key
+  # must match derive_angular_response.py's on every case in mode_keys.json.
+  ament_add_gtest(test_backscatter_table test/test_backscatter_table.cpp)
+  target_link_libraries(test_backscatter_table cube_bathymetry nlohmann_json::nlohmann_json)
+  target_compile_definitions(test_backscatter_table PRIVATE
+    MODE_KEYS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/mode_keys.json"
+    DERIVED_CURVE_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/derived_curve_tier2_seawater.csv"
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
   # Golden curve written by derive_angular_response.py (#170): the Python test
   # checks the script still writes it, this test checks the C++ loader reads it.
   # Per-mode table fixture (#172), written by the same Python test: the current
