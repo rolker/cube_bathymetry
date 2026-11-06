@@ -968,6 +968,25 @@ private:
     }
     return idx;
   }
+  /// Resolve one cloud's pulse mode and stamp it on every sounding, counting
+  /// each beam against the table (cube#172). A cloud with no soundings (an
+  /// empty or all-dropped cloud) is skipped: it is not a ping the table can
+  /// correct, and having no points it carries no frequency, so resolving it
+  /// would count a `?kHz` no-entry ping -- and could fire the declared-TVG
+  /// and unresolved warnings -- for nothing.
+  void stampCloudMode(
+    int64_t stamp_ns, float cloud_frequency, std::vector<cube::GeoSounding> & soundings)
+  {
+    if (!bs_resolver_ || soundings.empty()) {
+      return;
+    }
+    const uint16_t correction_idx = resolveCloudMode(stamp_ns, cloud_frequency);
+    for (auto & s : soundings) {
+      s.sounding.correction_idx = correction_idx;
+      bs_resolver_->countBeam(
+        correction_idx, s.sounding.intensity, s.sounding.beam_angle, s.sounding.slant_range);
+    }
+  }
   static constexpr double kUnresolvedWarnIntervalS = 60.0;
   /// When the unresolved-cloud warning last fired in this configuration.
   std::optional<rclcpp::Time> bs_unresolved_warned_at_;
@@ -2725,16 +2744,9 @@ private:
 
     // Pulse-mode resolution (cube#172): one key per cloud (one ping), stamped
     // on every sounding so the record-time correction picks the entry.
-    if (bs_resolver_) {
-      const int64_t stamp_ns = static_cast<int64_t>(msg->header.stamp.sec) * 1000000000LL +
-        static_cast<int64_t>(msg->header.stamp.nanosec);
-      const uint16_t correction_idx = resolveCloudMode(stamp_ns, cloud_frequency);
-      for (auto & s : soundings) {
-        s.sounding.correction_idx = correction_idx;
-        bs_resolver_->countBeam(
-          correction_idx, s.sounding.intensity, s.sounding.beam_angle, s.sounding.slant_range);
-      }
-    }
+    stampCloudMode(
+      static_cast<int64_t>(msg->header.stamp.sec) * 1000000000LL +
+      static_cast<int64_t>(msg->header.stamp.nanosec), cloud_frequency, soundings);
 
     auto epoch = std::chrono::time_point<std::chrono::steady_clock>{};
     auto timestamp = epoch + std::chrono::seconds(msg->header.stamp.sec) +

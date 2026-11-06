@@ -149,6 +149,16 @@ struct CubeBathymetryTestAccess
     return n.resolveCloudMode(stamp_ns, frequency_hz);
   }
   static bool hasResolver(const CubeBathymetry & n) {return static_cast<bool>(n.bs_resolver_);}
+  static void stampCloud(
+    CubeBathymetry & n, int64_t stamp_ns, float frequency_hz,
+    std::vector<cube::GeoSounding> & soundings)
+  {
+    n.stampCloudMode(stamp_ns, frequency_hz, soundings);
+  }
+  static uint64_t resolvedPings(const CubeBathymetry & n)
+  {
+    return n.bs_resolver_ ? n.bs_resolver_->counts().pings : 0;
+  }
 
   static double catalogInterval(const CubeBathymetry & n) {return n.catalog_interval_s_;}
   static double saveInterval(const CubeBathymetry & n) {return n.save_interval_s_;}
@@ -1122,6 +1132,35 @@ TEST_F(NodeLifecycle, UnresolvedCloudsWarnWithTheReasonsThrottled)
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   EXPECT_TRUE(log.contains("0 of 21 pings resolved")) << "the cleanup report stays\n" << log.all();
+}
+
+// cube_bathymetry#172 review: an empty (or all-dropped) cloud carries no
+// frequency and no soundings; it must not be resolved as a `?kHz` ping. A
+// cloud with soundings is resolved once and its index stamped on each.
+TEST_F(NodeLifecycle, AnEmptyCloudIsNotResolvedAsAPing)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  marine_interfaces::msg::SonarInfo info;
+  info.header.stamp.sec = 100;
+  info.pulse_lengths = {0.001f};
+  info.bandwidths = {24000.0f};
+  info.tx_signal_types = {marine_interfaces::msg::SonarInfo::SIGNAL_TYPE_FM_UP};
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
+
+  std::vector<cube::GeoSounding> none;
+  CubeBathymetryTestAccess::stampCloud(*node, 150LL * 1000000000LL, NAN, none);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolvedPings(*node), 0u) << "an empty cloud is no ping";
+
+  std::vector<cube::GeoSounding> two(
+    2, cube::GeoSounding(gz4d::GeoPointLatLongDegrees(43.07, -70.71, -10.0)));
+  CubeBathymetryTestAccess::stampCloud(*node, 150LL * 1000000000LL, 500000.0f, two);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolvedPings(*node), 1u);
+  EXPECT_EQ(two[0].sounding.correction_idx, 2);
+  EXPECT_EQ(two[1].sounding.correction_idx, 2);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
 // A table that does not load, or an invalid fallback, fails the configure
