@@ -224,6 +224,18 @@ TEST(BackscatterTable, NearMissFormatLinesAreTablesAndOnlyV1Loads)
     }
     std::filesystem::remove(path);
   }
+  // Review round 3: the first line is read before the per-line bound, so the
+  // error quotes only its start.
+  const auto long_first = writeTemp(
+    "long_first", "# format: angular-response-table v2" + std::string(1000000, 'x') + "\n" +
+    body);
+  std::string long_error;
+  EXPECT_TRUE(loadBackscatterTable(long_first, long_error).empty());
+  EXPECT_NE(long_error.find("unsupported table format"), std::string::npos);
+  EXPECT_NE(long_error.find("(1000035 characters)"), std::string::npos) << long_error.size();
+  EXPECT_LT(long_error.size(), 600u);
+  std::filesystem::remove(long_first);
+
   const auto empty = writeTemp("empty", "\n\n");
   EXPECT_FALSE(isAngularResponseTable(empty));
   std::string error;

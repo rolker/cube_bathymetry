@@ -269,6 +269,21 @@ constexpr std::size_t kMaxTableRows = 1000000;
 constexpr std::size_t kMaxLineLength = 4096;
 /// The format probe reads no further than this looking for the first line.
 constexpr std::size_t kMaxProbeBytes = 64 * 1024;
+/// How much of a line an error message quotes.
+constexpr std::size_t kMaxQuotedLength = 200;
+
+/// @p line as an error message quotes it: whole up to kMaxQuotedLength
+/// characters, else its start and its length. The first line is read before
+/// the per-line length bound applies, so it can be the whole file (review
+/// round 3).
+std::string quotedLine(const std::string & line)
+{
+  if (line.size() <= kMaxQuotedLength) {
+    return line;
+  }
+  return line.substr(0, kMaxQuotedLength) + "... (" + std::to_string(line.size()) +
+         " characters)";
+}
 
 /// True when @p path names a regular file (symlinks followed). Checked
 /// before opening: opening a FIFO for reading blocks until a writer comes,
@@ -628,7 +643,8 @@ BackscatterTable loadBackscatterTable(
   }
   if (line != kFormatLine) {
     if (hasFormatPrefix(line)) {
-      return fail(line_no, "unsupported table format '" + line + "' (this loader reads '" +
+      return fail(line_no, "unsupported table format '" + quotedLine(line) +
+               "' (this loader reads '" +
                kFormatLine + "')");
     }
     return fail(line_no, std::string("not an angular-response table (first line must be '") +
