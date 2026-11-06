@@ -23,6 +23,7 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -533,6 +534,60 @@ TEST(BackscatterTable, DeclaredGroupsMustCoverEveryRangeRow)
   std::string error;
   EXPECT_EQ(loadBackscatterTable(path, error).entries.size(), 1u) << error;
   std::filesystem::remove(path);
+}
+
+// cube_bathymetry#172 review: the loader bounds what it reads, so an oversized
+// or runaway file fails fast instead of stalling a configure; and a large but
+// legitimate table loads quickly (the duplicate checks are not quadratic).
+TEST(BackscatterTable, OversizedInputIsRefusedAndLargeTablesLoadFast)
+{
+  const std::string header(kHeader);
+  const auto long_line = writeTemp(
+    "long_line", header + kGoodRows + "# " + std::string(5000, 'x') + "\n");
+  std::string error;
+  EXPECT_TRUE(loadBackscatterTable(long_line, error).empty());
+  EXPECT_NE(error.find("line longer than 4096"), std::string::npos) << error;
+  std::filesystem::remove(long_line);
+  const auto long_header = writeTemp(
+    "long_header", "# format: angular-response-table v1\n# " + std::string(5000, 'x') + "\n");
+  EXPECT_TRUE(loadBackscatterTable(long_header, error).empty());
+  EXPECT_NE(error.find("line longer than 4096"), std::string::npos) << error;
+  std::filesystem::remove(long_header);
+  // A file larger than any table is refused before it is read (sparse here).
+  const auto huge = writeTemp("huge", header + kGoodRows);
+  std::filesystem::resize_file(huge, 65ull * 1024 * 1024);
+  EXPECT_TRUE(loadBackscatterTable(huge, error).empty());
+  EXPECT_NE(error.find("more than a table can be"), std::string::npos) << error;
+  std::filesystem::remove(huge);
+
+  // 200 modes x (80 angle bins + 3 groups x 40 nodes) = 40,000 rows.
+  std::string rows;
+  for (int m = 0; m < 200; ++m) {
+    const std::string key = "FMU_" + std::to_string(1000 + m) + "us_24000Hz_500kHz";
+    const std::string tail = ",0.000,0.000,true,UNKNOWN,nan\n";
+    for (int a = 0; a < 80; ++a) {
+      rows += key + ",angle," + std::to_string(0.5 + a) + ",,,-20,100,9,0,0.3" + tail;
+    }
+    for (int g = 0; g < 3; ++g) {
+      const std::string bounds = std::to_string(10 + 20 * g) + "," + std::to_string(30 + 20 * g);
+      for (int x = 0; x < 40; ++x) {
+        rows += key + ",range," + std::to_string(-1.0 + 0.05 * x) + "," + bounds +
+          ",0,100,,,0" + tail;
+      }
+    }
+  }
+  const auto big = writeTemp("big", header + rows);
+  const auto start = std::chrono::steady_clock::now();
+  const auto table = loadBackscatterTable(big, error);
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+    .count();
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_EQ(table.entries.size(), 200u);
+  EXPECT_EQ(table.entries[0].angle.size(), 80u);
+  ASSERT_EQ(table.entries[0].groups.size(), 3u);
+  EXPECT_EQ(table.entries[0].groups[2].nodes.size(), 40u);
+  EXPECT_LT(secs, 5.0) << "40,000 rows must not take quadratic time";
+  std::filesystem::remove(big);
 }
 
 TEST(BackscatterTable, OverlappingGroupsAreRejected)

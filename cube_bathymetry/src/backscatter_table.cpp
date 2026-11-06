@@ -28,11 +28,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -250,7 +253,20 @@ struct ModeBuild
   ModeScalars scalars;
   /// (lo, hi) -> nodes, in order of first appearance.
   std::vector<std::pair<std::pair<double, double>, std::vector<RangeNode>>> groups;
+  /// Index into `groups` by bounds, and the keys already seen, so the
+  /// duplicate checks stay O(log n) per row (an operator file of any size
+  /// must not stall a configure).
+  std::map<std::pair<double, double>, std::size_t> group_index;
+  std::set<double> angle_bins;
+  std::set<std::tuple<double, double, double>> range_nodes;
 };
+
+/// Bounds on what the loader reads: a real table is a few thousand rows of
+/// short lines (modes x angle bins + modes x groups x nodes), so these leave
+/// orders of magnitude of headroom and only stop a wrong or runaway file.
+constexpr std::uintmax_t kMaxTableBytes = 64ull * 1024 * 1024;
+constexpr std::size_t kMaxTableRows = 1000000;
+constexpr std::size_t kMaxLineLength = 4096;
 
 }  // namespace
 
@@ -517,6 +533,15 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
     error = path + ": cannot open";
     return BackscatterTable();
   }
+  {
+    std::error_code ec;
+    const std::uintmax_t bytes = std::filesystem::file_size(path, ec);
+    if (!ec && bytes > kMaxTableBytes) {
+      error = path + ": " + std::to_string(bytes) + " bytes, more than a table can be (" +
+        std::to_string(kMaxTableBytes) + ")";
+      return BackscatterTable();
+    }
+  }
   std::string line;
   std::size_t line_no = 0;
   if (!firstContentLine(in, line, line_no)) {
@@ -538,6 +563,9 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
   while (std::getline(in, line)) {
     ++line_no;
     line = stripCr(line);
+    if (line.size() > kMaxLineLength) {
+      return fail(line_no, "line longer than " + std::to_string(kMaxLineLength) + " characters");
+    }
     if (line.empty()) {
       continue;
     }
@@ -634,11 +662,18 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
   // Rows.
   std::vector<ModeBuild> builds;
   std::map<std::string, std::size_t> build_index;
+  std::size_t rows = 0;
   while (std::getline(in, line)) {
     ++line_no;
     line = stripCr(line);
+    if (line.size() > kMaxLineLength) {
+      return fail(line_no, "line longer than " + std::to_string(kMaxLineLength) + " characters");
+    }
     if (line.empty() || line[0] == '#') {
       continue;
+    }
+    if (++rows > kMaxTableRows) {
+      return fail(line_no, "more than " + std::to_string(kMaxTableRows) + " rows");
     }
     const auto f = splitCsv(line);
     if (f.size() != kColumnCount) {
@@ -721,10 +756,8 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
       if (!(x >= 0.0 && x < 90.0)) {
         return fail(line_no, "angle bin centre " + f[2] + " is outside [0, 90) deg");
       }
-      for (const auto & bin : b.entry.angle) {
-        if (bin.abs_angle_deg == x) {
-          return fail(line_no, "duplicate angle bin " + f[2] + " for '" + mode + "'");
-        }
+      if (!b.angle_bins.insert(x).second) {
+        return fail(line_no, "duplicate angle bin " + f[2] + " for '" + mode + "'");
       }
       AngleBin bin;
       bin.abs_angle_deg = x;
@@ -751,20 +784,15 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
       node.value_db = value;
       node.se_db = se;
       node.n = n;
-      auto g = std::find_if(
-        b.groups.begin(), b.groups.end(), [&](const auto & e) {
-          return e.first.first == lo && e.first.second == hi;
-        });
-      if (g == b.groups.end()) {
+      if (!b.range_nodes.insert(std::make_tuple(lo, hi, x)).second) {
+        return fail(line_no, "duplicate range node " + f[2] + " for '" + mode + "'");
+      }
+      auto slot = b.group_index.find({lo, hi});
+      if (slot == b.group_index.end()) {
+        slot = b.group_index.emplace(std::make_pair(lo, hi), b.groups.size()).first;
         b.groups.push_back({{lo, hi}, {}});
-        g = std::prev(b.groups.end());
       }
-      for (const auto & existing : g->second) {
-        if (existing.x == x) {
-          return fail(line_no, "duplicate range node " + f[2] + " for '" + mode + "'");
-        }
-      }
-      g->second.push_back(node);
+      b.groups[slot->second].second.push_back(node);
     } else {
       return fail(line_no, "unknown term '" + term + "'");
     }
