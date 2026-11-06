@@ -578,6 +578,18 @@ TEST(BackscatterTable, DeclaredGroupsMustCoverEveryRangeRow)
   std::string error;
   EXPECT_EQ(loadBackscatterTable(path, error).entries.size(), 1u) << error;
   std::filesystem::remove(path);
+
+  // Review round 2: two written groups within 1e-9 of the declared one (only
+  // a hand edit makes them) both match it; the second must not overwrite the
+  // first's nodes silently.
+  const auto twice = writeTemp(
+    "declared_twice", head + "# range_angle_groups_deg: 10-90\n" + columns + kGoodRows +
+    "FMU_1000us_24000Hz_500kHz,range,2,10.0000000001,90,-20,100,,,0,0.000,0.000,true,UNKNOWN,"
+    "nan\n");
+  EXPECT_TRUE(loadBackscatterTable(twice, error).empty());
+  EXPECT_NE(error.find("two groups that both match the declared group 10-90"),
+    std::string::npos) << error;
+  std::filesystem::remove(twice);
 }
 
 // cube_bathymetry#172 review: the loader bounds what it reads, so an oversized

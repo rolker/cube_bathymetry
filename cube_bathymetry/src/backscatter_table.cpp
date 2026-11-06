@@ -888,6 +888,10 @@ BackscatterTable loadBackscatterTable(
       for (const auto & d : declared_groups) {
         placed.push_back({d, {}});
       }
+      // Written groups are bucketed by exact bounds but matched within 1e-9,
+      // so two near-identical written groups (a hand edit) can land on one
+      // declared group: refused, never one silently overwriting the other.
+      std::vector<bool> filled(placed.size(), false);
       for (auto & g : b.groups) {
         auto slot = std::find_if(
           placed.begin(), placed.end(), [&](const auto & p) {
@@ -901,6 +905,16 @@ BackscatterTable loadBackscatterTable(
           error = os.str();
           return BackscatterTable();
         }
+        const std::size_t at = static_cast<std::size_t>(slot - placed.begin());
+        if (filled[at]) {
+          std::ostringstream os;
+          os << path << ": mode '" << b.entry.key << "' has range rows for two groups that "
+             << "both match the declared group " << slot->first.first << "-"
+             << slot->first.second;
+          error = os.str();
+          return BackscatterTable();
+        }
+        filled[at] = true;
         slot->second = std::move(g.second);
       }
       b.groups = std::move(placed);
