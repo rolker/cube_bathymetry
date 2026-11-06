@@ -582,9 +582,10 @@ in short:
   `abortDirtyReplay` (exit 1, "NOT empty and NOT complete"), while an
   unwritable `build_fingerprint.json` over a store that IS complete is exit 2
   and says so. A per-pulse-mode table run over the excerpt (it records no
-  SonarInfo) is exit 4 with the fingerprint kind `table-unresolved`; the same
-  table on a `--level-plan-out` preflight keeps exit 0 but says it resolved
-  nothing, and with an unwritable fingerprint keeps exit 2. Every other test drives the library directly, so nothing else
+  SonarInfo) is exit 4 with the fingerprint kind `table-unresolved`. The same
+  table on a `--level-plan-out` preflight also exits 4 and says it resolved
+  nothing; that preflight writes no fingerprint. A full table run with an
+  unwritable fingerprint keeps exit 2. Every other test drives the library directly, so nothing else
   reaches `import_bag`'s `main()` past argument validation. It runs against a
   3,000-ping excerpt of the 2026-06-09 UNH pier M3 bag, which is **survey data
   referenced by path**, not a committed fixture (18 MB); it lives beside its
@@ -749,11 +750,12 @@ an entry, the usual causes being a wrong `--sonar-info-topic`, no SonarInfo in
 the bags, or clouds without `frequency` — is loud too: `import_bag` prints an
 error with the reason counts, still writes the store and the fingerprint but
 with `kind` `table-unresolved` (so no staleness check takes it for a
-table-corrected store), and exits 4. Exit 4 means the store and that
-fingerprint were written: a run that failed (1) or could not write the
-fingerprint (2) keeps its code, and a `--level-plan-out` preflight, which
-writes neither, keeps its own code and says it resolved nothing, so a wrong
-topic is caught before the import. The live node warns at the first
+table-corrected store), and exits 4. Exit 4 means a table was given and no
+ping resolved a pulse mode; on a full run the store and its
+`table-unresolved` fingerprint were still written. A run that failed (1) or
+could not write the fingerprint (2) keeps its code. A `--level-plan-out`
+preflight, which writes neither, exits 4 too, so `preflight && import` stops
+on a wrong topic before the import starts. The live node warns at the first
 unresolved cloud after each configure, with the count and the reasons so far,
 at most once a minute while nothing has resolved; once clouds do resolve, an
 unresolved one is the normal case (a rare mode, the ping floor) and each

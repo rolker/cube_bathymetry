@@ -209,7 +209,10 @@ or none (they are written for `table-unresolved` too). `kind:
 table entry — a wrong `--sonar-info-topic`, no SonarInfo in the bags, or pings
 without a frequency: the table was loaded and hashed, but the backscatter
 layer carries none of its correction, so the store must never pass for a
-table-corrected one (`import_bag` also exits 4 then). `isStale` compares `mode`, `kind`, `sha256`, `fallback` and
+table-corrected one. `import_bag` exits 4 then. Exit 4 means a table was
+given and no ping resolved a pulse mode; on a full run the store and its
+`table-unresolved` fingerprint were still written, and a `--level-plan-out`
+preflight, which writes neither, exits 4 too. `isStale` compares `mode`, `kind`, `sha256`, `fallback` and
 `min_pings` — not `source`, so the same table under another path is the same
 correction. A fingerprint without the key (written before #172) is stale
 against one that has it: what correction built its backscatter layer cannot

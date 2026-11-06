@@ -537,10 +537,11 @@ TEST(RealBagSmoke, ATableRunThatResolvesNoPingExitsFourAndSaysSo)
 
 // cube_bathymetry#172 review round 2: the outcome sentence is printed once the
 // finish step's code is known, and says only what is true for that path. A
-// recon-only --level-plan-out preflight writes no store and no fingerprint: it
-// keeps its own code (0) but says it resolved nothing, so a wrong
-// --sonar-info-topic is caught before the multi-hour import, not after.
-TEST(RealBagSmoke, ATablePreflightThatResolvesNoPingSaysSoAndKeepsItsCode)
+// recon-only --level-plan-out preflight writes no store and no fingerprint.
+// Review round 3: it exits 4 too (exit 4 = a table was given and no ping
+// resolved a pulse mode), so `preflight && import` stops on a wrong
+// --sonar-info-topic before the multi-hour import, not after.
+TEST(RealBagSmoke, ATablePreflightThatResolvesNoPingSaysSoAndExitsFour)
 {
   SKIP_WITHOUT_EXCERPT();
   TempDir dir("unresolved_preflight");
@@ -553,12 +554,13 @@ TEST(RealBagSmoke, ATablePreflightThatResolvesNoPingSaysSoAndKeepsItsCode)
     " -r 1.0 -l 200 --depth-adaptive --scratch-dir " + dir.sub("scratch") +
     " --level-plan-out " + plan + " --backscatter-correction empirical --backscatter-curve " +
     MODE_TABLE_FIXTURE_FILE + " " + excerptPath(), &status);
-  EXPECT_EQ(status, 0) << "the preflight keeps its own code\n" << out;
+  EXPECT_EQ(status, 4) << "the preflight exits 4 too\n" << out;
   EXPECT_NE(out.find("NOT ONE of the 200 ping(s) resolved to a table entry"), std::string::npos)
     << out;
   EXPECT_NE(out.find("This --level-plan-out preflight resolved nothing"), std::string::npos)
     << out;
-  EXPECT_EQ(out.find("exits 4"), std::string::npos) << "no exit 4 claimed\n" << out;
+  EXPECT_NE(out.find("The preflight exits 4."), std::string::npos) << out;
+  EXPECT_TRUE(std::filesystem::exists(plan)) << "the plan is still written";
   EXPECT_EQ(out.find("fingerprint records kind"), std::string::npos)
     << "no fingerprint was written, so none is claimed\n" << out;
   EXPECT_FALSE(std::filesystem::exists(dir.sub("store") + "/build_fingerprint.json"));

@@ -301,12 +301,11 @@ bool loadCurveFromBagSonarInfo(
     "so a later incremental regen must do a FULL regen (ADR-0003); "
     "3 = the store and its fingerprint are both complete, only the "
     "--tile-size-report CSV could not be written (a diagnostic, not the data); "
-    "4 = the store and its fingerprint are both complete, but a per-pulse-mode "
-    "table was loaded and NOT ONE ping resolved to a table entry, so the "
-    "backscatter layer carries no table correction (fingerprint kind "
-    "'table-unresolved'; a wrong --sonar-info-topic or no SonarInfo in the bags is "
-    "the usual cause). 1 and 2 outrank 4, and 4 outranks 3. A --level-plan-out "
-    "preflight writes no store, so it keeps its own code and says it resolved nothing.\n";
+    "4 = a per-pulse-mode table was given and NOT ONE ping resolved a pulse mode "
+    "(a wrong --sonar-info-topic or no SonarInfo in the bags is the usual cause); on a "
+    "full run the store and its fingerprint (kind 'table-unresolved') were still "
+    "written, and a --level-plan-out preflight, which writes neither, exits 4 too. "
+    "1 and 2 outrank 4, and 4 outranks 3.\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
     "to the survey/campaign id). Per-cell source interning was retired for the "
@@ -1221,12 +1220,15 @@ bool reportModeResolution(BackscatterSetup & backscatter)
 /// The exit code once the finish step has returned @p finish_code (cube#172
 /// review), and the one sentence saying what a table run that corrected no
 /// ping left on disk -- printed here, once the code is known, because each
-/// path leaves something different. Exit 4 only when the store AND its
-/// `table-unresolved` fingerprint were written (finish 0, or 3: only the
-/// tile-size CSV is missing). 1 (the store may be incomplete) and 2 (no
-/// fingerprint) outrank it and keep their code. A recon-only preflight
-/// (--level-plan-out) wrote neither, so it keeps its own code, but says the
-/// preflight resolved nothing, so the full import is not started blind.
+/// path leaves something different. Exit 4 has one meaning on every path: a
+/// table was given and no ping resolved a pulse mode. On a full run it is
+/// returned when the store AND its `table-unresolved` fingerprint were still
+/// written (finish 0, or 3: only the tile-size CSV is missing); 1 (the store
+/// may be incomplete) and 2 (no fingerprint) outrank it and keep their code.
+/// A recon-only preflight (--level-plan-out) writes neither, and exits 4 too
+/// once its plan is written (review round 3), so `preflight && import` does
+/// not start the multi-hour import blind; a preflight that failed keeps its
+/// own code.
 int withTableResolution(int finish_code, bool table_unresolved, bool recon_only)
 {
   if (!table_unresolved) {
@@ -1235,11 +1237,15 @@ int withTableResolution(int finish_code, bool table_unresolved, bool recon_only)
   std::cerr << "error: the per-pulse-mode table corrected no ping (see the error after the "
     "pass). ";
   if (recon_only) {
+    if (finish_code != 0) {
+      std::cerr << "This --level-plan-out preflight also failed (exit " << finish_code
+                << ", see above)." << std::endl;
+      return finish_code;
+    }
     std::cerr << "This --level-plan-out preflight resolved nothing: no store and no "
       "fingerprint were written, and the import it plans would correct no ping either. Fix "
-      "the SonarInfo input before importing. The preflight keeps its exit code "
-              << finish_code << "." << std::endl;
-    return finish_code;
+      "the SonarInfo input before importing. The preflight exits 4." << std::endl;
+    return 4;
   }
   if (finish_code == 1) {
     std::cerr << "The run also failed (exit 1, see above): the store may be incomplete, and "
