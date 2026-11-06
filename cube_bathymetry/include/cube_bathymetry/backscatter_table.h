@@ -130,7 +130,9 @@ namespace cube
 
 /// Declared gain state of a stream: the model plus the absorption its TVG
 /// used (NaN = undeclared). Two states are equal when the models match and
-/// both absorptions are NaN or both are equal.
+/// both absorptions are NaN or both agree within a relative 1e-5 (the table
+/// writes the absorption with `%.6g`, so an exact comparison would flag a
+/// declared value against its own round trip).
   struct DeclaredTvgState
   {
     DeclaredTvg model = DeclaredTvg::Unknown;

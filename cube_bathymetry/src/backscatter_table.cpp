@@ -388,7 +388,11 @@ bool DeclaredTvgState::operator==(const DeclaredTvgState & other) const
   if (a_nan || b_nan) {
     return a_nan && b_nan;
   }
-  return absorption_db_per_km == other.absorption_db_per_km;
+  // The table writes the absorption with %.6g, so a declared float32 comes
+  // back rounded to 6 significant digits (relative error up to 5e-6): equal
+  // within a relative 1e-5, never compared bit for bit.
+  const double a = absorption_db_per_km, b = other.absorption_db_per_km;
+  return std::abs(a - b) <= 1e-5 * std::max(std::abs(a), std::abs(b));
 }
 
 std::string DeclaredTvgState::toString() const

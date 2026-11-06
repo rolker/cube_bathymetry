@@ -142,6 +142,17 @@ TEST(DeclaredTvgState, EqualityTreatsNaNAbsorptionAsOneState)
   EXPECT_NE(a, b) << "declared absorption vs none";
   b.absorption_db_per_km = 80.0f;
   EXPECT_EQ(a, b);
+  // A declared float32 against its own %.6g round trip through the table.
+  a.absorption_db_per_km = 12.3456789f;
+  b.absorption_db_per_km = 12.3457f;
+  EXPECT_EQ(a, b) << "the table's 6 significant digits are the same declaration";
+  b.absorption_db_per_km = 12.36f;
+  EXPECT_NE(a, b);
+  a.absorption_db_per_km = 0.0f;
+  b.absorption_db_per_km = 0.0f;
+  EXPECT_EQ(a, b);
+  a.absorption_db_per_km = 80.0f;
+  b.absorption_db_per_km = 80.0f;
   EXPECT_EQ(a.toString(), "40LOGR/80 dB/km");
   EXPECT_EQ(DeclaredTvgState().toString(), "UNKNOWN");
 
