@@ -326,3 +326,57 @@ Specialists: static analysis (cpplint, uncrustify, xmllint, lint_cmake: clean; c
 - [x] (suggestion) ADR-0003: the `tool_version` text runs on from "...keeps schema version 2 (additive)." with no paragraph break. — `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md` (Governance) — fixed in `77204a1`
 - [x] (suggestion) README "Header provenance" key table still lists only the single-curve keys (carried from PR 1). — `README.md` (Governance) — fixed in `101ea6d`
 - [x] (suggestion) Instruction-update candidates (proposals only): a `.agents/README.md` for cube_bathymetry recording the `soundings` field contract (count, point_step, fixtures); the pitfall that an exported target linking a new find_package'd library needs `ament_export_dependencies`. (Governance) — (deferred: proposals only; a cube_bathymetry `.agents/README.md` is a dedicated task with its own issue per AGENTS.md, recorded in the Implementation entry)
+
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 11:21 -05:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-172 at `8c34961`
+**Addressed**: `## Local Review (Pre-Push)` of 2026-11-06 10:29 -05:00 (round 1 of PR 2, at `e7e2022`): 8 must-fix, 18 suggestions
+**Commits**: `818ccb6` `7874b06` `78ba0cc` `62d75a1` `9b64de2` `83d3858` `75bafb4` `c54c922` `e7aff1d` `fdfb0e7` `4e62474` `e2a6fa3` `4a7db64` `55895b2` `9acfbea` `46ab062` `33fb160` `b3f62f8` `bec5b70` `a724a0b` `77204a1` `101ea6d` `c2ed3cf`; boxes checked in `8c34961`. Not pushed.
+
+### Actions
+- [x] (must-fix 1) Group lookup: the loader reads `# range_angle_groups_deg:` and creates every declared group per mode (an unfitted one with no nodes = zero term); the specular band takes the first DECLARED group; a range row naming an undeclared group, or a malformed declaration, fails the load; without the header line the written groups are used as before. Test with an unfitted first group (specular and 10-30 beams get zero, 30-90 gets its term) and the bare-table fallback. Load report now says "N of M groups fitted" — `818ccb6`, `c2ed3cf`
+- [x] (must-fix 2) `ament_export_dependencies(... OpenSSL)`. A scratch downstream `find_package(cube_bathymetry)` + link of `cube_bathymetry_level_plan` configured before and after; before, OpenSSL::Crypto resolved only because another dependency already found OpenSSL — `7874b06`
+- [x] (must-fix 3) README: `soundings` has eight fields (`frequency`, point_step 32); an older seven-field cloud keys as `?kHz` — `78ba0cc`
+- [x] (must-fix 4) README: the estimator does not weight by `1/var_db2` (decision 6 deviation); stale "PR 2" wording replaced — `62d75a1`
+- [x] (must-fix 5) Node: NO-OP warning guarded with `!bs_file_is_table`; lifecycle test captures the log (empirical + table: no NO-OP; empirical, no file: NO-OP) — `9b64de2`
+- [x] (must-fix 6) Resolver history bounded as directed: on every `addSonarInfo`, entries before `newest resolved ping - 60 s` dropped except the newest at or before the cut; hard cap 4096 (oldest first); documented in the header, README, plan decision 10, ADR-0007 item 2. Also: a message whose state equals the one in force at its stamp is not stored; the stale count looks only at pings between the stamp and the next stored stamp and counts one only when the message changes its correction (each recent ping records its idx); dead `newest_stamp_ns_`/`have_newest_` removed. Tests: 2000 s switching every ping stays at the window size, late pings 59 s and 30 s behind resolve against the kept state, cap holds a ping-less stream, steady republish stores one state, out-of-order older message counts no ping that used a newer state — `83d3858`
+- [x] (must-fix 7) Table run that resolves nothing: import_bag prints `error:` with the reason breakdown and likely causes, writes the store and the fingerprint with `kind: "table-unresolved"` (ADR-0003, `build_fingerprint.h`; `isTableKind()` keeps fallback/min_pings in the JSON), exits 4 (usage(): 1 and 2 outrank 4, 4 outranks 3; recon-only keeps its code). Node: WARN at the first unresolved cloud after each configure, throttled 60 s per configuration (member, not the macro's call-site static), with count + reasons; cleanup report kept. Tests: resolver `resolvedNothing`/`unresolvedSummary`, fingerprint round trip + staleness both ways, lifecycle log capture of the throttled warning, real-bag smoke case (fixture table over the excerpt, which has no SonarInfo: exit 4, error text, fingerprint kind) — `c54c922`
+- [x] (must-fix 8) `setupBackscatter(BackscatterSetup & out, ...)` fills a caller-owned struct; copy and move deleted — `75bafb4`
+- [x] (suggestion) Beam-level fallbacks counted: `countBeam()` applies the estimator's own `tableBeamStatus` to each sounding where the ping is stamped (import_bag + node); report lists uncorrectable beams per (mode, reason), as submitted; ADR item 5, `--backscatter-mode-fallback` help, README, plan decision 9 updated — `fdfb0e7`
+- [x] (suggestion) `|θ| >= 90` deg is uncorrectable (fallback); `tableBeamStatus`/`beamAbsAngleDeg` added — `e7aff1d`
+- [x] (suggestion) Empty cloud not resolved (`stampCloudMode` skips it); lifecycle test — `4e62474`
+- [x] (suggestion) TVG mismatch warning names the reason and fallback when the entry is not applied — `e2a6fa3`
+- [x] (suggestion) Loader refuses angle bins outside [0, 90), group bounds outside [0, 90], a duplicate `# mode_summary:`, and a summary without `pings=` — `4a7db64`
+- [x] (suggestion) Near-miss format line: BOM / leading blank lines tolerated; any `# format: angular-response-table` prefix is a table, only v1 loads, another version is an "unsupported table format" error — `55895b2`
+- [x] (suggestion) Loader bounds: file > 64 MiB, line > 4096 chars, > 1e6 rows refused; duplicate checks are set/map lookups (40,000-row table test) — `9acfbea`
+- [x] (suggestion) Fallback/min-pings without a table warn once (import_bag and node; tested on both) — `46ab062`
+- [x] (suggestion) Cleanup report says it spans every `~/reset`; README reset section lists the table and resolver as kept — `33fb160`
+- [x] (suggestion) Declared absorption compared within a relative 1e-5 (the `%.6g` round trip) — `b3f62f8`
+- [x] (suggestion) README: `exclude` is the safe fallback for a mode-switching sonar; older clouds without `frequency` get the fallback — `bec5b70`
+- [x] (suggestion) Dead `newest_stamp_ns_`/`have_newest_` removed — `83d3858`
+- [x] (suggestion) batch_regen never reads `build_fingerprint.json` — (deferred: PR-body text for the host; wording below)
+- [x] (suggestion) Layout change needs a ui_ws rebuild — (deferred: PR-body text for the host; wording below)
+- [x] (suggestion) CMake "tiling only" comment — `a724a0b`
+- [x] (suggestion) ADR-0003 paragraph break — `77204a1`
+- [x] (suggestion) README "Header provenance": per-mode header keys table, read vs record — `101ea6d`
+- [x] (suggestion) Instruction-update candidates — (deferred: proposals only; a cube_bathymetry `.agents/README.md` is a dedicated task with its own issue per AGENTS.md. Candidates kept: the `soundings` field contract (count, point_step, fixtures); an exported target linking a new find_package'd library needs `ament_export_dependencies`; RCLCPP_*_THROTTLE state is a per-call-site static shared by every node in the process, so a per-configuration throttle needs a member)
+
+### For the PR body (host)
+- **Known gap, predates #172:** `batch_regen_bag` refuses a per-mode table file, but it never reads `build_fingerprint.json`, so `--backscatter-correction none` (or another curve) can rebuild tiles inside a table-built store without any check. The fingerprint now records the correction; a consumer that compares it is the ADR-0003 `--incremental` follow-up.
+- **Rebuild:** `Sounding`/`DepthAndUncertainty`/`Parameters` changed layout (`DepthAndUncertainty` 20 → 22 bytes, `Parameters` carries the table), so ui_ws `marine_perception_tools` must be rebuilt with this PR, and the main tree's sensors_ws and ui_ws rebuilt after merge.
+- `import_bag` has a new exit code 4 (table loaded, no ping resolved; fingerprint kind `table-unresolved`).
+
+### Tests
+Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1410 tests, 0 errors, 0 failures, 96 skipped** (the same 96 cppcheck skips as before; was 1395). The real-bag smoke cases ran (excerpt reachable on this host). uncrustify and cpplint clean on every touched file, lint_cmake clean; import_bag `main()` at 492 of cpplint's 500 lines.
+
+### Left open
+- Nothing from round 1 besides the three deferrals above.
+- Behaviour to know (documented in `backscatter_mode.h`): a SonarInfo deduplicated because it equals the state in force is not stored, so a later out-of-order message stamped between it and its predecessor governs pings after the dropped stamp too. Needs out-of-order delivery from one publisher; accepted.
+- Not a defect, noticed: the lifecycle tests' synthetic SonarInfo leaves `tvg_absorption_db_per_km` at 0 (the message says producers must set NaN), so it reads as a declared `UNKNOWN/0 dB/km` mismatch; real bridge data sets NaN.
+
+### Next
+`/review-code` pre-push (round 2) on the branch, fresh context.
