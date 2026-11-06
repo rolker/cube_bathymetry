@@ -28,6 +28,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "cube_bathymetry/backscatter_table.h"
 #include "cube_bathymetry/common.h"
 
 namespace cube
@@ -272,6 +273,19 @@ namespace cube
   /// is the single source of truth, guaranteeing Python/C++ consistency. Default
   /// 0 = no absorption term (tier-1, or fresh water at negligible alpha).
     float backscatter_absorption_db_per_m = 0.0f;
+
+  /// Per-pulse-mode backscatter table (cube_bathymetry#172): one entry per
+  /// mode key, selected per beam by `Sounding::correction_idx`. Empty = no
+  /// table (the legacy fields above are the whole correction). Set via
+  /// GeoMapSheet::setBackscatterTable(). A beam whose index names an entry
+  /// is corrected `raw - db_relative_to_nadir - r_g - offset`; the legacy
+  /// curve and TL term never apply to it.
+    BackscatterTable backscatter_table;
+
+  /// What to do with a beam the table cannot correct (unresolved mode, no
+  /// entry, unanchored mode, unweighable angle bin, no finite range):
+  /// `Identity` records it uncorrected, `Exclude` drops its backscatter.
+    BackscatterModeFallback backscatter_mode_fallback = BackscatterModeFallback::Identity;
   };
 
 }  // namespace cube

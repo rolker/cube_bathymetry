@@ -39,6 +39,7 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -51,6 +52,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cube_bathymetry/geo_map_sheet.h"
@@ -451,10 +453,10 @@ TEST(MixedLevelImport, OneResidentBudgetAcrossLevels)
 #ifdef IMPORT_BAG_EXE
 namespace
 {
-// Run import_bag with @p args; merged stdout+stderr, exit status via @p status.
-std::string runImportBag(const std::string & args, int * status)
+// Run @p command; merged stdout+stderr, exit status via @p status.
+std::string runCommand(const std::string & command_line, int * status)
 {
-  const std::string command = std::string(IMPORT_BAG_EXE) + " " + args + " 2>&1";
+  const std::string command = command_line + " 2>&1";
   std::string output;
   FILE * pipe = popen(command.c_str(), "r");
   if (pipe == nullptr) {
@@ -468,6 +470,12 @@ std::string runImportBag(const std::string & args, int * status)
   const int rc = pclose(pipe);
   *status = (rc != -1 && WIFEXITED(rc)) ? WEXITSTATUS(rc) : -1;
   return output;
+}
+
+// Run import_bag with @p args; merged stdout+stderr, exit status via @p status.
+std::string runImportBag(const std::string & args, int * status)
+{
+  return runCommand(std::string(IMPORT_BAG_EXE) + " " + args, status);
 }
 }  // namespace
 
@@ -639,6 +647,50 @@ TEST(ImportBagCli, RefusesBackscatterOnTheMixedLevelPathNamingThePrerequisite)
   const std::string fixed = runImportBag(
     "--bs-store /tmp/bs -o /nonexistent/store -d /t /nonexistent.bag", &status);
   EXPECT_EQ(fixed.find("--bs-store is not supported"), std::string::npos) << fixed;
+}
+
+// cube_bathymetry#172 review round 3: --backscatter-curve naming a FIFO, a
+// device or an unreadable file is refused before either loader runs and
+// before any bag opens. The table probe already skipped such a path, so it
+// fell through to the single-curve loader: a FIFO blocked the import,
+// /dev/zero read without bound, and an unreadable table ran uncorrected with
+// exit 0. batch_regen refuses the same paths.
+TEST(ImportBagCli, RefusesANonRegularOrUnreadableBackscatterCurve)
+{
+  const std::string base = (std::filesystem::temp_directory_path() /
+    ("cube_cli_bs_" + std::to_string(::getpid()))).string();
+  const std::string fifo = base + ".fifo";
+  std::filesystem::remove(fifo);
+  ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+  const std::string unreadable = base + ".csv";
+  {
+    std::ofstream(unreadable) << "# format: angular-response-table v1\n";
+  }
+  std::filesystem::permissions(unreadable, std::filesystem::perms::none);
+  std::vector<std::pair<std::string, std::string>> cases = {
+    {fifo, "is not a regular file"}, {"/dev/zero", "is not a regular file"}};
+  if (::geteuid() != 0) {
+    cases.emplace_back(unreadable, "cannot be opened for reading");
+  }
+  for (const auto & [path, why] : cases) {
+    const std::string flags = "--backscatter-correction empirical --backscatter-curve " + path +
+      " -o /nonexistent/store -d /t /nonexistent.bag";
+    int status = -1;
+    std::string out = runImportBag(flags, &status);
+    EXPECT_NE(status, 0) << out;
+    EXPECT_NE(out.find("--backscatter-curve '" + path + "' " + why), std::string::npos) << out;
+    EXPECT_EQ(out.find("EMPTY curve"), std::string::npos) << out;
+    EXPECT_EQ(out.find("cannot open"), std::string::npos) << "before any bag opens\n" << out;
+#ifdef BATCH_REGEN_EXE
+    out = runCommand(std::string(BATCH_REGEN_EXE) + " " + flags, &status);
+    EXPECT_NE(status, 0) << out;
+    EXPECT_NE(out.find("--backscatter-curve '" + path + "' " + why), std::string::npos) << out;
+    EXPECT_EQ(out.find("NO-OP"), std::string::npos) << out;
+#endif
+  }
+  std::filesystem::permissions(unreadable, std::filesystem::perms::owner_all);
+  std::filesystem::remove(unreadable);
+  std::filesystem::remove(fifo);
 }
 
 TEST(ImportBagCli, UsageDocumentsTheDepthAdaptiveFlags)

@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -84,8 +85,25 @@ double curveRelativeDb(
 }  // namespace
 
 double correctBeamIntensity(
-  float raw_intensity, float beam_angle, float range, const Parameters & parameters)
+  float raw_intensity, float beam_angle, float range, const Parameters & parameters,
+  uint16_t correction_idx)
 {
+  // Per-mode table path (cube#172): a resolved beam is corrected by its mode's
+  // entry only; the reserved values short-circuit. Unresolved (0) falls
+  // through to the legacy single-curve path below, unchanged.
+  if (correction_idx == kCorrectionIdentity) {
+    return raw_intensity;
+  }
+  if (correction_idx == kCorrectionExclude) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (correction_idx != kCorrectionUnresolved) {
+    return correctWithTable(
+      raw_intensity, beamAbsAngleDeg(beam_angle), range, parameters.backscatter_table,
+      correction_idx,
+      parameters.backscatter_mode_fallback);
+  }
+
   // Exact per-beam math formerly in Node::extractNodeRecord (cube#80/#81/#87),
   // moved to record time (cube#93). Apply order is TL add-back THEN angular
   // residual, accumulated in double -- identical to the old extract.

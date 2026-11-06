@@ -22,6 +22,7 @@
 #include "cube_bathymetry/build_fingerprint.h"
 
 #include <fcntl.h>
+#include <openssl/evp.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -52,9 +53,23 @@ const char * toString(BuildFingerprint::Mode mode)
   return mode == BuildFingerprint::Mode::Fixed ? "fixed" : "depth_adaptive";
 }
 
+bool BuildFingerprint::BackscatterCorrection::operator==(const BackscatterCorrection & o) const
+{
+  return mode == o.mode && kind == o.kind && sha256 == o.sha256 && fallback == o.fallback &&
+         min_pings == o.min_pings;
+}
+
 bool BuildFingerprint::isStale(const BuildFingerprint & previous) const
 {
   if (previous.schema_version != schema_version || previous.mode != mode) {
+    return true;
+  }
+  // The backscatter correction decides the backscatter layer's values
+  // (cube#172); a fingerprint that did not record one cannot vouch for them.
+  if (backscatter_correction.has_value() != previous.backscatter_correction.has_value()) {
+    return true;
+  }
+  if (backscatter_correction && *backscatter_correction != *previous.backscatter_correction) {
     return true;
   }
   if (mode == Mode::Fixed) {
@@ -127,6 +142,27 @@ std::string BuildFingerprint::toJson() const
   tiling["policy"] = p;
   tiling["levels_used"] = std::vector<int>(levels_used.begin(), levels_used.end());
   j["tiling"] = tiling;
+  if (backscatter_correction) {
+    nlohmann::json b;
+    b["mode"] = backscatter_correction->mode;
+    b["kind"] = backscatter_correction->kind;
+    b["source"] = backscatter_correction->source;
+    if (backscatter_correction->sha256.empty()) {
+      b["sha256"] = nullptr;
+    } else {
+      b["sha256"] = backscatter_correction->sha256;
+    }
+    if (backscatter_correction->isTableKind()) {
+      b["fallback"] = backscatter_correction->fallback;
+      b["min_pings"] = backscatter_correction->min_pings;
+    } else {
+      b["fallback"] = nullptr;
+      b["min_pings"] = nullptr;
+    }
+    j["backscatter_correction"] = b;
+  } else {
+    j["backscatter_correction"] = nullptr;
+  }
   return j.dump(2) + "\n";
 }
 
@@ -175,10 +211,93 @@ BuildFingerprint BuildFingerprint::fromJson(const std::string & json)
     for (const auto & level : tiling.at("levels_used")) {
       f.levels_used.insert(level.get<uint8_t>());
     }
+    if (j.contains("backscatter_correction") && !j.at("backscatter_correction").is_null()) {
+      const auto & b = j.at("backscatter_correction");
+      BackscatterCorrection c;
+      c.mode = b.at("mode").get<std::string>();
+      c.kind = b.at("kind").get<std::string>();
+      if (b.contains("source") && !b.at("source").is_null()) {
+        c.source = b.at("source").get<std::string>();
+      }
+      if (b.contains("sha256") && !b.at("sha256").is_null()) {
+        c.sha256 = b.at("sha256").get<std::string>();
+      }
+      if (b.contains("fallback") && !b.at("fallback").is_null()) {
+        c.fallback = b.at("fallback").get<std::string>();
+      }
+      if (b.contains("min_pings") && !b.at("min_pings").is_null()) {
+        c.min_pings = b.at("min_pings").get<uint64_t>();
+      }
+      f.backscatter_correction = c;
+    }
   } catch (const nlohmann::json::exception & e) {
     throw std::runtime_error(std::string("build_fingerprint: ") + e.what());
   }
   return f;
+}
+
+namespace
+{
+std::string digestHex(EVP_MD_CTX * ctx)
+{
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int length = 0;
+  if (EVP_DigestFinal_ex(ctx, digest, &length) != 1) {
+    throw std::runtime_error("sha256: EVP_DigestFinal_ex failed");
+  }
+  static const char * hex = "0123456789abcdef";
+  std::string out;
+  out.reserve(2 * length);
+  for (unsigned int i = 0; i < length; ++i) {
+    out.push_back(hex[digest[i] >> 4]);
+    out.push_back(hex[digest[i] & 0x0f]);
+  }
+  return out;
+}
+
+struct DigestContext
+{
+  EVP_MD_CTX * ctx = EVP_MD_CTX_new();
+  DigestContext()
+  {
+    if (!ctx || EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
+      EVP_MD_CTX_free(ctx);
+      ctx = nullptr;
+      throw std::runtime_error("sha256: cannot initialise the digest");
+    }
+  }
+  ~DigestContext() {EVP_MD_CTX_free(ctx);}
+  DigestContext(const DigestContext &) = delete;
+  DigestContext & operator=(const DigestContext &) = delete;
+};
+}  // namespace
+
+std::string sha256File(const std::string & path)
+{
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("sha256: cannot read " + path);
+  }
+  DigestContext d;
+  char buffer[1 << 16];
+  while (in.read(buffer, sizeof(buffer)) || in.gcount() > 0) {
+    if (EVP_DigestUpdate(d.ctx, buffer, static_cast<std::size_t>(in.gcount())) != 1) {
+      throw std::runtime_error("sha256: EVP_DigestUpdate failed");
+    }
+  }
+  if (in.bad()) {
+    throw std::runtime_error("sha256: read error on " + path);
+  }
+  return digestHex(d.ctx);
+}
+
+std::string sha256Text(const std::string & text)
+{
+  DigestContext d;
+  if (EVP_DigestUpdate(d.ctx, text.data(), text.size()) != 1) {
+    throw std::runtime_error("sha256: EVP_DigestUpdate failed");
+  }
+  return digestHex(d.ctx);
 }
 
 std::optional<BuildFingerprint> BuildFingerprint::read(const std::string & store_dir)

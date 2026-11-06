@@ -48,9 +48,12 @@ find_package(tf2_sensor_msgs REQUIRED)
 
 find_package(GDAL CONFIG REQUIRED)
 find_package(nlohmann_json REQUIRED)  # level plan JSON (#143)
+find_package(OpenSSL REQUIRED)  # build fingerprint: SHA-256 of the backscatter curve/table (#172)
 
 add_library(cube_bathymetry
   src/angular_response_curve.cpp
+  src/backscatter_table.cpp   # per-pulse-mode table + mode-key spec (#172)
+  src/backscatter_mode.cpp    # per-ping mode resolver (#172)
   src/detections_projector.cpp
   src/error_model.cpp
   src/geo_grid.cpp
@@ -98,7 +101,7 @@ install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 add_library(cube_bathymetry_level_plan
   src/count_grid.cpp
   src/level_plan.cpp
-  src/build_fingerprint.cpp   # ADR-0003 schema v2, tiling only (#143)
+  src/build_fingerprint.cpp   # ADR-0003 schema v2: tiling (#143) + backscatter_correction (#172)
   src/recon.cpp               # recon pass: counts + decision depths + sounding spill
 )
 target_include_directories(cube_bathymetry_level_plan PUBLIC
@@ -111,6 +114,7 @@ target_link_libraries(cube_bathymetry_level_plan
   marine_tiled_raster_store::marine_tiled_raster_store  # count-tile GeoTIFF io
   marine_bathymetry_store::marine_bathymetry_store  # depthAdaptiveLevel (uma#369)
   nlohmann_json::nlohmann_json
+  OpenSSL::Crypto                    # sha256File / sha256Text (#172)
 )
 install(TARGETS cube_bathymetry_level_plan EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
@@ -402,6 +406,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_node_lifecycle test/test_node_lifecycle.cpp TIMEOUT 120)
   target_include_directories(test_node_lifecycle PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  # Per-mode table fixture (#172): the live node loads it from backscatter_curve_file.
+  target_compile_definitions(test_node_lifecycle PRIVATE
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
   target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
   set_tests_properties(test_node_lifecycle PROPERTIES
     ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
@@ -429,9 +436,25 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_node test/test_node.cpp)
   target_link_libraries(test_node cube_bathymetry)
+  target_compile_definitions(test_node PRIVATE
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
 
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
+
+  # Per-mode table loader + the shared mode-key vectors (#172): the C++ key
+  # must match derive_angular_response.py's on every case in mode_keys.json.
+  ament_add_gtest(test_backscatter_mode test/test_backscatter_mode.cpp)
+  target_link_libraries(test_backscatter_mode cube_bathymetry)
+  target_compile_definitions(test_backscatter_mode PRIVATE
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
+
+  ament_add_gtest(test_backscatter_table test/test_backscatter_table.cpp)
+  target_link_libraries(test_backscatter_table cube_bathymetry nlohmann_json::nlohmann_json)
+  target_compile_definitions(test_backscatter_table PRIVATE
+    MODE_KEYS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/mode_keys.json"
+    DERIVED_CURVE_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/derived_curve_tier2_seawater.csv"
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
   # Golden curve written by derive_angular_response.py (#170): the Python test
   # checks the script still writes it, this test checks the C++ loader reads it.
   # Per-mode table fixture (#172), written by the same Python test: the current
@@ -589,12 +612,14 @@ if(BUILD_TESTING)
     marine_bathymetry_store::marine_bathymetry_store
     marine_mbes_backscatter_store::marine_mbes_backscatter_store
   )
-  # The CLI-contract cases run the built import_bag binary for its argument
-  # validation (a bad depth-adaptive policy must fail before any bag opens).
+  # The CLI-contract cases run the built import_bag (and batch_regen_bag)
+  # binaries for their argument validation (a bad depth-adaptive policy, an
+  # unreadable --backscatter-curve, must fail before any bag opens).
   target_compile_definitions(test_mixed_level_import PRIVATE
     IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
+    BATCH_REGEN_EXE="$<TARGET_FILE:batch_regen_bag>"
   )
-  add_dependencies(test_mixed_level_import import_bag)
+  add_dependencies(test_mixed_level_import import_bag batch_regen_bag)
 
   # End-to-end smoke test over a REAL sonar bag (#143/#162). Nothing else in
   # the suite reaches import_bag's main() past argument validation, so the
@@ -608,6 +633,7 @@ if(BUILD_TESTING)
   target_compile_definitions(test_real_bag_smoke PRIVATE
     IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
     BATCH_REGEN_EXE="$<TARGET_FILE:batch_regen_bag>"
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv"
   )
   add_dependencies(test_real_bag_smoke import_bag batch_regen_bag)
 endif()
@@ -618,7 +644,12 @@ endif()
 # find_package(cube_bathymetry) then resolves their include paths/targets without
 # its own find_package. (marine_bathymetry_store was a pre-existing gap here;
 # marine_mbes_backscatter_store is new with #80.)
-ament_export_dependencies(rclcpp marine_bathymetry_store marine_mbes_backscatter_store)
+# OpenSSL (#172): the exported cube_bathymetry_level_plan links OpenSSL::Crypto
+# (the fingerprint's SHA-256), so a downstream find_package(cube_bathymetry)
+# must find OpenSSL too or that imported target names a target that does not
+# exist.
+ament_export_dependencies(
+  rclcpp marine_bathymetry_store marine_mbes_backscatter_store OpenSSL)
 
 # Export old-style CMake variables
 ament_export_include_directories(include/${PROJECT_NAME})

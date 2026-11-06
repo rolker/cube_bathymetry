@@ -262,17 +262,20 @@ private:
 
     pointcloud.height = 1;
     pointcloud.width = soundings.size();
-    pointcloud.point_step = 28;  // 7 fields * 4 bytes each
+    pointcloud.point_step = 32;  // 8 fields * 4 bytes each
     pointcloud.row_step = pointcloud.point_step * pointcloud.width;
     pointcloud.is_dense = true;
     pointcloud.is_bigendian = false;
 
     // Field order: x, y, z, intensity, vertical_uncertainty, horizontal_uncertainty,
-    // beam_angle. intensity (per-beam backscatter) sits with the geometry, ahead of
-    // the uncertainty fields; beam_angle (incidence angle rel. nadir, rad) trails so
-    // the live node can pair it with intensity (ADR-0007 D3). Consumers read by field
-    // name, so the order is safe.
-    pointcloud.fields.resize(7);
+    // beam_angle, frequency. intensity (per-beam backscatter) sits with the geometry,
+    // ahead of the uncertainty fields; beam_angle (incidence angle rel. nadir, rad)
+    // trails so the live node can pair it with intensity (ADR-0007 D3); frequency
+    // (the ping's PingInfo.frequency, Hz, the same value on every point of the
+    // cloud) lets the live node build the ping's pulse-mode key together with
+    // the latest SonarInfo (cube_bathymetry#172). Consumers read by field name,
+    // so the order is safe, and both trailing fields are optional to them.
+    pointcloud.fields.resize(8);
     pointcloud.fields[0].name = "x";
     pointcloud.fields[0].offset = 0;
     pointcloud.fields[0].datatype = sensor_msgs::msg::PointField::FLOAT32;
@@ -301,6 +304,10 @@ private:
     pointcloud.fields[6].offset = 24;
     pointcloud.fields[6].datatype = sensor_msgs::msg::PointField::FLOAT32;
     pointcloud.fields[6].count = 1;
+    pointcloud.fields[7].name = "frequency";
+    pointcloud.fields[7].offset = 28;
+    pointcloud.fields[7].datatype = sensor_msgs::msg::PointField::FLOAT32;
+    pointcloud.fields[7].count = 1;
 
     pointcloud.data.resize(pointcloud.row_step * pointcloud.height);
     float * data_ptr = reinterpret_cast<float *>(pointcloud.data.data());
@@ -313,7 +320,8 @@ private:
       data_ptr[4] = sounding.vertical_error;
       data_ptr[5] = sounding.horizontal_error;
       data_ptr[6] = sounding.beam_angle;
-      data_ptr += 7;  // Move to the next point
+      data_ptr[7] = msg->ping_info.frequency;
+      data_ptr += 8;  // Move to the next point
     }
 
     pointcloud_publisher_->publish(pointcloud);

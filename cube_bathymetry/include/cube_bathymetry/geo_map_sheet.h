@@ -94,6 +94,16 @@ public:
       bool tl_removed = false,
       float absorption_db_per_m = 0.0f);
 
+  /// @brief Install the per-pulse-mode backscatter table and the fallback
+  ///        policy (cube_bathymetry#172) into the sheet's Parameters, so every
+  ///        grid's `Hypothesis::recordBeam` can look a beam's
+  ///        `correction_idx` up. An empty table removes one. Independent of
+  ///        setBackscatterCorrection(): the legacy curve still serves beams
+  ///        whose index is unresolved (0).
+    void setBackscatterTable(
+      BackscatterTable table,
+      BackscatterModeFallback fallback = BackscatterModeFallback::Identity);
+
   /// @brief Set the spacing term of the node capture distance
   ///        (`Parameters::capture_spacing_scale`, cube_bathymetry#143).
   ///

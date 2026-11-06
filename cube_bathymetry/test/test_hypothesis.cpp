@@ -269,4 +269,22 @@ TEST_F(HypothesisTest, IntensityStateIsConstantSizeRegardlessOfBeamCount)
   EXPECT_LE(sizeof(IntensityWelford), static_cast<std::size_t>(32));
 }
 
+// cube_bathymetry#172: an excluded beam is not a sample; an explicit-identity
+// beam is recorded raw whatever the configured curve.
+TEST_F(HypothesisTest, RecordBeamHonoursTheCorrectionIndex)
+{
+  params.backscatter_angle_correction = BackscatterAngleCorrection::Empirical;
+  params.angular_response_curve = {{1.0f, 0.0f}, {41.0f, -8.0f}};
+  Hypothesis h(10.0f, 1.0f);
+  const float angle_21 = static_cast<float>(21.0 * M_PI / 180.0);
+  h.recordBeam(-30.0f, angle_21, std::nan(""), params, kCorrectionExclude);
+  EXPECT_EQ(h.intensity.n, 0u) << "an excluded beam must not be counted";
+  h.recordBeam(-30.0f, angle_21, std::nan(""), params, kCorrectionIdentity);
+  ASSERT_EQ(h.intensity.n, 1u);
+  EXPECT_DOUBLE_EQ(h.intensity.mean, -30.0);
+  h.recordBeam(-30.0f, angle_21, std::nan(""), params);  // unresolved -> legacy -4 dB
+  ASSERT_EQ(h.intensity.n, 2u);
+  EXPECT_NEAR(h.intensity.mean, -28.0, 1e-5);
+}
+
 }  // namespace cube

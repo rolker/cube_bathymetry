@@ -35,6 +35,7 @@
        the need for an explicit find_package(nlohmann_json) (the store now exports it),
        but not the build-time install dependency. -->
   <depend>nlohmann-json-dev</depend>
+  <depend>libssl-dev</depend>  <!-- SHA-256 of the backscatter curve/table in the fingerprint (#172) -->
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>  <!-- bag readers in import_bag / bag_to_geotiff -->
   <depend>rosbag2_transport</depend>

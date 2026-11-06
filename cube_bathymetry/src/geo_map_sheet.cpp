@@ -92,6 +92,12 @@ void GeoMapSheet::setBackscatterCorrection(
   parameters_.backscatter_absorption_db_per_m = absorption_db_per_m;
 }
 
+void GeoMapSheet::setBackscatterTable(BackscatterTable table, BackscatterModeFallback fallback)
+{
+  parameters_.backscatter_table = std::move(table);
+  parameters_.backscatter_mode_fallback = fallback;
+}
+
 void GeoMapSheet::setCaptureSpacingScale(float scale)
 {
   if (!std::isfinite(scale) || scale <= 0.0f) {

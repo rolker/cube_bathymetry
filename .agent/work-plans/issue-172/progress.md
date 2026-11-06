@@ -248,3 +248,375 @@ Specialists: Claude Adversarial Lens A + Lens B on the fix commits (fresh contex
 - [x] (suggestion) bag_identity mtime in whole seconds — mtime_ns (Gemini)
 - [x] (suggestion) README said the trimming floor needs both thresholds and that out-of-span beams do not shape the intercepts — wording matches the code (Codex)
 - [ ] (suggestion) README "Header provenance" key table still lists only the single-curve keys — cosmetic, the by-mode section describes its own header (Governance round 1; carried)
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 10:22 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+
+**Scope**: PR 2 of #172 — the per-pulse-mode table applied in the estimator, the offline importer and the live node (PR 1, the derive side, merged as PR #174). Not pushed, no PR.
+**Branch**: feature/issue-172 at `6c8ad85` (six commits on jazzy `7437948`)
+
+### Commits
+- `32dfda8` backscatter_table: load the per-mode table and share the mode-key spec
+- `d67cb73` estimator: carry a per-ping correction index to the record-time backscatter correction
+- `6440bdc` backscatter_mode: resolve each ping's pulse mode against the table
+- `3ccbc8f` build_fingerprint: record the backscatter correction beside the tiling (ADR-0003)
+- `de9d930` import_bag + live node: apply a per-pulse-mode table per ping
+- `6c8ad85` docs: per-pulse-mode addendum to ADR-0007, the fingerprint key in ADR-0003, applying the table
+
+### What landed
+- `backscatter_table.{h,cpp}`: `keyNumber` / `canonicalModeKey` (tested on every case of `test/data/mode_keys.json`), the strict `angular-response-table v1` loader (a table is read whole or refused with the line named; per-mode scalar disagreement, overlapping groups, missing header keys all refuse), `correctWithTable` = `raw - db_relative_to_nadir - r_g(log10 R/R0) - offset` with the angle-group lookup rule, node interpolation clamped beyond the ends, nearest-centre bin for the unweighable check, fallback identity|exclude.
+- `backscatter_mode.{h,cpp}`: resolver (stamp-keyed deduplicated SonarInfo history, latest at or before the ping, declared-TVG check warned once per (mode, state) and counted per ping, fallback for NoSonarInfo / NoEntry / Unanchored / UnderPingFloor, late-SonarInfo stale count, report). `sonarInfoStateFrom` in `sonar_info_curve`.
+- `Sounding::correction_idx` (0 unresolved → legacy curve path byte-identical, 0xFFFE exclude, 0xFFFF identity, 1..0xFFFD entries) through `DepthAndUncertainty` (22 bytes), `Node::update`/`queueEstimate`, `Hypothesis::recordBeam` (NaN back = skipped), the recon spill; `GeoMapSheet::setBackscatterTable`; `MultiLevelAccumulatorConfig`.
+- import_bag: table via `--backscatter-curve` (format line), `--backscatter-mode-fallback`, `--backscatter-mode-min-pings`, SonarInfo topic in the main-pass read filter and resolved at drain time, resolver report, fingerprint record; main() refactored into five helpers (cpplint fn_size). Live node: `backscatter_mode_fallback`, `backscatter_mode_min_pings`, broken table fails configure, SonarInfo depth 10, table re-installed on reset, report at cleanup. `detections_to_pointcloud` writes a `frequency` field per point. batch_regen refuses a table.
+- Fingerprint `backscatter_correction` {mode, kind, source, sha256 (OpenSSL, `libssl-dev`), fallback, min_pings}; a pre-#172 file is stale.
+- marine_tools mirror follow-up filed: rolker/marine_tools#96.
+
+### Deviations from the plan (recorded in plan.md + the ADR-0007 addendum)
+- Decision 6: inverse-variance Welford weights are NOT applied — the persisted statistic is the unweighted `{n, mean, M2}` (eviction spill + the 3-band MbesCell round trip), and a weighted Welford needs the weight sums carried through both; the column serves only the unweighable-bin cut. Flat on the M3, so the product is unchanged; follow-up listed in the ADR's Deferred section.
+- Decision 9: `nearest` fallback dropped (no honest metric; a neighbour's entry reintroduces the mode steps); `--backscatter-mode-min-pings` added as the apply-time answer for the 5 ms FM mode.
+- Decision 10: the live node's clouds carried no frequency; `detections_to_pointcloud` now writes it (point_step 28 → 32), an older cloud keys as `?kHz` and gets the fallback.
+- Per-beam uncorrectable cases (unweighable bin, no finite range) take the fallback but are not counted per beam (const parameters inside the estimator); the loader reports unweighable bins per mode at load time.
+
+### Tests
+Full package suite: 1395 tests, 0 failures (96 cppcheck skips, as before). New: `test_backscatter_table` (9), `test_backscatter_mode` (5), fingerprint key + SHA-256 vectors (2), `correctBeamIntensity` index paths, `recordBeam` exclude, `Node` queue carries the index, recon spill round trip, two live-node lifecycle tests. Lint (uncrustify, cpplint, xmllint, lint_cmake, cppcheck) clean. Not covered: import_bag's main-pass SonarInfo ordering end to end (no C++ synthetic bag with SonarInfo; the Appledore re-import is the integration run).
+
+### Next
+`/review-code` pre-push on the branch; after the PR, the Appledore re-import with the run-4 table (`--backscatter-mode-fallback exclude`) → candidate D for the operator's eyes.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 10:29 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `e7e2022`
+**Mode**: pre-push
+**Depth**: Deep (reason: 3398 lines over 42 files, plus substantive ADR-0003/ADR-0007 amendments)
+**Must-fix**: 8 | **Suggestions**: 18
+**Round**: 1 (first review of PR 2; the two earlier entries reviewed PR 1, merged as PR #174) | **Ship**: continue — eight must-fixes. Two are correctness bugs: the range-term group lookup, and the false NO-OP warning. Two are design-level: an unbounded SonarInfo history in the live node, and a table run where nothing resolved still exiting 0 with a `kind:table` fingerprint. These warrant a second independent read after the fix.
+
+Specialists: static analysis (cpplint, uncrustify, xmllint, lint_cmake: clean; cppcheck 2.13 skipped by ament on this host, as in the package tests), governance + plan drift, Claude Adversarial Lens A and Lens B (Deep horizon, fresh context), and cross-model Gemini and Codex (both ran, EXIT=0). Local Adversarial is off (the default). The repo has no `.agents/README.md` or `review-context.yaml`. Plan drift: the Files to Change table matches the diff, and the declared deviations are recorded in plan.md and ADR-0007, except that ADR item 5 still claims per-beam cases are counted.
+
+### Findings
+- [x] (must-fix) `groupFor`: a beam below the lowest PRESENT group's `angle_lo_deg` takes that group's range term. When the writer omits the first declared group ("zero:" status, no rows), beams in that group and in the specular band get the next group's r_g instead of the zero term the format specifies. Fix: honour `# range_angle_groups_deg` or the `# range_term:` lines, and add a test with an unfitted first group. — `cube_bathymetry/src/backscatter_table.cpp:375-388` (lead + Codex, cross-model confirmed) — fixed in `818ccb6` (+ load report `c2ed3cf`)
+- [x] (must-fix) `cube_bathymetry_level_plan` is exported with a transitive `OpenSSL::Crypto` link, but `ament_export_dependencies` lacks OpenSSL. A downstream `find_package(cube_bathymetry)`, such as ui_ws `marine_perception_tools`, fails to resolve the target. — `cube_bathymetry/CMakeLists.txt:117,644` (Governance + Lens B) — fixed in `7874b06`
+- [x] (must-fix) README says `soundings` carries seven float32 fields. `detections_to_pointcloud` now writes eight (`frequency`, point_step 32). — `README.md:16-17` (Governance) — fixed in `78ba0cc`
+- [x] (must-fix) README says the beam "is weighted by `1 / var_db2`". Weights are not applied (decision 6 deviation). The "PR 2's loader" and "what PR 2 does" wording is stale too. — `README.md:~933,1062,1080` (Governance) — fixed in `62d75a1`
+- [x] (must-fix) The live node logs "backscatter_angle_correction=empirical but no curve was loaded ... NO-OP" when a valid per-mode table IS loaded: the `bs_curve.points.empty()` branch lacks `!bs_file_is_table`. Add a lifecycle test with `empirical` + table. — `cube_bathymetry/src/cube_bathymetry_node.hpp:237` (Gemini) — fixed in `9b64de2`
+- [x] (must-fix) `BackscatterModeResolver::history_` is never pruned. The M3 bridge republishes SonarInfo on every acquisition-signature change, which happens every ping under alternating multi-mode pinging, so a long-running live node grows without bound (roughly 250 MB a day at 10 Hz). Prune it behind a horizon without breaking the stale logic, and dedupe a new stamp whose state equals its predecessor's. — `cube_bathymetry/src/backscatter_mode.cpp:78-103` (Lens B; Lens A + Gemini as suggestion) — fixed in `83d3858`
+- [x] (must-fix) With a table configured, a run in which no ping resolves still exits 0, prints only the report, and writes the fingerprint `kind:table` + sha256. That happens with a wrong `--sonar-info-topic`, with no SonarInfo in the bags, or with a live cloud without `frequency`. The result is uncorrected data with false provenance. Fail or warn loudly in import_bag when `sonar_info_seen == 0` or 0 pings resolved. In the node, warn once on a cloud lacking `frequency` and once when N pings have resolved nothing. — `cube_bathymetry/src/import_bag_main.cpp:2686`, `cube_bathymetry/src/cube_bathymetry_node.hpp:~2616` (Lens B) — fixed in `c54c922`
+- [x] (must-fix) `setupBackscatter` builds the resolver with `&out.table`, then `return out;`. That relies on NRVO, which is not guaranteed; a move would leave `table_` dangling. Fix: make the resolver own or share the table, or build it at the call site, or delete the struct's copy/move. — `cube_bathymetry/src/import_bag_main.cpp:1095-1147` (Codex; Lens B as suggestion) — fixed in `75bafb4`
+- [x] (suggestion) Beam-level fallbacks (NaN angle, no finite range, unweighable bin) are not counted per beam, yet ADR-0007 item 5 says "every case is counted per reason". Either count them or reword the ADR and the `--backscatter-mode-fallback` help. — `cube_bathymetry/src/backscatter_table.cpp:736-744`, ADR-0007 item 5 (Codex + Lens B + Governance) — fixed in `fdfb0e7` (counted, ADR item 5 now true)
+- [x] (suggestion) A beam at |θ| >= 90 deg gets the clamped angle term but a zero range term. The writer drops such beams, so the C++ side could treat them as uncorrectable (fallback). — `cube_bathymetry/src/backscatter_table.cpp:375-388,747` (Lens A) — fixed in `e7aff1d`
+- [x] (suggestion) An empty (width 0) cloud is still resolved with NaN frequency, so it counts as a `?kHz` NoEntry ping and may fire the TVG warning. Gate it on `!soundings.empty()`. — `cube_bathymetry/src/cube_bathymetry_node.hpp:~2701` (Gemini) — fixed in `4e62474`
+- [x] (suggestion) The declared-TVG mismatch warning fires for Unanchored and UnderPingFloor entries and says "the table is applied as is", but the fallback applied instead. — `cube_bathymetry/src/backscatter_mode.cpp:158-177` (Gemini) — fixed in `e2a6fa3`
+- [x] (suggestion) The loader does not check angle rows or group bounds against [0, 90]. A duplicate `# mode_summary:` silently overwrites, and a summary without `pings=` reads as 0, so it falls under any ping floor. — `cube_bathymetry/src/backscatter_table.cpp:513-639` (Gemini) — fixed in `4a7db64`
+- [x] (suggestion) A near-miss format line (BOM, leading blank line, `v2`) is not detected as a table. It falls to the legacy loader, which yields an empty curve with only a WARN and a `kind:none` fingerprint. Fail loudly on a `# format: angular-response-table` prefix that is not exactly v1. — `cube_bathymetry/src/backscatter_table.cpp:412-426` (Lens B) — fixed in `55895b2`
+- [x] (suggestion) The duplicate bin/node checks are O(n²) and have no row or line-length bound. An oversized operator file can stall `on_configure`. — `cube_bathymetry/src/backscatter_table.cpp:617-655` (Lens B) — fixed in `9acfbea`
+- [x] (suggestion) `--backscatter-mode-fallback` / `--backscatter-mode-min-pings` (and the node parameters) are silently ignored without a table. Warn once. — `cube_bathymetry/src/import_bag_main.cpp:~1113` (Lens B) — fixed in `46ab062`
+- [x] (suggestion) `~/reset` keeps the resolver (by design), and its counts and `warned_` keep accumulating, so the cleanup report mixes pre-reset and post-reset pings. Say so in the report or the README. — `cube_bathymetry/src/cube_bathymetry_node.hpp:~1903` (Gemini) — fixed in `33fb160`
+- [x] (suggestion) `DeclaredTvgState` compares the float absorption exactly after a `%.6g` round trip. Use a small relative tolerance. — `cube_bathymetry/src/backscatter_table.cpp` operator== (Lens A) — fixed in `b3f62f8`
+- [x] (suggestion) The README should say plainly that `identity` mixes raw beams into table-corrected means, so `exclude` is the safe fallback for a mode-switching sonar. Also state that an older cloud without `frequency` keys as `?kHz` and gets the fallback. — `README.md` by-mode / node parameters (Lens A + Governance) — fixed in `bec5b70`
+- [x] (suggestion) `newest_stamp_ns_` / `have_newest_` are written but never read. — `cube_bathymetry/include/cube_bathymetry/backscatter_mode.h:174-175` (Gemini) — fixed in `83d3858` (with must-fix 6)
+- [x] (suggestion) batch_regen refuses a table file but never reads `build_fingerprint.json`, so `--backscatter-correction none` can rebuild tiles in a table-built store. This gap predates #172; name it in the PR body. — `cube_bathymetry/src/batch_regen_main.cpp:918-927` (Lens B) — (deferred: PR-body text for the host, who opens the PR; the gap predates #172 and the wording is in the Implementation entry)
+- [x] (suggestion) The `Parameters`/`Sounding`/`DepthAndUncertainty` layout changed (20 to 22 bytes), so ui_ws `marine_perception_tools` must be rebuilt with this. Note it in the PR body and the post-merge rebuild. (Lens B) — (deferred: PR-body text for the host, who opens the PR; the rebuild note is in the Implementation entry)
+- [x] (suggestion) CMake comment "ADR-0003 schema v2, tiling only (#143)" is stale. — `cube_bathymetry/CMakeLists.txt:104` (Governance) — fixed in `a724a0b`
+- [x] (suggestion) ADR-0003: the `tool_version` text runs on from "...keeps schema version 2 (additive)." with no paragraph break. — `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md` (Governance) — fixed in `77204a1`
+- [x] (suggestion) README "Header provenance" key table still lists only the single-curve keys (carried from PR 1). — `README.md` (Governance) — fixed in `101ea6d`
+- [x] (suggestion) Instruction-update candidates (proposals only): a `.agents/README.md` for cube_bathymetry recording the `soundings` field contract (count, point_step, fixtures); the pitfall that an exported target linking a new find_package'd library needs `ament_export_dependencies`. (Governance) — (deferred: proposals only; a cube_bathymetry `.agents/README.md` is a dedicated task with its own issue per AGENTS.md, recorded in the Implementation entry)
+
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 11:21 -05:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-172 at `8c34961`
+**Addressed**: `## Local Review (Pre-Push)` of 2026-11-06 10:29 -05:00 (round 1 of PR 2, at `e7e2022`): 8 must-fix, 18 suggestions
+**Commits**: `818ccb6` `7874b06` `78ba0cc` `62d75a1` `9b64de2` `83d3858` `75bafb4` `c54c922` `e7aff1d` `fdfb0e7` `4e62474` `e2a6fa3` `4a7db64` `55895b2` `9acfbea` `46ab062` `33fb160` `b3f62f8` `bec5b70` `a724a0b` `77204a1` `101ea6d` `c2ed3cf`; boxes checked in `8c34961`. Not pushed.
+
+### Actions
+- [x] (must-fix 1) Group lookup: the loader reads `# range_angle_groups_deg:` and creates every declared group per mode (an unfitted one with no nodes = zero term); the specular band takes the first DECLARED group; a range row naming an undeclared group, or a malformed declaration, fails the load; without the header line the written groups are used as before. Test with an unfitted first group (specular and 10-30 beams get zero, 30-90 gets its term) and the bare-table fallback. Load report now says "N of M groups fitted" — `818ccb6`, `c2ed3cf`
+- [x] (must-fix 2) `ament_export_dependencies(... OpenSSL)`. A scratch downstream `find_package(cube_bathymetry)` + link of `cube_bathymetry_level_plan` configured before and after; before, OpenSSL::Crypto resolved only because another dependency already found OpenSSL — `7874b06`
+- [x] (must-fix 3) README: `soundings` has eight fields (`frequency`, point_step 32); an older seven-field cloud keys as `?kHz` — `78ba0cc`
+- [x] (must-fix 4) README: the estimator does not weight by `1/var_db2` (decision 6 deviation); stale "PR 2" wording replaced — `62d75a1`
+- [x] (must-fix 5) Node: NO-OP warning guarded with `!bs_file_is_table`; lifecycle test captures the log (empirical + table: no NO-OP; empirical, no file: NO-OP) — `9b64de2`
+- [x] (must-fix 6) Resolver history bounded as directed: on every `addSonarInfo`, entries before `newest resolved ping - 60 s` dropped except the newest at or before the cut; hard cap 4096 (oldest first); documented in the header, README, plan decision 10, ADR-0007 item 2. Also: a message whose state equals the one in force at its stamp is not stored; the stale count looks only at pings between the stamp and the next stored stamp and counts one only when the message changes its correction (each recent ping records its idx); dead `newest_stamp_ns_`/`have_newest_` removed. Tests: 2000 s switching every ping stays at the window size, late pings 59 s and 30 s behind resolve against the kept state, cap holds a ping-less stream, steady republish stores one state, out-of-order older message counts no ping that used a newer state — `83d3858`
+- [x] (must-fix 7) Table run that resolves nothing: import_bag prints `error:` with the reason breakdown and likely causes, writes the store and the fingerprint with `kind: "table-unresolved"` (ADR-0003, `build_fingerprint.h`; `isTableKind()` keeps fallback/min_pings in the JSON), exits 4 (usage(): 1 and 2 outrank 4, 4 outranks 3; recon-only keeps its code). Node: WARN at the first unresolved cloud after each configure, throttled 60 s per configuration (member, not the macro's call-site static), with count + reasons; cleanup report kept. Tests: resolver `resolvedNothing`/`unresolvedSummary`, fingerprint round trip + staleness both ways, lifecycle log capture of the throttled warning, real-bag smoke case (fixture table over the excerpt, which has no SonarInfo: exit 4, error text, fingerprint kind) — `c54c922`
+- [x] (must-fix 8) `setupBackscatter(BackscatterSetup & out, ...)` fills a caller-owned struct; copy and move deleted — `75bafb4`
+- [x] (suggestion) Beam-level fallbacks counted: `countBeam()` applies the estimator's own `tableBeamStatus` to each sounding where the ping is stamped (import_bag + node); report lists uncorrectable beams per (mode, reason), as submitted; ADR item 5, `--backscatter-mode-fallback` help, README, plan decision 9 updated — `fdfb0e7`
+- [x] (suggestion) `|θ| >= 90` deg is uncorrectable (fallback); `tableBeamStatus`/`beamAbsAngleDeg` added — `e7aff1d`
+- [x] (suggestion) Empty cloud not resolved (`stampCloudMode` skips it); lifecycle test — `4e62474`
+- [x] (suggestion) TVG mismatch warning names the reason and fallback when the entry is not applied — `e2a6fa3`
+- [x] (suggestion) Loader refuses angle bins outside [0, 90), group bounds outside [0, 90], a duplicate `# mode_summary:`, and a summary without `pings=` — `4a7db64`
+- [x] (suggestion) Near-miss format line: BOM / leading blank lines tolerated; any `# format: angular-response-table` prefix is a table, only v1 loads, another version is an "unsupported table format" error — `55895b2`
+- [x] (suggestion) Loader bounds: file > 64 MiB, line > 4096 chars, > 1e6 rows refused; duplicate checks are set/map lookups (40,000-row table test) — `9acfbea`
+- [x] (suggestion) Fallback/min-pings without a table warn once (import_bag and node; tested on both) — `46ab062`
+- [x] (suggestion) Cleanup report says it spans every `~/reset`; README reset section lists the table and resolver as kept — `33fb160`
+- [x] (suggestion) Declared absorption compared within a relative 1e-5 (the `%.6g` round trip) — `b3f62f8`
+- [x] (suggestion) README: `exclude` is the safe fallback for a mode-switching sonar; older clouds without `frequency` get the fallback — `bec5b70`
+- [x] (suggestion) Dead `newest_stamp_ns_`/`have_newest_` removed — `83d3858`
+- [x] (suggestion) batch_regen never reads `build_fingerprint.json` — (deferred: PR-body text for the host; wording below)
+- [x] (suggestion) Layout change needs a ui_ws rebuild — (deferred: PR-body text for the host; wording below)
+- [x] (suggestion) CMake "tiling only" comment — `a724a0b`
+- [x] (suggestion) ADR-0003 paragraph break — `77204a1`
+- [x] (suggestion) README "Header provenance": per-mode header keys table, read vs record — `101ea6d`
+- [x] (suggestion) Instruction-update candidates — (deferred: proposals only; a cube_bathymetry `.agents/README.md` is a dedicated task with its own issue per AGENTS.md. Candidates kept: the `soundings` field contract (count, point_step, fixtures); an exported target linking a new find_package'd library needs `ament_export_dependencies`; RCLCPP_*_THROTTLE state is a per-call-site static shared by every node in the process, so a per-configuration throttle needs a member)
+
+### For the PR body (host)
+- **Known gap, predates #172:** `batch_regen_bag` refuses a per-mode table file, but it never reads `build_fingerprint.json`, so `--backscatter-correction none` (or another curve) can rebuild tiles inside a table-built store without any check. The fingerprint now records the correction; a consumer that compares it is the ADR-0003 `--incremental` follow-up.
+- **Rebuild:** `Sounding`/`DepthAndUncertainty`/`Parameters` changed layout (`DepthAndUncertainty` 20 → 22 bytes, `Parameters` carries the table), so ui_ws `marine_perception_tools` must be rebuilt with this PR, and the main tree's sensors_ws and ui_ws rebuilt after merge.
+- `import_bag` has a new exit code 4 (table loaded, no ping resolved; fingerprint kind `table-unresolved`).
+
+### Tests
+Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1410 tests, 0 errors, 0 failures, 96 skipped** (the same 96 cppcheck skips as before; was 1395). The real-bag smoke cases ran (excerpt reachable on this host). uncrustify and cpplint clean on every touched file, lint_cmake clean; import_bag `main()` at 492 of cpplint's 500 lines.
+
+### Left open
+- Nothing from round 1 besides the three deferrals above.
+- Behaviour to know (documented in `backscatter_mode.h`): a SonarInfo deduplicated because it equals the state in force is not stored, so a later out-of-order message stamped between it and its predecessor governs pings after the dropped stamp too. Needs out-of-order delivery from one publisher; accepted.
+- Not a defect, noticed: the lifecycle tests' synthetic SonarInfo leaves `tvg_absorption_db_per_km` at 0 (the message says producers must set NaN), so it reads as a declared `UNKNOWN/0 dB/km` mismatch; real bridge data sets NaN.
+
+### Next
+`/review-code` pre-push (round 2) on the branch, fresh context.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 11:31 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `36b5d26`
+**Mode**: pre-push
+**Depth**: Deep (reason: +4751 / -138 lines over 43 files, plus ADR-0003/ADR-0007 amendments; round 2 reviewed the round-1 fix commits 8f5a52f..c2ed3cf, with the whole branch read cross-model)
+**Must-fix**: 3 | **Suggestions**: 13
+**Round**: 2 of PR 2 (the earlier rounds 1-2 of 11-02 reviewed PR 1, merged as PR #174) | **Ship**: continue — must-fixes fell from 8 to 3, and each is a precise fix. Two of them were introduced by round-1 fixes in the resolver and the exit-4 path, so a short round 3 on just the new fix commits is worth it; a full re-dispatch is not.
+
+Specialists:
+- Static analysis on every changed C++/CMake/XML file: cpplint, uncrustify, lint_cmake, xmllint, plus cppcheck 2.13 run directly (ament skips it on this host). All clean.
+- Governance and plan drift: plan.md, README, ADR-0003 and ADR-0007 are in sync with the fixes. The repo has no `.agents/README.md` or `review-context.yaml`.
+- Claude Adversarial Lens A and Lens B ran on the fix commits (fresh context, Deep horizon).
+- Cross-model: Gemini and Codex ran on the whole branch, both EXIT=0.
+- Local Adversarial is off (the default).
+
+Round-1 closure: all 8 must-fixes and the 15 fixed suggestions are verified closed, and the 3 deferrals are still owed as PR-body text. Two round-1 fixes introduced new defects: must-fix 6 (bounded history) led to must-fix 2 below, and must-fix 7 (exit 4) led to must-fix 3 below.
+
+Dropped after checking:
+- Gemini, locale-dependent `snprintf`/`strtod`: nothing in the package calls `setlocale`.
+- Gemini, the SonarInfo curve path under a table: an explicit file returns early, and that warning is throttled.
+- Gemini, packed 22-byte `DepthAndUncertainty`: `pack(1)` was already there before this branch.
+- Gemini, `auto` vs `empirical` fingerprint mode: errs on the safe side (a false stale) and applies to single curves too.
+
+### Findings
+- [x] (must-fix) The loader refuses an angle bin centred at or past 90 deg, but `derive_angular_response.py` `fit_mode` writes `(j + 0.5) * bin_width` up to `ceil(90 / width)`. At `--bin-width-deg` 4, 8, 12, 20, 40 or 60 (not divisors of 90), one beam in the last bin makes the whole table fail to load. Accept the last bin when its lower edge is under 90 (beams at 90 deg or more are already uncorrectable), and add a round-trip test at width 4. — `cube_bathymetry/src/backscatter_table.cpp:760` (Lens A; from `4a7db64`) — fixed in `877a16a`
+- [x] (must-fix) The history-window anchor `newest_resolved_ns_` is a running maximum and never moves back. After a backward stamp jump (sim restart, `ros2 bag play --loop`; `~/reset` keeps the resolver), each `addSonarInfo` prunes to the newest entry before the old maximum. A ping whose successor SonarInfo arrived first then gets no state and falls back, until time passes the old maximum. Before the bound, the unbounded history kept those states. The node's member throttle `(now - last).seconds() >= 60` is negative after the jump, so the unresolved warning is muted too. Fix: re-anchor (and clear `recent_resolved_`) when a ping lands more than the window behind the anchor, treat a negative elapsed time as "warn now", and add a test. Offline, a far-future ping blocks the head of the pending queue until the flush, so that case is weaker than Lens B states. — `cube_bathymetry/src/backscatter_mode.cpp:210-213,136-140`, `cube_bathymetry/src/cube_bathymetry_node.hpp:973-974` (Lens B + Gemini, cross-model confirmed; from `83d3858`) — fixed in `167d794`
+- [x] (must-fix) The "nothing resolved" error prints "The store is otherwise complete; its fingerprint records kind 'table-unresolved' and the run exits 4" before the finish step runs. That is false in three cases: a recon-only `--level-plan-out` preflight (no store, no fingerprint, exits 0, so a preflight gate passes a wrong `--sonar-info-topic`), a finish that returns 1 (store may be incomplete), and a finish that returns 2 (no fingerprint). Keep the diagnosis in `reportModeResolution`, print the outcome sentence from `withTableResolution` once the code is known, and make the recon-only preflight exit 4, or say plainly that it failed. — `cube_bathymetry/src/import_bag_main.cpp:1196-1204,1213-1216` (Lens B must-fix, Lens A suggestion, cross-pass confirmed; from `c54c922`) — fixed in `f278fd5`
+- [x] (suggestion) Deduplicating equal states across different stamps breaks out-of-order association. Example: A@100 is stored, A@300 is dropped as a duplicate, then a late B@200 arrives, and a ping at 350 gets B. The Python derive keeps distinct stamps. This was documented and accepted, and it needs non-monotonic stamps from one producer; Codex rates it must-fix. The 60 s window alone already bounds the history, so the dedup could go, but that would load the cap in import_bag (next item). — `cube_bathymetry/src/backscatter_mode.cpp:85-93` (Codex) — fixed in `961d87e`
+- [x] (suggestion) The `kMaxHistory` cap ignores pings still pending in import_bag. SonarInfo is fed at read time, while pings wait for the TF frontier. If TF stalls through more than 4096 state changes, the states those pings need are dropped, and the pings are reported as "before the first SonarInfo". — `cube_bathymetry/src/backscatter_mode.cpp:146-148`, `cube_bathymetry/src/import_bag_main.cpp:2723-2736` (Gemini) — fixed in `afc66d6`
+- [x] (suggestion) The stale count can count one ping twice and never takes a count back. Example: a ping at 20 resolves under A@0, then a late B@10 arrives, then a late C@15, and the count is 2 for one ping. Count each ping at most once. — `cube_bathymetry/src/backscatter_mode.cpp:101-118` (Lens A) — fixed in `80a1348`
+- [x] (suggestion) A beam past the last written angle bin, or in a gap between bins, gets the nearest bin's clamped value, which the table never measured. This is the same reasoning as the 90 deg rule. Add a status for "no bin within half `angle_bin_width_deg`". — `cube_bathymetry/src/backscatter_table.cpp:460-471,442` (Lens A) — fixed in `e34dba3` (beyond the outermost / short of the nadir-most bin; an interior gap is still interpolated between its two measured neighbours, partly deferred: see the Implementation entry)
+- [x] (suggestion) The live node's unresolved warning fires every minute on normal unresolved pings: a rare mode with no entry, the ping floor, pings before the first SonarInfo. import_bag treats only "nothing resolved" as an error, so the two disagree. Gate the warning on `resolvedNothing()`, or warn once per new reason. — `cube_bathymetry/src/cube_bathymetry_node.hpp:969` (Lens A + lead) — fixed in `387abfc`
+- [x] (suggestion) The loader's limits can be bypassed by a non-regular file such as a FIFO or `/dev/zero`:
+  - a `file_size` error skips the 64 MiB check;
+  - `getline` buffers the whole line before the 4096-character check;
+  - comment lines are not counted against the row limit;
+  - `isAngularResponseTable` has no bound and consumes the start of a FIFO;
+  - `sha256File` reads the file a second time, so an in-place rewrite between the reads fingerprints a table that was not applied.
+
+  Refuse a non-regular file, read at most the cap once, then probe, parse and hash that one buffer. — `cube_bathymetry/src/backscatter_table.cpp:214-219,516-547,567-571`, `cube_bathymetry/src/import_bag_main.cpp:1010` (Lens B) — fixed in `fba5de5`
+- [x] (suggestion) `warned_` and `declared_mismatch` are keyed by the absorption text (6 significant digits). A sonar whose declared absorption drifts gets a new WARN and a new map key for each value, without bound. Key on (mode, TVG model), or round or cap. — `cube_bathymetry/src/backscatter_mode.cpp:234-236` (Lens B) — fixed in `b86b5cf`
+- [x] (suggestion) The declared absorption accepts ±inf from the table (no `isfinite` check) and from SonarInfo. `operator==` then treats inf as equal to any finite value, and inf is not equal to itself. Reject non-finite values in the loader and guard the comparison. — `cube_bathymetry/src/backscatter_table.cpp:739,395` (Gemini) — fixed in `652ff1c`
+- [x] (suggestion) Under `identity`, `fallbackIdx()` returns `kCorrectionUnresolved` (the legacy single-curve path), not `kCorrectionIdentity`. This is correct today only because a table run carries no legacy curve. Return `kCorrectionIdentity` so the invariant is explicit. — `cube_bathymetry/src/backscatter_mode.cpp:160-164` (Gemini) — fixed in `baf8866` (naming and comment only, behaviour kept per host direction: 0 is the deliberate identity path, plan decision 9)
+- [x] (suggestion) Written groups are bucketed by exact bounds but matched to declared groups within 1e-9. Two near-identical written groups (only possible in a hand-edited table) fill one slot, and the second silently overwrites the first. Refuse a second fill. — `cube_bathymetry/src/backscatter_table.cpp:~747` (Gemini) — fixed in `fc303a8`
+- [x] (suggestion) The duplicate `# mode_summary:` and `pings=` errors name the column line's number, not the summary line's. — `cube_bathymetry/src/backscatter_table.cpp:652-661` (Lens A) — fixed in `9dec65c`
+- [x] (suggestion) The comment "ADR-0003 schema 2, tiling only -- cube#143" sits on the `writeFingerprint` call that now records the backscatter correction. It is the same staleness as the CMake comment fixed in `a724a0b`. — `cube_bathymetry/src/import_bag_main.cpp:1746` (lead) — fixed in `7ed4fe4`
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 12:09 -05:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-172 at `6981693`
+**Addressed**: `## Local Review (Pre-Push)` of 2026-11-06 11:31 -05:00 (round 2 of PR 2, at `36b5d26`, progress commit `9e8a7ba`): 3 must-fix, 13 suggestions
+**Commits**: `877a16a` `167d794` `f278fd5` `afc66d6` `961d87e` `80a1348` `e34dba3` `387abfc` `fba5de5` `b86b5cf` `652ff1c` `baf8866` `fc303a8` `9dec65c` `7ed4fe4`; boxes checked in `6981693`. Not pushed.
+
+### Actions
+- [x] (must-fix 1) The loader accepts an angle-bin centre at or past 90 deg (a `--bin-width-deg` that does not divide 90); it refuses only a non-finite, negative or >= 180 centre. Beams at or beyond 90 deg stay uncorrectable. Tests: widths 20 (last centre 90), 40 (last centre 100), 4 and 8 load, 89 deg corrected, 90 deg not, 85 deg interpolated at width 40; 180 and inf refused — `877a16a`
+- [x] (must-fix 2) Resolver: a ping more than the window behind the anchor re-anchors on itself and clears the stale look-back (`Counts::window_reanchored`, reported). SonarInfo stamped behind the window is stored unpruned, never folded into an older entry, and is not counted stale. When such SonarInfo arrived with nothing in the window since, the re-anchoring ping drops the old timeline's entries, so an old entry stamped later than the new timeline has reached cannot take over. A lone late ping only moves the anchor. Node: `cube::warnIntervalDue` treats a negative elapsed time as due. Tests: time jump with two states before the first ping (the host's case), a lone late ping, a late message followed by an in-window ping, and the throttle helper. README, ADR-0007 and plan decision 10 updated — `167d794`
+- [x] (must-fix 3) `reportModeResolution` keeps the diagnosis. `withTableResolution` prints the outcome sentence once the finish code is known. Exit 4 only after finish 0/3, when the store and the `table-unresolved` fingerprint were written. Finish 1 and 2 keep their code and say so. A recon-only preflight keeps its code and says "This --level-plan-out preflight resolved nothing". usage() updated, and no line was added to `main()`. Real-bag smoke re-checked: the exit-4 case also asserts the sentence, and new cases cover the preflight (exit 0, no exit-4 or fingerprint claim) and an unwritable fingerprint (exit 2). README, ADR-0007 and plan decision 9 updated — `f278fd5`
+- [x] (suggestion) Out-of-order association: the same state under a new stamp is stored, not folded; only a same-stamp re-delivery is deduplicated. Test: A@100, A@300, late B@200, then ping 350 gets A. Docs updated — `961d87e`
+- [x] (suggestion) The cap ignored import_bag's pending pings. Added `holdFrom(oldest waiting ping)`: neither the window nor the cap drops the state in force there or any later one. import_bag passes `pending.front()` through `feedSonarInfo`, changing one line in place in `main()`. The excess is bounded by the pings import_bag is itself holding. Test past 2x the cap — `afc66d6`
+- [x] (suggestion) The stale count counts each ping at most once, and a late message that restores the correction takes the count back. Test with A@0, ping 20, late B@10, C@15, A@18. The existing replace-at-stamp expectation went from 2 to 1, which is correct under the new rule — `80a1348`
+- [x] (suggestion) A beam more than half `angle_bin_width_deg` beyond the outermost written bin, or short of the nadir-most one, is `TableBeamStatus::OutsideAngleBins`: it takes the fallback and is counted per mode. A table without the width header skips the test. The fixture tests at 60 deg now use 41.5 deg — `e34dba3` (deferred in part: an interior gap between two written bins is still interpolated between its measured neighbours rather than refused. That value is bracketed by data, not a clamped end value, and refusing it would change the fixture-pinned lookup contract, which the Python-written fixture has deliberate gaps for. Flag it for the operator if gaps should be refused too.)
+- [x] (suggestion) Node warning: once per minute while `resolvedNothing()`, then once per new reason per configuration. Lifecycle test added. README, ADR-0007 and plan updated — `387abfc`
+- [x] (suggestion) Loader bounds: a FIFO or device is refused before it is opened, and the probe reads at most 64 KiB and refuses a non-regular file. The loader reads at most the cap once and parses that buffer. Every line, comments included, counts against the bound. `loadBackscatterTable(..., &bytes)` returns the parsed bytes, and import_bag hashes them with `sha256Text`, so there is no second read. Tests: mkfifo, /dev/zero, a comment flood, returned bytes — `fba5de5`
+- [x] (suggestion) `warned_` and `declared_mismatch` are keyed on (mode, TVG model); the warning names the first state seen. Test: 200 drifting absorptions give one warning and one key — `b86b5cf`
+- [x] (suggestion) The loader refuses an infinite declared absorption (and one float32 overflows). `operator==` treats an infinity as equal only to itself. Tests added — `652ff1c`
+- [x] (suggestion) `fallbackIdx()` renamed to `unresolvedIdx()`. The comment at the definition and the constructor doc say why identity is index 0 (plan decision 9). Behaviour kept per host direction — `baf8866`
+- [x] (suggestion) Two written groups matching one declared group are refused instead of the second silently replacing the first. Test added — `fc303a8`
+- [x] (suggestion) `# mode_summary:` errors name the summary's own line. Tests assert `:5:` and `:4:` — `9dec65c`
+- [x] (suggestion) Stale "tiling only" comment on the fixed-level `writeFingerprint` call fixed — `7ed4fe4`
+
+### For the PR body (host), carried forward
+- **Known gap, predates #172:** `batch_regen_bag` refuses a per-mode table file, but it never reads `build_fingerprint.json`. So `--backscatter-correction none` (or another curve) can rebuild tiles inside a table-built store without any check. The fingerprint now records the correction; a consumer that compares it is the ADR-0003 `--incremental` follow-up.
+- **Rebuild:** `Sounding`, `DepthAndUncertainty` and `Parameters` changed layout (`DepthAndUncertainty` 20 → 22 bytes, `Parameters` carries the table). ui_ws `marine_perception_tools` must be rebuilt with this PR, and the main tree's sensors_ws and ui_ws rebuilt after merge.
+- `import_bag` has a new exit code 4: a table was loaded, no ping resolved, and the store and its fingerprint (kind `table-unresolved`) were written. Exits 1 and 2 keep their code, and a `--level-plan-out` preflight keeps its own code and says it resolved nothing.
+
+### Tests
+Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1421 tests, 0 errors, 0 failures, 96 skipped**, the same 96 cppcheck skips (was 1410). The real-bag smoke cases ran, since the excerpt is reachable on this host. uncrustify and cpplint are clean on every touched file. import_bag's `main()` gained no lines.
+
+### Left open
+- The interior-gap half of the angle-bin suggestion (see above), a lookup-contract decision for the operator.
+- The round-1 "left open" note about folded duplicates is resolved by `961d87e`.
+- Not a defect, noticed earlier and still true: the lifecycle tests' synthetic SonarInfo leaves `tvg_absorption_db_per_km` at 0, so it reads as a declared `UNKNOWN/0 dB/km` mismatch. Real bridge data sets NaN.
+
+### Next
+`/review-code` pre-push (round 3) on the new fix commits, `877a16a..7ed4fe4`, fresh context.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 12:16 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `498e782`
+**Mode**: pre-push
+**Depth**: Deep (reason: +859 / -143 lines over 13 files in the fix range, plus ADR-0007 addendum edits; scoped to the round-2 fix commits `877a16a..7ed4fe4`, cross-model read on that range too)
+**Must-fix**: 1 | **Suggestions**: 10
+**Round**: 3 of PR 2 (the 11-02 entries reviewed PR 1, merged as PR #174) | **Ship**: recommended — must-fixes went 8, 3, 1. The one left is a bounded gap in the round-2 time-jump fix with a clear correction, and the suggestions can ride the PR. Another full round is not justified. If the fix replaces the arrival-order heuristic with a clock-jump handler, a Light review of that one commit is enough.
+
+Specialists:
+- Static analysis on the 10 changed C++ files: cpplint and uncrustify are clean. cppcheck 2.13, run directly, reports only style notes (useStlAlgorithm, noExplicitConstructor), the same kinds as earlier rounds.
+- Governance and plan drift: README, the ADR-0007 addendum and plan decisions 9 and 10 match the fixes. The repo has no `.agents/README.md` or `review-context.yaml`.
+- Claude Adversarial Lens A and Lens B ran on the fix range with fresh context and a Deep horizon (Sonnet).
+- Cross-model: Gemini and Codex ran on `9e8a7ba..HEAD`, both EXIT=0.
+- Local Adversarial is off (the default).
+
+Round-2 closure:
+- All 3 must-fixes are closed: the 90 deg last bin (`877a16a`), the re-anchor (`167d794`) and the exit-4 wording (`f278fd5`). The re-anchor is closed for the order it tests. The two orders it misses are must-fix 1 below.
+- All 13 suggestions are closed, with one partly deferred: an interior gap between written bins is still interpolated, and that is still an operator decision.
+- Verified by reading: the hash is computed over the parsed bytes; `tableBeamStatus` gates the lookup itself, not only the counts; the live node is single-threaded, so the resolver has no race.
+
+Downgraded or dropped:
+- Gemini and Codex rated the cap-eviction case must-fix. It needs more than 4096 SonarInfo stamps in 60 s (above 68 Hz, past what the M3 or EM2040 ping) plus a time jump, so it is folded into must-fix 1.
+- Codex's delayed-pair case (suggestion 2) requires a SonarInfo and a ping that both arrive more than 60 s late with no ping between them. That is indistinguishable from a restart by arrival order.
+- Dropped: Lens B's stat-then-open race. The path is operator-supplied, and it needs a racing writer.
+
+### Findings
+- [x] (must-fix) The re-anchor misses two orders after time goes backwards, both cross-model confirmed (Lens A + Gemini + lead, and Gemini + Codex):
+  - (a) When the new timeline's first ping arrives before its first SonarInfo, `behind_stamps_` is empty and the old timeline's entries survive, because `prune` keeps everything above the cut. Once the new run reaches those stamps, a ping stamped just after an old entry is resolved with the old run's mode. This is silent, and does harm only when the two runs used different modes.
+  - (b) With the history at the cap and no hold (live), `capHistory` erases each behind-window state the moment it is inserted, while `rememberBehind` keeps its stamp. The re-anchoring ping then erases every entry, leaving the history empty.
+  - Fix: exempt behind-stamped entries from the cap. For (a), the cleanest fix is a backward-jump callback on the node clock (`rclcpp::Clock::create_jump_callback`) that clears the resolver's timeline, since offline bags are merged in time order. Test both orders. — `cube_bathymetry/src/backscatter_mode.cpp:143-146,174-185,282-305` (fixed: `1e64a13`)
+- [x] (suggestion) The node's warned-reason set is filled before the throttle check. A reason first seen while the once-a-minute throttle is muting the "nothing resolved" warning is then never warned once clouds resolve, contrary to "each reason is warned about once per configuration". Insert only when the warning fires. — `cube_bathymetry/src/cube_bathymetry_node.hpp:980` (Gemini + Lens B, cross-model confirmed) (fixed: `f1b1bcd`)
+- [x] (suggestion) A SonarInfo and ping that both arrive more than 60 s late, with nothing in the window between them, are taken as a restart and drop the current timeline's states. Arrival order cannot tell the two apart. Document it as accepted, or remove the ambiguity with the clock-jump route from must-fix 1. — `cube_bathymetry/src/backscatter_mode.cpp:289-300` (Codex) (fixed as documentation: `1e64a13` -- the header, README, ADR-0007 addendum and a test record that input more than the window late is read as a restart, an accepted cost; host direction: no clock-jump callback)
+- [x] (suggestion) A false probe falls through to the unguarded legacy curve loader:
+  - A FIFO given as `--backscatter-curve` or `backscatter_curve_file` still blocks configure or import, and `/dev/zero` reads without bound. The "never a FIFO or device" guard covers only the table branch.
+  - An unreadable table (chmod 000) becomes an "EMPTY curve" warning and an uncorrected store with exit 0.
+  - Both predate this range. Refuse a non-regular or unreadable path before either loader runs. — `cube_bathymetry/src/backscatter_table.cpp:545`, `cube_bathymetry/src/import_bag_main.cpp:1044`, `cube_bathymetry/src/cube_bathymetry_node.hpp:235` (Codex + Lens B, cross-model confirmed) (fixed: `ad1bfbc`)
+- [x] (suggestion) A `--level-plan-out` preflight that resolved nothing still exits 0, after printing "Re-run with --level-plan" on stdout. A script running `preflight && import` therefore starts the full import blind. Round 2 accepted "say so plainly". The host should decide between exit 4 and documenting that callers must not gate on the preflight's exit 0. — `cube_bathymetry/src/import_bag_main.cpp:1227-1234,1932-1935` (Lens A + Lens B, cross-pass confirmed) (fixed: `7b69af0`, host direction: the preflight exits 4 too)
+- [x] (suggestion) The README smoke-test sentence ("the same table on a `--level-plan-out` preflight keeps exit 0 ..., and with an unwritable fingerprint keeps exit 2") reads as if the preflight writes a fingerprint. Split the sentence. — `README.md:~585` (Lens B) (fixed: `7b69af0`, the sentence is split there)
+- [x] (suggestion) The depth-adaptive finish prints "done!" before `withTableResolution` turns its 0 into exit 4, so an exit-4 run ends with "done!" and then the error. Print "done!" after the code is known, or not at all on 4. — `cube_bathymetry/src/import_bag_main.cpp:2123` (Lens B) (fixed: `12fd13d`)
+- [x] (suggestion) A table without `# angle_bin_width_deg:` silently skips the OutsideAngleBins test, so a beam far past the last bin gets the clamped end value. Warn at load when the header is missing and the table has more than one bin, or require the header. — `cube_bathymetry/src/backscatter_table.cpp:~1015` (Lens A) (fixed: `eb3f4db`, a load warning)
+- [x] (suggestion) A last bin centred past 90 deg (100 deg at width 40) is used as that bin's interpolation x, although its beams lie between 80 and 90 deg. A beam at 85 deg is therefore pulled only 0.625 of the way to the bin's value. The PR 1 writer could write the clipped centre `(lo + min(hi, 90)) / 2`, or the loader could clip. Cross-PR, so it can go to a follow-up. — `cube_bathymetry/src/backscatter_table.cpp:820-830` (lead) (deferred: PR 1's writer, host direction; a follow-up line in the PR body)
+- [x] (suggestion) The "unsupported table format" error echoes the first content line uncapped, while every later line is capped at 4096 characters. Truncate it. — `cube_bathymetry/src/backscatter_table.cpp:609-611` (Lens B) (fixed: `9679d99`)
+- [x] (suggestion) `holdFrom(pending.front())` assumes detections arrive in stamp order, the same assumption the drain loop makes. Say so in a comment. — `cube_bathymetry/src/import_bag_main.cpp:1315` (Lens A) (fixed: `8376812`)
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 12:44 -05:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-172 at `588abfe`
+**Addressed**: `## Local Review (Pre-Push)` of 2026-11-06 12:16 -05:00 (round 3 of PR 2, at `498e782`, progress commit `a74d084`): 1 must-fix, 10 suggestions
+**Commits**: `1e64a13` `f1b1bcd` `ad1bfbc` `7b69af0` `12fd13d` `eb3f4db` `9679d99` `8376812`; boxes checked in `588abfe`. Not pushed.
+
+### Actions
+- [x] (must-fix) Time going backwards, both orders. The re-anchoring ping now erases every entry more than the window AHEAD of it, so a new timeline whose first ping precedes its first SonarInfo gets "no SonarInfo" until that SonarInfo arrives, never the old run's mode. Behind-window states are not counted against the 4096 cap, which drops only the window's states, oldest first, and never the one in force at the newest resolved ping. They have a 4096 cap of their own, erased from the set and the history together. No clock-jump callback, per host direction; the header says why (it fires only for the ROS time source, not for a wall-clock replay or import_bag). Tests: ping first, SonarInfo first, the cap full of window states followed by a new timeline, and the behind-window cap. README, ADR-0007 addendum and plan decision 10 updated — `cube_bathymetry/src/backscatter_mode.cpp`, `1e64a13`
+- [x] (suggestion 1) The node marks a reason as warned only when a warning naming it fires. A reason muted by the "nothing resolved" throttle is warned once clouds resolve. Lifecycle test added — `cube_bathymetry_node.hpp`, `f1b1bcd`
+- [x] (suggestion 2, documentation) A SonarInfo and ping, or a lone ping, delivered more than the window late is read as a restart. That is the accepted cost, and it means unresolved pings until the next SonarInfo, never a wrong mode. It is stated in the header, README and ADR-0007, and pinned by the `stray` case in `TimeGoingBackwardsReAnchorsTheWindow` — `1e64a13`
+- [x] (suggestion 3) `explicitBackscatterFileProblem` refuses a FIFO, device, directory or unreadable path for both file kinds, before either loader runs. import_bag and batch_regen exit with an error before any bag opens (batch_regen's check moved ahead of `BagReaders`). The node fails configure. A missing file stays the #102 EMPTY-curve warning. Tests: unit, node, and an import_bag + batch_regen CLI case (`test_mixed_level_import` now also gets `BATCH_REGEN_EXE`) — `ad1bfbc`
+- [x] (suggestion 4) A `--level-plan-out` preflight that resolved nothing exits 4 once its plan is written; a preflight that failed keeps its own code. Exit 4 now reads the same in usage(), README, ADR-0003, the ADR-0007 addendum and plan decision 9: "a table was given and no ping resolved a pulse mode; on a full run the store and its `table-unresolved` fingerprint were still written". The smoke test now pins exit 4, "The preflight exits 4." and that the plan is still written. No lines added to `main()` — `7b69af0`
+- [x] (suggestion 5) The README smoke-test sentence is split, so the preflight no longer reads as writing a fingerprint — `7b69af0`
+- [x] (suggestion 6) `withTableResolution` prints "done!" only once the final code is known, and only for a full run ending 0. This also restores it on the fixed-level path, which lost it when its finish was lifted out of `main()`. Smoke tests: a new depth-adaptive exit-4 case without "done!", and "done!" asserted on a successful depth-adaptive import and a fixed-level run — `12fd13d`
+- [x] (suggestion 7) A table with more than one bin per mode and no `# angle_bin_width_deg:` loads with a `BackscatterTable::warnings` entry, which import_bag and the node print. A header, or a single bin per mode, gives none. Unit and node tests; README header table updated — `eb3f4db`
+- [x] (suggestion 8) Last bin centred past 90 deg used as the interpolation x — `backscatter_table.cpp:820-830` (deferred: PR 1's writer, host direction; recorded below as a follow-up for the PR body)
+- [x] (suggestion 9) The unsupported-format error quotes at most 200 characters of the first line, plus its length. Test with a 1,000,035-character first line — `9679d99`
+- [x] (suggestion 10) Comment at `holdFrom(pending.front())`: it takes the queue front as the oldest waiting ping, the same stamp-order assumption the drain loop makes — `import_bag_main.cpp`, `8376812`
+
+### For the PR body (host), carried forward
+- **Known gap, predates #172:** `batch_regen_bag` refuses a per-mode table file, but it never reads `build_fingerprint.json`. So `--backscatter-correction none` (or another curve) can rebuild tiles inside a table-built store without any check. The fingerprint records the correction; a consumer that compares it is the ADR-0003 `--incremental` follow-up.
+- **Rebuild:** `Sounding`, `DepthAndUncertainty` and `Parameters` changed layout (`DepthAndUncertainty` 20 → 22 bytes, `Parameters` carries the table). ui_ws `marine_perception_tools` must be rebuilt with this PR, and the main tree's sensors_ws and ui_ws rebuilt after merge.
+- **Exit 4 (new):** a per-pulse-mode table was given and no ping resolved a pulse mode. On a full run the store and its fingerprint (kind `table-unresolved`) were still written; exits 1 and 2 outrank it, and it outranks 3. A `--level-plan-out` preflight exits 4 too, so `preflight && import` stops before the import.
+- **Follow-up (PR 1's writer):** a last angle bin centred past 90 deg (100 deg at width 40) is used as that bin's interpolation x, although its beams lie between 80 and 90 deg. A beam at 85 deg is pulled only 0.625 of the way to the bin's value. Fix it in `derive_angular_response.py` (write the clipped centre `(lo + min(hi, 90)) / 2`) or clip in the loader.
+- **Behaviour change:** an explicit `--backscatter-curve` / `backscatter_curve_file` that is a FIFO, a device, a directory or unreadable is now an error (exit, or a failed configure) rather than an EMPTY-curve warning. A missing file is unchanged.
+
+### Tests
+Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1429 tests, 0 errors, 0 failures, 96 skipped**, the same 96 cppcheck skips (was 1421). The real-bag smoke cases ran, since the excerpt is reachable on this host. uncrustify and cpplint are clean on every touched file. import_bag's `main()` gained no lines.
+
+### Left open
+- Suggestion 8, the writer follow-up above.
+- Still open from round 2: an interior gap between written bins is interpolated rather than refused (an operator decision).
+
+### Next
+`/review-code` pre-push (round 4) on `1e64a13..8376812`. Per the round-3 Ship note, a Light review is enough unless the reviewer finds the must-fix fix itself warrants more.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 12:48 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `73e393f`
+**Mode**: pre-push
+**Depth**: Light (reason: host-directed re-check of the round-3 fix commits `1e64a13..8376812`, read as `a74d084..8376812`, +655 / -79 over 17 files; the round-3 Ship note asked for Light)
+**Must-fix**: 1 | **Suggestions**: 1
+**Round**: 4 of PR 2 | **Ship**: recommended — must-fixes went 8, 3, 1, 1. The one left is the same finding, partly closed, and its correction is small and fits the contract the header already states. Fix it, then a test run is enough; another review round is not needed.
+
+Specialists:
+- Static analysis: ament_cpplint and ament_uncrustify on the 12 changed C++ files report no problems.
+- Claude Adversarial, Lens A, one fresh-context pass (Sonnet). It found must-fix 1 on its own, so the finding is cross-pass confirmed (Lens A + lead).
+- Lead probe: a temporary gtest (not committed; the file was restored) was built and run against the branch head to reproduce must-fix 1.
+- Cross-Model: not run (Light). Local Adversarial: off (the default).
+
+Round-3 closure:
+- The must-fix is closed in order (b), where SonarInfo comes first. That includes the cap case: a behind-window state is no longer erased by the main cap, and it has a cap of its own.
+- Order (a), where the ping comes first, is closed only for old entries more than the window ahead of the new ping. See must-fix 1.
+- Every suggestion is closed as described: the warned-reason bookkeeping, the FIFO/device/unreadable refusal in import_bag, batch_regen and the node, preflight exit 4, the "done!" ordering, the missing-bin-width warning, the capped quote, and the stamp-order comment. batch_regen's guard covers exactly the mode in which its loader reads the file (Empirical).
+
+Dropped from Lens A: a restart jump under 60 s is not detected (the header states the floor, and `--loop` replays the same modes); the behind-window cap drops the oldest states (they are unresolved, not wrong); a TOCTOU window on a path that does not exist; a reason that is only ever muted (the summary names it).
+
+### Findings
+- [x] (must-fix) Order (a) is still open when the old run's in-force SonarInfo is stamped near the new run's start. The publishers send SonarInfo only on change, and the heartbeat keeps the original stamp, so a single-mode run's only entry is near its start. That is exactly what `prune` keeps. The re-anchoring ping keeps every entry `<= ping + window`, so the old entry survives. Reproduced: old SonarInfo CW at 5 s, pings 6..1000 s; restart, ping at 10 s, then the new run's FMU SonarInfo at 3 s. The pings at 10, 20 and 500 s all get the old CW correction (idx 1), silently and for the rest of the run. That contradicts the header and `.cpp` claim "never the old run's mode". Fix: on a re-anchor with no behind-window SonarInfo, drop every entry, not only those more than the window ahead. A stray ping more than 60 s late then costs unresolved pings until the next SonarInfo or heartbeat, which is the cost the header already accepts. Update the `lone` and `late` cases in `TimeGoingBackwardsReAnchorsTheWindow` to match, and add the reproduction above as a test. — `cube_bathymetry/src/backscatter_mode.cpp:344-351`, `cube_bathymetry/include/cube_bathymetry/backscatter_mode.h:132-140` (Lens A + lead probe)
+- [x] (suggestion) The re-anchor erase ignores `held()`. In import_bag, a ping more than 60 s behind the anchor drops SonarInfo states that were read ahead for pings still waiting on the TF frontier. With the must-fix applied, it drops all of them. That needs a bag whose stamps are not in order, which is the same assumption the new `feedSonarInfo` comment names, so a sentence there or in the re-anchor comment is enough. — `cube_bathymetry/src/backscatter_mode.cpp:344-351` (Lens A)
+
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 13:01 -05:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-172 at `7f11455`
+**Addressed**: `## Local Review (Pre-Push)` of 2026-11-06 12:48 -05:00 (round 4 of PR 2, at `73e393f`, progress commit `2bf6902`): 1 must-fix, 1 suggestion
+**Commits**: `bc9b0fe` `7f11455` (boxes checked in those commits). Not pushed.
+
+### Actions
+- [x] (must-fix) Order (a) with the old run's in-force SonarInfo stamped near the new run's start. With no SonarInfo stored behind the window, the re-anchoring ping now drops EVERY history entry rather than only those more than the window ahead, so the old run's mode can never decide the new run's pings. A stray ping more than 60 s late leaves pings unresolved until the next SonarInfo or heartbeat. That is the accepted cost, now stated in the header, README, ADR-0007 addendum and plan decision 10. New test `ANewTimelineNeverInheritsAnOldStateStampedNearItsStart` is the reviewer's reproduction: old CW at 5 s, pings 6..1000 s, restart, ping at 10 s, new FMU at 3 s. The 10 s ping is unresolved and counted stale; the 20 s and 500 s pings get FMU. The `lone` and `late` cases in `TimeGoingBackwardsReAnchorsTheWindow` now expect the drop; `lone` also shows a heartbeat at the original stamp resolving again. `NodeLifecycle.PerModeTableResolvesCloudsAndSurvivesReset` sent its "before the SonarInfo" ping 100 s behind the anchor, which is now a stray-ping re-anchor, so it moves to 99 s, inside the window, keeping what it checks — `cube_bathymetry/src/backscatter_mode.cpp`, `cube_bathymetry/include/cube_bathymetry/backscatter_mode.h`, `bc9b0fe`
+- [x] (suggestion) One sentence in the re-anchor comment: the erase ignores the hold (`holdFrom`), so in import_bag it can drop SonarInfo read ahead for pings waiting on the TF frontier, but only on a bag with out-of-order detection stamps, which the hold already assumes away (see `feedSonarInfo`) — `cube_bathymetry/src/backscatter_mode.cpp`, `7f11455`
+
+### For the PR body (host), carried forward
+- **Known gap, predates #172:** `batch_regen_bag` refuses a per-mode table file, but it never reads `build_fingerprint.json`. So `--backscatter-correction none` (or another curve) can rebuild tiles inside a table-built store without any check. The fingerprint records the correction; a consumer that compares it is the ADR-0003 `--incremental` follow-up.
+- **Rebuild:** `Sounding`, `DepthAndUncertainty` and `Parameters` changed layout (`DepthAndUncertainty` 20 → 22 bytes, `Parameters` carries the table). ui_ws `marine_perception_tools` must be rebuilt with this PR, and the main tree's sensors_ws and ui_ws rebuilt after merge.
+- **Exit 4 (new):** a per-pulse-mode table was given and no ping resolved a pulse mode. On a full run the store and its fingerprint (kind `table-unresolved`) were still written; exits 1 and 2 outrank it, and it outranks 3. A `--level-plan-out` preflight exits 4 too, so `preflight && import` stops before the import.
+- **Follow-up (PR 1's writer):** a last angle bin centred past 90 deg (100 deg at width 40) is used as that bin's interpolation x, although its beams lie between 80 and 90 deg. A beam at 85 deg is pulled only 0.625 of the way to the bin's value. Fix it in `derive_angular_response.py` (write the clipped centre `(lo + min(hi, 90)) / 2`) or clip in the loader.
+- **Behaviour change:** an explicit `--backscatter-curve` / `backscatter_curve_file` that is a FIFO, a device, a directory or unreadable is now an error (exit, or a failed configure) rather than an EMPTY-curve warning. A missing file is unchanged.
+
+### Tests
+`test_backscatter_mode` (19 tests) and `test_node_lifecycle` (45 tests) pass, run directly with `ROS_DOMAIN_ID=87 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`. Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1430 tests, 0 errors, 0 failures, 96 skipped**, the same 96 cppcheck skips (was 1429; +1 is the new test). uncrustify and cpplint are clean on the four touched C++ files.
+
+### Left open
+- Suggestion 8 of round 3, the writer follow-up above.
+- Still open from round 2: an interior gap between written bins is interpolated rather than refused (an operator decision).
+
+### Next
+Per the round-4 Ship note (recommended; a test run is enough, no further review round needed), the branch is ready for the host to push and open or update the PR.

@@ -71,12 +71,35 @@
 /// (`--decision-depth-percentile`, `--achieved-percentile`) move tiles between
 /// levels exactly as the level bounds do.
 ///
-/// **This is ADR-0003's first, partial implementation.** The other keys
-/// (`tool_version`, the bag list and hashes, `reference_store`,
-/// `backscatter_correction`) and `batch_regen --incremental`'s consumer are
-/// not implemented here; a file written by this code carries only what is
-/// listed above, and `isStale` compares only that. Adding the remaining keys
-/// is additive within schema 2.
+/// `backscatter_correction` (cube_bathymetry#172) records the correction the
+/// backscatter layer was built with, beside `tiling`:
+///
+/// ```json
+///   "backscatter_correction": {
+///     "mode": "none" | "empirical" | "auto",
+///     "kind": "none" | "curve" | "table" | "table-unresolved",
+///     "source": "<file path or sonar_info topic>",   // informational
+///     "sha256": "<hex of the file, or of the SonarInfo curve>" | null,
+///     "fallback": "identity" | "exclude" | null,       // tables only
+///     "min_pings": 0 | null                            // tables only
+///   }
+/// ```
+///
+/// `table-unresolved` is a table run in which not one ping resolved to a
+/// table entry (wrong SonarInfo topic, no SonarInfo, no frequency): the
+/// table was loaded and hashed, but the backscatter layer carries none of
+/// its correction, so the kind differs from `table` and a staleness check
+/// can never take such a store for a corrected one. import_bag exits 4 then.
+///
+/// `isStale` compares mode, kind, sha256, fallback and min_pings (not the
+/// source path: the same table under another name is the same correction).
+/// A fingerprint without the key (written before #172) is stale against one
+/// with it: what correction built it cannot be told.
+///
+/// **This is still a partial implementation of ADR-0003.** The other keys
+/// (`tool_version`, the bag list and hashes, `reference_store`) and
+/// `batch_regen --incremental`'s consumer are not implemented here; adding
+/// them is additive within schema 2.
 
 namespace cube
 {
@@ -110,6 +133,27 @@ namespace cube
       double achieved_percentile = 0.95;
     };
 
+  /// The backscatter correction a build applied (cube_bathymetry#172).
+    struct BackscatterCorrection
+    {
+      std::string mode = "none";
+    /// `none`, `curve`, `table`, or `table-unresolved` (above).
+      std::string kind = "none";
+      std::string source;
+      std::string sha256;
+      std::string fallback;
+      uint64_t min_pings = 0;
+
+    /// True for `table` and `table-unresolved`: the kinds that carry the
+    /// table's fallback and ping floor.
+      bool isTableKind() const {return kind == "table" || kind == "table-unresolved";}
+
+    /// Equal when the correction is the same: mode, kind, hash, fallback,
+    /// ping floor. `source` is informational.
+      bool operator == (const BackscatterCorrection & other) const;
+      bool operator != (const BackscatterCorrection & other) const {return !(*this == other);}
+    };
+
     int schema_version = kSchemaVersion;
     Mode mode = Mode::Fixed;
   /// Fixed mode: the requested cell size the single sheet was built with.
@@ -119,6 +163,9 @@ namespace cube
     Policy policy;
   /// Every GGGS level at which the store holds native tiles from this build.
     std::set < uint8_t > levels_used;
+  /// The backscatter correction, when the writer recorded one (import_bag
+  /// always does since #172); nullopt for a file written before.
+    std::optional < BackscatterCorrection > backscatter_correction;
 
   /// @brief Whether a store built as @p previous must be fully regenerated
   ///        before tiles from a build with this fingerprint can join it: the
@@ -161,6 +208,14 @@ namespace cube
 /// so `write` warns; a real failure (`EIO`, `ENOSPC`, `EBADF`, ...) still
 /// throws.
   bool fsyncErrnoMeansUnsupported(int err) noexcept;
+
+/// @brief SHA-256 of a file's bytes as lowercase hex (the fingerprint's
+///        curve / table identity).
+/// @throws std::runtime_error when the file cannot be read.
+  std::string sha256File(const std::string & path);
+
+/// @brief SHA-256 of @p text as lowercase hex.
+  std::string sha256Text(const std::string & text);
 
 }  // namespace cube
 

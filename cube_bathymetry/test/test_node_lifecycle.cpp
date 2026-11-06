@@ -45,14 +45,19 @@
 // that one path forgets fails in both.
 
 #include <gtest/gtest.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <utility>
 #include <fstream>
 #include <limits>
@@ -65,6 +70,7 @@
 #include <vector>
 
 #include "lifecycle_msgs/msg/state.hpp"
+#include "rcutils/logging.h"
 #include "marine_bathymetry_store/bathymetry_store.hpp"
 #include "marine_bathymetry_store/tile_io.hpp"
 #include "marine_interfaces/msg/sonar_info.hpp"
@@ -138,6 +144,23 @@ struct CubeBathymetryTestAccess
   static std::size_t storedCurvePoints(const CubeBathymetry & n)
   {
     return n.bs_applied_curve_.points.size();
+  }
+  /// Per-mode table state (cube#172).
+  static std::size_t tableModes(const CubeBathymetry & n) {return n.bs_table_.entries.size();}
+  static uint16_t resolveMode(CubeBathymetry & n, int64_t stamp_ns, float frequency_hz)
+  {
+    return n.resolveCloudMode(stamp_ns, frequency_hz);
+  }
+  static bool hasResolver(const CubeBathymetry & n) {return static_cast<bool>(n.bs_resolver_);}
+  static void stampCloud(
+    CubeBathymetry & n, int64_t stamp_ns, float frequency_hz,
+    std::vector<cube::GeoSounding> & soundings)
+  {
+    n.stampCloudMode(stamp_ns, frequency_hz, soundings);
+  }
+  static uint64_t resolvedPings(const CubeBathymetry & n)
+  {
+    return n.bs_resolver_ ? n.bs_resolver_->counts().pings : 0;
   }
 
   static double catalogInterval(const CubeBathymetry & n) {return n.catalog_interval_s_;}
@@ -942,6 +965,396 @@ TEST_F(NodeLifecycle, ResetKeepsSheetLevelSettings)
   EXPECT_EQ(node->sheet()->parameters().angular_response_curve, before.angular_response_curve);
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// cube_bathymetry#172: a backscatter_curve_file that is a per-pulse-mode table
+// loads into the sheet with its fallback, each cloud's mode resolves against the
+// SonarInfo history (by stamp, never retroactively), and the table, fallback
+// and resolver all survive a `~/reset`.
+TEST_F(NodeLifecycle, PerModeTableResolvesCloudsAndSurvivesReset)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+    rclcpp::Parameter("backscatter_mode_fallback", std::string("exclude"))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_EQ(CubeBathymetryTestAccess::tableModes(*node), 3u);
+  EXPECT_TRUE(CubeBathymetryTestAccess::hasResolver(*node));
+  EXPECT_FALSE(CubeBathymetryTestAccess::curveApplied(*node)) << "a table is not a curve";
+  EXPECT_EQ(node->sheet()->parameters().backscatter_table.entries.size(), 3u);
+  EXPECT_EQ(node->sheet()->parameters().backscatter_mode_fallback,
+    cube::BackscatterModeFallback::Exclude);
+
+  const float f = 500000.0f;
+  // Before any SonarInfo: unresolved, and the fallback is exclude.
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 150LL * 1000000000LL, f),
+    cube::kCorrectionExclude);
+  marine_interfaces::msg::SonarInfo info;
+  info.header.stamp.sec = 100;
+  info.pulse_lengths = {0.001f};
+  info.bandwidths = {24000.0f};
+  info.tx_signal_types = {marine_interfaces::msg::SonarInfo::SIGNAL_TYPE_FM_UP};
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 150LL * 1000000000LL, f), 2)
+    << "FMU_1000us_24000Hz_500kHz is the fixture's second entry";
+  // 99 s: before the SonarInfo stamp but inside the 60 s window. A ping more
+  // than the window behind the newest one is read as a restart and drops the
+  // history (review round 4), which is not what this checks.
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 99LL * 1000000000LL, f),
+    cube::kCorrectionExclude) << "a ping before the SonarInfo stamp stays unresolved";
+  // Without the frequency field the key cannot match any entry.
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 160LL * 1000000000LL, NAN),
+    cube::kCorrectionExclude);
+
+  ResetCaller caller(node);
+  const auto [ok, message] = caller.call();
+  ASSERT_TRUE(ok) << message;
+  EXPECT_EQ(node->sheet()->parameters().backscatter_table.entries.size(), 3u)
+    << "the rebuilt sheet carries the table";
+  EXPECT_EQ(node->sheet()->parameters().backscatter_mode_fallback,
+    cube::BackscatterModeFallback::Exclude);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 170LL * 1000000000LL, f), 2)
+    << "the SonarInfo history survives the reset";
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(CubeBathymetryTestAccess::tableModes(*node), 0u) << "cleanup releases it";
+}
+
+namespace
+{
+/// Captures every log line emitted while it lives (rcutils output handler),
+/// then restores the previous handler. One at a time; tests run serially.
+class LogCapture
+{
+public:
+  LogCapture()
+  : previous_(rcutils_logging_get_output_handler())
+  {
+    lines().clear();
+    rcutils_logging_set_output_handler(&LogCapture::handler);
+  }
+  ~LogCapture() {rcutils_logging_set_output_handler(previous_);}
+  LogCapture(const LogCapture &) = delete;
+  LogCapture & operator=(const LogCapture &) = delete;
+
+  bool contains(const std::string & needle) const
+  {
+    return std::any_of(
+      lines().begin(), lines().end(),
+      [&](const std::string & l) {return l.find(needle) != std::string::npos;});
+  }
+  std::size_t count(const std::string & needle) const
+  {
+    std::size_t n = 0;
+    for (const auto & l : lines()) {
+      n += l.find(needle) != std::string::npos ? 1u : 0u;
+    }
+    return n;
+  }
+  std::string all() const
+  {
+    std::string out;
+    for (const auto & l : lines()) {
+      out += l + "\n";
+    }
+    return out;
+  }
+
+private:
+  static std::vector<std::string> & lines()
+  {
+    static std::vector<std::string> captured;
+    return captured;
+  }
+  static void handler(
+    const rcutils_log_location_t *, int, const char *, rcutils_time_point_value_t,
+    const char * format, va_list * args)
+  {
+    va_list copy;
+    va_copy(copy, *args);
+    char buffer[4096];
+    std::vsnprintf(buffer, sizeof(buffer), format, copy);
+    va_end(copy);
+    lines().emplace_back(buffer);
+  }
+  rcutils_logging_output_handler_t previous_;
+};
+}  // namespace
+
+// cube_bathymetry#172 review: backscatter_angle_correction=empirical with a
+// per-mode table loaded is the correction working, not the "enabled but no
+// curve, NO-OP" case -- the configure must not claim the intensity goes out
+// uncorrected. The control (empirical, no file) shows the capture sees it.
+TEST_F(NodeLifecycle, EmpiricalWithATableIsNotReportedAsANoOp)
+{
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_angle_correction", std::string("empirical")),
+      rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_EQ(CubeBathymetryTestAccess::tableModes(*node), 3u);
+    EXPECT_TRUE(log.contains("per-pulse-mode table")) << log.all();
+    EXPECT_FALSE(log.contains("NO-OP")) << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_angle_correction", std::string("empirical"))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_TRUE(log.contains("NO-OP")) << "control: no curve and no table\n" << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+}
+
+// cube_bathymetry#172 review: a configured table that corrects no cloud (a
+// wrong sonar_info topic, no publisher, clouds without `frequency`) must say
+// so while the node runs, not only in the cleanup report: a WARN at the first
+// unresolved cloud with the count and the reasons, throttled to once a minute.
+TEST_F(NodeLifecycle, UnresolvedCloudsWarnWithTheReasonsThrottled)
+{
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_FALSE(log.contains("not corrected by the table"));
+  CubeBathymetryTestAccess::resolveMode(*node, 150LL * 1000000000LL, 500000.0f);
+  EXPECT_TRUE(log.contains("not corrected by the table (no SonarInfo at or before the ping)"))
+    << log.all();
+  EXPECT_TRUE(log.contains("1 of 1 ping(s) not corrected")) << log.all();
+  EXPECT_TRUE(log.contains("1 before any SonarInfo (0 SonarInfo message(s) seen)")) << log.all();
+  const std::size_t after_first = log.count("not corrected by the table");
+  EXPECT_EQ(after_first, 1u);
+  for (int i = 1; i <= 20; ++i) {
+    CubeBathymetryTestAccess::resolveMode(*node, (150LL + i) * 1000000000LL, NAN);
+  }
+  EXPECT_EQ(log.count("not corrected by the table"), after_first) << "throttled\n" << log.all();
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_TRUE(log.contains("0 of 21 pings resolved")) << "the cleanup report stays\n" << log.all();
+  EXPECT_TRUE(log.contains("since configure (they span any ~/reset)")) << log.all();
+}
+
+// cube_bathymetry#172 review round 2: once pings resolve, an unresolved cloud
+// is the normal case (a rare mode with no entry, the ping floor); warning
+// about it every minute disagreed with import_bag, which treats only "nothing
+// resolved" as an error. Each reason is warned about once per configuration.
+TEST_F(NodeLifecycle, UnresolvedCloudsAfterResolvedOnesWarnOncePerReason)
+{
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  marine_interfaces::msg::SonarInfo info;
+  info.header.stamp.sec = 100;
+  info.pulse_lengths = {0.001f};
+  info.bandwidths = {24000.0f};
+  info.tx_signal_types = {marine_interfaces::msg::SonarInfo::SIGNAL_TYPE_FM_UP};
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
+  const int64_t s = 1000000000LL;
+  ASSERT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 150 * s, 500000.0f), 2);
+  // A cloud without the frequency field: no entry. Warned once, not again.
+  for (int i = 1; i <= 5; ++i) {
+    CubeBathymetryTestAccess::resolveMode(*node, (150 + i) * s, NAN);
+  }
+  EXPECT_EQ(log.count("not corrected by the table (no table entry for the mode)"), 1u)
+    << log.all();
+  // A new reason: the pings before the SonarInfo stamp. Warned once too.
+  for (int i = 1; i <= 5; ++i) {
+    CubeBathymetryTestAccess::resolveMode(*node, (100 * s) - i, 500000.0f);
+  }
+  EXPECT_EQ(log.count("not corrected by the table (no SonarInfo at or before the ping)"), 1u)
+    << log.all();
+  EXPECT_EQ(log.count("not corrected by the table"), 2u) << log.all();
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// cube_bathymetry#172 review round 3: an explicit backscatter file that is
+// not a regular file, or cannot be read, fails configure before either
+// loader runs: a FIFO would block configure, /dev/zero reads without bound,
+// and an unreadable table would load as an EMPTY single curve.
+TEST_F(NodeLifecycle, AnUnreadableOrNonRegularBackscatterFileFailsConfigure)
+{
+  const std::string fifo =
+    (std::filesystem::temp_directory_path() / ("cube_node_bs_fifo_" +
+    std::to_string(::getpid()))).string();
+  std::filesystem::remove(fifo);
+  ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+  const std::string unreadable = fifo + ".csv";
+  std::filesystem::copy_file(MODE_TABLE_FIXTURE_FILE, unreadable,
+    std::filesystem::copy_options::overwrite_existing);
+  std::filesystem::permissions(unreadable, std::filesystem::perms::none);
+  std::vector<std::string> paths = {fifo, "/dev/zero"};
+  if (::geteuid() != 0) {
+    paths.push_back(unreadable);
+  }
+  for (const std::string & path : paths) {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_angle_correction", std::string("empirical")),
+      rclcpp::Parameter("backscatter_curve_file", path)}));
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED) << path;
+    EXPECT_TRUE(log.contains("backscatter_curve_file='" + path + "'")) << log.all();
+    EXPECT_FALSE(log.contains("EMPTY curve")) << log.all();
+  }
+  std::filesystem::permissions(unreadable, std::filesystem::perms::owner_all);
+  std::filesystem::remove(unreadable);
+  std::filesystem::remove(fifo);
+}
+
+// cube_bathymetry#172 review round 3: a table without `# angle_bin_width_deg:`
+// loads, and configure warns that beams past the outermost bin are clamped.
+TEST_F(NodeLifecycle, ATableWithoutABinWidthIsWarnedAboutAtConfigure)
+{
+  std::ifstream in(MODE_TABLE_FIXTURE_FILE);
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::size_t at = text.find("# angle_bin_width_deg:");
+  ASSERT_NE(at, std::string::npos);
+  text.erase(at, text.find('\n', at) + 1 - at);
+  const std::string path = (std::filesystem::temp_directory_path() /
+    ("cube_node_no_width_" + std::to_string(::getpid()) + ".csv")).string();
+  {
+    std::ofstream(path) << text;
+  }
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_curve_file", path)}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE) << log.all();
+  EXPECT_TRUE(log.contains("no '# angle_bin_width_deg:' header")) << log.all();
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  std::filesystem::remove(path);
+}
+
+// cube_bathymetry#172 review round 3: a reason first seen while the throttle
+// mutes the "nothing resolved" warning was marked warned anyway, so it was
+// never warned about once clouds resolved. It counts as warned only once a
+// warning naming it fires.
+TEST_F(NodeLifecycle, AReasonMutedByTheThrottleIsWarnedOnceCloudsResolve)
+{
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  const int64_t s = 1000000000LL;
+  CubeBathymetryTestAccess::resolveMode(*node, 150 * s, 500000.0f);   // no SonarInfo: warned
+  ASSERT_EQ(log.count("not corrected by the table"), 1u) << log.all();
+  marine_interfaces::msg::SonarInfo info;
+  info.header.stamp.sec = 151;
+  info.pulse_lengths = {0.001f};
+  info.bandwidths = {24000.0f};
+  info.tx_signal_types = {marine_interfaces::msg::SonarInfo::SIGNAL_TYPE_FM_UP};
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
+  // No frequency: no entry. Nothing has resolved yet, so the throttle mutes it.
+  CubeBathymetryTestAccess::resolveMode(*node, 151 * s + 1, NAN);
+  EXPECT_EQ(log.count("not corrected by the table (no table entry for the mode)"), 0u)
+    << log.all();
+  ASSERT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 152 * s, 500000.0f), 2);
+  // Clouds resolve now: the muted reason is warned once, then not again.
+  for (int i = 1; i <= 3; ++i) {
+    CubeBathymetryTestAccess::resolveMode(*node, 152 * s + i, NAN);
+  }
+  EXPECT_EQ(log.count("not corrected by the table (no table entry for the mode)"), 1u)
+    << log.all();
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// cube_bathymetry#172 review: an empty (or all-dropped) cloud carries no
+// frequency and no soundings; it must not be resolved as a `?kHz` ping. A
+// cloud with soundings is resolved once and its index stamped on each.
+TEST_F(NodeLifecycle, AnEmptyCloudIsNotResolvedAsAPing)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  marine_interfaces::msg::SonarInfo info;
+  info.header.stamp.sec = 100;
+  info.pulse_lengths = {0.001f};
+  info.bandwidths = {24000.0f};
+  info.tx_signal_types = {marine_interfaces::msg::SonarInfo::SIGNAL_TYPE_FM_UP};
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
+
+  std::vector<cube::GeoSounding> none;
+  CubeBathymetryTestAccess::stampCloud(*node, 150LL * 1000000000LL, NAN, none);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolvedPings(*node), 0u) << "an empty cloud is no ping";
+
+  std::vector<cube::GeoSounding> two(
+    2, cube::GeoSounding(gz4d::GeoPointLatLongDegrees(43.07, -70.71, -10.0)));
+  CubeBathymetryTestAccess::stampCloud(*node, 150LL * 1000000000LL, 500000.0f, two);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolvedPings(*node), 1u);
+  EXPECT_EQ(two[0].sounding.correction_idx, 2);
+  EXPECT_EQ(two[1].sounding.correction_idx, 2);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// cube_bathymetry#172 review: the per-mode settings without a table do
+// nothing; the configure says so instead of accepting them silently.
+TEST_F(NodeLifecycle, PerModeSettingsWithoutATableAreReportedIgnored)
+{
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_mode_fallback", std::string("exclude")),
+      rclcpp::Parameter("backscatter_mode_min_pings", static_cast<int64_t>(500))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_TRUE(log.contains("apply only to a per-pulse-mode table")) << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+      rclcpp::Parameter("backscatter_mode_fallback", std::string("exclude"))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_FALSE(log.contains("apply only to a per-pulse-mode table")) << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+}
+
+// A table that does not load, or an invalid fallback, fails the configure
+// rather than running with a half-applied correction.
+TEST_F(NodeLifecycle, ABrokenPerModeTableFailsConfigure)
+{
+  const auto dir = makeTempDir();
+  const auto broken = dir / "broken_table.csv";
+  {
+    std::ofstream out(broken);
+    out << "# format: angular-response-table v1\n# reference_mode: X\n# range_ref_m: 10\n"
+      "mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,"
+      "offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,"
+      "declared_tvg_absorption_db_per_km\n"
+      "FMU_1000us_24000Hz_500kHz,angle,1,,,-20\n";
+  }
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("backscatter_curve_file", broken.string())}));
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED)
+      << "a table that does not load must fail the configure";
+  }
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+      rclcpp::Parameter("backscatter_mode_fallback", std::string("nearest"))}));
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED)
+      << "an unknown fallback must fail the configure";
+  }
+  std::filesystem::remove_all(dir);
 }
 
 // With draft_dir set the saved tiles would reload (ADR-0001), so the sheet would

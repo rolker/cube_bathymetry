@@ -100,13 +100,22 @@ namespace cube
   /// sizeof(DepthAndUncertainty) (NOT a hardcoded 8/16); verified for #87.
     float range;
 
+  /// Per-ping backscatter correction index (cube_bathymetry#172): which
+  /// per-mode table entry corrects this beam, or one of the reserved values
+  /// (`kCorrectionUnresolved` 0 = legacy curve / identity,
+  /// `kCorrectionExclude`, `kCorrectionIdentity`; see backscatter_table.h).
+  /// Carried through the median queue bound to its depth like the fields
+  /// above. 22 bytes now (5 floats + uint16); still read only via sizeof.
+    uint16_t correction_idx;
+
     DepthAndUncertainty(float depth = std::numeric_limits < float > ::quiet_NaN(),
       float uncertainty = std::numeric_limits < float > ::quiet_NaN(),
       float intensity = std::numeric_limits < float > ::quiet_NaN(),
       float beam_angle = std::numeric_limits < float > ::quiet_NaN(),
-      float range = std::numeric_limits < float > ::quiet_NaN())
+      float range = std::numeric_limits < float > ::quiet_NaN(),
+      uint16_t correction_idx = 0)
       : depth(depth), uncertainty(uncertainty), intensity(intensity),
-      beam_angle(beam_angle), range(range) {
+      beam_angle(beam_angle), range(range), correction_idx(correction_idx) {
     }
   };
 #pragma pack(pop)

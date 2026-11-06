@@ -366,6 +366,7 @@ TEST(ReconCollector, SpillRoundTripsEverySoundingFieldInChronologicalOrder)
       sounding(43.07, -70.76, -12.0f, 0.02f),
       sounding(43.5, -70.2, -30.0f),
       sounding(43.0701, -70.7601, -12.5f, 0.03f)};
+    batch[1].sounding.correction_idx = 7;  // cube#172: pass two must see pass one's mode
     recon.add(batch, params);
     EXPECT_EQ(recon.soundingsSpilled(), 3u);
     EXPECT_TRUE(std::filesystem::exists(recon.spillPath()));
@@ -382,6 +383,7 @@ TEST(ReconCollector, SpillRoundTripsEverySoundingFieldInChronologicalOrder)
       EXPECT_FLOAT_EQ(replayed[i].sounding.intensity, batch[i].sounding.intensity);
       EXPECT_FLOAT_EQ(replayed[i].sounding.beam_angle, batch[i].sounding.beam_angle);
       EXPECT_FLOAT_EQ(replayed[i].sounding.slant_range, batch[i].sounding.slant_range);
+      EXPECT_EQ(replayed[i].sounding.correction_idx, batch[i].sounding.correction_idx);
       EXPECT_DOUBLE_EQ(replayed[i].sounding.sonar_relative_position.x,
         batch[i].sounding.sonar_relative_position.x);
       EXPECT_DOUBLE_EQ(replayed[i].sounding.sonar_relative_position.y,

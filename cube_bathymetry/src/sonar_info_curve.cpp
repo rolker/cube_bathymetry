@@ -97,4 +97,17 @@ bool curveFromSonarInfo(
   return true;
 }
 
+SonarInfoState sonarInfoStateFrom(const marine_interfaces::msg::SonarInfo & info)
+{
+  SonarInfoState s;
+  s.stamp_ns = static_cast<int64_t>(info.header.stamp.sec) * 1000000000LL +
+    static_cast<int64_t>(info.header.stamp.nanosec);
+  s.pulse_lengths_s = info.pulse_lengths;
+  s.bandwidths_hz = info.bandwidths;
+  s.tx_signal_types = info.tx_signal_types;
+  s.declared.model = declaredTvgFromMessageValue(info.tvg_model);
+  s.declared.absorption_db_per_km = info.tvg_absorption_db_per_km;
+  return s;
+}
+
 }  // namespace cube
