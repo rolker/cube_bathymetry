@@ -199,7 +199,12 @@ TEST(BackscatterTable, LoadsTheFixture)
   EXPECT_EQ(cw.angle[1].n, 1u);
   EXPECT_TRUE(std::isnan(cw.angle[1].se_db));
   EXPECT_EQ(cw.unweighable_bins, 1u);
-  EXPECT_TRUE(cw.groups.empty()) << "both groups were written zero (no range rows)";
+  // Both groups were written zero (no range rows): every DECLARED group is
+  // still present, with no nodes (a zero term).
+  ASSERT_EQ(cw.groups.size(), 2u);
+  EXPECT_TRUE(cw.groups[0].nodes.empty());
+  EXPECT_TRUE(cw.groups[1].nodes.empty());
+  EXPECT_DOUBLE_EQ(cw.groups[1].angle_lo_deg, 30.0);
   EXPECT_TRUE(cw.offset_anchored);
   EXPECT_DOUBLE_EQ(cw.offset_db_vs_ref, -17.25);
   EXPECT_DOUBLE_EQ(cw.offset_se_db, 0.31);
@@ -228,7 +233,9 @@ TEST(BackscatterTable, LoadsTheFixture)
   EXPECT_FALSE(rare.offset_anchored);
   EXPECT_TRUE(std::isnan(rare.offset_db_vs_ref));
   EXPECT_EQ(rare.pings, 169u);
-  ASSERT_EQ(rare.groups.size(), 1u);
+  ASSERT_EQ(rare.groups.size(), 2u);
+  EXPECT_EQ(rare.groups[0].nodes.size(), 2u);
+  EXPECT_TRUE(rare.groups[1].nodes.empty()) << "30-90 was written zero";
 }
 
 TEST(BackscatterTable, LookupFollowsTheTableContract)
@@ -366,6 +373,85 @@ TEST(BackscatterTable, RejectsMalformedTablesWhole)
   std::string error;
   EXPECT_TRUE(loadBackscatterTable("/no/such/table_172.csv", error).empty());
   EXPECT_NE(error.find("cannot open"), std::string::npos);
+}
+
+// cube_bathymetry#172 review: the writer omits the rows of a group it did not
+// fit. When that is the FIRST group, the specular band and the first group's
+// own beams must get its zero term -- not the next group's range term, which is
+// what a lookup over the written groups alone gives them.
+TEST(BackscatterTable, AnUnfittedFirstGroupIsAZeroTermNotTheNextGroup)
+{
+  const std::string rows =
+    "FMU_1000us_24000Hz_500kHz,angle,1,,,-20,100,9,+0.000,0.3,0.000,0.000,true,UNKNOWN,nan\n"
+    "FMU_1000us_24000Hz_500kHz,range,0,30,90,0,100,,,0,0.000,0.000,true,UNKNOWN,nan\n"
+    "FMU_1000us_24000Hz_500kHz,range,1,30,90,-10,100,,,0,0.000,0.000,true,UNKNOWN,nan\n";
+  const std::string header(kHeader);
+  const std::string declared = header.substr(0, header.find("mode,term")) +
+    "# range_angle_groups_deg: 10-30,30-90\n" + header.substr(header.find("mode,term"));
+  const auto path = writeTemp("unfitted_first", declared + rows);
+  std::string error;
+  const auto table = loadBackscatterTable(path, error);
+  ASSERT_TRUE(error.empty()) << error;
+  const ModeEntry & e = table.entries.at(0);
+  ASSERT_EQ(e.groups.size(), 2u) << "both declared groups exist";
+  EXPECT_DOUBLE_EQ(e.groups[0].angle_lo_deg, 10.0);
+  EXPECT_DOUBLE_EQ(e.groups[0].angle_hi_deg, 30.0);
+  EXPECT_TRUE(e.groups[0].nodes.empty());
+  ASSERT_EQ(e.groups[1].nodes.size(), 2u);
+  const auto id = BackscatterModeFallback::Identity;
+  const double far = 100.0;  // log10(R / R0) = 1: the 30-90 group reads -10 there
+  EXPECT_EQ(e.groupFor(5.0), &e.groups[0]) << "the specular band takes the first DECLARED group";
+  EXPECT_EQ(e.groupFor(20.0), &e.groups[0]);
+  EXPECT_EQ(e.groupFor(60.0), &e.groups[1]);
+  EXPECT_NEAR(correctWithTable(-20.0, 5.0, far, table, 1, id), -20.0, 1e-9)
+    << "specular band: zero range term";
+  EXPECT_NEAR(correctWithTable(-20.0, 20.0, far, table, 1, id), -20.0, 1e-9)
+    << "inside the unfitted first group: zero range term";
+  EXPECT_NEAR(correctWithTable(-20.0, 60.0, far, table, 1, id), -20.0 + 10.0, 1e-9);
+  std::filesystem::remove(path);
+
+  // Without the header line (a hand-made table) the rows are all there is:
+  // the first WRITTEN group serves the specular band, as documented.
+  const auto bare = writeTemp("unfitted_first_bare", header + rows);
+  const auto legacy = loadBackscatterTable(bare, error);
+  ASSERT_TRUE(error.empty()) << error;
+  ASSERT_EQ(legacy.entries.at(0).groups.size(), 1u);
+  EXPECT_NEAR(correctWithTable(-20.0, 5.0, far, legacy, 1, id), -20.0 + 10.0, 1e-9);
+  std::filesystem::remove(bare);
+}
+
+TEST(BackscatterTable, DeclaredGroupsMustCoverEveryRangeRow)
+{
+  const std::string header(kHeader);
+  const std::string head = header.substr(0, header.find("mode,term"));
+  const std::string columns = header.substr(header.find("mode,term"));
+  struct Case
+  {
+    const char * tag;
+    const char * groups;
+    const char * expect;
+  };
+  const std::vector<Case> cases = {
+    {"undeclared", "10-30,30-50", "does not declare"},
+    {"garbled", "10to30", "is not <lo>-<hi>"},
+    {"reversed", "30-10", "0 <= lo < hi <= 90"},
+    {"beyond", "10-95", "0 <= lo < hi <= 90"},
+    {"overlap", "10-50,30-90", "overlaps"},
+  };
+  for (const auto & c : cases) {
+    const auto path = writeTemp(
+      c.tag, head + "# range_angle_groups_deg: " + c.groups + "\n" + columns + kGoodRows);
+    std::string error;
+    EXPECT_TRUE(loadBackscatterTable(path, error).empty()) << c.tag;
+    EXPECT_NE(error.find(c.expect), std::string::npos) << c.tag << ": " << error;
+    std::filesystem::remove(path);
+  }
+  // kGoodRows' one group is 10-90: declaring exactly it loads.
+  const auto path = writeTemp(
+    "declared_ok", head + "# range_angle_groups_deg: 10-90\n" + columns + kGoodRows);
+  std::string error;
+  EXPECT_EQ(loadBackscatterTable(path, error).entries.size(), 1u) << error;
+  std::filesystem::remove(path);
 }
 
 TEST(BackscatterTable, OverlappingGroupsAreRejected)

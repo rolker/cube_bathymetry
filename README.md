@@ -1056,7 +1056,12 @@ beam of mode `m` at `|angle|` and slant range R uses the `range` rows of `m`
 whose `angle_lo_deg <= |angle| < angle_hi_deg`, interpolated linearly in
 `log10(R / R0)` between nodes and clamped beyond the end nodes; below the first
 `angle_lo_deg` (the specular band) it uses the first group; a mode or group
-with no `range` rows has a zero term. The corrected value is
+with no `range` rows has a zero term. The groups are the ones
+`# range_angle_groups_deg` declares, not the ones that happen to have rows: the
+writer omits the rows of a group it did not fit, so the C++ loader creates
+every declared group for every mode (an unfitted one as a zero term), and the
+specular band takes the first DECLARED group. Only a table without that header
+line falls back to the groups its rows name. The corrected value is
 `raw - db_relative_to_nadir - r_g - offset_db_vs_ref`, which puts every mode on
 the reference mode's nadir level at R0, and the beam is weighted by
 `1 / var_db2` of its angle bin. The cases the loader must handle are all

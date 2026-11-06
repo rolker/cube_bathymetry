@@ -193,7 +193,10 @@ namespace cube
     std::string key;
   /// Ascending in `abs_angle_deg`.
     std::vector < AngleBin > angle;
-  /// Ascending in `angle_lo_deg`; may be empty (zero range term).
+  /// Ascending in `angle_lo_deg`. With the header's
+  /// `# range_angle_groups_deg:` line, EVERY declared group, a group the
+  /// writer did not fit (no range rows) being present with no nodes (a zero
+  /// term); without that line, the groups the rows name, possibly none.
     std::vector < RangeTermGroup > groups;
   /// False for a mode with no switch path to the reference mode: it has no
   /// measured offset and MUST NOT be corrected by this table.
@@ -215,8 +218,10 @@ namespace cube
     const AngleBin * binFor(double abs_angle_deg) const;
   /// The range-term group for `abs_angle_deg` per the table's lookup rule:
   /// `angle_lo_deg <= |theta| < angle_hi_deg`; below the first
-  /// `angle_lo_deg` (the specular band) the first group; null when no group
-  /// applies (zero term).
+  /// `angle_lo_deg` (the specular band) the first group -- the first
+  /// DECLARED group when the header declares them, so an unfitted first
+  /// group gives the specular band its zero term rather than the next
+  /// group's; null when no group applies (zero term).
     const RangeTermGroup * groupFor(double abs_angle_deg) const;
   };
 

@@ -153,6 +153,54 @@ std::map<std::string, std::string> tokens(const std::string & text)
   return out;
 }
 
+/// Parse `# range_angle_groups_deg:` (`10-30,30-50,50-90`, the writer's `%g-%g`
+/// list): every declared group, ascending and non-overlapping, inside
+/// [0, 90] degrees. False (with @p why) on anything else.
+bool parseAngleGroups(
+  const std::string & text, std::vector<std::pair<double, double>> & out, std::string & why)
+{
+  out.clear();
+  for (const auto & raw : splitCsv(text)) {
+    const std::string item = trim(raw);
+    const char * begin = item.c_str();
+    char * end = nullptr;
+    errno = 0;
+    const double lo = std::strtod(begin, &end);
+    if (end == begin || *end != '-' || errno == ERANGE) {
+      why = "group '" + item + "' is not <lo>-<hi>";
+      return false;
+    }
+    const char * hi_begin = end + 1;
+    const double hi = std::strtod(hi_begin, &end);
+    if (end == hi_begin || *end != '\0' || errno == ERANGE) {
+      why = "group '" + item + "' is not <lo>-<hi>";
+      return false;
+    }
+    if (!std::isfinite(lo) || !std::isfinite(hi) || !(lo >= 0.0) || !(lo < hi) ||
+      !(hi <= 90.0))
+    {
+      why = "group '" + item + "' needs 0 <= lo < hi <= 90";
+      return false;
+    }
+    if (!out.empty() && lo < out.back().second) {
+      why = "group '" + item + "' overlaps or precedes the one before it";
+      return false;
+    }
+    out.emplace_back(lo, hi);
+  }
+  if (out.empty()) {
+    why = "no groups";
+    return false;
+  }
+  return true;
+}
+
+/// True when two group bounds written with the same `%g` are the same group.
+bool sameBounds(const std::pair<double, double> & a, const std::pair<double, double> & b)
+{
+  return std::abs(a.first - b.first) <= 1e-9 && std::abs(a.second - b.second) <= 1e-9;
+}
+
 /// Per-mode scalar columns as raw text, compared verbatim between rows.
 struct ModeScalars
 {
@@ -509,6 +557,19 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
   if (header.count("source_bags")) {
     table.source_bags = header["source_bags"];
   }
+  // The declared range-term groups (cube#172 review): the writer omits the
+  // rows of a group it did not fit (its zero term), so the rows alone cannot
+  // say where the first group starts. With this line every mode carries every
+  // declared group, empty ones as zero terms, and the specular band takes the
+  // first DECLARED group; without it (a hand-made table) the groups are the
+  // ones the rows name.
+  std::vector<std::pair<double, double>> declared_groups;
+  if (header.count("range_angle_groups_deg")) {
+    std::string why;
+    if (!parseAngleGroups(header["range_angle_groups_deg"], declared_groups, why)) {
+      return fail(line_no, "malformed '# range_angle_groups_deg:' (" + why + ")");
+    }
+  }
 
   // Per-mode summaries: pings and beams.
   std::map<std::string, std::pair<uint64_t, uint64_t>> summary_counts;
@@ -671,6 +732,31 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
     std::sort(
       b.entry.angle.begin(), b.entry.angle.end(),
       [](const AngleBin & l, const AngleBin & r) {return l.abs_angle_deg < r.abs_angle_deg;});
+    if (!declared_groups.empty()) {
+      // Every declared group, in declared order; a written group must be one
+      // of them (a row naming another group is a table this loader cannot
+      // place, so it refuses rather than guessing).
+      std::vector<std::pair<std::pair<double, double>, std::vector<RangeNode>>> placed;
+      for (const auto & d : declared_groups) {
+        placed.push_back({d, {}});
+      }
+      for (auto & g : b.groups) {
+        auto slot = std::find_if(
+          placed.begin(), placed.end(), [&](const auto & p) {
+            return sameBounds(p.first, g.first);
+          });
+        if (slot == placed.end()) {
+          std::ostringstream os;
+          os << path << ": mode '" << b.entry.key << "' has range rows for the group "
+             << g.first.first << "-" << g.first.second
+             << ", which '# range_angle_groups_deg:' does not declare";
+          error = os.str();
+          return BackscatterTable();
+        }
+        slot->second = std::move(g.second);
+      }
+      b.groups = std::move(placed);
+    }
     std::sort(
       b.groups.begin(), b.groups.end(),
       [](const auto & l, const auto & r) {return l.first.first < r.first.first;});
