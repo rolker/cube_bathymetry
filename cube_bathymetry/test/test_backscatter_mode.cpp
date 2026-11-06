@@ -176,6 +176,85 @@ TEST(BackscatterModeResolver, HeartbeatsDedupAndLateMessagesCountStale)
   EXPECT_EQ(r.resolve(530, kF), 2);
 }
 
+// cube_bathymetry#172 review: a bridge that republishes SonarInfo with a new
+// stamp on every ping under a steady mode adds no history entry and is not
+// late; a late OLDER message only counts the pings it would really have
+// corrected differently (the ones before the next stored stamp).
+TEST(BackscatterModeResolver, SteadyRepublishAndOutOfOrderMessagesAreNotStale)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table);
+  const int64_t s = 1000000000LL;
+  EXPECT_TRUE(r.addSonarInfo(state(1 * s, 0.001f, 24000.0f, 2)));   // FMU 1 ms
+  for (int i = 0; i < 50; ++i) {
+    const int64_t ping = 2 * s + i * 100000000LL;
+    EXPECT_EQ(r.resolve(ping, kF), 2);
+    // Delivered just after the ping it describes, stamped with it: same mode.
+    EXPECT_TRUE(r.addSonarInfo(state(ping, 0.001f, 24000.0f, 2))) << i;
+  }
+  EXPECT_EQ(r.historySize(), 1u) << "a steady mode stores one state";
+  EXPECT_EQ(r.counts().stale, 0u);
+
+  // A real change at 10 s, pings after it, then a late message stamped 9 s
+  // with a third mode: the pings at 10 s and later use the 10 s state, so the
+  // late one describes none of them.
+  EXPECT_TRUE(r.addSonarInfo(state(10 * s, 5e-5f, 20000.0f, 1)));   // CW 50 us
+  EXPECT_EQ(r.resolve(10 * s + 1, kF), 1);
+  EXPECT_EQ(r.resolve(10 * s + 2, kF), 1);
+  EXPECT_TRUE(r.addSonarInfo(state(9 * s, 0.005f, 24000.0f, 2)));   // FMU 5 ms, late
+  EXPECT_EQ(r.counts().stale, 0u) << "no resolved ping lies between 9 s and 10 s";
+  EXPECT_EQ(r.resolve(9 * s + 5, kF), kCorrectionUnresolved) << "the 5 ms entry is unanchored";
+  // A re-delivery at 10 s that changes only the declared TVG changes no
+  // correction: stored, but nothing is stale.
+  EXPECT_TRUE(r.addSonarInfo(state(10 * s, 5e-5f, 20000.0f, 1, DeclaredTvg::Log40R, 80.0f)));
+  EXPECT_EQ(r.counts().stale, 0u);
+}
+
+// The bound (cube_bathymetry#172 review must-fix): a sonar alternating modes on
+// every ping republishes SonarInfo every ping; the history must not grow with
+// the run, yet a ping that arrives late but inside the window still resolves
+// against the state that was in force at its stamp.
+TEST(BackscatterModeResolver, HistoryIsBoundedByTheWindowAndTheCap)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table);
+  const int64_t step = 100000000LL;  // 10 Hz
+  const int n = 20000;               // 2000 s, far beyond the 60 s window
+  for (int i = 0; i < n; ++i) {
+    const int64_t t = i * step;
+    if (i % 2 == 0) {
+      r.addSonarInfo(state(t, 0.001f, 24000.0f, 2));   // FMU 1 ms -> idx 2
+    } else {
+      r.addSonarInfo(state(t, 5e-5f, 20000.0f, 1));    // CW 50 us -> idx 1
+    }
+    ASSERT_EQ(r.resolve(t + step / 2, kF), i % 2 == 0 ? 2 : 1) << i;
+  }
+  const std::size_t window_entries =
+    static_cast<std::size_t>(BackscatterModeResolver::kHistoryWindowNs / step);
+  EXPECT_LE(r.historySize(), window_entries + 2) << "bounded by the window, not the run";
+  EXPECT_GE(r.historySize(), window_entries - 2) << "the window itself is kept";
+  EXPECT_EQ(r.counts().stale, 0u);
+
+  // Late pings inside the window, 59 s and 30 s behind the newest one, still
+  // resolve against the state in force at their stamps.
+  const int64_t newest = (n - 1) * step + step / 2;
+  for (const int64_t behind : {59LL * 1000000000LL, 30LL * 1000000000LL}) {
+    const int64_t late = newest - behind;
+    EXPECT_EQ(r.resolve(late, kF), (late / step) % 2 == 0 ? 2 : 1) << behind;
+  }
+
+  // A SonarInfo stream with no pings at all is held by the hard cap.
+  BackscatterModeResolver idle(&f.table);
+  const int64_t many = 3 * static_cast<int64_t>(BackscatterModeResolver::kMaxHistory);
+  for (int64_t i = 0; i < many; ++i) {
+    idle.addSonarInfo(
+      i % 2 == 0 ? state(i, 0.001f, 24000.0f, 2) : state(i, 5e-5f, 20000.0f, 1));
+  }
+  EXPECT_EQ(idle.historySize(), BackscatterModeResolver::kMaxHistory);
+  ASSERT_NE(idle.stateAt(many), nullptr) << "the newest states are the ones kept";
+  EXPECT_EQ(idle.stateAt(0), nullptr) << "the oldest ones went first";
+}
+
 TEST(BackscatterModeResolver, MixedDeclarationAlwaysMismatches)
 {
   const std::string path = (std::filesystem::temp_directory_path() /

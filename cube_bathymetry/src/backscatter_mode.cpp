@@ -23,6 +23,7 @@
 #include "cube_bathymetry/backscatter_mode.h"
 
 #include <algorithm>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -32,9 +33,9 @@ namespace cube
 
 namespace
 {
-/// Bound on the stamps kept for the stale count between two SonarInfo
-/// arrivals (a bag with no SonarInfo at all would otherwise keep every ping).
-constexpr std::size_t kMaxResolvedSinceNewest = 1u << 20;
+/// Bound on the ping stamps kept for the stale count, beside the window
+/// (a ping rate high enough to fill it inside 60 s is not a sonar).
+constexpr std::size_t kMaxRecentResolved = 1u << 20;
 
 bool sameState(const SonarInfoState & a, const SonarInfoState & b)
 {
@@ -78,14 +79,35 @@ void BackscatterModeResolver::setMismatchWarning(std::function<void(const std::s
 bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
 {
   ++counts_.sonar_info_seen;
-  const auto existing = history_.find(state.stamp_ns);
+  const int64_t stamp = state.stamp_ns;
+  const auto existing = history_.find(stamp);
   if (existing != history_.end() && sameState(existing->second, state)) {
     return true;  // a heartbeat: the same message again
   }
-  // Pings already resolved at or after this stamp would have used it.
+  if (existing == history_.end()) {
+    // The state in force at this stamp, if any: the same state again under
+    // a new stamp (a bridge republishing on every ping) changes nothing.
+    const SonarInfoState * in_force = stateAt(stamp);
+    if (in_force && sameState(*in_force, state)) {
+      prune();
+      return true;
+    }
+  }
+  // The pings this message would have described: the resolved ones from its
+  // stamp up to the next stored stamp (those beyond use that later entry).
+  // One is stale when this state gives it another correction than the one
+  // it got -- a re-delivery that changes only the declared TVG is not.
+  const auto next = history_.upper_bound(stamp);
   uint64_t stale_now = 0;
-  for (const int64_t stamp : resolved_since_newest_) {
-    if (stamp >= state.stamp_ns) {
+  for (const RecentPing & ping : recent_resolved_) {
+    if (ping.stamp_ns < stamp || (next != history_.end() && ping.stamp_ns >= next->first)) {
+      continue;
+    }
+    const KeyDecision & d = decide(
+      canonicalModeKey(
+        state.pulse_lengths_s, state.bandwidths_hz, state.tx_signal_types,
+        ping.frequency_hz));
+    if (idxOf(d) != ping.idx) {
       ++stale_now;
     }
   }
@@ -93,13 +115,35 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
     ++counts_.late_sonar_info;
     counts_.stale += stale_now;
   }
-  history_[state.stamp_ns] = state;
-  if (!have_newest_ || state.stamp_ns >= newest_stamp_ns_) {
-    newest_stamp_ns_ = state.stamp_ns;
-    have_newest_ = true;
-  }
-  resolved_since_newest_.clear();
+  history_[stamp] = state;
+  prune();
   return stale_now == 0;
+}
+
+int64_t BackscatterModeResolver::windowCut() const
+{
+  return newest_resolved_ns_ < std::numeric_limits<int64_t>::min() + kHistoryWindowNs ?
+         std::numeric_limits<int64_t>::min() : newest_resolved_ns_ - kHistoryWindowNs;
+}
+
+void BackscatterModeResolver::prune()
+{
+  if (have_resolved_) {
+    const int64_t cut = windowCut();
+    // Keep the newest entry at or before the cut: a ping at or after the cut
+    // may still resolve against it; nothing older can be selected again.
+    auto keep = history_.upper_bound(cut);
+    if (keep != history_.begin()) {
+      --keep;
+      history_.erase(history_.begin(), keep);
+    }
+    while (!recent_resolved_.empty() && recent_resolved_.front().stamp_ns < cut) {
+      recent_resolved_.pop_front();
+    }
+  }
+  while (history_.size() > kMaxHistory) {
+    history_.erase(history_.begin());
+  }
 }
 
 const SonarInfoState * BackscatterModeResolver::stateAt(int64_t stamp_ns) const
@@ -118,24 +162,14 @@ uint16_t BackscatterModeResolver::fallbackIdx() const
          kCorrectionUnresolved;
 }
 
-uint16_t BackscatterModeResolver::resolve(
-  int64_t ping_stamp_ns, float frequency_hz, ModeResolution & resolution)
+uint16_t BackscatterModeResolver::idxOf(const KeyDecision & d) const
 {
-  ++counts_.pings;
-  if (resolved_since_newest_.size() >= kMaxResolvedSinceNewest) {
-    resolved_since_newest_.pop_front();
-  }
-  resolved_since_newest_.push_back(ping_stamp_ns);
+  return d.resolution == ModeResolution::Resolved ? d.idx : fallbackIdx();
+}
 
-  const SonarInfoState * state = stateAt(ping_stamp_ns);
-  if (!state) {
-    resolution = ModeResolution::NoSonarInfo;
-    ++counts_.no_sonar_info;
-    return fallbackIdx();
-  }
-  const std::string key = canonicalModeKey(
-    state->pulse_lengths_s, state->bandwidths_hz, state->tx_signal_types, frequency_hz);
-
+const BackscatterModeResolver::KeyDecision & BackscatterModeResolver::decide(
+  const std::string & key)
+{
   auto decision = decisions_.find(key);
   if (decision == decisions_.end()) {
     KeyDecision d{kCorrectionUnresolved, ModeResolution::NoEntry};
@@ -153,7 +187,42 @@ uint16_t BackscatterModeResolver::resolve(
     }
     decision = decisions_.emplace(key, d).first;
   }
-  resolution = decision->second.resolution;
+  return decision->second;
+}
+
+void BackscatterModeResolver::remember(int64_t ping_stamp_ns, float frequency_hz, uint16_t idx)
+{
+  if (recent_resolved_.size() >= kMaxRecentResolved) {
+    recent_resolved_.pop_front();
+  }
+  recent_resolved_.push_back(RecentPing{ping_stamp_ns, frequency_hz, idx});
+  const int64_t cut = windowCut();
+  while (!recent_resolved_.empty() && recent_resolved_.front().stamp_ns < cut) {
+    recent_resolved_.pop_front();
+  }
+}
+
+uint16_t BackscatterModeResolver::resolve(
+  int64_t ping_stamp_ns, float frequency_hz, ModeResolution & resolution)
+{
+  ++counts_.pings;
+  if (!have_resolved_ || ping_stamp_ns > newest_resolved_ns_) {
+    newest_resolved_ns_ = ping_stamp_ns;
+    have_resolved_ = true;
+  }
+
+  const SonarInfoState * state = stateAt(ping_stamp_ns);
+  if (!state) {
+    resolution = ModeResolution::NoSonarInfo;
+    ++counts_.no_sonar_info;
+    remember(ping_stamp_ns, frequency_hz, fallbackIdx());
+    return fallbackIdx();
+  }
+  const std::string key = canonicalModeKey(
+    state->pulse_lengths_s, state->bandwidths_hz, state->tx_signal_types, frequency_hz);
+  const KeyDecision & decision = decide(key);
+  remember(ping_stamp_ns, frequency_hz, idxOf(decision));
+  resolution = decision.resolution;
 
   // Declared-state check (decision 8): a check, not an input. Compared on
   // every ping so the count is per ping; warned once per (mode, state).
@@ -179,7 +248,7 @@ uint16_t BackscatterModeResolver::resolve(
   switch (resolution) {
     case ModeResolution::Resolved:
       ++counts_.resolved_by_mode[key];
-      return decision->second.idx;
+      return decision.idx;
     case ModeResolution::NoEntry:
       ++counts_.no_entry_by_mode[key];
       break;

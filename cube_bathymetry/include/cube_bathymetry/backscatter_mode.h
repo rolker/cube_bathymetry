@@ -77,13 +77,37 @@ namespace cube
 
 /// Resolves pings to `correction_idx` values. Time-ordered association:
 /// a ping uses the latest SonarInfo whose stamp is at or before the ping
-/// stamp; the history is keyed by stamp and deduplicated (heartbeats repeat
-/// the change stamp). A SonarInfo that arrives AFTER pings it would have
-/// described is never applied to them retroactively; the live node counts
-/// those pings as stale (`lateSonarInfo`).
+/// stamp. The history is keyed by stamp and deduplicated: a message at a
+/// stamp already held with the same state is a heartbeat (re-delivery), and
+/// a message whose state equals the one already in force at its stamp
+/// changes nothing and is not stored (a bridge that republishes on every
+/// ping under a steady mode adds no entries). A SonarInfo that arrives AFTER
+/// pings it would have described is never applied to them retroactively;
+/// those pings -- the resolved ones between its stamp and the next stored
+/// stamp whose correction it would have changed -- are counted as stale
+/// (`Counts::stale`).
+///
+/// **The history is bounded** (a live node runs for days, and a
+/// mode-switching sonar republishes SonarInfo on every switch, which under
+/// alternating multi-mode pinging is every ping):
+///   - on every `addSonarInfo`, entries stamped before
+///     `newest resolved ping stamp - kHistoryWindowNs` are dropped, EXCEPT
+///     the newest entry at or before that cut. Pings drain in stamp order
+///     offline and arrive in order live, so a later ping can only resolve
+///     against that kept entry or a newer one: the dropped entries can never
+///     be selected again. A late ping inside the window still finds the
+///     state that was in force at its stamp.
+///   - a hard cap of `kMaxHistory` entries, the oldest dropped first, for a
+///     stream that changes state while no ping is resolved at all.
+/// The stale count looks back over the same window only.
   class BackscatterModeResolver
   {
 public:
+  /// How far behind the newest resolved ping the history is kept (60 s).
+    static constexpr int64_t kHistoryWindowNs = 60LL * 1000000000LL;
+  /// Hard cap on stored SonarInfo states.
+    static constexpr std::size_t kMaxHistory = 4096;
+
   /// Counters for the report. Keys are mode keys; the mismatch map is keyed
   /// by (mode key, declared state as text).
     struct Counts
@@ -96,7 +120,8 @@ public:
       std::map < std::string, uint64_t > under_floor_by_mode;
       std::map < std::pair < std::string, std::string >, uint64_t > declared_mismatch;
     /// Pings resolved before a SonarInfo with an earlier stamp arrived (live
-    /// delivery lag): they were corrected under the previous mode.
+    /// delivery lag) that it would have corrected differently: they were
+    /// corrected under the previous mode. Looked for inside the window.
       uint64_t stale = 0;
       uint64_t late_sonar_info = 0;
       uint64_t sonar_info_seen = 0;
@@ -123,9 +148,12 @@ public:
   /// Called once per (mode key, declared state) mismatch with a message.
     void setMismatchWarning(std::function < void(const std::string &) > warn);
 
-  /// Record a SonarInfo. Same stamp = the same message (a heartbeat or a
-  /// re-delivery): replaced, not duplicated. Returns false when the stamp
-  /// lies before a ping already resolved (the stale case above).
+  /// Record a SonarInfo. Same stamp and state = the same message (a
+  /// heartbeat or a re-delivery); same state as the one in force at its
+  /// stamp = no change; both are not stored. A different state at a held
+  /// stamp replaces it. Then prunes the history (the bound above). Returns
+  /// false when the message changes the state of pings already resolved
+  /// (the stale case above).
     bool addSonarInfo(const SonarInfoState & state);
 
   /// Resolve one ping. @p frequency_hz is the ping's own
@@ -142,6 +170,8 @@ public:
     const SonarInfoState * stateAt(int64_t stamp_ns) const;
 
     const Counts & counts() const {return counts_;}
+  /// Stored SonarInfo states (the bound above).
+    std::size_t historySize() const {return history_.size();}
     BackscatterModeFallback fallback() const {return fallback_;}
     uint64_t minPings() const {return min_pings_;}
     const BackscatterTable & table() const {return *table_;}
@@ -152,14 +182,6 @@ public:
     std::string report() const;
 
 private:
-    uint16_t fallbackIdx() const;
-
-    const BackscatterTable * table_;
-    BackscatterModeFallback fallback_;
-    uint64_t min_pings_;
-    std::function < void(const std::string &) > warn_;
-    Counts counts_;
-    std::map < int64_t, SonarInfoState > history_;
   /// mode key -> resolved idx and reason, cached per key (the key string is
   /// rebuilt per ping; the table lookup and checks are not).
     struct KeyDecision
@@ -167,12 +189,38 @@ private:
       uint16_t idx;
       ModeResolution resolution;
     };
+  /// One resolved ping inside the window: what it got, so a late SonarInfo
+  /// can tell whether it changes that.
+    struct RecentPing
+    {
+      int64_t stamp_ns;
+      float frequency_hz;
+      uint16_t idx;
+    };
+
+    uint16_t fallbackIdx() const;
+    uint16_t idxOf(const KeyDecision & d) const;
+    const KeyDecision & decide(const std::string & key);
+    void remember(int64_t ping_stamp_ns, float frequency_hz, uint16_t idx);
+
+    const BackscatterTable * table_;
+    BackscatterModeFallback fallback_;
+    uint64_t min_pings_;
+    std::function < void(const std::string &) > warn_;
+    Counts counts_;
+    std::map < int64_t, SonarInfoState > history_;
     std::unordered_map < std::string, KeyDecision > decisions_;
     std::map < std::pair < std::string, std::string >, bool > warned_;
-  /// Stamps of pings resolved since the newest SonarInfo, for the stale count.
-    std::deque < int64_t > resolved_since_newest_;
-    int64_t newest_stamp_ns_ = 0;
-    bool have_newest_ = false;
+  /// Stamps of the pings resolved inside the history window, oldest first,
+  /// for the stale count.
+    std::deque < RecentPing > recent_resolved_;
+  /// The newest ping stamp resolved so far (the window's anchor).
+    int64_t newest_resolved_ns_ = 0;
+    bool have_resolved_ = false;
+
+  /// Oldest stamp the window keeps; meaningless before the first ping.
+    int64_t windowCut() const;
+    void prune();
   };
 
 }  // namespace cube
