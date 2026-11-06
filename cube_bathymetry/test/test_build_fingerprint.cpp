@@ -178,6 +178,80 @@ TEST(BuildFingerprint, StalenessRules)
   EXPECT_TRUE(fixed(0.25).isStale(v1));
 }
 
+// cube_bathymetry#172: the backscatter correction is part of the fingerprint.
+TEST(BuildFingerprint, BackscatterCorrectionRoundTripsAndDecidesStaleness)
+{
+  auto with_table = fixed(1.0);
+  BuildFingerprint::BackscatterCorrection c;
+  c.mode = "empirical";
+  c.kind = "table";
+  c.source = "/data/m3_mode_table.csv";
+  c.sha256 = sha256Text("a table");
+  c.fallback = "exclude";
+  c.min_pings = 200;
+  with_table.backscatter_correction = c;
+
+  const auto back = BuildFingerprint::fromJson(with_table.toJson());
+  ASSERT_TRUE(back.backscatter_correction.has_value());
+  EXPECT_EQ(*back.backscatter_correction, c);
+  EXPECT_EQ(back.backscatter_correction->source, c.source);
+  EXPECT_FALSE(back.isStale(with_table));
+
+  // The same table under another path is the same correction.
+  auto moved = with_table;
+  moved.backscatter_correction->source = "/elsewhere/table.csv";
+  EXPECT_FALSE(with_table.isStale(moved));
+  // A different table, fallback or ping floor is not.
+  auto other = with_table;
+  other.backscatter_correction->sha256 = sha256Text("another table");
+  EXPECT_TRUE(with_table.isStale(other));
+  auto identity = with_table;
+  identity.backscatter_correction->fallback = "identity";
+  EXPECT_TRUE(with_table.isStale(identity));
+  auto floor = with_table;
+  floor.backscatter_correction->min_pings = 0;
+  EXPECT_TRUE(with_table.isStale(floor));
+
+  // None: written as an object with null hash; a pre-#172 file (no key) is
+  // stale against any fingerprint that records the correction.
+  auto none = fixed(1.0);
+  none.backscatter_correction = BuildFingerprint::BackscatterCorrection{};
+  const std::string json = none.toJson();
+  EXPECT_NE(json.find("\"sha256\": null"), std::string::npos) << json;
+  EXPECT_NE(json.find("\"fallback\": null"), std::string::npos) << json;
+  const auto none_back = BuildFingerprint::fromJson(json);
+  ASSERT_TRUE(none_back.backscatter_correction.has_value());
+  EXPECT_EQ(none_back.backscatter_correction->kind, "none");
+  EXPECT_TRUE(with_table.isStale(none));
+  const auto old = fixed(1.0);  // no key at all
+  EXPECT_FALSE(old.backscatter_correction.has_value());
+  EXPECT_TRUE(none.isStale(old));
+  EXPECT_TRUE(old.isStale(none));
+  EXPECT_FALSE(old.isStale(old));
+  EXPECT_NE(old.toJson().find("\"backscatter_correction\": null"), std::string::npos);
+  EXPECT_FALSE(BuildFingerprint::fromJson(old.toJson()).backscatter_correction.has_value());
+}
+
+TEST(BuildFingerprint, Sha256HelpersMatchTheReferenceDigests)
+{
+  // FIPS 180-4 reference vectors.
+  EXPECT_EQ(sha256Text(""),
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  EXPECT_EQ(sha256Text("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  const auto dir = std::filesystem::path(tempStore("sha"));
+  std::filesystem::create_directories(dir);
+  const auto path = dir / "abc.txt";
+  {
+    std::ofstream out(path);
+    out << "abc";
+  }
+  EXPECT_EQ(sha256File(path.string()),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_THROW(sha256File((dir / "missing").string()), std::runtime_error);
+  std::filesystem::remove_all(dir);
+}
+
 TEST(BuildFingerprint, ReadWriteAtomically)
 {
   const auto dir = tempStore("rw");

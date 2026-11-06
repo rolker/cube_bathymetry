@@ -48,6 +48,7 @@ find_package(tf2_sensor_msgs REQUIRED)
 
 find_package(GDAL CONFIG REQUIRED)
 find_package(nlohmann_json REQUIRED)  # level plan JSON (#143)
+find_package(OpenSSL REQUIRED)  # build fingerprint: SHA-256 of the backscatter curve/table (#172)
 
 add_library(cube_bathymetry
   src/angular_response_curve.cpp
@@ -113,6 +114,7 @@ target_link_libraries(cube_bathymetry_level_plan
   marine_tiled_raster_store::marine_tiled_raster_store  # count-tile GeoTIFF io
   marine_bathymetry_store::marine_bathymetry_store  # depthAdaptiveLevel (uma#369)
   nlohmann_json::nlohmann_json
+  OpenSSL::Crypto                    # sha256File / sha256Text (#172)
 )
 install(TARGETS cube_bathymetry_level_plan EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
