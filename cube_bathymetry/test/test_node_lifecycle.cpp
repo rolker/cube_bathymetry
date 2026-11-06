@@ -139,6 +139,13 @@ struct CubeBathymetryTestAccess
   {
     return n.bs_applied_curve_.points.size();
   }
+  /// Per-mode table state (cube#172).
+  static std::size_t tableModes(const CubeBathymetry & n) {return n.bs_table_.entries.size();}
+  static uint16_t resolveMode(CubeBathymetry & n, int64_t stamp_ns, float frequency_hz)
+  {
+    return n.resolveCloudMode(stamp_ns, frequency_hz);
+  }
+  static bool hasResolver(const CubeBathymetry & n) {return static_cast<bool>(n.bs_resolver_);}
 
   static double catalogInterval(const CubeBathymetry & n) {return n.catalog_interval_s_;}
   static double saveInterval(const CubeBathymetry & n) {return n.save_interval_s_;}
@@ -942,6 +949,88 @@ TEST_F(NodeLifecycle, ResetKeepsSheetLevelSettings)
   EXPECT_EQ(node->sheet()->parameters().angular_response_curve, before.angular_response_curve);
   EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+// cube_bathymetry#172: a backscatter_curve_file that is a per-pulse-mode table
+// loads into the sheet with its fallback, each cloud's mode resolves against the
+// SonarInfo history (by stamp, never retroactively), and the table, fallback
+// and resolver all survive a `~/reset`.
+TEST_F(NodeLifecycle, PerModeTableResolvesCloudsAndSurvivesReset)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+    rclcpp::Parameter("backscatter_mode_fallback", std::string("exclude"))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  EXPECT_EQ(CubeBathymetryTestAccess::tableModes(*node), 3u);
+  EXPECT_TRUE(CubeBathymetryTestAccess::hasResolver(*node));
+  EXPECT_FALSE(CubeBathymetryTestAccess::curveApplied(*node)) << "a table is not a curve";
+  EXPECT_EQ(node->sheet()->parameters().backscatter_table.entries.size(), 3u);
+  EXPECT_EQ(node->sheet()->parameters().backscatter_mode_fallback,
+    cube::BackscatterModeFallback::Exclude);
+
+  const float f = 500000.0f;
+  // Before any SonarInfo: unresolved, and the fallback is exclude.
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 150LL * 1000000000LL, f),
+    cube::kCorrectionExclude);
+  marine_interfaces::msg::SonarInfo info;
+  info.header.stamp.sec = 100;
+  info.pulse_lengths = {0.001f};
+  info.bandwidths = {24000.0f};
+  info.tx_signal_types = {marine_interfaces::msg::SonarInfo::SIGNAL_TYPE_FM_UP};
+  CubeBathymetryTestAccess::deliverSonarInfo(*node, info);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 150LL * 1000000000LL, f), 2)
+    << "FMU_1000us_24000Hz_500kHz is the fixture's second entry";
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 50LL * 1000000000LL, f),
+    cube::kCorrectionExclude) << "a ping before the SonarInfo stamp stays unresolved";
+  // Without the frequency field the key cannot match any entry.
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 160LL * 1000000000LL, NAN),
+    cube::kCorrectionExclude);
+
+  ResetCaller caller(node);
+  const auto [ok, message] = caller.call();
+  ASSERT_TRUE(ok) << message;
+  EXPECT_EQ(node->sheet()->parameters().backscatter_table.entries.size(), 3u)
+    << "the rebuilt sheet carries the table";
+  EXPECT_EQ(node->sheet()->parameters().backscatter_mode_fallback,
+    cube::BackscatterModeFallback::Exclude);
+  EXPECT_EQ(CubeBathymetryTestAccess::resolveMode(*node, 170LL * 1000000000LL, f), 2)
+    << "the SonarInfo history survives the reset";
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_EQ(CubeBathymetryTestAccess::tableModes(*node), 0u) << "cleanup releases it";
+}
+
+// A table that does not load, or an invalid fallback, fails the configure
+// rather than running with a half-applied correction.
+TEST_F(NodeLifecycle, ABrokenPerModeTableFailsConfigure)
+{
+  const auto dir = makeTempDir();
+  const auto broken = dir / "broken_table.csv";
+  {
+    std::ofstream out(broken);
+    out << "# format: angular-response-table v1\n# reference_mode: X\n# range_ref_m: 10\n"
+      "mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,"
+      "offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,"
+      "declared_tvg_absorption_db_per_km\n"
+      "FMU_1000us_24000Hz_500kHz,angle,1,,,-20\n";
+  }
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("backscatter_curve_file", broken.string())}));
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED)
+      << "a table that does not load must fail the configure";
+  }
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+      rclcpp::Parameter("backscatter_mode_fallback", std::string("nearest"))}));
+    EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED)
+      << "an unknown fallback must fail the configure";
+  }
+  std::filesystem::remove_all(dir);
 }
 
 // With draft_dir set the saved tiles would reload (ADR-0001), so the sheet would

@@ -75,6 +75,7 @@
 #include "marine_mbes_backscatter_store/registry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rosbag2_transport/reader_writer_factory.hpp"
+#include "cube_bathymetry/backscatter_mode.h"
 #include "cube_bathymetry/sonar_info_curve.h"
 #include "marine_interfaces/msg/sonar_info.hpp"
 #include "marine_interfaces/msg/sonar_visualization_tile.hpp"
@@ -182,8 +183,9 @@ bool loadCurveFromBagSonarInfo(
     "Default 1.0\n";
   std::cout << "  --iho-order <order>: CUBE IHO order (default order1a)\n";
   std::cout << "  --sonar-info-topic <topic>: SonarInfo topic scanned for the "
-    "angular-response curve (auto mode, cube#102). Default: the detections "
-    "topic's sibling 'sonar_info'. An explicit --backscatter-curve wins.\n";
+    "angular-response curve (auto mode, cube#102) and, with a per-mode table, read "
+    "in the main pass for each ping's pulse mode (cube#172). Default: the detections "
+    "topic's sibling 'sonar_info'. An explicit --backscatter-curve wins for the curve.\n";
   std::cout << "  --backscatter-correction none|empirical|auto: per-beam angular-response "
     "correction at node-output (default auto = a valid curve in the bag's "
     "SonarInfo enables it; no curve = identity, cube#102). 'empirical' subtracts the "
@@ -192,7 +194,21 @@ bool loadCurveFromBagSonarInfo(
     "(abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir). Required for "
     "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
     "curve (header '# tl_removed: true' + '# absorption_db_per_m: <a>') also makes "
-    "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
+    "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87). A "
+    "per-pulse-mode TABLE (derive_angular_response.py --by-mode, first line "
+    "'# format: angular-response-table v1', cube#172) corrects each ping by its "
+    "mode's entry: raw - db_relative_to_nadir - range term - offset, on the reference "
+    "mode's nadir level at R0; the ping's mode is the latest SonarInfo at or before "
+    "it plus the ping's frequency. A table that does not load is an error.\n";
+  std::cout << "  --backscatter-mode-fallback identity|exclude: with a table, what a ping "
+    "the table cannot correct gets -- no SonarInfo yet, a mode with no entry or no "
+    "measured offset, an entry under the ping floor -- and likewise a beam in an "
+    "angle bin the table could not weight: 'identity' records it uncorrected "
+    "(default), 'exclude' drops its backscatter and keeps its depth. Counts per "
+    "reason are printed after the pass (cube#172).\n";
+  std::cout << "  --backscatter-mode-min-pings <N>: with a table, treat an entry derived "
+    "from fewer than N pings as absent (the fallback applies); default 0 keeps every "
+    "entry, however rare the mode (cube#172).\n";
   std::cout << "  --tile-size-report <csv>: measure the live coverage stream's "
     "per-message size instead of guessing it (cube_bathymetry#112). Every "
     "--tile-report-interval seconds of BAG time, each dirty tile is quantized "
@@ -922,16 +938,34 @@ std::vector<cube::GeoSounding> georeferencePing(
 }
 
 
-/// Resolve the backscatter angular-response correction mode and curve
-/// (cube#81/#102): explicit file wins, else the bags' SonarInfo pre-pass.
-/// Returns false on an unparseable mode (the caller exits via usage()).
+/// Hash a SonarInfo-delivered curve for the fingerprint (cube#172): there is
+/// no file to hash, so its canonical text stands in for one.
+std::string sonarInfoCurveDigest(const cube::AngularResponseCurve & curve)
+{
+  std::ostringstream os;
+  os.precision(9);
+  os << "tl_removed=" << (curve.tl_removed ? 1 : 0) << "\n"
+     << "absorption_db_per_m=" << curve.absorption_db_per_m << "\n";
+  for (const auto & p : curve.points) {
+    os << p.first << "," << p.second << "\n";
+  }
+  return cube::sha256Text(os.str());
+}
+
+/// Resolve the backscatter correction inputs (cube#81/#102/#172): an explicit
+/// --backscatter-curve wins, as a single curve or a per-pulse-mode table, else
+/// the bags' SonarInfo pre-pass for a curve. Fills the fingerprint's record of
+/// what was applied. Returns false on an unparseable mode, a table that does
+/// not load, or a file that cannot be hashed (the caller exits via usage()).
 /// Extracted from main() for cpplint's function-size limit (cube#143).
 bool resolveBackscatterCorrection(
   const std::string & backscatter_correction_str, const std::string & backscatter_curve_file,
   const std::string & sonar_info_topic, const std::string & detections_topic,
   const std::vector<std::string> & bagfile_names,
   cube::BackscatterAngleCorrection & backscatter_mode,
-  cube::AngularResponseCurve & backscatter_curve)
+  cube::AngularResponseCurve & backscatter_curve,
+  cube::BackscatterTable & backscatter_table,
+  cube::BuildFingerprint::BackscatterCorrection & provenance)
 {
   if (!cube::parseBackscatterAngleCorrection(
       backscatter_correction_str, backscatter_mode))
@@ -940,11 +974,57 @@ bool resolveBackscatterCorrection(
               << "or 'auto' (got '" << backscatter_correction_str << "')\n";
     return false;
   }
+  provenance = cube::BuildFingerprint::BackscatterCorrection{};
+  provenance.mode =
+    backscatter_mode == cube::BackscatterAngleCorrection::None ? "none" :
+    backscatter_mode == cube::BackscatterAngleCorrection::Empirical ? "empirical" : "auto";
   std::string backscatter_curve_source = backscatter_curve_file;
   if (backscatter_mode == cube::BackscatterAngleCorrection::None) {
     std::cout << "--backscatter-correction none: any SonarInfo "
-      "angular-response curve in the bag will be ignored." << std::endl;
-  } else if (!backscatter_curve_file.empty()) {
+      "angular-response curve in the bag (and any --backscatter-curve file) will be "
+      "ignored." << std::endl;
+    return true;
+  }
+  if (!backscatter_curve_file.empty()) {
+    if (cube::isAngularResponseTable(backscatter_curve_file)) {
+      // A per-pulse-mode table (cube#172): one entry per mode, selected per
+      // ping from the SonarInfo stream. Read whole or refused -- a table that
+      // half-loads would correct every beam it touches by the wrong amount.
+      std::string error;
+      backscatter_table = cube::loadBackscatterTable(backscatter_curve_file, error);
+      if (!error.empty()) {
+        std::cerr << "error: --backscatter-curve names a per-pulse-mode table that could "
+          "not be loaded: " << error << "\n";
+        return false;
+      }
+      provenance.kind = "table";
+      provenance.source = backscatter_curve_file;
+      try {
+        provenance.sha256 = cube::sha256File(backscatter_curve_file);
+      } catch (const std::exception & e) {
+        std::cerr << "error: cannot hash --backscatter-curve for the fingerprint: "
+                  << e.what() << "\n";
+        return false;
+      }
+      std::cout << "Backscatter per-pulse-mode table from " << backscatter_curve_file << ": "
+                << backscatter_table.entries.size() << " mode(s), reference "
+                << backscatter_table.reference_mode << ", R0 " << backscatter_table.range_ref_m
+                << " m" << std::endl;
+      for (const auto & e : backscatter_table.entries) {
+        std::cout << "  " << e.key << ": " << e.pings << " pings, " << e.angle.size()
+                  << " angle bins, " << e.groups.size() << " range-term group(s), ";
+        if (e.offset_anchored) {
+          std::cout << "offset " << e.offset_db_vs_ref << " dB";
+        } else {
+          std::cout << "UNANCHORED (no offset; the fallback applies)";
+        }
+        if (e.unweighable_bins > 0) {
+          std::cout << ", " << e.unweighable_bins << " unweighable bin(s)";
+        }
+        std::cout << ", declared TVG " << e.declared.toString() << std::endl;
+      }
+      return true;
+    }
     // Explicit file wins over SonarInfo (the reprocessing override, #102).
     backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
     if (backscatter_curve.points.empty()) {
@@ -955,6 +1035,16 @@ bool resolveBackscatterCorrection(
                 << "' yielded an EMPTY curve (missing/unparseable) -- no "
         "correction from it, and the bag's SonarInfo curves stay IGNORED "
         "because an explicit file was given. Fix or drop the flag.\n";
+    } else {
+      provenance.kind = "curve";
+      provenance.source = backscatter_curve_file;
+      try {
+        provenance.sha256 = cube::sha256File(backscatter_curve_file);
+      } catch (const std::exception & e) {
+        std::cerr << "error: cannot hash --backscatter-curve for the fingerprint: "
+                  << e.what() << "\n";
+        return false;
+      }
     }
   } else {
     // SonarInfo pre-pass (#102): scan the bags' sonar_info topic for the
@@ -966,6 +1056,9 @@ bool resolveBackscatterCorrection(
         bagfile_names, topic, backscatter_curve, last_reject))
     {
       backscatter_curve_source = "SonarInfo topic '" + topic + "'";
+      provenance.kind = "curve";
+      provenance.source = "sonar_info:" + topic;
+      provenance.sha256 = sonarInfoCurveDigest(backscatter_curve);
     } else if (!last_reject.empty()) {
       std::cerr << "warning: SonarInfo on '" << topic
                 << "' carried an angular-response curve, but it was rejected: "
@@ -996,6 +1089,125 @@ bool resolveBackscatterCorrection(
   return true;
 }
 
+
+/// Everything main() needs from the backscatter inputs (cube#172), built by
+/// setupBackscatter so main() stays under cpplint's function-size limit.
+struct BackscatterSetup
+{
+  cube::BackscatterAngleCorrection mode = cube::BackscatterAngleCorrection::None;
+  cube::AngularResponseCurve curve;
+  cube::BackscatterTable table;
+  cube::BackscatterModeFallback fallback = cube::BackscatterModeFallback::Identity;
+  cube::BuildFingerprint::BackscatterCorrection provenance;
+  /// The per-ping mode resolver (SonarInfo history -> mode key -> table
+  /// entry, with the declared-TVG check and the fallback policy); null
+  /// without a table, since a single curve has no modes to resolve. Points
+  /// at `table` -- the struct must not be moved after construction.
+  std::unique_ptr<cube::BackscatterModeResolver> resolver;
+  /// The SonarInfo topic the main pass reads when a table is loaded.
+  std::string sonar_info_topic;
+};
+
+/// Resolve the correction inputs and build the mode resolver (cube#172).
+/// Exits via usage() on a bad mode, fallback, or a table that does not load.
+BackscatterSetup setupBackscatter(
+  const std::string & backscatter_correction_str, const std::string & backscatter_curve_file,
+  const std::string & sonar_info_topic, const std::string & detections_topic,
+  const std::vector<std::string> & bagfile_names, const std::string & fallback_str,
+  int64_t min_pings)
+{
+  BackscatterSetup out;
+  if (!resolveBackscatterCorrection(
+      backscatter_correction_str, backscatter_curve_file, sonar_info_topic,
+      detections_topic, bagfile_names, out.mode, out.curve, out.table, out.provenance))
+  {
+    usage();
+  }
+  if (!cube::parseBackscatterModeFallback(fallback_str, out.fallback)) {
+    std::cerr << "error: --backscatter-mode-fallback must be 'identity' or 'exclude' (got '"
+              << fallback_str << "')\n";
+    usage();
+  }
+  out.sonar_info_topic = sonar_info_topic.empty() ?
+    deriveSonarInfoTopic(detections_topic) : sonar_info_topic;
+  if (!out.table.empty()) {
+    out.provenance.fallback = cube::toString(out.fallback);
+    out.provenance.min_pings = static_cast<uint64_t>(min_pings);
+    out.resolver = std::make_unique<cube::BackscatterModeResolver>(
+      &out.table, out.fallback, static_cast<uint64_t>(min_pings));
+    out.resolver->setMismatchWarning(
+      [](const std::string & message) {std::cerr << "warning: " << message << "\n";});
+    std::cout << "Pulse modes from SonarInfo topic '" << out.sonar_info_topic
+              << "'; an unresolved ping gets " << cube::toString(out.fallback);
+    if (min_pings > 0) {
+      std::cout << "; table entries under " << min_pings << " pings are treated as absent";
+    }
+    std::cout << "." << std::endl;
+  }
+  return out;
+}
+
+/// Print the main-pass progress line once per report interval of wall time.
+void maybePrintProgress(
+  std::chrono::system_clock::time_point & last_report_time,
+  std::chrono::seconds report_interval, int64_t total_ns, int64_t tf_frontier_ns,
+  int64_t begin_ns, int ping_count, size_t dropped_georef, size_t pending)
+{
+  const auto now = std::chrono::system_clock::now();
+  if (now >= last_report_time + report_interval && total_ns > 0 &&
+    tf_frontier_ns != std::numeric_limits<int64_t>::min())
+  {
+    const double progress = (tf_frontier_ns - begin_ns) / static_cast<double>(total_ns);
+    std::cout << "\r  " << static_cast<int>(100 * progress) << "%  " << ping_count
+              << " pings (" << dropped_georef << " dropped, " << pending
+              << " pending)      " << std::flush;
+    last_report_time = now;
+  }
+}
+
+/// Feed one recorded odometry message to the speed-over-ground map (cube#107).
+void feedOdometry(
+  const rosbag2_storage::SerializedBagMessage & message, std::map<int64_t, double> & speed_by_ns,
+  size_t & odom_samples_total)
+{
+  try {
+    rclcpp::SerializedMessage sm(*message.serialized_data);
+    nav_msgs::msg::Odometry odom;
+    rclcpp::Serialization<nav_msgs::msg::Odometry>().deserialize_message(&sm, &odom);
+    const int64_t ns = static_cast<int64_t>(odom.header.stamp.sec) * 1000000000LL +
+      odom.header.stamp.nanosec;
+    speed_by_ns[ns] = std::hypot(odom.twist.twist.linear.x, odom.twist.twist.linear.y);
+    ++odom_samples_total;
+  } catch (const std::exception & e) {
+    std::cerr << e.what() << '\n';
+  }
+}
+
+/// Stamp one ping's correction index on every sounding of it (cube#172), so
+/// the record-time correction picks the ping's table entry.
+void stampCorrectionIndex(std::vector<cube::GeoSounding> & soundings, uint16_t correction_idx)
+{
+  for (auto & s : soundings) {
+    s.sounding.correction_idx = correction_idx;
+  }
+}
+
+/// Feed one recorded SonarInfo message to the mode resolver (cube#172).
+/// Recorded as it arrives; pings resolve at drain time (a guard interval
+/// later), so a SonarInfo written just after its first ping is still seen.
+/// One stamped before a ping already drained is counted stale.
+void feedSonarInfo(
+  const rosbag2_storage::SerializedBagMessage & message, cube::BackscatterModeResolver & resolver)
+{
+  try {
+    rclcpp::SerializedMessage sm(*message.serialized_data);
+    marine_interfaces::msg::SonarInfo info;
+    rclcpp::Serialization<marine_interfaces::msg::SonarInfo>().deserialize_message(&sm, &info);
+    resolver.addSonarInfo(cube::sonarInfoStateFrom(info));
+  } catch (const std::exception & e) {
+    std::cerr << e.what() << '\n';
+  }
+}
 
 /// Refuse `--bs-store` on a mixed-level path, naming the prerequisite
 /// (cube#143). TEMPORARY: `marine_mbes_backscatter_store` is single-level by
@@ -1301,10 +1513,14 @@ std::unique_ptr<cube::ReconCollector> makeRecon(
 bool writeFingerprint(
   const std::string & store_dir, cube::BuildFingerprint::Mode mode, double cell_size_m,
   const cube::Parameters & parameters, const std::string & iho_order,
-  const cube::LevelPlanPolicy * policy, const std::set<uint8_t> & levels_used)
+  const cube::LevelPlanPolicy * policy, const std::set<uint8_t> & levels_used,
+  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction)
 {
   cube::BuildFingerprint f;
   f.mode = mode;
+  // What corrected the backscatter layer (cube#172): mode, curve/table hash,
+  // fallback and ping floor, so a store built under another table is stale.
+  f.backscatter_correction = backscatter_correction;
   if (mode == cube::BuildFingerprint::Mode::Fixed) {
     f.cell_size_m = cell_size_m;
   }
@@ -1414,7 +1630,8 @@ int cube_fixed_level_finish(
   const marine_mbes_backscatter_store::StoreMetadata & bs_metadata,
   std::optional<TileSizeReporter> & tile_reporter,
   const std::string & tile_size_report_path, double tile_refresh_interval_s,
-  int tile_refresh_tiles_per_cycle, double phase_secs)
+  int tile_refresh_tiles_per_cycle, double phase_secs,
+  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction)
 {
   std::cout << "Building store tiles..." << std::endl;
 
@@ -1449,7 +1666,7 @@ int cube_fixed_level_finish(
   // store records its mode, the requested cell size and the capture policy.
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
-    iho_order, nullptr, {geo_map_sheet.gridLevel().level()});
+    iho_order, nullptr, {geo_map_sheet.gridLevel().level()}, backscatter_correction);
 
   // Exit codes rank by what is wrong with the DATA: 1 says the store may be
   // incomplete, so a failed diagnostic CSV must not borrow it -- that run's
@@ -1480,6 +1697,9 @@ int cube_depth_adaptive_finish(
   float capture_spacing_scale, bool capture_spacing_scale_given,
   cube::BackscatterAngleCorrection backscatter_mode,
   const cube::AngularResponseCurve & backscatter_curve,
+  const cube::BackscatterTable & backscatter_table,
+  cube::BackscatterModeFallback backscatter_mode_fallback,
+  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction,
   const marine_bathymetry_store::StoreMetadata & store_metadata,
   const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, double recon_secs)
 {
@@ -1667,6 +1887,8 @@ int cube_depth_adaptive_finish(
   cfg.backscatter_curve = backscatter_curve.points;
   cfg.backscatter_tl_removed = backscatter_curve.tl_removed;
   cfg.backscatter_absorption_db_per_m = backscatter_curve.absorption_db_per_m;
+  cfg.backscatter_table = backscatter_table;
+  cfg.backscatter_mode_fallback = backscatter_mode_fallback;
   cube::MultiLevelAccumulator accumulator(plan, cfg);
 
   auto phase_tp = std::chrono::steady_clock::now();
@@ -1778,7 +2000,7 @@ int cube_depth_adaptive_finish(
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::DepthAdaptive, 0.0,
     accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &effective_policy,
-    plan->levels());
+    plan->levels(), backscatter_correction);
   if (!fingerprinted) {
     return 2;
   }
@@ -1832,6 +2054,10 @@ int main(int argc, char * argv[])
   std::string backscatter_correction_str = "auto";
   std::string backscatter_curve_file;
   std::string sonar_info_topic;  // default: derived from detections_topic
+  // Per-pulse-mode table (cube#172): what an unresolved ping gets, and the
+  // ping floor under which a table entry is treated as absent.
+  std::string backscatter_mode_fallback_str = "identity";
+  int64_t backscatter_mode_min_pings = 0;
   // Node capture distance, spacing term (cube#143): max(0.05*|depth|, k*spacing).
   float capture_spacing_scale = 0.71f;
   bool capture_spacing_scale_given = false;
@@ -1944,6 +2170,14 @@ int main(int argc, char * argv[])
       backscatter_curve_file = next_value("--backscatter-curve");
     } else if (*arg == "--sonar-info-topic") {
       sonar_info_topic = next_value("--sonar-info-topic");
+    } else if (*arg == "--backscatter-mode-fallback") {
+      backscatter_mode_fallback_str = next_value("--backscatter-mode-fallback");
+    } else if (*arg == "--backscatter-mode-min-pings") {
+      backscatter_mode_min_pings = static_cast<int64_t>(
+        requireAtLeast(
+          "--backscatter-mode-min-pings",
+          parse_int("--backscatter-mode-min-pings", next_value("--backscatter-mode-min-pings")),
+          0));
     } else if (*arg == "--max-resident-tiles") {
       const int64_t v = parse_long("--max-resident-tiles", next_value("--max-resident-tiles"));
       if (v < 0) {
@@ -2086,13 +2320,26 @@ int main(int argc, char * argv[])
   // Whole-run projection totals; cube::report_projection_summary prints them.
   cube::ProjectionRunTotals proj_totals;
 
+  // Backscatter correction inputs (cube#81/#102/#172), resolved BEFORE the
+  // readers open: a per-pulse-mode table adds the SonarInfo topic to the read
+  // filter. The sheet setters run once the sheet exists (below).
+  BackscatterSetup backscatter = setupBackscatter(
+    backscatter_correction_str, backscatter_curve_file, sonar_info_topic, detections_topic,
+    bagfile_names, backscatter_mode_fallback_str, backscatter_mode_min_pings);
+  cube::BackscatterModeResolver * mode_resolver = backscatter.resolver.get();
+  const std::string & effective_sonar_info_topic = backscatter.sonar_info_topic;
+
   // Main-pass read filter (cube#107): restrict each reader to the topics the
   // projection consumes. /tf and /tf_static are added per-bag inside Bag::open
-  // by namespaced suffix; here we pass the exact detections/odom topic names.
+  // by namespaced suffix; here we pass the exact detections/odom topic names
+  // (and the SonarInfo topic when a per-mode table needs it, cube#172).
   std::vector<std::string> filter_topics;
   filter_topics.push_back(detections_topic);
   if (!odom_topic.empty()) {
     filter_topics.push_back(odom_topic);
+  }
+  if (mode_resolver) {
+    filter_topics.push_back(effective_sonar_info_topic);
   }
   BagReaders bag_readers(bagfile_names, filter_topics);
 
@@ -2126,20 +2373,14 @@ int main(int argc, char * argv[])
   reportTilingChoice(
     depth_adaptive, level_policy, geo_map_sheet, resolution, capture_spacing_scale);
 
-  // Backscatter angular-response correction (cube#81). The setter must run AFTER
-  // the sheet is constructed (its grids hold a const ref to the sheet Parameters).
-  cube::BackscatterAngleCorrection backscatter_mode =
-    cube::BackscatterAngleCorrection::None;
-  cube::AngularResponseCurve backscatter_curve;
-  if (!resolveBackscatterCorrection(
-      backscatter_correction_str, backscatter_curve_file, sonar_info_topic,
-      detections_topic, bagfile_names, backscatter_mode, backscatter_curve))
-  {
-    usage();
-  }
+  // Backscatter correction setters (cube#81/#172): AFTER the sheet is
+  // constructed (its grids hold a const ref to the sheet Parameters).
   geo_map_sheet.setBackscatterCorrection(
-    backscatter_mode, backscatter_curve.points,
-    backscatter_curve.tl_removed, backscatter_curve.absorption_db_per_m);
+    backscatter.mode, backscatter.curve.points,
+    backscatter.curve.tl_removed, backscatter.curve.absorption_db_per_m);
+  if (!backscatter.table.empty()) {
+    geo_map_sheet.setBackscatterTable(backscatter.table, backscatter.fallback);
+  }
 
   // Reference-prior seeding (#89, #96) is now LAZY, per tile on first touch, driven
   // by the accumulator's seedNewTile (see ImportAccumulatorConfig::reference_store_dir
@@ -2290,8 +2531,14 @@ int main(int argc, char * argv[])
         // one per ping. At swath scale (tens of metres about the reference) the
         // linearization error is well under a millimetre -- far below the GGGS
         // cell size and the soundings' own TPU.
-        const std::vector<cube::GeoSounding> soundings =
+        std::vector<cube::GeoSounding> soundings =
           georeferencePing(projection, transform);
+        if (mode_resolver) {
+          // One pulse mode per ping (cube#172): the latest SonarInfo at or
+          // before the ping stamp plus the ping's own frequency.
+          stampCorrectionIndex(
+            soundings, mode_resolver->resolve(ping_ns, detections.ping_info.frequency));
+        }
         if (recon) {
           // Recon pass (cube#143): count, reservoir and spill; no estimation.
           recon->add(soundings, geo_map_sheet.parameters());
@@ -2367,6 +2614,9 @@ int main(int argc, char * argv[])
       message->message->topic_name == odom_topic;
     const bool is_detection = message->data_type == "marine_acoustic_msgs/msg/SonarDetections" &&
       message->message->topic_name == detections_topic;
+    const bool is_sonar_info = mode_resolver &&
+      message->data_type == "marine_interfaces/msg/SonarInfo" &&
+      message->message->topic_name == effective_sonar_info_topic;
 
     if (is_tf) {
       const bool is_static = ends_with(message->message->topic_name, "/tf_static");
@@ -2391,17 +2641,9 @@ int main(int argc, char * argv[])
       }
       drain_pending(false);
     } else if (is_odom) {
-      try {
-        rclcpp::SerializedMessage sm(*message->message->serialized_data);
-        nav_msgs::msg::Odometry odom;
-        rclcpp::Serialization<nav_msgs::msg::Odometry>().deserialize_message(&sm, &odom);
-        const int64_t ns = static_cast<int64_t>(odom.header.stamp.sec) * 1000000000LL +
-          odom.header.stamp.nanosec;
-        speed_by_ns[ns] = std::hypot(odom.twist.twist.linear.x, odom.twist.twist.linear.y);
-        ++odom_samples_total;
-      } catch (const std::exception & e) {
-        std::cerr << e.what() << '\n';
-      }
+      feedOdometry(*message->message, speed_by_ns, odom_samples_total);
+    } else if (is_sonar_info) {
+      feedSonarInfo(*message->message, *mode_resolver);
     } else if (is_detection) {
       try {
         rclcpp::SerializedMessage sm(*message->message->serialized_data);
@@ -2416,16 +2658,9 @@ int main(int argc, char * argv[])
       }
     }
 
-    auto now = std::chrono::system_clock::now();
-    if (now >= last_report_time + report_interval && total_ns > 0 &&
-      tf_frontier_ns != std::numeric_limits<int64_t>::min())
-    {
-      double progress = (tf_frontier_ns - begin_ns) / static_cast<double>(total_ns);
-      std::cout << "\r  " << static_cast<int>(100 * progress) << "%  " << ping_count
-                << " pings (" << proj_totals.dropped_georef << " dropped, " << pending.size()
-                << " pending)      " << std::flush;
-      last_report_time = now;
-    }
+    maybePrintProgress(
+      last_report_time, report_interval, total_ns, tf_frontier_ns, begin_ns, ping_count,
+      proj_totals.dropped_georef, pending.size());
   }
   // Flush detections still pending at end-of-stream against available coverage.
   drain_pending(true);
@@ -2448,17 +2683,22 @@ int main(int argc, char * argv[])
   std::cout << "\ndone." << std::endl;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
   cube::report_projection_summary(proj_totals, std::cout, std::cerr);
+  if (mode_resolver) {
+    std::cout << mode_resolver->report();
+  }
 
   if (recon) {
     return cube_depth_adaptive_finish(
       *recon, level_policy, level_plan_in, level_plan_out, count_grid_out, store_dir,
       reference_store_dir, bs_store_dir, max_resident_tiles, iho_order,
-      capture_spacing_scale, capture_spacing_scale_given, backscatter_mode,
-      backscatter_curve, store_metadata, bs_metadata, projection_secs);
+      capture_spacing_scale, capture_spacing_scale_given, backscatter.mode,
+      backscatter.curve, backscatter.table, backscatter.fallback, backscatter.provenance,
+      store_metadata, bs_metadata, projection_secs);
   }
 
   return cube_fixed_level_finish(
     accumulator, geo_map_sheet, store_dir, bs_store_dir, resolution, iho_order,
     store_metadata, bs_metadata, tile_reporter, tile_size_report_path,
-    tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs());
+    tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs(),
+    backscatter.provenance);
 }

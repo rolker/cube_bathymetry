@@ -173,8 +173,53 @@ public:
     bs_explicit_file_ = !bs_curve_file.empty();
     bs_curve_applied_ = false;
     cube::AngularResponseCurve bs_curve;
+
+    // Per-pulse-mode table (cube_bathymetry#172): an explicit file that is a
+    // table (first line '# format: angular-response-table v1') carries one
+    // entry per mode. Each cloud's mode is the latest SonarInfo at or before
+    // its stamp plus the cloud's `frequency` field; a ping the table cannot
+    // correct gets the fallback. A table that does not load fails the
+    // configure: a half-applied table would corrupt every beam it touched.
+    bs_table_ = cube::BackscatterTable();
+    bs_resolver_.reset();
+    const std::string bs_fallback_str =
+      declareOnce<std::string>("backscatter_mode_fallback", "identity");
+    if (!cube::parseBackscatterModeFallback(bs_fallback_str, bs_fallback_)) {
+      RCLCPP_ERROR(get_logger(),
+        "backscatter_mode_fallback='%s' is not 'identity' or 'exclude'.",
+        bs_fallback_str.c_str());
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+    }
+    const int64_t bs_min_pings = declareOnce<int64_t>("backscatter_mode_min_pings", 0);
+    if (bs_min_pings < 0) {
+      RCLCPP_ERROR(get_logger(), "backscatter_mode_min_pings must be >= 0 (0 = keep every mode).");
+      return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+    }
+    bs_min_pings_ = static_cast<uint64_t>(bs_min_pings);
+    const bool bs_file_is_table = bs_mode != cube::BackscatterAngleCorrection::None &&
+      !bs_curve_file.empty() && cube::isAngularResponseTable(bs_curve_file);
+    if (bs_file_is_table) {
+      std::string error;
+      bs_table_ = cube::loadBackscatterTable(bs_curve_file, error);
+      if (!error.empty()) {
+        RCLCPP_ERROR(get_logger(),
+          "backscatter_curve_file names a per-pulse-mode table that could not be "
+          "loaded: %s", error.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
+      bs_resolver_ = std::make_unique<cube::BackscatterModeResolver>(
+        &bs_table_, bs_fallback_, bs_min_pings_);
+      bs_resolver_->setMismatchWarning(
+        [this](const std::string & message) {RCLCPP_WARN(get_logger(), "%s", message.c_str());});
+      RCLCPP_INFO(get_logger(),
+        "Backscatter per-pulse-mode table from %s: %zu mode(s), reference %s, R0 %.2f m; "
+        "an unresolved ping gets %s%s", bs_curve_file.c_str(), bs_table_.entries.size(),
+        bs_table_.reference_mode.c_str(), bs_table_.range_ref_m,
+        cube::toString(bs_fallback_),
+        bs_min_pings_ > 0 ? " (entries under the ping floor count as absent)" : "");
+    }
     if (bs_mode != cube::BackscatterAngleCorrection::None &&
-      !bs_curve_file.empty())
+      !bs_curve_file.empty() && !bs_file_is_table)
     {
       bs_curve = cube::loadAngularResponseCurveWithHeader(bs_curve_file);
       bs_curve_applied_ = !bs_curve.points.empty();
@@ -534,7 +579,10 @@ public:
     if (bs_mode != cube::BackscatterAngleCorrection::None) {
       sonar_info_subscription_ =
         create_subscription<marine_interfaces::msg::SonarInfo>(
-        sonar_info_topic, rclcpp::QoS(1).reliable().transient_local(),
+        // Depth 10 (cube#172): a mode-switching sonar republishes on every
+        // change, and the per-ping resolver must see each one; the writer
+        // stays transient_local depth 1, which still latches the newest.
+        sonar_info_topic, rclcpp::QoS(10).reliable().transient_local(),
         std::bind(&CubeBathymetry::sonarInfoCallback, this,
         std::placeholders::_1));
     } else {
@@ -788,6 +836,13 @@ private:
     // (#102): its callback has no lifecycle-state gate, so it must not
     // outlive the configured state and touch the stale sheet.
     sonar_info_subscription_.reset();
+    // The per-mode resolver's counters are the run's record (cube#172): say
+    // what was resolved before the configuration is torn down.
+    if (bs_resolver_) {
+      RCLCPP_INFO(get_logger(), "%s", bs_resolver_->report().c_str());
+      bs_resolver_.reset();
+    }
+    bs_table_ = cube::BackscatterTable();
     // Everything on_configure creates is released here, so a reconfigure builds
     // the node from scratch (#164) and no callback of the old configuration can
     // run against the replaced sheet. The ping/request callbacks are state-gated
@@ -870,6 +925,25 @@ private:
   bool bs_explicit_file_ = false;   // explicit file wins over SonarInfo
   bool bs_curve_applied_ = false;   // latch-first: one curve per run
   cube::AngularResponseCurve bs_applied_curve_;
+  // Per-pulse-mode table state (cube#172): the table and fallback are
+  // sheet-level settings (re-applied by buildSession); the resolver holds the
+  // SonarInfo history and the per-ping counters for the whole configured life.
+  cube::BackscatterTable bs_table_;
+  cube::BackscatterModeFallback bs_fallback_ = cube::BackscatterModeFallback::Identity;
+  uint64_t bs_min_pings_ = 0;
+  std::unique_ptr<cube::BackscatterModeResolver> bs_resolver_;
+
+  /// The correction index the per-mode resolver gives a cloud at @p stamp_ns
+  /// with @p frequency_hz (the `frequency` field), or unresolved without a
+  /// table. One call per cloud (one ping); pingCallback stamps it on every
+  /// sounding.
+  uint16_t resolveCloudMode(int64_t stamp_ns, float frequency_hz)
+  {
+    if (!bs_resolver_) {
+      return cube::kCorrectionUnresolved;
+    }
+    return bs_resolver_->resolve(stamp_ns, frequency_hz);
+  }
 
   // Latch-first curve adoption (#102). The latched (transient_local)
   // producer normally delivers before activation, so the whole grid is
@@ -879,6 +953,17 @@ private:
   // the transition for post-survey scrutiny.
   void sonarInfoCallback(const marine_interfaces::msg::SonarInfo & info)
   {
+    if (bs_resolver_) {
+      // Per-pulse-mode history (cube#172). A message stamped before pings
+      // already resolved is never applied to them retroactively; they were
+      // corrected under the previous mode and are counted as stale.
+      if (!bs_resolver_->addSonarInfo(cube::sonarInfoStateFrom(info))) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 60000,
+          "SonarInfo arrived after pings it describes; %lu ping(s) so far were "
+          "corrected under the previous pulse mode",
+          static_cast<unsigned long>(bs_resolver_->counts().stale));  // NOLINT(runtime/int)
+      }
+    }
     cube::AngularResponseCurve curve;
     std::string reject_reason;
     if (!cube::curveFromSonarInfo(info, curve, reject_reason)) {
@@ -1818,6 +1903,9 @@ private:
     session.sheet->setBackscatterCorrection(
       bs_mode_, bs_applied_curve_.points,
       bs_applied_curve_.tl_removed, bs_applied_curve_.absorption_db_per_m);
+    // The per-mode table and its fallback (cube#172) are configuration too;
+    // the resolver (SonarInfo history) is a node member and survives a reset.
+    session.sheet->setBackscatterTable(bs_table_, bs_fallback_);
     if (build_fault_injector_) {
       build_fault_injector_();
     }
@@ -2494,6 +2582,7 @@ private:
     const size_t point_count = static_cast<size_t>(msg->width) * msg->height;
     std::vector<cube::GeoSounding> soundings;
     soundings.reserve(point_count);
+    float cloud_frequency = std::nanf("");
 
     try {
       sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
@@ -2518,8 +2607,13 @@ private:
         };
       std::optional<sensor_msgs::PointCloud2ConstIterator<float>> iter_intensity;
       std::optional<sensor_msgs::PointCloud2ConstIterator<float>> iter_beam_angle;
+      std::optional<sensor_msgs::PointCloud2ConstIterator<float>> iter_frequency;
       if (has_field("intensity")) {iter_intensity.emplace(*msg, "intensity");}
       if (has_field("beam_angle")) {iter_beam_angle.emplace(*msg, "beam_angle");}
+      // The ping's frequency (cube#172), the same on every point; absent on a
+      // cloud from an older detections_to_pointcloud -> the mode key reads
+      // `?kHz`, matches no table entry, and the fallback applies.
+      if (has_field("frequency")) {iter_frequency.emplace(*msg, "frequency");}
 
       size_t dropped = 0;
       for (; (iter_x != iter_x.end()) &&
@@ -2534,6 +2628,12 @@ private:
         const float vu = *iter_vertical_uncertainty, hu = *iter_horizontal_uncertainty;
         const float intensity = iter_intensity ? **iter_intensity : std::nanf("");
         const float beam_angle = iter_beam_angle ? **iter_beam_angle : std::nanf("");
+        if (iter_frequency) {
+          if (std::isnan(cloud_frequency) && std::isfinite(**iter_frequency)) {
+            cloud_frequency = **iter_frequency;
+          }
+          ++*iter_frequency;
+        }
         if (iter_intensity) {++*iter_intensity;}
         if (iter_beam_angle) {++*iter_beam_angle;}
 
@@ -2594,6 +2694,17 @@ private:
       RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000,
         "Could not read soundings cloud: " << e.what());
       return;
+    }
+
+    // Pulse-mode resolution (cube#172): one key per cloud (one ping), stamped
+    // on every sounding so the record-time correction picks the entry.
+    if (bs_resolver_) {
+      const int64_t stamp_ns = static_cast<int64_t>(msg->header.stamp.sec) * 1000000000LL +
+        static_cast<int64_t>(msg->header.stamp.nanosec);
+      const uint16_t correction_idx = resolveCloudMode(stamp_ns, cloud_frequency);
+      for (auto & s : soundings) {
+        s.sounding.correction_idx = correction_idx;
+      }
     }
 
     auto epoch = std::chrono::time_point<std::chrono::steady_clock>{};

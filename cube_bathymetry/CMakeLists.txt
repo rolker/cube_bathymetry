@@ -406,6 +406,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_node_lifecycle test/test_node_lifecycle.cpp TIMEOUT 120)
   target_include_directories(test_node_lifecycle PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  # Per-mode table fixture (#172): the live node loads it from backscatter_curve_file.
+  target_compile_definitions(test_node_lifecycle PRIVATE
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
   target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
   set_tests_properties(test_node_lifecycle PROPERTIES
     ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
