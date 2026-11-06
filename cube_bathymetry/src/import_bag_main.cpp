@@ -1090,10 +1090,20 @@ bool resolveBackscatterCorrection(
 }
 
 
-/// Everything main() needs from the backscatter inputs (cube#172), built by
-/// setupBackscatter so main() stays under cpplint's function-size limit.
+/// Everything main() needs from the backscatter inputs (cube#172), filled in
+/// place by setupBackscatter so main() stays under cpplint's function-size
+/// limit. Neither copyable nor movable: the resolver holds a pointer to
+/// `table`, so the struct must stay where main() declared it (filled in
+/// place, never returned by value -- that would rest on NRVO, which the
+/// language does not guarantee for a named local).
 struct BackscatterSetup
 {
+  BackscatterSetup() = default;
+  BackscatterSetup(const BackscatterSetup &) = delete;
+  BackscatterSetup & operator=(const BackscatterSetup &) = delete;
+  BackscatterSetup(BackscatterSetup &&) = delete;
+  BackscatterSetup & operator=(BackscatterSetup &&) = delete;
+
   cube::BackscatterAngleCorrection mode = cube::BackscatterAngleCorrection::None;
   cube::AngularResponseCurve curve;
   cube::BackscatterTable table;
@@ -1102,21 +1112,22 @@ struct BackscatterSetup
   /// The per-ping mode resolver (SonarInfo history -> mode key -> table
   /// entry, with the declared-TVG check and the fallback policy); null
   /// without a table, since a single curve has no modes to resolve. Points
-  /// at `table` -- the struct must not be moved after construction.
+  /// at `table` (hence the deleted copy and move above).
   std::unique_ptr<cube::BackscatterModeResolver> resolver;
   /// The SonarInfo topic the main pass reads when a table is loaded.
   std::string sonar_info_topic;
 };
 
-/// Resolve the correction inputs and build the mode resolver (cube#172).
-/// Exits via usage() on a bad mode, fallback, or a table that does not load.
-BackscatterSetup setupBackscatter(
+/// Resolve the correction inputs into the caller's @p out and build the mode
+/// resolver there (cube#172). Exits via usage() on a bad mode, fallback, or a
+/// table that does not load.
+void setupBackscatter(
+  BackscatterSetup & out,
   const std::string & backscatter_correction_str, const std::string & backscatter_curve_file,
   const std::string & sonar_info_topic, const std::string & detections_topic,
   const std::vector<std::string> & bagfile_names, const std::string & fallback_str,
   int64_t min_pings)
 {
-  BackscatterSetup out;
   if (!resolveBackscatterCorrection(
       backscatter_correction_str, backscatter_curve_file, sonar_info_topic,
       detections_topic, bagfile_names, out.mode, out.curve, out.table, out.provenance))
@@ -1144,7 +1155,6 @@ BackscatterSetup setupBackscatter(
     }
     std::cout << "." << std::endl;
   }
-  return out;
 }
 
 /// Print the main-pass progress line once per report interval of wall time.
@@ -2323,9 +2333,10 @@ int main(int argc, char * argv[])
   // Backscatter correction inputs (cube#81/#102/#172), resolved BEFORE the
   // readers open: a per-pulse-mode table adds the SonarInfo topic to the read
   // filter. The sheet setters run once the sheet exists (below).
-  BackscatterSetup backscatter = setupBackscatter(
-    backscatter_correction_str, backscatter_curve_file, sonar_info_topic, detections_topic,
-    bagfile_names, backscatter_mode_fallback_str, backscatter_mode_min_pings);
+  BackscatterSetup backscatter;
+  setupBackscatter(backscatter, backscatter_correction_str, backscatter_curve_file,
+    sonar_info_topic, detections_topic, bagfile_names, backscatter_mode_fallback_str,
+    backscatter_mode_min_pings);
   cube::BackscatterModeResolver * mode_resolver = backscatter.resolver.get();
   const std::string & effective_sonar_info_topic = backscatter.sonar_info_topic;
 
