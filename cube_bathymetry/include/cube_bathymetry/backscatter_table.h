@@ -256,9 +256,12 @@ private:
     std::unordered_map < std::string, uint16_t > index_;
   };
 
-/// True when the file's first line is `# format: angular-response-table v1`
-/// -- tables are detected by that line, never guessed from rows. False for
-/// a missing or unreadable file.
+/// True when the file's first non-blank line (a UTF-8 byte-order mark
+/// ignored) starts with `# format: angular-response-table` -- tables are
+/// detected by that line, never guessed from rows. Any version counts, so a
+/// table this loader cannot read (`v2`, a garbled version) still goes to
+/// `loadBackscatterTable` and fails there loudly instead of being read as an
+/// empty single curve. False for a missing or unreadable file.
   bool isAngularResponseTable(const std::string & path);
 
 /// Load a table. On any failure returns an EMPTY table and sets @p error

@@ -1054,7 +1054,12 @@ of order).
 `# format: angular-response-table v1`, then `# key: value` comments (reference
 mode and its source, `range_ref_m` and its source, node spacing, angle bin
 width, specular exclusion, window, misfit threshold, absorption handling, box,
-source bags, and one `mode_summary` and `range_term` line per mode), then:
+source bags, and one `mode_summary` and `range_term` line per mode), then the
+column line and rows (below). The C++ side treats any file whose first
+non-blank line (a UTF-8 byte-order mark ignored) starts with
+`# format: angular-response-table` as a table, and loads only `v1`: another
+version is an error, never handed to the single-curve loader as an empty
+curve. Then:
 
 ```
 mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,declared_tvg_absorption_db_per_km

@@ -167,6 +167,46 @@ TEST(BackscatterTable, DetectsTablesByTheFormatLineOnly)
   EXPECT_FALSE(isAngularResponseTable(""));
 }
 
+// cube_bathymetry#172 review: a near-miss first line must not fall through to
+// the single-curve loader (an empty curve and only a WARN). A BOM or leading
+// blank lines are tolerated; another version is a table, and refused.
+TEST(BackscatterTable, NearMissFormatLinesAreTablesAndOnlyV1Loads)
+{
+  const std::string header(kHeader);
+  const std::string body = header.substr(header.find('\n') + 1) + kGoodRows;
+  struct Case
+  {
+    const char * tag;
+    std::string first;
+    bool loads;
+  };
+  const std::vector<Case> cases = {
+    {"bom", "\xEF\xBB\xBF# format: angular-response-table v1\n", true},
+    {"blank_lines", "\n  \n# format: angular-response-table v1\r\n", true},
+    {"trailing_blank", "# format: angular-response-table v1  \n", true},
+    {"v2", "# format: angular-response-table v2\n", false},
+    {"no_version", "# format: angular-response-table\n", false},
+  };
+  for (const auto & c : cases) {
+    const auto path = writeTemp(c.tag, c.first + body);
+    EXPECT_TRUE(isAngularResponseTable(path)) << c.tag;
+    std::string error;
+    const auto table = loadBackscatterTable(path, error);
+    EXPECT_EQ(table.entries.size(), c.loads ? 1u : 0u) << c.tag << ": " << error;
+    if (!c.loads) {
+      const bool named = error.find("unsupported table format") != std::string::npos;
+      EXPECT_TRUE(named) << c.tag << ": " << error;
+    }
+    std::filesystem::remove(path);
+  }
+  const auto empty = writeTemp("empty", "\n\n");
+  EXPECT_FALSE(isAngularResponseTable(empty));
+  std::string error;
+  EXPECT_TRUE(loadBackscatterTable(empty, error).empty());
+  EXPECT_NE(error.find("empty file"), std::string::npos) << error;
+  std::filesystem::remove(empty);
+}
+
 TEST(BackscatterTable, LoadsTheFixture)
 {
   std::string error;

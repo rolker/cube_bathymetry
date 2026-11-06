@@ -43,6 +43,10 @@ namespace
 {
 
 constexpr const char * kFormatLine = "# format: angular-response-table v1";
+/// Any version of the format: a file whose first line starts with this is a
+/// table, and one this loader cannot read fails loudly rather than being
+/// handed to the single-curve loader (which reads it as an empty curve).
+constexpr const char * kFormatPrefix = "# format: angular-response-table";
 constexpr const char * kColumns =
   "mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,"
   "se_db,offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,"
@@ -199,6 +203,33 @@ bool parseAngleGroups(
 bool sameBounds(const std::pair<double, double> & a, const std::pair<double, double> & b)
 {
   return std::abs(a.first - b.first) <= 1e-9 && std::abs(a.second - b.second) <= 1e-9;
+}
+
+/// The first non-blank line of @p in, with a UTF-8 byte-order mark, the line
+/// ending and surrounding blanks removed; @p line_no counts every line read.
+/// False when the stream holds no such line.
+bool firstContentLine(std::istream & in, std::string & out, std::size_t & line_no)
+{
+  std::string line;
+  bool first = true;
+  while (std::getline(in, line)) {
+    ++line_no;
+    if (first && line.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+      line.erase(0, 3);
+    }
+    first = false;
+    line = trim(stripCr(line));
+    if (!line.empty()) {
+      out = line;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasFormatPrefix(const std::string & line)
+{
+  return line.compare(0, std::char_traits<char>::length(kFormatPrefix), kFormatPrefix) == 0;
 }
 
 /// Per-mode scalar columns as raw text, compared verbatim between rows.
@@ -467,10 +498,8 @@ bool isAngularResponseTable(const std::string & path)
     return false;
   }
   std::string line;
-  if (!std::getline(in, line)) {
-    return false;
-  }
-  return stripCr(line) == kFormatLine;
+  std::size_t line_no = 0;
+  return firstContentLine(in, line, line_no) && hasFormatPrefix(line);
 }
 
 BackscatterTable loadBackscatterTable(const std::string & path, std::string & error)
@@ -490,11 +519,17 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
   }
   std::string line;
   std::size_t line_no = 0;
-  if (!std::getline(in, line) || stripCr(line) != kFormatLine) {
-    return fail(1, std::string("not an angular-response table (first line must be '") +
+  if (!firstContentLine(in, line, line_no)) {
+    return fail(line_no, "empty file, not an angular-response table");
+  }
+  if (line != kFormatLine) {
+    if (hasFormatPrefix(line)) {
+      return fail(line_no, "unsupported table format '" + line + "' (this loader reads '" +
+               kFormatLine + "')");
+    }
+    return fail(line_no, std::string("not an angular-response table (first line must be '") +
              kFormatLine + "')");
   }
-  line_no = 1;
 
   // Header comments, then the column line.
   std::map<std::string, std::string> header;
