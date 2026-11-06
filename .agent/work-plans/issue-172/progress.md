@@ -284,3 +284,45 @@ Full package suite: 1395 tests, 0 failures (96 cppcheck skips, as before). New: 
 
 ### Next
 `/review-code` pre-push on the branch; after the PR, the Appledore re-import with the run-4 table (`--backscatter-mode-fallback exclude`) → candidate D for the operator's eyes.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 10:29 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `e7e2022`
+**Mode**: pre-push
+**Depth**: Deep (reason: 3398 lines over 42 files, plus substantive ADR-0003/ADR-0007 amendments)
+**Must-fix**: 8 | **Suggestions**: 18
+**Round**: 1 (first review of PR 2; the two earlier entries reviewed PR 1, merged as PR #174) | **Ship**: continue — eight must-fixes. Two are correctness bugs: the range-term group lookup, and the false NO-OP warning. Two are design-level: an unbounded SonarInfo history in the live node, and a table run where nothing resolved still exiting 0 with a `kind:table` fingerprint. These warrant a second independent read after the fix.
+
+Specialists: static analysis (cpplint, uncrustify, xmllint, lint_cmake: clean; cppcheck 2.13 skipped by ament on this host, as in the package tests), governance + plan drift, Claude Adversarial Lens A and Lens B (Deep horizon, fresh context), and cross-model Gemini and Codex (both ran, EXIT=0). Local Adversarial is off (the default). The repo has no `.agents/README.md` or `review-context.yaml`. Plan drift: the Files to Change table matches the diff, and the declared deviations are recorded in plan.md and ADR-0007, except that ADR item 5 still claims per-beam cases are counted.
+
+### Findings
+- [ ] (must-fix) `groupFor`: a beam below the lowest PRESENT group's `angle_lo_deg` takes that group's range term. When the writer omits the first declared group ("zero:" status, no rows), beams in that group and in the specular band get the next group's r_g instead of the zero term the format specifies. Fix: honour `# range_angle_groups_deg` or the `# range_term:` lines, and add a test with an unfitted first group. — `cube_bathymetry/src/backscatter_table.cpp:375-388` (lead + Codex, cross-model confirmed)
+- [ ] (must-fix) `cube_bathymetry_level_plan` is exported with a transitive `OpenSSL::Crypto` link, but `ament_export_dependencies` lacks OpenSSL. A downstream `find_package(cube_bathymetry)`, such as ui_ws `marine_perception_tools`, fails to resolve the target. — `cube_bathymetry/CMakeLists.txt:117,644` (Governance + Lens B)
+- [ ] (must-fix) README says `soundings` carries seven float32 fields. `detections_to_pointcloud` now writes eight (`frequency`, point_step 32). — `README.md:16-17` (Governance)
+- [ ] (must-fix) README says the beam "is weighted by `1 / var_db2`". Weights are not applied (decision 6 deviation). The "PR 2's loader" and "what PR 2 does" wording is stale too. — `README.md:~933,1062,1080` (Governance)
+- [ ] (must-fix) The live node logs "backscatter_angle_correction=empirical but no curve was loaded ... NO-OP" when a valid per-mode table IS loaded: the `bs_curve.points.empty()` branch lacks `!bs_file_is_table`. Add a lifecycle test with `empirical` + table. — `cube_bathymetry/src/cube_bathymetry_node.hpp:237` (Gemini)
+- [ ] (must-fix) `BackscatterModeResolver::history_` is never pruned. The M3 bridge republishes SonarInfo on every acquisition-signature change, which happens every ping under alternating multi-mode pinging, so a long-running live node grows without bound (roughly 250 MB a day at 10 Hz). Prune it behind a horizon without breaking the stale logic, and dedupe a new stamp whose state equals its predecessor's. — `cube_bathymetry/src/backscatter_mode.cpp:78-103` (Lens B; Lens A + Gemini as suggestion)
+- [ ] (must-fix) With a table configured, a run in which no ping resolves still exits 0, prints only the report, and writes the fingerprint `kind:table` + sha256. That happens with a wrong `--sonar-info-topic`, with no SonarInfo in the bags, or with a live cloud without `frequency`. The result is uncorrected data with false provenance. Fail or warn loudly in import_bag when `sonar_info_seen == 0` or 0 pings resolved. In the node, warn once on a cloud lacking `frequency` and once when N pings have resolved nothing. — `cube_bathymetry/src/import_bag_main.cpp:2686`, `cube_bathymetry/src/cube_bathymetry_node.hpp:~2616` (Lens B)
+- [ ] (must-fix) `setupBackscatter` builds the resolver with `&out.table`, then `return out;`. That relies on NRVO, which is not guaranteed; a move would leave `table_` dangling. Fix: make the resolver own or share the table, or build it at the call site, or delete the struct's copy/move. — `cube_bathymetry/src/import_bag_main.cpp:1095-1147` (Codex; Lens B as suggestion)
+- [ ] (suggestion) Beam-level fallbacks (NaN angle, no finite range, unweighable bin) are not counted per beam, yet ADR-0007 item 5 says "every case is counted per reason". Either count them or reword the ADR and the `--backscatter-mode-fallback` help. — `cube_bathymetry/src/backscatter_table.cpp:736-744`, ADR-0007 item 5 (Codex + Lens B + Governance)
+- [ ] (suggestion) A beam at |θ| >= 90 deg gets the clamped angle term but a zero range term. The writer drops such beams, so the C++ side could treat them as uncorrectable (fallback). — `cube_bathymetry/src/backscatter_table.cpp:375-388,747` (Lens A)
+- [ ] (suggestion) An empty (width 0) cloud is still resolved with NaN frequency, so it counts as a `?kHz` NoEntry ping and may fire the TVG warning. Gate it on `!soundings.empty()`. — `cube_bathymetry/src/cube_bathymetry_node.hpp:~2701` (Gemini)
+- [ ] (suggestion) The declared-TVG mismatch warning fires for Unanchored and UnderPingFloor entries and says "the table is applied as is", but the fallback applied instead. — `cube_bathymetry/src/backscatter_mode.cpp:158-177` (Gemini)
+- [ ] (suggestion) The loader does not check angle rows or group bounds against [0, 90]. A duplicate `# mode_summary:` silently overwrites, and a summary without `pings=` reads as 0, so it falls under any ping floor. — `cube_bathymetry/src/backscatter_table.cpp:513-639` (Gemini)
+- [ ] (suggestion) A near-miss format line (BOM, leading blank line, `v2`) is not detected as a table. It falls to the legacy loader, which yields an empty curve with only a WARN and a `kind:none` fingerprint. Fail loudly on a `# format: angular-response-table` prefix that is not exactly v1. — `cube_bathymetry/src/backscatter_table.cpp:412-426` (Lens B)
+- [ ] (suggestion) The duplicate bin/node checks are O(n²) and have no row or line-length bound. An oversized operator file can stall `on_configure`. — `cube_bathymetry/src/backscatter_table.cpp:617-655` (Lens B)
+- [ ] (suggestion) `--backscatter-mode-fallback` / `--backscatter-mode-min-pings` (and the node parameters) are silently ignored without a table. Warn once. — `cube_bathymetry/src/import_bag_main.cpp:~1113` (Lens B)
+- [ ] (suggestion) `~/reset` keeps the resolver (by design), and its counts and `warned_` keep accumulating, so the cleanup report mixes pre-reset and post-reset pings. Say so in the report or the README. — `cube_bathymetry/src/cube_bathymetry_node.hpp:~1903` (Gemini)
+- [ ] (suggestion) `DeclaredTvgState` compares the float absorption exactly after a `%.6g` round trip. Use a small relative tolerance. — `cube_bathymetry/src/backscatter_table.cpp` operator== (Lens A)
+- [ ] (suggestion) The README should say plainly that `identity` mixes raw beams into table-corrected means, so `exclude` is the safe fallback for a mode-switching sonar. Also state that an older cloud without `frequency` keys as `?kHz` and gets the fallback. — `README.md` by-mode / node parameters (Lens A + Governance)
+- [ ] (suggestion) `newest_stamp_ns_` / `have_newest_` are written but never read. — `cube_bathymetry/include/cube_bathymetry/backscatter_mode.h:174-175` (Gemini)
+- [ ] (suggestion) batch_regen refuses a table file but never reads `build_fingerprint.json`, so `--backscatter-correction none` can rebuild tiles in a table-built store. This gap predates #172; name it in the PR body. — `cube_bathymetry/src/batch_regen_main.cpp:918-927` (Lens B)
+- [ ] (suggestion) The `Parameters`/`Sounding`/`DepthAndUncertainty` layout changed (20 to 22 bytes), so ui_ws `marine_perception_tools` must be rebuilt with this. Note it in the PR body and the post-merge rebuild. (Lens B)
+- [ ] (suggestion) CMake comment "ADR-0003 schema v2, tiling only (#143)" is stale. — `cube_bathymetry/CMakeLists.txt:104` (Governance)
+- [ ] (suggestion) ADR-0003: the `tool_version` text runs on from "...keeps schema version 2 (additive)." with no paragraph break. — `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md` (Governance)
+- [ ] (suggestion) README "Header provenance" key table still lists only the single-curve keys (carried from PR 1). — `README.md` (Governance)
+- [ ] (suggestion) Instruction-update candidates (proposals only): a `.agents/README.md` for cube_bathymetry recording the `soundings` field contract (count, point_step, fixtures); the pitfall that an exported target linking a new find_package'd library needs `ament_export_dependencies`. (Governance)
