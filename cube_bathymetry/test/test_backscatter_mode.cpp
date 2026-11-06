@@ -178,9 +178,9 @@ TEST(BackscatterModeResolver, HeartbeatsDedupAndLateMessagesCountStale)
 }
 
 // cube_bathymetry#172 review: a bridge that republishes SonarInfo with a new
-// stamp on every ping under a steady mode adds no history entry and is not
-// late; a late OLDER message only counts the pings it would really have
-// corrected differently (the ones before the next stored stamp).
+// stamp on every ping under a steady mode is not late; a late OLDER message
+// only counts the pings it would really have corrected differently (the ones
+// before the next stored stamp).
 TEST(BackscatterModeResolver, SteadyRepublishAndOutOfOrderMessagesAreNotStale)
 {
   Fixture f;
@@ -193,7 +193,7 @@ TEST(BackscatterModeResolver, SteadyRepublishAndOutOfOrderMessagesAreNotStale)
     // Delivered just after the ping it describes, stamped with it: same mode.
     EXPECT_TRUE(r.addSonarInfo(state(ping, 0.001f, 24000.0f, 2))) << i;
   }
-  EXPECT_EQ(r.historySize(), 1u) << "a steady mode stores one state";
+  EXPECT_EQ(r.historySize(), 51u) << "distinct stamps are kept (the window bounds them)";
   EXPECT_EQ(r.counts().stale, 0u);
 
   // A real change at 10 s, pings after it, then a late message stamped 9 s
@@ -209,6 +209,24 @@ TEST(BackscatterModeResolver, SteadyRepublishAndOutOfOrderMessagesAreNotStale)
   // correction: stored, but nothing is stale.
   EXPECT_TRUE(r.addSonarInfo(state(10 * s, 5e-5f, 20000.0f, 1, DeclaredTvg::Log40R, 80.0f)));
   EXPECT_EQ(r.counts().stale, 0u);
+}
+
+// cube_bathymetry#172 review round 2: the same state under a new stamp is
+// stored, not folded into the entry in force, or a late message stamped
+// between the two would take over the pings after the second.
+TEST(BackscatterModeResolver, OutOfOrderSonarInfoKeepsTheLaterRepeat)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table);
+  r.addSonarInfo(state(100, 0.001f, 24000.0f, 2));   // A: FMU 1 ms -> idx 2
+  r.addSonarInfo(state(300, 0.001f, 24000.0f, 2));   // A again, new stamp
+  r.addSonarInfo(state(200, 5e-5f, 20000.0f, 1));    // B, late: CW 50 us -> idx 1
+  EXPECT_EQ(r.resolve(150, kF), 2);
+  EXPECT_EQ(r.resolve(250, kF), 1);
+  EXPECT_EQ(r.resolve(350, kF), 2) << "A@300 is in force at 350, not the late B@200";
+  // A same-stamp re-delivery is still one entry.
+  r.addSonarInfo(state(300, 0.001f, 24000.0f, 2));
+  EXPECT_EQ(r.historySize(), 3u);
 }
 
 // The bound (cube_bathymetry#172 review must-fix): a sonar alternating modes on

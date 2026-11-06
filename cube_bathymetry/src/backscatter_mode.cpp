@@ -84,9 +84,8 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
   const int64_t stamp = state.stamp_ns;
   // A message stamped before the window cut is either far behind the pings
   // or the first of a timeline that went BACKWARDS (a sim restart, a looped
-  // bag) before any ping of it arrived. Either way it is stored -- never
-  // folded into an older entry, which may belong to the old timeline -- and
-  // this call does not prune: pruning against the old anchor would cut the
+  // bag) before any ping of it arrived. Either way it is stored and this
+  // call does not prune: pruning against the old anchor would cut the
   // new timeline down to its newest entry before the anchor, message by
   // message, until a ping of it re-anchors the window (resolve). It is older
   // than the stale count looks back (the window), so it counts nothing stale.
@@ -101,15 +100,11 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
     }
     return true;  // a heartbeat: the same message again
   }
-  if (existing == history_.end() && !behind_window) {
-    // The state in force at this stamp, if any: the same state again under
-    // a new stamp (a bridge republishing on every ping) changes nothing.
-    const SonarInfoState * in_force = stateAt(stamp);
-    if (in_force && sameState(*in_force, state)) {
-      prune();
-      return true;
-    }
-  }
+  // The same state again under a NEW stamp (a bridge republishing on every
+  // ping) is stored, not folded into the entry in force: folding it breaks
+  // out-of-order association (A@100 kept, A@300 folded, a late B@200 would
+  // then hand a ping at 350 B instead of A), and the derive tool keeps
+  // distinct stamps too. The window and the cap bound the history without it.
   // The pings this message would have described: the resolved ones from its
   // stamp up to the next stored stamp (those beyond use that later entry).
   // One is stale when this state gives it another correction than the one

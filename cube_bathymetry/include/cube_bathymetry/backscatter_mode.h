@@ -90,11 +90,12 @@ namespace cube
 
 /// Resolves pings to `correction_idx` values. Time-ordered association:
 /// a ping uses the latest SonarInfo whose stamp is at or before the ping
-/// stamp. The history is keyed by stamp and deduplicated: a message at a
-/// stamp already held with the same state is a heartbeat (re-delivery), and
-/// a message whose state equals the one already in force at its stamp
-/// changes nothing and is not stored (a bridge that republishes on every
-/// ping under a steady mode adds no entries). A SonarInfo that arrives AFTER
+/// stamp. The history is keyed by stamp and deduplicated by stamp: a message
+/// at a stamp already held with the same state is a heartbeat (re-delivery)
+/// and is not stored again. The same state under a NEW stamp IS stored
+/// (review round 2): folding it into the entry in force would hand a late
+/// message stamped between the two the pings after the second (the derive
+/// tool keeps distinct stamps too); the window and the cap bound it. A SonarInfo that arrives AFTER
 /// pings it would have described is never applied to them retroactively;
 /// those pings -- the resolved ones between its stamp and the next stored
 /// stamp whose correction it would have changed -- are counted as stale
@@ -187,9 +188,8 @@ public:
     void setMismatchWarning(std::function < void(const std::string &) > warn);
 
   /// Record a SonarInfo. Same stamp and state = the same message (a
-  /// heartbeat or a re-delivery); same state as the one in force at its
-  /// stamp = no change; both are not stored. A different state at a held
-  /// stamp replaces it. Then prunes the history (the bound above). Returns
+  /// heartbeat or a re-delivery), not stored again. A different state at a
+  /// held stamp replaces it. Then prunes the history (the bound above). Returns
   /// false when the message changes the state of pings already resolved
   /// (the stale case above).
     bool addSonarInfo(const SonarInfoState & state);

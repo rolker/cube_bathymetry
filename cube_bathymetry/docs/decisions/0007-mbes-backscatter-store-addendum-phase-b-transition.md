@@ -242,7 +242,7 @@ curve corrects their mean and leaves each mode offset from it.
    `SonarInfo` at or before its stamp plus its `PingInfo.frequency`; the live
    node reads the frequency from the `frequency` field
    `detections_to_pointcloud` writes on every point. The resolver keeps that
-   SonarInfo history deduplicated and bounded — 60 s behind the newest
+   SonarInfo history (same-stamp re-deliveries deduplicated) bounded — 60 s behind the newest
    resolved ping plus the one state in force at the cut, at most 4096
    states — since a mode-switching sonar republishes on every switch. A ping
    more than the window behind the newest one (time went backwards: a sim

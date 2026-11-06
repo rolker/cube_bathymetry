@@ -705,7 +705,7 @@ See
 `# format: angular-response-table v1`, see *Per-mode tables* below), each ping
 is corrected by its own mode's entry instead of one curve: `import_bag` reads
 the SonarInfo topic in the main pass and the live node keeps the SonarInfo
-history (deduplicated, and bounded to 60 s behind the newest ping plus the
+history (a same-stamp re-delivery deduplicated, and bounded to 60 s behind the newest ping plus the
 state in force at that cut, at most 4096 states; a ping more than 60 s behind
 the newest one means time went backwards — a sim restart, a looped bag — and
 re-anchors that window on itself), and a ping's mode is the latest SonarInfo at or before its stamp plus
