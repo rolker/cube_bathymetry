@@ -254,7 +254,8 @@ namespace cube
     const ModeEntry * entry(uint16_t correction_idx) const;
 
 private:
-    friend BackscatterTable loadBackscatterTable(const std::string &, std::string &);
+    friend BackscatterTable loadBackscatterTable(
+      const std::string &, std::string &, std::string *);
     std::unordered_map < std::string, uint16_t > index_;
   };
 
@@ -263,12 +264,20 @@ private:
 /// detected by that line, never guessed from rows. Any version counts, so a
 /// table this loader cannot read (`v2`, a garbled version) still goes to
 /// `loadBackscatterTable` and fails there loudly instead of being read as an
-/// empty single curve. False for a missing or unreadable file.
+/// empty single curve. False for a missing or unreadable file, and for a
+/// path that is not a regular file (a FIFO, a device): the probe would block
+/// on it or consume what the loader needs, and reads at most 64 KiB.
   bool isAngularResponseTable(const std::string & path);
 
 /// Load a table. On any failure returns an EMPTY table and sets @p error
 /// (the file, the line, and why); a table is read whole or not at all.
-  BackscatterTable loadBackscatterTable(const std::string & path, std::string & error);
+/// The file is read ONCE, into memory, bounded (at most 64 MiB; a path that
+/// is not a regular file is refused before it is opened), and parsed from
+/// that buffer; @p bytes, when given, receives that same buffer, so a
+/// fingerprint hashes exactly the table that was applied even if the file is
+/// rewritten in place after the read (cube_bathymetry#172 review round 2).
+  BackscatterTable loadBackscatterTable(
+    const std::string & path, std::string & error, std::string * bytes = nullptr);
 
 /// What the estimator does with a beam the table cannot correct: a ping of
 /// a mode with no entry, an unanchored mode, a mode under the ping floor, a

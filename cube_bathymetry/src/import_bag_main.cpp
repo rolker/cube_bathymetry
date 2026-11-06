@@ -998,8 +998,8 @@ bool resolveBackscatterCorrection(
       // A per-pulse-mode table (cube#172): one entry per mode, selected per
       // ping from the SonarInfo stream. Read whole or refused -- a table that
       // half-loads would correct every beam it touches by the wrong amount.
-      std::string error;
-      backscatter_table = cube::loadBackscatterTable(backscatter_curve_file, error);
+      std::string error, table_bytes;
+      backscatter_table = cube::loadBackscatterTable(backscatter_curve_file, error, &table_bytes);
       if (!error.empty()) {
         std::cerr << "error: --backscatter-curve names a per-pulse-mode table that could "
           "not be loaded: " << error << "\n";
@@ -1008,7 +1008,9 @@ bool resolveBackscatterCorrection(
       provenance.kind = "table";
       provenance.source = backscatter_curve_file;
       try {
-        provenance.sha256 = cube::sha256File(backscatter_curve_file);
+        // The bytes the table was parsed from, never a second read of a file
+        // that may have been rewritten since (cube#172 review round 2).
+        provenance.sha256 = cube::sha256Text(table_bytes);
       } catch (const std::exception & e) {
         std::cerr << "error: cannot hash --backscatter-curve for the fingerprint: "
                   << e.what() << "\n";

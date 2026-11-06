@@ -267,6 +267,32 @@ struct ModeBuild
 constexpr std::uintmax_t kMaxTableBytes = 64ull * 1024 * 1024;
 constexpr std::size_t kMaxTableRows = 1000000;
 constexpr std::size_t kMaxLineLength = 4096;
+/// The format probe reads no further than this looking for the first line.
+constexpr std::size_t kMaxProbeBytes = 64 * 1024;
+
+/// True when @p path names a regular file (symlinks followed). Checked
+/// before opening: opening a FIFO for reading blocks until a writer comes,
+/// and a device such as /dev/zero has no size to bound the read by.
+bool isRegularFile(const std::string & path)
+{
+  std::error_code ec;
+  const auto status = std::filesystem::status(path, ec);
+  return !ec && std::filesystem::is_regular_file(status);
+}
+
+/// Read at most @p limit + 1 bytes of @p in into @p out: more than @p limit
+/// means the file is larger than allowed. False on a read error.
+bool readBounded(std::istream & in, std::uintmax_t limit, std::string & out)
+{
+  out.clear();
+  char buffer[1 << 16];
+  while (out.size() <= limit &&
+    (in.read(buffer, sizeof(buffer)) || in.gcount() > 0))
+  {
+    out.append(buffer, static_cast<std::size_t>(in.gcount()));
+  }
+  return !in.bad();
+}
 
 }  // namespace
 
@@ -510,42 +536,64 @@ const ModeEntry * BackscatterTable::entry(uint16_t correction_idx) const
 
 bool isAngularResponseTable(const std::string & path)
 {
-  if (path.empty()) {
+  if (path.empty() || !isRegularFile(path)) {
     return false;
   }
-  std::ifstream in(path);
-  if (!in) {
+  std::ifstream file(path, std::ios::binary);
+  std::string head;
+  if (!file || !readBounded(file, kMaxProbeBytes, head)) {
     return false;
   }
+  std::istringstream in(head);
   std::string line;
   std::size_t line_no = 0;
   return firstContentLine(in, line, line_no) && hasFormatPrefix(line);
 }
 
-BackscatterTable loadBackscatterTable(const std::string & path, std::string & error)
+BackscatterTable loadBackscatterTable(
+  const std::string & path, std::string & error, std::string * bytes_out)
 {
   BackscatterTable table;
   table.path = path;
   error.clear();
+  if (bytes_out) {
+    bytes_out->clear();
+  }
   auto fail = [&](std::size_t line_no, const std::string & why) {
       error = path + ":" + std::to_string(line_no) + ": " + why;
       return BackscatterTable();
     };
 
-  std::ifstream in(path);
-  if (!in) {
+  if (!std::filesystem::exists(path)) {
     error = path + ": cannot open";
     return BackscatterTable();
   }
-  {
-    std::error_code ec;
-    const std::uintmax_t bytes = std::filesystem::file_size(path, ec);
-    if (!ec && bytes > kMaxTableBytes) {
-      error = path + ": " + std::to_string(bytes) + " bytes, more than a table can be (" +
-        std::to_string(kMaxTableBytes) + ")";
-      return BackscatterTable();
-    }
+  if (!isRegularFile(path)) {
+    error = path + ": not a regular file (a table is read from a file, never a FIFO or "
+      "device)";
+    return BackscatterTable();
   }
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    error = path + ": cannot open";
+    return BackscatterTable();
+  }
+  // One bounded read: the size check, the parse and the caller's hash all
+  // see these bytes, never a second read of a file that may have changed.
+  std::string content;
+  if (!readBounded(file, kMaxTableBytes, content)) {
+    error = path + ": read error";
+    return BackscatterTable();
+  }
+  if (content.size() > kMaxTableBytes) {
+    std::error_code ec;
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    error = path + ": " + (ec ? std::string("over ") + std::to_string(kMaxTableBytes) :
+      std::to_string(size)) + " bytes, more than a table can be (" +
+      std::to_string(kMaxTableBytes) + ")";
+    return BackscatterTable();
+  }
+  std::istringstream in(content);
   std::string line;
   std::size_t line_no = 0;
   if (!firstContentLine(in, line, line_no)) {
@@ -673,11 +721,12 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
     if (line.size() > kMaxLineLength) {
       return fail(line_no, "line longer than " + std::to_string(kMaxLineLength) + " characters");
     }
+    // Every line counts against the bound, comments included.
+    if (++rows > kMaxTableRows) {
+      return fail(line_no, "more than " + std::to_string(kMaxTableRows) + " lines");
+    }
     if (line.empty() || line[0] == '#') {
       continue;
-    }
-    if (++rows > kMaxTableRows) {
-      return fail(line_no, "more than " + std::to_string(kMaxTableRows) + " rows");
     }
     const auto f = splitCsv(line);
     if (f.size() != kColumnCount) {
@@ -870,6 +919,9 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
   if (table.entries.empty()) {
     error = path + ": no table rows";
     return BackscatterTable();
+  }
+  if (bytes_out) {
+    *bytes_out = std::move(content);
   }
   return table;
 }

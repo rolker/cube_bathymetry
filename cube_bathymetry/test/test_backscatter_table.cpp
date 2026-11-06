@@ -21,6 +21,7 @@
 
 
 #include <gtest/gtest.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -665,6 +666,45 @@ TEST(BackscatterTable, ALastBinCentredAtOrPast90DegLoads)
   ASSERT_TRUE(error.empty()) << error;
   EXPECT_NEAR(correctWithTable(-20.0, 85.0, 10.0, table, 1, BackscatterModeFallback::Exclude),
     -20.0 + 1.625, 1e-9);
+  std::filesystem::remove(path);
+}
+
+// cube_bathymetry#172 review round 2: the loader's bounds hold for a path that
+// is not a regular file (a FIFO would block the probe or lose what it read; a
+// device has no size), comment lines count against the line bound, and the
+// bytes handed back for the fingerprint are the ones that were parsed.
+TEST(BackscatterTable, NonRegularFilesAreRefusedAndTheParsedBytesAreReturned)
+{
+  const std::string fifo = tempPath("fifo");
+  std::filesystem::remove(fifo);
+  ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+  EXPECT_FALSE(isAngularResponseTable(fifo)) << "the probe must not open (and block on) it";
+  std::string error;
+  EXPECT_TRUE(loadBackscatterTable(fifo, error).empty());
+  EXPECT_NE(error.find("not a regular file"), std::string::npos) << error;
+  std::filesystem::remove(fifo);
+  EXPECT_FALSE(isAngularResponseTable("/dev/zero"));
+  EXPECT_TRUE(loadBackscatterTable("/dev/zero", error).empty());
+  EXPECT_NE(error.find("not a regular file"), std::string::npos) << error;
+
+  // A flood of comment lines is bounded like rows.
+  std::string flood(kHeader);
+  flood.reserve(flood.size() + 2100000);
+  for (int i = 0; i < 1000001; ++i) {
+    flood += "#\n";
+  }
+  const auto flooded = writeTemp("comment_flood", flood + kGoodRows);
+  EXPECT_TRUE(loadBackscatterTable(flooded, error).empty());
+  EXPECT_NE(error.find("more than 1000000 lines"), std::string::npos) << error;
+  std::filesystem::remove(flooded);
+
+  const std::string content = std::string(kHeader) + kGoodRows;
+  const auto path = writeTemp("bytes", content);
+  std::string bytes;
+  const auto table = loadBackscatterTable(path, error, &bytes);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_EQ(table.entries.size(), 1u);
+  EXPECT_EQ(bytes, content) << "the buffer the table was parsed from";
   std::filesystem::remove(path);
 }
 
