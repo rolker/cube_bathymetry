@@ -180,10 +180,35 @@ implementation** of the fingerprint.
 ### Implementation status
 
 `build_fingerprint.h/cpp` implements read/write (atomic temp-file + rename, as
-specified) and `isStale` over the `tiling` object **only**; `import_bag` writes
-the file after every successful import (fixed and depth-adaptive). The other
-keys (`tool_version`, `bags`, `reference_store`, `backscatter_correction`) and
-`batch_regen --incremental`'s consumer remain unimplemented; adding them is
-additive within schema 2. `tool_version` as specified reads `package.xml`'s
+specified) and `isStale` over the `tiling` object and the
+`backscatter_correction` object; `import_bag` writes the file after every
+successful import (fixed and depth-adaptive). The other keys (`tool_version`,
+`bags`, `reference_store`) and `batch_regen --incremental`'s consumer remain
+unimplemented; adding them is additive within schema 2.
+
+### `backscatter_correction` (cube_bathymetry#172)
+
+Written beside `tiling`, always, by `import_bag`:
+
+```json
+"backscatter_correction": {
+  "mode": "none" | "empirical" | "auto",
+  "kind": "none" | "curve" | "table",
+  "source": "<curve/table path, or sonar_info:<topic>>",
+  "sha256": "<hex>" | null,
+  "fallback": "identity" | "exclude" | null,
+  "min_pings": 0 | null
+}
+```
+
+`sha256` is of the curve or table file's bytes, or of a canonical rendering
+of a SonarInfo-delivered curve (there is no file to hash); `fallback` and
+`min_pings` are the per-pulse-mode table's policy and are `null` for a curve
+or none. `isStale` compares `mode`, `kind`, `sha256`, `fallback` and
+`min_pings` — not `source`, so the same table under another path is the same
+correction. A fingerprint without the key (written before #172) is stale
+against one that has it: what correction built its backscatter layer cannot
+be told. This replaces the schema-1 sketch above (`{"mode", "curve_sha256"}`)
+and keeps schema version 2 (additive). `tool_version` as specified reads `package.xml`'s
 `<version>`, which is `0.0.0` and has never been bumped, so that key would be
 inert until a versioning practice exists — a follow-up, not this amendment.

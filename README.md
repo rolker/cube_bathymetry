@@ -686,6 +686,30 @@ the scanned topic, default = the detections topic's sibling `sonar_info`).
 See
 `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
 
+**Per-pulse-mode tables (#172).** When the explicit file is a table written by
+`derive_angular_response.py --by-mode` (first line
+`# format: angular-response-table v1`, see *Per-mode tables* below), each ping
+is corrected by its own mode's entry instead of one curve: `import_bag` reads
+the SonarInfo topic in the main pass and the live node keeps the SonarInfo
+history, and a ping's mode is the latest SonarInfo at or before its stamp plus
+the ping's frequency (`ping_info.frequency` offline; the `frequency` field
+`detections_to_pointcloud` now writes on every point, live). Two settings
+decide what a ping the table cannot correct gets — no SonarInfo yet, a mode
+with no entry or no measured offset, an entry under the ping floor, or a beam
+in an angle bin the table could not weight: `--backscatter-mode-fallback
+identity|exclude` (node: `backscatter_mode_fallback`; default `identity`
+records the beam uncorrected, `exclude` drops its backscatter and keeps its
+depth) and `--backscatter-mode-min-pings <N>` (node:
+`backscatter_mode_min_pings`; default 0 keeps every entry, a floor treats a
+rarer mode's entry as absent). The pass ends with a per-mode count of
+resolved pings and every unresolved reason, and the SonarInfo-declared TVG
+state is compared with what the table recorded per mode (a mismatch is warned
+once per mode and counted; the table is applied as is). The build fingerprint
+records the correction (mode, curve/table SHA-256, fallback, floor). A table
+that does not load is an error (`import_bag`) or a failed configure (node),
+never a silent identity; `batch_regen_bag` refuses a table, since it reads no
+SonarInfo.
+
 ### Deriving a curve (`derive_angular_response.py`)
 
 `ros2 run cube_bathymetry derive_angular_response.py` bins each beam's
@@ -879,12 +903,22 @@ this script on this host, not an interchange format: a pickle runs code when
 loaded, so the script loads only a regular file owned by the current user that
 nobody else can write, and refuses anything else.
 
-**The estimator does not read the table yet.** That is PR 2 of #172 (C++ table
-loader and mode resolver, per-ping correction in the estimator, `import_bag` and
-the live node, fingerprint, ADR-0007/0003 amendments). Today's single-curve
-loader, and the marine_tools SonarInfo mirror, read a table as an empty curve,
-which every caller already reports as an empty or unparseable curve; they never
-read rows out of it. PR 1 exists so the format is settled on real fits first.
+**Applying the table.** Pass it where a curve goes:
+
+```bash
+import_bag -o store -d /bizzy/sensors/m3/detections --bs-store bs_store \
+    --backscatter-correction empirical --backscatter-curve m3_mode_table.csv \
+    --backscatter-mode-fallback exclude <bags...>
+```
+
+The C++ loader (`backscatter_table.h`) reads a table whole or refuses it, the
+resolver (`backscatter_mode.h`) turns each ping's SonarInfo + frequency into
+the mode key and a table entry, and the estimator corrects every beam of the
+ping by that entry at record time (`Sounding::correction_idx`, see
+*Backscatter fidelity* above for the fallback and floor settings). The
+single-curve loader and the marine_tools SonarInfo mirror still read a table
+as an empty curve (letter-first keys), so an older binary reports it as an
+unparseable curve rather than reading rows out of it.
 
 **Mode attribution.** Detections, `marine_interfaces/SonarInfo`
 (`--sonar-info-topic`, default the detections topic's sibling `sonar_info`) and,
