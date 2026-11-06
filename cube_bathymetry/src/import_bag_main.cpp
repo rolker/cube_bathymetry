@@ -1018,8 +1018,13 @@ bool resolveBackscatterCorrection(
                 << backscatter_table.reference_mode << ", R0 " << backscatter_table.range_ref_m
                 << " m" << std::endl;
       for (const auto & e : backscatter_table.entries) {
+        // Every declared group is present, an unfitted one as a zero term.
+        const auto fitted = std::count_if(
+          e.groups.begin(), e.groups.end(),
+          [](const cube::RangeTermGroup & g) {return !g.nodes.empty();});
         std::cout << "  " << e.key << ": " << e.pings << " pings, " << e.angle.size()
-                  << " angle bins, " << e.groups.size() << " range-term group(s), ";
+                  << " angle bins, " << fitted << " of " << e.groups.size()
+                  << " range-term group(s) fitted, ";
         if (e.offset_anchored) {
           std::cout << "offset " << e.offset_db_vs_ref << " dB";
         } else {
