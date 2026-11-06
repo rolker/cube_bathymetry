@@ -98,11 +98,9 @@ double correctBeamIntensity(
     return std::numeric_limits<double>::quiet_NaN();
   }
   if (correction_idx != kCorrectionUnresolved) {
-    const double abs_angle_deg = std::isnan(beam_angle) ?
-      std::numeric_limits<double>::quiet_NaN() :
-      std::abs(static_cast<double>(beam_angle)) * 180.0 / M_PI;
     return correctWithTable(
-      raw_intensity, abs_angle_deg, range, parameters.backscatter_table, correction_idx,
+      raw_intensity, beamAbsAngleDeg(beam_angle), range, parameters.backscatter_table,
+      correction_idx,
       parameters.backscatter_mode_fallback);
   }
 

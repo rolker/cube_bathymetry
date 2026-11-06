@@ -265,8 +265,9 @@ private:
 
 /// What the estimator does with a beam the table cannot correct: a ping of
 /// a mode with no entry, an unanchored mode, a mode under the ping floor, a
-/// ping before the first SonarInfo, a beam in an unweighable angle bin, or a
-/// beam with no finite positive range.
+/// ping before the first SonarInfo, a beam in an unweighable angle bin, a
+/// beam at or beyond 90 deg, or a beam with no finite angle or no finite
+/// positive range.
   enum class BackscatterModeFallback
   {
   /// Record the beam uncorrected (`correction_idx` 0 -> legacy path, which
@@ -280,10 +281,43 @@ private:
 /// Parse `identity` / `exclude` (case-insensitive). False on anything else.
   bool parseBackscatterModeFallback(const std::string & text, BackscatterModeFallback & out);
 
+/// Whether the table corrects one beam, and if not why (cube_bathymetry#172).
+  enum class TableBeamStatus
+  {
+    Corrected,
+  /// @p correction_idx names no entry (a reserved or out-of-range value).
+    NoEntry,
+  /// The entry has no measured offset.
+    Unanchored,
+  /// The beam angle is NaN / infinite.
+    NoFiniteAngle,
+  /// `|theta| >= 90` deg: beyond every bin and group the writer can produce
+  /// (it drops such beams), so neither the angle nor the range term is
+  /// measured there.
+    AngleAtOrBeyond90,
+  /// No finite positive slant range (the range term needs `log10 R`).
+    NoFiniteRange,
+  /// The nearest angle bin's variance is EMPTY (unweighable).
+    UnweighableBin,
+  };
+
+  const char * toString(TableBeamStatus status);
+
+/// The status `correctWithTable` acts on: Corrected, or the first reason the
+/// beam is uncorrectable, in the order of the enum.
+  TableBeamStatus tableBeamStatus(
+    double abs_angle_deg, double range_m, const BackscatterTable & table,
+    uint16_t correction_idx);
+
+/// `|beam_angle|` in degrees (NaN for a NaN angle): the conversion the
+/// estimator applies before a table lookup.
+  double beamAbsAngleDeg(float beam_angle_rad);
+
 /// Per-beam table correction. Returns the corrected level, @p raw_db when
-/// the fallback is Identity and the beam is uncorrectable, or NaN when the
-/// fallback is Exclude and it is. @p correction_idx must name a table entry
-/// (1-based; the caller handles the reserved values).
+/// the fallback is Identity and the beam is uncorrectable
+/// (`tableBeamStatus` is not Corrected), or NaN when the fallback is
+/// Exclude and it is. @p correction_idx must name a table entry (1-based;
+/// the caller handles the reserved values).
   double correctWithTable(
     double raw_db, double abs_angle_deg, double range_m,
     const BackscatterTable & table, uint16_t correction_idx,

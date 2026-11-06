@@ -287,6 +287,23 @@ TEST(BackscatterTable, LookupFollowsTheTableContract)
   EXPECT_DOUBLE_EQ(correctWithTable(-30.0, kNaN, 3.0, table, 2, id), -30.0);
   EXPECT_TRUE(std::isnan(correctWithTable(-30.0, 11.0, 0.0, table, 2, ex)));
   EXPECT_TRUE(std::isnan(correctWithTable(-30.0, 11.0, kNaN, table, 2, ex)));
+
+  // At or beyond 90 deg the writer has no bin and no group (it drops such
+  // beams): uncorrectable, never a clamped angle term with a zero range term.
+  EXPECT_DOUBLE_EQ(correctWithTable(-30.0, 90.0, r0, table, 2, id), -30.0);
+  EXPECT_TRUE(std::isnan(correctWithTable(-30.0, 95.0, r0, table, 2, ex)));
+  EXPECT_FALSE(std::isnan(correctWithTable(-30.0, 89.9, r0, table, 2, ex)));
+
+  // The status each of those cases reports (what the per-beam counts use).
+  EXPECT_EQ(tableBeamStatus(11.0, r0, table, 2), TableBeamStatus::Corrected);
+  EXPECT_EQ(tableBeamStatus(11.0, r0, table, 7), TableBeamStatus::NoEntry);
+  EXPECT_EQ(tableBeamStatus(1.0, 3.0, table, 3), TableBeamStatus::Unanchored);
+  EXPECT_EQ(tableBeamStatus(kNaN, r0, table, 2), TableBeamStatus::NoFiniteAngle);
+  EXPECT_EQ(tableBeamStatus(90.0, r0, table, 2), TableBeamStatus::AngleAtOrBeyond90);
+  EXPECT_EQ(tableBeamStatus(11.0, 0.0, table, 2), TableBeamStatus::NoFiniteRange);
+  EXPECT_EQ(tableBeamStatus(41.0, 3.0, table, 1), TableBeamStatus::UnweighableBin);
+  EXPECT_TRUE(std::isnan(beamAbsAngleDeg(std::numeric_limits<float>::quiet_NaN())));
+  EXPECT_NEAR(beamAbsAngleDeg(-static_cast<float>(M_PI) / 4.0f), 45.0, 1e-5);
 }
 
 TEST(BackscatterTable, AMinimalTableLoads)

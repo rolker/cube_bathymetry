@@ -808,26 +808,65 @@ bool parseBackscatterModeFallback(const std::string & text, BackscatterModeFallb
   return false;
 }
 
+const char * toString(TableBeamStatus status)
+{
+  switch (status) {
+    case TableBeamStatus::Corrected: return "corrected";
+    case TableBeamStatus::NoEntry: return "no table entry";
+    case TableBeamStatus::Unanchored: return "unanchored entry";
+    case TableBeamStatus::NoFiniteAngle: return "no finite beam angle";
+    case TableBeamStatus::AngleAtOrBeyond90: return "beam angle at or beyond 90 deg";
+    case TableBeamStatus::NoFiniteRange: return "no finite positive slant range";
+    case TableBeamStatus::UnweighableBin: return "unweighable angle bin";
+    default: return "?";
+  }
+}
+
+double beamAbsAngleDeg(float beam_angle_rad)
+{
+  return std::isnan(beam_angle_rad) ? std::numeric_limits<double>::quiet_NaN() :
+         std::abs(static_cast<double>(beam_angle_rad)) * 180.0 / M_PI;
+}
+
+TableBeamStatus tableBeamStatus(
+  double abs_angle_deg, double range_m, const BackscatterTable & table,
+  uint16_t correction_idx)
+{
+  const ModeEntry * entry = table.entry(correction_idx);
+  if (!entry) {
+    return TableBeamStatus::NoEntry;
+  }
+  if (!entry->offset_anchored) {
+    return TableBeamStatus::Unanchored;
+  }
+  if (!std::isfinite(abs_angle_deg)) {
+    return TableBeamStatus::NoFiniteAngle;
+  }
+  if (abs_angle_deg >= 90.0) {
+    return TableBeamStatus::AngleAtOrBeyond90;
+  }
+  if (!std::isfinite(range_m) || range_m <= 0.0 || !(table.range_ref_m > 0.0)) {
+    return TableBeamStatus::NoFiniteRange;
+  }
+  const AngleBin * bin = entry->binFor(abs_angle_deg);
+  if (!bin || !bin->weighable()) {
+    return TableBeamStatus::UnweighableBin;
+  }
+  return TableBeamStatus::Corrected;
+}
+
 double correctWithTable(
   double raw_db, double abs_angle_deg, double range_m,
   const BackscatterTable & table, uint16_t correction_idx,
   BackscatterModeFallback fallback)
 {
-  const double fallback_value = fallback == BackscatterModeFallback::Exclude ?
-    std::numeric_limits<double>::quiet_NaN() : raw_db;
-  const ModeEntry * entry = table.entry(correction_idx);
-  if (!entry || !entry->offset_anchored) {
-    return fallback_value;
-  }
-  if (!std::isfinite(abs_angle_deg) || !std::isfinite(range_m) || range_m <= 0.0 ||
-    !(table.range_ref_m > 0.0))
+  if (tableBeamStatus(abs_angle_deg, range_m, table, correction_idx) !=
+    TableBeamStatus::Corrected)
   {
-    return fallback_value;
+    return fallback == BackscatterModeFallback::Exclude ?
+           std::numeric_limits<double>::quiet_NaN() : raw_db;
   }
-  const AngleBin * bin = entry->binFor(abs_angle_deg);
-  if (!bin || !bin->weighable()) {
-    return fallback_value;
-  }
+  const ModeEntry * entry = table.entry(correction_idx);
   const double rel = entry->relativeDb(abs_angle_deg);
   const RangeTermGroup * group = entry->groupFor(abs_angle_deg);
   const double r = group ? group->at(std::log10(range_m / table.range_ref_m)) : 0.0;
