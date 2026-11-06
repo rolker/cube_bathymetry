@@ -178,8 +178,10 @@ public:
 
   /// @param table      the loaded table (must outlive the resolver).
   /// @param fallback   what an unresolved ping gets: Identity ->
-  ///        `kCorrectionUnresolved` (the legacy path), Exclude ->
-  ///        `kCorrectionExclude`.
+  ///        `kCorrectionUnresolved` (0: the legacy single-curve path, which
+  ///        records the beam uncorrected because a table run carries no
+  ///        legacy curve -- the identity fallback by plan decision 9),
+  ///        Exclude -> `kCorrectionExclude`.
   /// @param min_pings  entries resting on fewer pings than this (per the
   ///        table's `# mode_summary:` line) are treated as absent; 0 keeps
   ///        every entry.
@@ -270,7 +272,11 @@ private:
       bool stale;
     };
 
-    uint16_t fallbackIdx() const;
+  /// The index an unresolved ping is stamped with: Exclude ->
+  /// `kCorrectionExclude`; Identity -> `kCorrectionUnresolved` (0, the
+  /// identity path of a table run, see the definition), not
+  /// `kCorrectionIdentity`.
+    uint16_t unresolvedIdx() const;
     uint16_t idxOf(const KeyDecision & d) const;
     const KeyDecision & decide(const std::string & key);
     void remember(int64_t ping_stamp_ns, float frequency_hz, uint16_t idx);

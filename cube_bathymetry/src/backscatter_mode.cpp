@@ -209,7 +209,14 @@ const SonarInfoState * BackscatterModeResolver::stateAt(int64_t stamp_ns) const
   return &it->second;
 }
 
-uint16_t BackscatterModeResolver::fallbackIdx() const
+// Identity -> kCorrectionUnresolved (0), deliberately NOT kCorrectionIdentity
+// (plan decision 9): 0 is the estimator's legacy single-curve path, and a
+// table run carries no legacy curve (an explicit file is a curve OR a table,
+// never both), so 0 records the beam uncorrected -- the identity fallback --
+// while keeping the one index every pre-#172 path (the Sounding(depth)
+// constructor, batch_regen's packed records, the live `auto` curve) uses.
+// The reserved kCorrectionIdentity is for an explicit identity stamp.
+uint16_t BackscatterModeResolver::unresolvedIdx() const
 {
   return fallback_ == BackscatterModeFallback::Exclude ? kCorrectionExclude :
          kCorrectionUnresolved;
@@ -217,7 +224,7 @@ uint16_t BackscatterModeResolver::fallbackIdx() const
 
 uint16_t BackscatterModeResolver::idxOf(const KeyDecision & d) const
 {
-  return d.resolution == ModeResolution::Resolved ? d.idx : fallbackIdx();
+  return d.resolution == ModeResolution::Resolved ? d.idx : unresolvedIdx();
 }
 
 const BackscatterModeResolver::KeyDecision & BackscatterModeResolver::decide(
@@ -292,8 +299,8 @@ uint16_t BackscatterModeResolver::resolve(
   if (!state) {
     resolution = ModeResolution::NoSonarInfo;
     ++counts_.no_sonar_info;
-    remember(ping_stamp_ns, frequency_hz, fallbackIdx());
-    return fallbackIdx();
+    remember(ping_stamp_ns, frequency_hz, unresolvedIdx());
+    return unresolvedIdx();
   }
   const std::string key = canonicalModeKey(
     state->pulse_lengths_s, state->bandwidths_hz, state->tx_signal_types, frequency_hz);
@@ -348,7 +355,7 @@ uint16_t BackscatterModeResolver::resolve(
     default:
       break;
   }
-  return fallbackIdx();
+  return unresolvedIdx();
 }
 
 void BackscatterModeResolver::countBeam(
