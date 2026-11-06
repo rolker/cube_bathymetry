@@ -1229,9 +1229,16 @@ bool reportModeResolution(BackscatterSetup & backscatter)
 /// once its plan is written (review round 3), so `preflight && import` does
 /// not start the multi-hour import blind; a preflight that failed keeps its
 /// own code.
+///
+/// "done!" is printed here, once the final code is known, and only for a full
+/// run that ends 0 (review round 3: the depth-adaptive finish printed it
+/// before an exit 4, so the run said "done!" and then the error).
 int withTableResolution(int finish_code, bool table_unresolved, bool recon_only)
 {
   if (!table_unresolved) {
+    if (finish_code == 0 && !recon_only) {
+      std::cout << "done!" << std::endl;
+    }
     return finish_code;
   }
   std::cerr << "error: the per-pulse-mode table corrected no ping (see the error after the "
@@ -1751,7 +1758,8 @@ int reportFatalPassError(
 
 /// Fixed-level finish (cube#143: lifted out of main(), which is at the cpplint
 /// function-size limit): persist, report, fingerprint, close the tile-size CSV.
-/// Returns the process exit code; 0 means the caller prints "done!".
+/// Returns the process exit code; on 0 the caller (withTableResolution)
+/// prints "done!" unless the table resolved nothing.
 int cube_fixed_level_finish(
   cube::ImportAccumulator & accumulator, cube::GeoMapSheet & geo_map_sheet,
   const std::string & store_dir, const std::string & bs_store_dir, double resolution,
@@ -1818,7 +1826,8 @@ int cube_fixed_level_finish(
 
 /// Depth-adaptive finish (cube#143): plan, report, recon-only exit, phase-two
 /// replay into one accumulator per level, finalize, fingerprint. Returns the
-/// process exit code.
+/// process exit code; on 0 the caller (withTableResolution) prints "done!"
+/// unless the table resolved nothing.
 int cube_depth_adaptive_finish(
   cube::ReconCollector & recon, const cube::LevelPlanPolicy & policy,
   const std::string & level_plan_in, const std::string & level_plan_out,
@@ -2135,8 +2144,7 @@ int cube_depth_adaptive_finish(
   if (!fingerprinted) {
     return 2;
   }
-  std::cout << "done!" << std::endl;
-  return 0;
+  return 0;  // the caller prints "done!" once the exit code is final
 }
 
 }  // namespace

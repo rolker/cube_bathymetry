@@ -340,6 +340,7 @@ TEST(RealBagSmoke, ImportAndBatchRegenAgreeByteForByteOnTheRealBag)
   int status = -1;
   const std::string recon = run(reconCommand(dir, plan), &status);
   ASSERT_EQ(status, 0) << recon;
+  EXPECT_EQ(recon.find("done!"), std::string::npos) << "a preflight imports nothing\n" << recon;
 
   std::filesystem::create_directories(dir.sub("imported"));
   std::filesystem::create_directories(dir.sub("scratch2"));
@@ -349,6 +350,7 @@ TEST(RealBagSmoke, ImportAndBatchRegenAgreeByteForByteOnTheRealBag)
     " --level-plan " + plan + " " + excerptPath(), &status);
   ASSERT_EQ(status, 0) << imported;
   EXPECT_NE(imported.find("Wrote build_fingerprint.json"), std::string::npos) << imported;
+  EXPECT_NE(imported.find("done!"), std::string::npos) << imported;
 
   std::filesystem::create_directories(dir.sub("regen"));
   const std::string regenerated = run(
@@ -529,6 +531,7 @@ TEST(RealBagSmoke, ATableRunThatResolvesNoPingExitsFourAndSaysSo)
   EXPECT_NE(out.find("--sonar-info-topic"), std::string::npos) << out;
   EXPECT_NE(out.find("fingerprint records kind 'table-unresolved' and the run exits 4"),
     std::string::npos) << out;
+  EXPECT_EQ(out.find("done!"), std::string::npos) << "an exit-4 run is not 'done!'\n" << out;
   const std::string fingerprint = readFile(store + "/build_fingerprint.json");
   EXPECT_NE(fingerprint.find("\"kind\": \"table-unresolved\""), std::string::npos)
     << fingerprint;
@@ -566,6 +569,26 @@ TEST(RealBagSmoke, ATablePreflightThatResolvesNoPingSaysSoAndExitsFour)
   EXPECT_FALSE(std::filesystem::exists(dir.sub("store") + "/build_fingerprint.json"));
 }
 
+// cube_bathymetry#172 review round 3: the depth-adaptive finish printed
+// "done!" before the table outcome turned its 0 into exit 4. "done!" is now
+// printed once the final code is known, and only on 0.
+TEST(RealBagSmoke, ADepthAdaptiveTableRunThatResolvesNoPingIsNotDone)
+{
+  SKIP_WITHOUT_EXCERPT();
+  TempDir dir("unresolved_adaptive");
+  std::filesystem::create_directories(dir.sub("store"));
+  std::filesystem::create_directories(dir.sub("scratch"));
+  int status = -1;
+  const std::string out = run(
+    std::string(IMPORT_BAG_EXE) + " -o " + dir.sub("store") + kProjectorArgs +
+    " -r 1.0 -l 200 --depth-adaptive --scratch-dir " + dir.sub("scratch") +
+    " --backscatter-correction empirical --backscatter-curve " + MODE_TABLE_FIXTURE_FILE +
+    " " + excerptPath(), &status);
+  EXPECT_EQ(status, 4) << out;
+  EXPECT_NE(out.find("and the run exits 4"), std::string::npos) << out;
+  EXPECT_EQ(out.find("done!"), std::string::npos) << "an exit-4 run is not 'done!'\n" << out;
+}
+
 // The same report on a run whose fingerprint cannot be written: exit 2 wins,
 // and the outcome sentence says the fingerprint is missing rather than that
 // it records 'table-unresolved'.
@@ -600,4 +623,5 @@ TEST(RealBagSmoke, PerModeFlagsWithoutATableAreReportedIgnored)
     excerptPath(), &status);
   EXPECT_EQ(status, 0) << out;
   EXPECT_NE(out.find("apply only to a per-pulse-mode table"), std::string::npos) << out;
+  EXPECT_NE(out.find("done!"), std::string::npos) << "a fixed-level run that ends 0\n" << out;
 }
