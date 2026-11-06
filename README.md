@@ -904,6 +904,25 @@ reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:
 | `box` | with `--box` | `LATMIN LONMIN LATMAX LONMAX` |
 | `source_bags` | always | comma-separated basenames of the input bags |
 
+A per-mode table (`--by-mode`, below) has its own header, after the
+`# format: angular-response-table v1` line. The C++ table loader
+(`backscatter_table.h`) reads the keys marked *read*; the rest are the
+record of how the table was made:
+
+| Key | Loader | Meaning |
+|---|---|---|
+| `reference_mode`, `reference_mode_source` | read (required) / record | the mode every offset is measured against, and whether it was requested or chosen |
+| `range_ref_m`, `range_ref_source` | read (required, > 0) / record | R0 in metres, and how it was chosen |
+| `range_node_spacing_decades` | read | range-term node spacing in `log10(R / R0)` |
+| `range_angle_groups_deg` | read | every range-term group, `lo-hi` comma-separated; the loader creates each declared group per mode, an unfitted one as a zero term |
+| `range_term_lookup`, `offset_meaning`, `empty_fields` | record | the apply rule, the offset's meaning and the empty-field cases, stated once more in the file |
+| `angle_bin_width_deg`, `specular_exclusion_deg` | read | the angle binning and the specular band left out of the range fit |
+| `key_spec` | record | where the mode-key spec and its shared vectors live |
+| `adjacency_window_s`, `misfit_threshold_db`, `absorption` | record | the switch window, the misfit flag threshold, and that absorption is carried by the range term |
+| `box`, `source_bags` | record / read (reports) | the `--box`, and the input bags |
+| `mode_summary` | read (`pings=`, `beams=`) | one line per mode: counts, declared TVG, offset, anchoring, misfit; `pings=` is required (the ping floor reads it) and a mode has at most one |
+| `range_term` | record | one line per mode and group: fitted with its node count and span, or the zero reason |
+
 ### Per-mode tables (`--by-mode`, #172)
 
 A sonar that switches pulse modes (the Kongsberg M3 has five) produces
