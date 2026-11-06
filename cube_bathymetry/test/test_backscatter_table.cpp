@@ -377,6 +377,30 @@ TEST(BackscatterTable, RejectsMalformedTablesWhole)
     {"bad_x",
       header + "FMU_1000us_24000Hz_500kHz,angle,abc,,,-20,100,9,0,0.3,0,0,true,UNKNOWN,nan\n",
       "malformed x"},
+    {"negative_bin",
+      header + "FMU_1000us_24000Hz_500kHz,angle,-1,,,-20,100,9,0,0.3,0,0,true,UNKNOWN,nan\n",
+      "outside [0, 90) deg"},
+    {"bin_at_90",
+      header + "FMU_1000us_24000Hz_500kHz,angle,90,,,-20,100,9,0,0.3,0,0,true,UNKNOWN,nan\n",
+      "outside [0, 90) deg"},
+    {"group_below_0",
+      header + good.substr(0, good.find("\nFMU_1000us_24000Hz_500kHz,range") + 1) +
+      "FMU_1000us_24000Hz_500kHz,range,0,-5,30,0,100,,,0,0.000,0.000,true,UNKNOWN,nan\n",
+      "outside [0, 90] deg"},
+    {"group_above_90",
+      header + good.substr(0, good.find("\nFMU_1000us_24000Hz_500kHz,range") + 1) +
+      "FMU_1000us_24000Hz_500kHz,range,0,10,95,0,100,,,0,0.000,0.000,true,UNKNOWN,nan\n",
+      "outside [0, 90] deg"},
+    {"dup_summary",
+      header.substr(0, header.find("mode,term")) +
+      "# mode_summary: FMU_1000us_24000Hz_500kHz pings=99 beams=1\n" +
+      header.substr(header.find("mode,term")) + good,
+      "two '# mode_summary:' lines"},
+    {"summary_no_pings",
+      "# format: angular-response-table v1\n# reference_mode: X\n# range_ref_m: 10\n"
+      "# mode_summary: FMU_1000us_24000Hz_500kHz beams=345\n" +
+      header.substr(header.find("mode,term")) + good,
+      "has no pings="},
   };
   for (const auto & c : cases) {
     const auto path = writeTemp(c.tag, c.content);

@@ -579,11 +579,19 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
     is >> key;
     const auto kv = tokens(s);
     uint64_t pings = 0, beams = 0;
-    if (kv.count("pings") && !parseCount(kv.at("pings"), pings)) {
+    // The ping count decides the ping floor (--backscatter-mode-min-pings):
+    // a summary without it would read as 0 and quietly fall under any floor.
+    if (!kv.count("pings")) {
+      return fail(line_no, "'# mode_summary: " + s + "' has no pings=");
+    }
+    if (!parseCount(kv.at("pings"), pings) || trim(kv.at("pings")).empty()) {
       return fail(line_no, "malformed pings in '# mode_summary: " + s + "'");
     }
     if (kv.count("beams") && !parseCount(kv.at("beams"), beams)) {
       return fail(line_no, "malformed beams in '# mode_summary: " + s + "'");
+    }
+    if (summary_counts.count(key)) {
+      return fail(line_no, "two '# mode_summary:' lines for '" + key + "'");
     }
     summary_counts[key] = {pings, beams};
   }
@@ -675,6 +683,9 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
       if (!std::isfinite(rel)) {
         return fail(line_no, "angle row without db_relative_to_nadir");
       }
+      if (!(x >= 0.0 && x < 90.0)) {
+        return fail(line_no, "angle bin centre " + f[2] + " is outside [0, 90) deg");
+      }
       for (const auto & bin : b.entry.angle) {
         if (bin.abs_angle_deg == x) {
           return fail(line_no, "duplicate angle bin " + f[2] + " for '" + mode + "'");
@@ -695,6 +706,10 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
     } else if (term == "range") {
       if (!std::isfinite(lo) || !std::isfinite(hi) || !(lo < hi)) {
         return fail(line_no, "range row needs angle_lo_deg < angle_hi_deg");
+      }
+      if (!(lo >= 0.0 && hi <= 90.0)) {
+        return fail(line_no, "range row group " + trim(f[3]) + "-" + trim(f[4]) +
+                 " is outside [0, 90] deg");
       }
       RangeNode node;
       node.x = x;

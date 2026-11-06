@@ -204,7 +204,9 @@ namespace cube
     double offset_db_vs_ref = std::numeric_limits < double > ::quiet_NaN();
     double offset_se_db = std::numeric_limits < double > ::quiet_NaN();
     DeclaredTvgState declared;
-  /// From the header's `# mode_summary:` line (0 when absent).
+  /// From the header's `# mode_summary:` line, which must carry `pings=` and
+  /// appear at most once per mode; 0 when the mode has no summary line (a
+  /// hand-made table), so any positive ping floor treats it as absent.
     uint64_t pings = 0;
     uint64_t beams = 0;
   /// Bins whose variance is EMPTY (uncorrectable beams fall in them).
