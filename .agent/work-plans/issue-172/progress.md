@@ -431,3 +431,45 @@ Dropped after checking:
 - [x] (suggestion) Written groups are bucketed by exact bounds but matched to declared groups within 1e-9. Two near-identical written groups (only possible in a hand-edited table) fill one slot, and the second silently overwrites the first. Refuse a second fill. — `cube_bathymetry/src/backscatter_table.cpp:~747` (Gemini) — fixed in `fc303a8`
 - [x] (suggestion) The duplicate `# mode_summary:` and `pings=` errors name the column line's number, not the summary line's. — `cube_bathymetry/src/backscatter_table.cpp:652-661` (Lens A) — fixed in `9dec65c`
 - [x] (suggestion) The comment "ADR-0003 schema 2, tiling only -- cube#143" sits on the `writeFingerprint` call that now records the backscatter correction. It is the same staleness as the CMake comment fixed in `a724a0b`. — `cube_bathymetry/src/import_bag_main.cpp:1746` (lead) — fixed in `7ed4fe4`
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-06 12:09 -05:00
+**By**: Claude Code Agent (Claude Opus)
+
+**Branch**: feature/issue-172 at `6981693`
+**Addressed**: `## Local Review (Pre-Push)` of 2026-11-06 11:31 -05:00 (round 2 of PR 2, at `36b5d26`, progress commit `9e8a7ba`): 3 must-fix, 13 suggestions
+**Commits**: `877a16a` `167d794` `f278fd5` `afc66d6` `961d87e` `80a1348` `e34dba3` `387abfc` `fba5de5` `b86b5cf` `652ff1c` `baf8866` `fc303a8` `9dec65c` `7ed4fe4`; boxes checked in `6981693`. Not pushed.
+
+### Actions
+- [x] (must-fix 1) The loader accepts an angle-bin centre at or past 90 deg (a `--bin-width-deg` that does not divide 90); it refuses only a non-finite, negative or >= 180 centre. Beams at or beyond 90 deg stay uncorrectable. Tests: widths 20 (last centre 90), 40 (last centre 100), 4 and 8 load, 89 deg corrected, 90 deg not, 85 deg interpolated at width 40; 180 and inf refused — `877a16a`
+- [x] (must-fix 2) Resolver: a ping more than the window behind the anchor re-anchors on itself and clears the stale look-back (`Counts::window_reanchored`, reported). SonarInfo stamped behind the window is stored unpruned, never folded into an older entry, and is not counted stale. When such SonarInfo arrived with nothing in the window since, the re-anchoring ping drops the old timeline's entries, so an old entry stamped later than the new timeline has reached cannot take over. A lone late ping only moves the anchor. Node: `cube::warnIntervalDue` treats a negative elapsed time as due. Tests: time jump with two states before the first ping (the host's case), a lone late ping, a late message followed by an in-window ping, and the throttle helper. README, ADR-0007 and plan decision 10 updated — `167d794`
+- [x] (must-fix 3) `reportModeResolution` keeps the diagnosis. `withTableResolution` prints the outcome sentence once the finish code is known. Exit 4 only after finish 0/3, when the store and the `table-unresolved` fingerprint were written. Finish 1 and 2 keep their code and say so. A recon-only preflight keeps its code and says "This --level-plan-out preflight resolved nothing". usage() updated, and no line was added to `main()`. Real-bag smoke re-checked: the exit-4 case also asserts the sentence, and new cases cover the preflight (exit 0, no exit-4 or fingerprint claim) and an unwritable fingerprint (exit 2). README, ADR-0007 and plan decision 9 updated — `f278fd5`
+- [x] (suggestion) Out-of-order association: the same state under a new stamp is stored, not folded; only a same-stamp re-delivery is deduplicated. Test: A@100, A@300, late B@200, then ping 350 gets A. Docs updated — `961d87e`
+- [x] (suggestion) The cap ignored import_bag's pending pings. Added `holdFrom(oldest waiting ping)`: neither the window nor the cap drops the state in force there or any later one. import_bag passes `pending.front()` through `feedSonarInfo`, changing one line in place in `main()`. The excess is bounded by the pings import_bag is itself holding. Test past 2x the cap — `afc66d6`
+- [x] (suggestion) The stale count counts each ping at most once, and a late message that restores the correction takes the count back. Test with A@0, ping 20, late B@10, C@15, A@18. The existing replace-at-stamp expectation went from 2 to 1, which is correct under the new rule — `80a1348`
+- [x] (suggestion) A beam more than half `angle_bin_width_deg` beyond the outermost written bin, or short of the nadir-most one, is `TableBeamStatus::OutsideAngleBins`: it takes the fallback and is counted per mode. A table without the width header skips the test. The fixture tests at 60 deg now use 41.5 deg — `e34dba3` (deferred in part: an interior gap between two written bins is still interpolated between its measured neighbours rather than refused. That value is bracketed by data, not a clamped end value, and refusing it would change the fixture-pinned lookup contract, which the Python-written fixture has deliberate gaps for. Flag it for the operator if gaps should be refused too.)
+- [x] (suggestion) Node warning: once per minute while `resolvedNothing()`, then once per new reason per configuration. Lifecycle test added. README, ADR-0007 and plan updated — `387abfc`
+- [x] (suggestion) Loader bounds: a FIFO or device is refused before it is opened, and the probe reads at most 64 KiB and refuses a non-regular file. The loader reads at most the cap once and parses that buffer. Every line, comments included, counts against the bound. `loadBackscatterTable(..., &bytes)` returns the parsed bytes, and import_bag hashes them with `sha256Text`, so there is no second read. Tests: mkfifo, /dev/zero, a comment flood, returned bytes — `fba5de5`
+- [x] (suggestion) `warned_` and `declared_mismatch` are keyed on (mode, TVG model); the warning names the first state seen. Test: 200 drifting absorptions give one warning and one key — `b86b5cf`
+- [x] (suggestion) The loader refuses an infinite declared absorption (and one float32 overflows). `operator==` treats an infinity as equal only to itself. Tests added — `652ff1c`
+- [x] (suggestion) `fallbackIdx()` renamed to `unresolvedIdx()`. The comment at the definition and the constructor doc say why identity is index 0 (plan decision 9). Behaviour kept per host direction — `baf8866`
+- [x] (suggestion) Two written groups matching one declared group are refused instead of the second silently replacing the first. Test added — `fc303a8`
+- [x] (suggestion) `# mode_summary:` errors name the summary's own line. Tests assert `:5:` and `:4:` — `9dec65c`
+- [x] (suggestion) Stale "tiling only" comment on the fixed-level `writeFingerprint` call fixed — `7ed4fe4`
+
+### For the PR body (host), carried forward
+- **Known gap, predates #172:** `batch_regen_bag` refuses a per-mode table file, but it never reads `build_fingerprint.json`. So `--backscatter-correction none` (or another curve) can rebuild tiles inside a table-built store without any check. The fingerprint now records the correction; a consumer that compares it is the ADR-0003 `--incremental` follow-up.
+- **Rebuild:** `Sounding`, `DepthAndUncertainty` and `Parameters` changed layout (`DepthAndUncertainty` 20 → 22 bytes, `Parameters` carries the table). ui_ws `marine_perception_tools` must be rebuilt with this PR, and the main tree's sensors_ws and ui_ws rebuilt after merge.
+- `import_bag` has a new exit code 4: a table was loaded, no ping resolved, and the store and its fingerprint (kind `table-unresolved`) were written. Exits 1 and 2 keep their code, and a `--level-plan-out` preflight keeps its own code and says it resolved nothing.
+
+### Tests
+Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1421 tests, 0 errors, 0 failures, 96 skipped**, the same 96 cppcheck skips (was 1410). The real-bag smoke cases ran, since the excerpt is reachable on this host. uncrustify and cpplint are clean on every touched file. import_bag's `main()` gained no lines.
+
+### Left open
+- The interior-gap half of the angle-bin suggestion (see above), a lookup-contract decision for the operator.
+- The round-1 "left open" note about folded duplicates is resolved by `961d87e`.
+- Not a defect, noticed earlier and still true: the lifecycle tests' synthetic SonarInfo leaves `tvg_absorption_db_per_km` at 0, so it reads as a declared `UNKNOWN/0 dB/km` mismatch. Real bridge data sets NaN.
+
+### Next
+`/review-code` pre-push (round 3) on the new fix commits, `877a16a..7ed4fe4`, fresh context.
