@@ -976,16 +976,19 @@ private:
       // Throttled per configuration (members, not the macro's call-site
       // static, so the first unresolved cloud after every configure warns).
       // A clock that went backwards (sim restart) warns at once.
+      // A reason counts as warned only once a warning naming it fired: one
+      // first seen while the throttle muted the "nothing resolved" warning
+      // is still warned about once clouds resolve (review round 3).
       const int64_t now = get_clock()->now().nanoseconds();
-      const bool new_reason = bs_unresolved_warned_reasons_.insert(why).second;
       if (bs_resolver_->resolvedNothing() ?
         cube::warnIntervalDue(bs_unresolved_warned_at_, now, kUnresolvedWarnIntervalNs) :
-        new_reason)
+        bs_unresolved_warned_reasons_.count(why) == 0)
       {
         RCLCPP_WARN(get_logger(),
           "Per-pulse-mode table: a cloud was not corrected by the table (%s). %s",
           cube::toString(why), bs_resolver_->unresolvedSummary().c_str());
         bs_unresolved_warned_at_ = now;
+        bs_unresolved_warned_reasons_.insert(why);
       }
     }
     return idx;
