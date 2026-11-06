@@ -532,3 +532,18 @@ TEST(RealBagSmoke, ATableRunThatResolvesNoPingExitsFourAndSaysSo)
     << fingerprint;
   EXPECT_NE(fingerprint.find("\"fallback\": \"identity\""), std::string::npos) << fingerprint;
 }
+
+// cube_bathymetry#172 review: the per-mode settings without a table do
+// nothing, and import_bag says so instead of accepting them silently.
+TEST(RealBagSmoke, PerModeFlagsWithoutATableAreReportedIgnored)
+{
+  SKIP_WITHOUT_EXCERPT();
+  TempDir dir("per_mode_flags");
+  int status = -1;
+  const std::string out = run(
+    std::string(IMPORT_BAG_EXE) + " -o " + dir.sub("store") + kProjectorArgs +
+    " -r 1.0 -l 20 --backscatter-mode-fallback exclude --backscatter-mode-min-pings 10 " +
+    excerptPath(), &status);
+  EXPECT_EQ(status, 0) << out;
+  EXPECT_NE(out.find("apply only to a per-pulse-mode table"), std::string::npos) << out;
+}

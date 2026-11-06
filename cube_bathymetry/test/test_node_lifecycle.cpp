@@ -1163,6 +1163,32 @@ TEST_F(NodeLifecycle, AnEmptyCloudIsNotResolvedAsAPing)
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
+// cube_bathymetry#172 review: the per-mode settings without a table do
+// nothing; the configure says so instead of accepting them silently.
+TEST_F(NodeLifecycle, PerModeSettingsWithoutATableAreReportedIgnored)
+{
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_mode_fallback", std::string("exclude")),
+      rclcpp::Parameter("backscatter_mode_min_pings", static_cast<int64_t>(500))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_TRUE(log.contains("apply only to a per-pulse-mode table")) << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  {
+    LogCapture log;
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({
+      rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+      rclcpp::Parameter("backscatter_mode_fallback", std::string("exclude"))}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_FALSE(log.contains("apply only to a per-pulse-mode table")) << log.all();
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  }
+}
+
 // A table that does not load, or an invalid fallback, fails the configure
 // rather than running with a half-applied correction.
 TEST_F(NodeLifecycle, ABrokenPerModeTableFailsConfigure)

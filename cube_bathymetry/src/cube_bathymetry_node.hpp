@@ -199,6 +199,15 @@ public:
     bs_min_pings_ = static_cast<uint64_t>(bs_min_pings);
     const bool bs_file_is_table = bs_mode != cube::BackscatterAngleCorrection::None &&
       !bs_curve_file.empty() && cube::isAngularResponseTable(bs_curve_file);
+    if (!bs_file_is_table &&
+      (bs_fallback_ != cube::BackscatterModeFallback::Identity || bs_min_pings_ != 0))
+    {
+      // Only a per-mode table has modes to fall back from (cube#172 review).
+      RCLCPP_WARN(get_logger(),
+        "backscatter_mode_fallback / backscatter_mode_min_pings apply only to a "
+        "per-pulse-mode table, and backscatter_curve_file is not one (or the correction "
+        "is none): they are ignored.");
+    }
     if (bs_file_is_table) {
       std::string error;
       bs_table_ = cube::loadBackscatterTable(bs_curve_file, error);

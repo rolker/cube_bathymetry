@@ -1148,6 +1148,15 @@ void setupBackscatter(
   }
   out.sonar_info_topic = sonar_info_topic.empty() ?
     deriveSonarInfoTopic(detections_topic) : sonar_info_topic;
+  if (out.table.empty() &&
+    (out.fallback != cube::BackscatterModeFallback::Identity || min_pings != 0))
+  {
+    // Only a per-mode table has modes to fall back from (cube#172 review): say
+    // the flags did nothing rather than let the operator think they applied.
+    std::cerr << "warning: --backscatter-mode-fallback / --backscatter-mode-min-pings "
+      "apply only to a per-pulse-mode table, and no table was loaded (--backscatter-curve "
+      "is not one, or the correction is none): they are ignored." << std::endl;
+  }
   if (!out.table.empty()) {
     out.provenance.fallback = cube::toString(out.fallback);
     out.provenance.min_pings = static_cast<uint64_t>(min_pings);
