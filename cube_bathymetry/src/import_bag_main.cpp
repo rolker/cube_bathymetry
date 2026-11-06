@@ -305,7 +305,8 @@ bool loadCurveFromBagSonarInfo(
     "table was loaded and NOT ONE ping resolved to a table entry, so the "
     "backscatter layer carries no table correction (fingerprint kind "
     "'table-unresolved'; a wrong --sonar-info-topic or no SonarInfo in the bags is "
-    "the usual cause). 1 and 2 outrank 4, and 4 outranks 3.\n";
+    "the usual cause). 1 and 2 outrank 4, and 4 outranks 3. A --level-plan-out "
+    "preflight writes no store, so it keeps its own code and says it resolved nothing.\n";
   std::cout << "  --platform / --sensor / --campaign <str>: store-level provenance "
     "written once to <store>/registry.json (uma#248 StoreMetadata; --campaign maps "
     "to the survey/campaign id). Per-cell source interning was retired for the "
@@ -1182,7 +1183,9 @@ void setupBackscatter(
 /// a table was loaded but NOT ONE ping resolved to a table entry, say so as an
 /// error naming the likely causes and record the fingerprint kind as
 /// `table-unresolved`, so the store can never pass for a table-corrected one.
-/// Returns true in that case (the run then exits 4, see withTableResolution).
+/// Returns true in that case. What that means for THIS run's outputs (exit 4,
+/// or a preflight that wrote no store, or a store the finish step could not
+/// complete) is only known after the finish step: withTableResolution says it.
 bool reportModeResolution(BackscatterSetup & backscatter)
 {
   if (!backscatter.resolver) {
@@ -1198,25 +1201,48 @@ bool reportModeResolution(BackscatterSetup & backscatter)
             << " ping(s) resolved to a table entry, so the backscatter layer carries no "
     "table correction at all. " << resolver.unresolvedSummary() << ". Likely causes: a "
     "wrong --sonar-info-topic (this run read '" << backscatter.sonar_info_topic
-            << "'), no SonarInfo recorded in the bags, or pings without a frequency. The "
-    "store is otherwise complete; its fingerprint records kind 'table-unresolved' and the "
-    "run exits 4." << std::endl;
+            << "'), no SonarInfo recorded in the bags, or pings without a frequency."
+            << std::endl;
   backscatter.provenance.kind = "table-unresolved";
   return true;
 }
 
 /// The exit code once the finish step has returned @p finish_code (cube#172
-/// review): a table run that corrected no ping exits 4. 1 (the store may be
-/// incomplete) and 2 (no fingerprint) outrank it, since they say more about
-/// what is on disk; 4 outranks 3 (only the tile-size CSV is missing). A
-/// recon-only run (--level-plan-out) wrote no store, so it keeps its code.
+/// review), and the one sentence saying what a table run that corrected no
+/// ping left on disk -- printed here, once the code is known, because each
+/// path leaves something different. Exit 4 only when the store AND its
+/// `table-unresolved` fingerprint were written (finish 0, or 3: only the
+/// tile-size CSV is missing). 1 (the store may be incomplete) and 2 (no
+/// fingerprint) outrank it and keep their code. A recon-only preflight
+/// (--level-plan-out) wrote neither, so it keeps its own code, but says the
+/// preflight resolved nothing, so the full import is not started blind.
 int withTableResolution(int finish_code, bool table_unresolved, bool recon_only)
 {
-  if (!table_unresolved || recon_only || finish_code == 1 || finish_code == 2) {
+  if (!table_unresolved) {
     return finish_code;
   }
-  std::cerr << "error: exit 4 -- the per-pulse-mode table corrected no ping (see the error "
-    "after the pass)." << std::endl;
+  std::cerr << "error: the per-pulse-mode table corrected no ping (see the error after the "
+    "pass). ";
+  if (recon_only) {
+    std::cerr << "This --level-plan-out preflight resolved nothing: no store and no "
+      "fingerprint were written, and the import it plans would correct no ping either. Fix "
+      "the SonarInfo input before importing. The preflight keeps its exit code "
+              << finish_code << "." << std::endl;
+    return finish_code;
+  }
+  if (finish_code == 1) {
+    std::cerr << "The run also failed (exit 1, see above): the store may be incomplete, and "
+      "what it holds carries no table correction." << std::endl;
+    return 1;
+  }
+  if (finish_code == 2) {
+    std::cerr << "The store is complete, but its fingerprint could not be written (exit 2, "
+      "see above), so nothing on disk records that it carries no table correction."
+              << std::endl;
+    return 2;
+  }
+  std::cerr << "The store is otherwise complete; its fingerprint records kind "
+    "'table-unresolved' and the run exits 4." << std::endl;
   return 4;
 }
 

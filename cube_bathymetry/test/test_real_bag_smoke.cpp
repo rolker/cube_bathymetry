@@ -527,10 +527,62 @@ TEST(RealBagSmoke, ATableRunThatResolvesNoPingExitsFourAndSaysSo)
   EXPECT_NE(out.find("200 before any SonarInfo (0 SonarInfo message(s) seen)"),
     std::string::npos) << out;
   EXPECT_NE(out.find("--sonar-info-topic"), std::string::npos) << out;
+  EXPECT_NE(out.find("fingerprint records kind 'table-unresolved' and the run exits 4"),
+    std::string::npos) << out;
   const std::string fingerprint = readFile(store + "/build_fingerprint.json");
   EXPECT_NE(fingerprint.find("\"kind\": \"table-unresolved\""), std::string::npos)
     << fingerprint;
   EXPECT_NE(fingerprint.find("\"fallback\": \"identity\""), std::string::npos) << fingerprint;
+}
+
+// cube_bathymetry#172 review round 2: the outcome sentence is printed once the
+// finish step's code is known, and says only what is true for that path. A
+// recon-only --level-plan-out preflight writes no store and no fingerprint: it
+// keeps its own code (0) but says it resolved nothing, so a wrong
+// --sonar-info-topic is caught before the multi-hour import, not after.
+TEST(RealBagSmoke, ATablePreflightThatResolvesNoPingSaysSoAndKeepsItsCode)
+{
+  SKIP_WITHOUT_EXCERPT();
+  TempDir dir("unresolved_preflight");
+  std::filesystem::create_directories(dir.sub("store"));
+  std::filesystem::create_directories(dir.sub("scratch"));
+  const std::string plan = dir.sub("plan.json");
+  int status = -1;
+  const std::string out = run(
+    std::string(IMPORT_BAG_EXE) + " -o " + dir.sub("store") + kProjectorArgs +
+    " -r 1.0 -l 200 --depth-adaptive --scratch-dir " + dir.sub("scratch") +
+    " --level-plan-out " + plan + " --backscatter-correction empirical --backscatter-curve " +
+    MODE_TABLE_FIXTURE_FILE + " " + excerptPath(), &status);
+  EXPECT_EQ(status, 0) << "the preflight keeps its own code\n" << out;
+  EXPECT_NE(out.find("NOT ONE of the 200 ping(s) resolved to a table entry"), std::string::npos)
+    << out;
+  EXPECT_NE(out.find("This --level-plan-out preflight resolved nothing"), std::string::npos)
+    << out;
+  EXPECT_EQ(out.find("exits 4"), std::string::npos) << "no exit 4 claimed\n" << out;
+  EXPECT_EQ(out.find("fingerprint records kind"), std::string::npos)
+    << "no fingerprint was written, so none is claimed\n" << out;
+  EXPECT_FALSE(std::filesystem::exists(dir.sub("store") + "/build_fingerprint.json"));
+}
+
+// The same report on a run whose fingerprint cannot be written: exit 2 wins,
+// and the outcome sentence says the fingerprint is missing rather than that
+// it records 'table-unresolved'.
+TEST(RealBagSmoke, ATableRunWithAnUnwritableFingerprintKeepsExitTwo)
+{
+  SKIP_WITHOUT_EXCERPT();
+  TempDir dir("unresolved_fingerprint");
+  const std::string store = dir.sub("store");
+  std::filesystem::create_directories(std::filesystem::path(store) / "build_fingerprint.json");
+  int status = -1;
+  const std::string out = run(
+    std::string(IMPORT_BAG_EXE) + " -o " + store + kProjectorArgs +
+    " -r 1.0 -l 200 --backscatter-correction empirical --backscatter-curve " +
+    MODE_TABLE_FIXTURE_FILE + " " + excerptPath(), &status);
+  EXPECT_EQ(status, 2) << out;
+  EXPECT_NE(out.find("NOT ONE of the 200 ping(s) resolved to a table entry"), std::string::npos)
+    << out;
+  EXPECT_NE(out.find("its fingerprint could not be written (exit 2"), std::string::npos) << out;
+  EXPECT_EQ(out.find("exits 4"), std::string::npos) << out;
 }
 
 // cube_bathymetry#172 review: the per-mode settings without a table do

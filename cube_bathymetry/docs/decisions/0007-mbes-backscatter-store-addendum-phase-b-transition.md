@@ -275,7 +275,9 @@ curve corrects their mean and leaves each mode offset from it.
    `batch_regen_bag` refuses a table (it reads no SonarInfo). A table run in
    which not one ping resolved to an entry is recorded as `kind:
    "table-unresolved"`, never `table`, and `import_bag` exits 4 with the
-   reasons; the live node warns (once a minute) from the first unresolved
+   reasons (only when that store and fingerprint were written: exits 1 and
+   2 keep their code, and a `--level-plan-out` preflight keeps its own and
+   says it resolved nothing); the live node warns (once a minute) from the first unresolved
    cloud.
 
 **Not done here, deliberately.** The inverse-variance beam weighting the
