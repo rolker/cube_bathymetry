@@ -317,6 +317,31 @@ TEST(BackscatterModeResolver, BeamsTheTableCannotCorrectAreCountedPerReason)
     std::string::npos) << report;
 }
 
+// cube_bathymetry#172 review: the declared-TVG warning must not claim the
+// table is applied when the entry was rejected (under the floor, unanchored).
+TEST(BackscatterModeResolver, MismatchWarningSaysWhenTheEntryIsNotApplied)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table, BackscatterModeFallback::Exclude, 1000000);
+  std::vector<std::string> warnings;
+  r.setMismatchWarning([&](const std::string & w) {warnings.push_back(w);});
+  r.addSonarInfo(state(100, 5e-5f, 20000.0f, 1));   // CW 50 us declared UNKNOWN, table 40LOGR
+  ModeResolution why;
+  EXPECT_EQ(r.resolve(150, kF, why), kCorrectionExclude);
+  EXPECT_EQ(why, ModeResolution::UnderPingFloor);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_EQ(warnings[0].find("applied as is"), std::string::npos) << warnings[0];
+  EXPECT_NE(warnings[0].find("the entry is not applied (mode entry under the ping floor), "
+    "the fallback exclude is"), std::string::npos) << warnings[0];
+
+  BackscatterModeResolver applied(&f.table);
+  applied.setMismatchWarning([&](const std::string & w) {warnings.push_back(w);});
+  applied.addSonarInfo(state(100, 5e-5f, 20000.0f, 1));
+  EXPECT_EQ(applied.resolve(150, kF), 1);
+  ASSERT_EQ(warnings.size(), 2u);
+  EXPECT_NE(warnings[1].find("the table is applied as is"), std::string::npos) << warnings[1];
+}
+
 TEST(BackscatterModeResolver, MixedDeclarationAlwaysMismatches)
 {
   const std::string path = (std::filesystem::temp_directory_path() /

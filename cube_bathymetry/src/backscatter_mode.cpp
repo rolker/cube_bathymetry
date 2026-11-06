@@ -238,8 +238,15 @@ uint16_t BackscatterModeResolver::resolve(
         if (warn_) {
           std::ostringstream os;
           os << "SonarInfo declares TVG " << state->declared.toString() << " for mode " << key
-             << " but the table recorded " << entry->declared.toString()
-             << " for it; the table is applied as is (its range term is empirical)";
+             << " but the table recorded " << entry->declared.toString() << " for it; ";
+          if (resolution == ModeResolution::Resolved) {
+            os << "the table is applied as is (its range term is empirical)";
+          } else {
+            // The entry is not applied at all (unanchored, under the floor):
+            // saying "applied as is" would misstate what the beams got.
+            os << "the entry is not applied (" << toString(resolution) << "), the fallback "
+               << toString(fallback_) << " is";
+          }
           warn_(os.str());
         }
       }

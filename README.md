@@ -716,7 +716,8 @@ resolved pings and every unresolved reason, per ping, and the beams of
 resolved pings the table still could not correct, per mode and reason (counted
 as they are handed to the estimator); the SonarInfo-declared TVG
 state is compared with what the table recorded per mode (a mismatch is warned
-once per mode and counted; the table is applied as is). The build fingerprint
+once per mode and counted; a resolved entry is applied as is, and the warning
+says so when the entry was not applied at all). The build fingerprint
 records the correction (mode, curve/table SHA-256, fallback, floor). A table
 that does not load is an error (`import_bag`) or a failed configure (node),
 never a silent identity; `batch_regen_bag` refuses a table, since it reads no
