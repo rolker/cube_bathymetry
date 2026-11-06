@@ -21,6 +21,7 @@
 
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <cmath>
 #include <filesystem>
@@ -30,7 +31,6 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#include <unistd.h>
 
 #include "cube_bathymetry/backscatter_table.h"
 

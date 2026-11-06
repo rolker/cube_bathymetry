@@ -52,6 +52,7 @@ find_package(nlohmann_json REQUIRED)  # level plan JSON (#143)
 add_library(cube_bathymetry
   src/angular_response_curve.cpp
   src/backscatter_table.cpp   # per-pulse-mode table + mode-key spec (#172)
+  src/backscatter_mode.cpp    # per-ping mode resolver (#172)
   src/detections_projector.cpp
   src/error_model.cpp
   src/geo_grid.cpp
@@ -438,6 +439,11 @@ if(BUILD_TESTING)
 
   # Per-mode table loader + the shared mode-key vectors (#172): the C++ key
   # must match derive_angular_response.py's on every case in mode_keys.json.
+  ament_add_gtest(test_backscatter_mode test/test_backscatter_mode.cpp)
+  target_link_libraries(test_backscatter_mode cube_bathymetry)
+  target_compile_definitions(test_backscatter_mode PRIVATE
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
+
   ament_add_gtest(test_backscatter_table test/test_backscatter_table.cpp)
   target_link_libraries(test_backscatter_table cube_bathymetry nlohmann_json::nlohmann_json)
   target_compile_definitions(test_backscatter_table PRIVATE
