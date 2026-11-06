@@ -641,7 +641,12 @@ endif()
 # find_package(cube_bathymetry) then resolves their include paths/targets without
 # its own find_package. (marine_bathymetry_store was a pre-existing gap here;
 # marine_mbes_backscatter_store is new with #80.)
-ament_export_dependencies(rclcpp marine_bathymetry_store marine_mbes_backscatter_store)
+# OpenSSL (#172): the exported cube_bathymetry_level_plan links OpenSSL::Crypto
+# (the fingerprint's SHA-256), so a downstream find_package(cube_bathymetry)
+# must find OpenSSL too or that imported target names a target that does not
+# exist.
+ament_export_dependencies(
+  rclcpp marine_bathymetry_store marine_mbes_backscatter_store OpenSSL)
 
 # Export old-style CMake variables
 ament_export_include_directories(include/${PROJECT_NAME})
