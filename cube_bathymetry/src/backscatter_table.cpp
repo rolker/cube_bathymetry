@@ -757,8 +757,14 @@ BackscatterTable loadBackscatterTable(const std::string & path, std::string & er
       if (!std::isfinite(rel)) {
         return fail(line_no, "angle row without db_relative_to_nadir");
       }
-      if (!(x >= 0.0 && x < 90.0)) {
-        return fail(line_no, "angle bin centre " + f[2] + " is outside [0, 90) deg");
+      // The writer centres bin j at (j + 0.5) * width for j < ceil(90 / width),
+      // so a width that does not divide 90 (4, 8, 20, 40 deg ...) puts the
+      // last centre at or past 90 deg: that bin's lower edge is still under 90
+      // and it holds real beams. Beams at or beyond 90 deg are uncorrectable
+      // whatever the bins say (tableBeamStatus), so only a centre no writer
+      // can produce (negative, or >= 180 deg, past any width <= 90) is refused.
+      if (!(x >= 0.0 && x < 180.0)) {
+        return fail(line_no, "angle bin centre " + f[2] + " is outside [0, 180) deg");
       }
       if (!b.angle_bins.insert(x).second) {
         return fail(line_no, "duplicate angle bin " + f[2] + " for '" + mode + "'");

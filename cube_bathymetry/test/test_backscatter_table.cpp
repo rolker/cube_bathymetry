@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -431,10 +432,13 @@ TEST(BackscatterTable, RejectsMalformedTablesWhole)
       "malformed x"},
     {"negative_bin",
       header + "FMU_1000us_24000Hz_500kHz,angle,-1,,,-20,100,9,0,0.3,0,0,true,UNKNOWN,nan\n",
-      "outside [0, 90) deg"},
-    {"bin_at_90",
-      header + "FMU_1000us_24000Hz_500kHz,angle,90,,,-20,100,9,0,0.3,0,0,true,UNKNOWN,nan\n",
-      "outside [0, 90) deg"},
+      "outside [0, 180) deg"},
+    {"bin_at_180",
+      header + "FMU_1000us_24000Hz_500kHz,angle,180,,,-20,100,9,0,0.3,0,0,true,UNKNOWN,nan\n",
+      "outside [0, 180) deg"},
+    {"bin_inf",
+      header + "FMU_1000us_24000Hz_500kHz,angle,inf,,,-20,100,9,0,0.3,0,0,true,UNKNOWN,nan\n",
+      "malformed x"},
     {"group_below_0",
       header + good.substr(0, good.find("\nFMU_1000us_24000Hz_500kHz,range") + 1) +
       "FMU_1000us_24000Hz_500kHz,range,0,-5,30,0,100,,,0,0.000,0.000,true,UNKNOWN,nan\n",
@@ -599,6 +603,61 @@ TEST(BackscatterTable, OversizedInputIsRefusedAndLargeTablesLoadFast)
   EXPECT_EQ(table.entries[0].groups[2].nodes.size(), 40u);
   EXPECT_LT(secs, 5.0) << "40,000 rows must not take quadratic time";
   std::filesystem::remove(big);
+}
+
+// cube_bathymetry#172 review round 2: the writer centres bin j at
+// (j + 0.5) * width for j < ceil(90 / width), so a width that does not divide
+// 90 writes a last centre at or past 90 deg. Such a table must load, and the
+// beams under 90 deg in that last bin are corrected; beams at or beyond 90 deg
+// stay uncorrectable.
+TEST(BackscatterTable, ALastBinCentredAtOrPast90DegLoads)
+{
+  const std::string tail = ",0.000,0.000,true,UNKNOWN,nan\n";
+  const std::string key = "FMU_1000us_24000Hz_500kHz";
+  auto tableAt = [&](double width) {
+      std::string rows;
+      const int bins = static_cast<int>(std::ceil(90.0 / width - 1e-9));
+      for (int j = 0; j < bins; ++j) {
+        char x[32];
+        std::snprintf(x, sizeof(x), "%.10g", (j + 0.5) * width);
+        rows += key + ",angle," + x + ",,,-20,100,9," + std::to_string(-j) + ",0.3" + tail;
+      }
+      std::string header(kHeader);
+      header.insert(header.find("mode,term"),
+        "# angle_bin_width_deg: " + std::to_string(width) + "\n");
+      return header + rows;
+    };
+  // Width 20: centres 10 .. 90 (the 90 centre was refused before). Width 40:
+  // 20, 60, 100. Width 4: up to 90; width 8: up to 92.
+  for (const double width : {20.0, 40.0, 4.0, 8.0}) {
+    const std::string tag = "wide_bins_" + std::to_string(static_cast<int>(width));
+    const auto path = writeTemp(tag, tableAt(width));
+    std::string error;
+    const auto table = loadBackscatterTable(path, error);
+    ASSERT_TRUE(error.empty()) << tag << ": " << error;
+    ASSERT_EQ(table.entries.size(), 1u) << tag;
+    const auto & angle = table.entries[0].angle;
+    const double last = (std::ceil(90.0 / width - 1e-9) - 0.5) * width;
+    ASSERT_FALSE(angle.empty()) << tag;
+    EXPECT_DOUBLE_EQ(angle.back().abs_angle_deg, last) << tag;
+    EXPECT_GE(angle.back().abs_angle_deg, 90.0) << tag;
+    // A beam just under 90 deg in the last bin is corrected ...
+    EXPECT_EQ(tableBeamStatus(89.0, 10.0, table, 1), TableBeamStatus::Corrected) << tag;
+    EXPECT_FALSE(std::isnan(correctWithTable(-20.0, 89.0, 10.0, table, 1,
+      BackscatterModeFallback::Exclude))) << tag;
+    // ... and one at or beyond 90 deg is not.
+    EXPECT_EQ(tableBeamStatus(90.0, 10.0, table, 1), TableBeamStatus::AngleAtOrBeyond90) << tag;
+    std::filesystem::remove(path);
+  }
+  // Width 40, last centre 100: an 85 deg beam lies between the 60 and 100
+  // centres (rel 0.625 of the way from -1 to -2 dB).
+  const auto path = writeTemp("wide_bins_40_value", tableAt(40.0));
+  std::string error;
+  const auto table = loadBackscatterTable(path, error);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_NEAR(correctWithTable(-20.0, 85.0, 10.0, table, 1, BackscatterModeFallback::Exclude),
+    -20.0 + 1.625, 1e-9);
+  std::filesystem::remove(path);
 }
 
 TEST(BackscatterTable, OverlappingGroupsAreRejected)
