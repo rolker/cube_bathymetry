@@ -107,11 +107,14 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
   // distinct stamps too. The window and the cap bound the history without it.
   // The pings this message would have described: the resolved ones from its
   // stamp up to the next stored stamp (those beyond use that later entry).
-  // One is stale when this state gives it another correction than the one
-  // it got -- a re-delivery that changes only the declared TVG is not.
+  // One is stale while the state now in force at its stamp gives it another
+  // correction than the one it got -- a re-delivery that changes only the
+  // declared TVG does not. Each ping counts once however many late messages
+  // land before it, and a later one that restores its correction takes the
+  // count back.
   const auto next = history_.upper_bound(stamp);
-  uint64_t stale_now = 0;
-  for (const RecentPing & ping : recent_resolved_) {
+  uint64_t changed = 0;
+  for (RecentPing & ping : recent_resolved_) {
     if (behind_window) {
       break;
     }
@@ -122,13 +125,19 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
       canonicalModeKey(
         state.pulse_lengths_s, state.bandwidths_hz, state.tx_signal_types,
         ping.frequency_hz));
-    if (idxOf(d) != ping.idx) {
-      ++stale_now;
+    const bool stale = idxOf(d) != ping.idx;
+    if (stale) {
+      ++changed;
     }
+    if (stale && !ping.stale) {
+      ++counts_.stale;
+    } else if (!stale && ping.stale) {
+      --counts_.stale;
+    }
+    ping.stale = stale;
   }
-  if (stale_now > 0) {
+  if (changed > 0) {
     ++counts_.late_sonar_info;
-    counts_.stale += stale_now;
   }
   history_[stamp] = state;
   if (behind_window) {
@@ -137,7 +146,7 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
   } else {
     prune();
   }
-  return stale_now == 0;
+  return changed == 0;
 }
 
 void BackscatterModeResolver::rememberBehind(int64_t stamp_ns)
@@ -239,7 +248,7 @@ void BackscatterModeResolver::remember(int64_t ping_stamp_ns, float frequency_hz
   if (recent_resolved_.size() >= kMaxRecentResolved) {
     recent_resolved_.pop_front();
   }
-  recent_resolved_.push_back(RecentPing{ping_stamp_ns, frequency_hz, idx});
+  recent_resolved_.push_back(RecentPing{ping_stamp_ns, frequency_hz, idx, false});
   const int64_t cut = windowCut();
   while (!recent_resolved_.empty() && recent_resolved_.front().stamp_ns < cut) {
     recent_resolved_.pop_front();

@@ -171,9 +171,12 @@ TEST(BackscatterModeResolver, HeartbeatsDedupAndLateMessagesCountStale)
   EXPECT_NE(r.report().find("1 ping(s) resolved before a later-arriving SonarInfo"),
     std::string::npos);
   // A different message at an existing stamp replaces it -- and since the
-  // ping at 520 was already corrected under the replaced one, that is late too.
+  // ping at 520 was already corrected under the replaced one, that is late
+  // too, while the ping at 510 now agrees with the state in force again: its
+  // count is taken back (review round 2: a ping counts at most once).
   EXPECT_FALSE(r.addSonarInfo(state(505, 0.001f, 24000.0f, 2)));
-  EXPECT_EQ(r.counts().stale, 2u);
+  EXPECT_EQ(r.counts().stale, 1u);
+  EXPECT_EQ(r.counts().late_sonar_info, 2u);
   EXPECT_EQ(r.resolve(530, kF), 2);
 }
 
@@ -227,6 +230,24 @@ TEST(BackscatterModeResolver, OutOfOrderSonarInfoKeepsTheLaterRepeat)
   // A same-stamp re-delivery is still one entry.
   r.addSonarInfo(state(300, 0.001f, 24000.0f, 2));
   EXPECT_EQ(r.historySize(), 3u);
+}
+
+// cube_bathymetry#172 review round 2: one ping counts as stale at most once,
+// however many late messages land before it, and a late message that restores
+// the correction it got takes the count back.
+TEST(BackscatterModeResolver, AStalePingCountsOnceAndCanBeTakenBack)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table);
+  r.addSonarInfo(state(0, 0.001f, 24000.0f, 2));          // A: FMU 1 ms -> idx 2
+  ASSERT_EQ(r.resolve(20, kF), 2);
+  EXPECT_FALSE(r.addSonarInfo(state(10, 5e-5f, 20000.0f, 1)));   // late B: CW 50 us -> 1
+  EXPECT_EQ(r.counts().stale, 1u);
+  EXPECT_FALSE(r.addSonarInfo(state(15, 2e-5f, 50000.0f, 1)));   // late C: no entry -> 0
+  EXPECT_EQ(r.counts().stale, 1u) << "the same ping, counted once";
+  EXPECT_EQ(r.counts().late_sonar_info, 2u);
+  EXPECT_TRUE(r.addSonarInfo(state(18, 0.001f, 24000.0f, 2)));   // late A again: what it got
+  EXPECT_EQ(r.counts().stale, 0u) << "the state now in force agrees with its correction";
 }
 
 // The bound (cube_bathymetry#172 review must-fix): a sonar alternating modes on

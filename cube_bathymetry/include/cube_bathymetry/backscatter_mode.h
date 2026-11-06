@@ -150,7 +150,9 @@ public:
       std::map < std::pair < std::string, std::string >, uint64_t > declared_mismatch;
     /// Pings resolved before a SonarInfo with an earlier stamp arrived (live
     /// delivery lag) that it would have corrected differently: they were
-    /// corrected under the previous mode. Looked for inside the window.
+    /// corrected under the previous mode. Looked for inside the window; each
+    /// ping counts at most once, and a later message that restores the
+    /// correction it got takes the count back.
       uint64_t stale = 0;
       uint64_t late_sonar_info = 0;
     /// Pings that arrived more than the window behind the newest one so far
@@ -261,6 +263,8 @@ private:
       int64_t stamp_ns;
       float frequency_hz;
       uint16_t idx;
+      /// Counted in `Counts::stale` (the state now in force disagrees).
+      bool stale;
     };
 
     uint16_t fallbackIdx() const;
