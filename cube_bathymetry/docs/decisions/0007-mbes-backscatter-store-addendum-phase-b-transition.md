@@ -246,8 +246,13 @@ curve corrects their mean and leaves each mode offset from it.
    resolved ping plus the one state in force at the cut, at most 4096
    states — since a mode-switching sonar republishes on every switch. A ping
    more than the window behind the newest one (time went backwards: a sim
-   restart, a looped bag) re-anchors the window on itself, and SonarInfo
-   stamped behind the window is kept unpruned until such a ping arrives.
+   restart, a looped bag) re-anchors the window on itself and drops the old
+   timeline's states more than the window ahead of it, and SonarInfo
+   stamped behind the window is kept unpruned (and outside the 4096 cap,
+   under a cap of its own) until such a ping arrives. Arrival order is the
+   only signal: a clock-jump callback fires only for the ROS time source,
+   which a replay without `--clock` and `import_bag` never use, and input
+   delivered more than the window late is taken as a restart too.
    `import_bag` holds the history from its oldest ping still waiting for the
    TF frontier, so a TF stall cannot cap away the states those pings need.
 3. **Per-ping state in the estimator.** `Sounding::correction_idx` names the

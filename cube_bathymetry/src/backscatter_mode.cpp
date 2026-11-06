@@ -141,18 +141,43 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
   }
   history_[stamp] = state;
   if (behind_window) {
+    // Not capped with the window's entries: at the cap the cap would erase
+    // this state the moment it is stored (it is older than every entry in the
+    // window), and the re-anchoring ping would then keep nothing (review
+    // round 3). rememberBehind bounds these on their own.
     rememberBehind(stamp);
-    capHistory();
   } else {
     prune();
   }
   return changed == 0;
 }
 
+bool BackscatterModeResolver::held(std::map<int64_t, SonarInfoState>::const_iterator it) const
+{
+  if (!hold_ns_) {
+    return false;
+  }
+  const auto next = std::next(it);
+  return next == history_.end() || next->first > *hold_ns_;
+}
+
 void BackscatterModeResolver::rememberBehind(int64_t stamp_ns)
 {
   behind_stamps_.insert(stamp_ns);
+  // The behind-window states have their own cap, so a new timeline that
+  // sends SonarInfo and no ping cannot grow the history without bound. The
+  // oldest goes from the set AND the history, so every stamp in the set is
+  // a stored state. A waiting ping (holdFrom) is newer than the anchor, since
+  // pings drain in stamp order, so it never holds one of these; the check is
+  // there for a caller that breaks that order.
   while (behind_stamps_.size() > kMaxHistory) {
+    const auto oldest = history_.find(*behind_stamps_.begin());
+    if (oldest != history_.end()) {
+      if (held(oldest)) {
+        break;
+      }
+      history_.erase(oldest);
+    }
     behind_stamps_.erase(behind_stamps_.begin());
   }
 }
@@ -170,14 +195,32 @@ void BackscatterModeResolver::holdFrom(std::optional<int64_t> stamp_ns)
 
 void BackscatterModeResolver::capHistory()
 {
-  // The oldest entry goes only while the state in force at the hold (the
-  // oldest ping still waiting to resolve) stays: the next entry is at or
-  // before the hold. Past that the history may exceed the cap, but only by
-  // the states read ahead of pings that are themselves still held in RAM.
-  while (history_.size() > kMaxHistory &&
-    (!hold_ns_ || std::next(history_.begin())->first <= *hold_ns_))
-  {
-    history_.erase(history_.begin());
+  // The cap counts and drops only the current window's states, oldest first
+  // (review round 3):
+  //  - never a behind-window state (rememberBehind bounds those). prune,
+  //    the only caller, runs after the current timeline went on, which
+  //    clears the set, so none is held here today; skipping them keeps the
+  //    cap from undoing a new timeline if that changes.
+  //  - never the state in force at the anchor (the newest resolved ping):
+  //    the next ping in order resolves against it or a newer one.
+  //  - never the state in force at the hold (the oldest ping still waiting
+  //    to resolve) or a later one. Past that the history may exceed the cap,
+  //    but only by the states read ahead of pings that are themselves still
+  //    held in RAM.
+  auto anchor = history_.end();
+  if (have_resolved_) {
+    anchor = history_.upper_bound(newest_resolved_ns_);
+    anchor = anchor == history_.begin() ? history_.end() : std::prev(anchor);
+  }
+  auto it = history_.begin();
+  while (history_.size() - behind_stamps_.size() > kMaxHistory && it != history_.end()) {
+    if (it == anchor || behind_stamps_.count(it->first) > 0) {
+      ++it;
+    } else if (held(it)) {
+      break;  // this state and every later one are held
+    } else {
+      it = history_.erase(it);
+    }
   }
 }
 
@@ -280,15 +323,31 @@ uint16_t BackscatterModeResolver::resolve(
     newest_resolved_ns_ = ping_stamp_ns;
     recent_resolved_.clear();
     ++counts_.window_reanchored;
-    if (!behind_stamps_.empty()) {
-      // SonarInfo arrived behind the window too, and nothing of the old
-      // timeline since: that is the new timeline's history. The old
-      // timeline's entries go, or one stamped later than the new timeline
-      // has reached would be selected once it gets there. (A lone late ping
-      // with no such SonarInfo only moves the anchor: nothing is dropped.)
-      for (auto it = history_.begin(); it != history_.end(); ) {
-        it = behind_stamps_.count(it->first) ? std::next(it) : history_.erase(it);
-      }
+    // The old timeline's entries go, or one stamped later than the new
+    // timeline has reached would be selected once it gets there:
+    //  - SonarInfo arrived behind the window too, and nothing of the old
+    //    timeline since: that is the new timeline's history, and every other
+    //    entry is the old one's.
+    //  - either way, an entry more than the window AHEAD of this ping is the
+    //    old timeline's. That covers the new timeline's first ping arriving
+    //    before its first SonarInfo (review round 3): the ping is unresolved
+    //    ("no SonarInfo") rather than given the old run's mode, and so is
+    //    every ping until the new run's SonarInfo arrives.
+    // Arrival order cannot tell a restart from a ping (or a SonarInfo and a
+    // ping) delivered more than the window late: a lone late ping also drops
+    // the current timeline's entries more than the window ahead of it. That
+    // is accepted -- a sonar ping 60 s late is not a live link, offline input
+    // is merged in stamp order, and the cost is unresolved pings until the
+    // next SonarInfo, never a wrong mode applied. See the header for why a
+    // clock-jump callback is not the answer.
+    const int64_t ahead_cut =
+      ping_stamp_ns > std::numeric_limits<int64_t>::max() - kHistoryWindowNs ?
+      std::numeric_limits<int64_t>::max() : ping_stamp_ns + kHistoryWindowNs;
+    const bool new_history = !behind_stamps_.empty();
+    for (auto it = history_.begin(); it != history_.end(); ) {
+      const bool keep = behind_stamps_.count(it->first) > 0 ||
+        (!new_history && it->first <= ahead_cut);
+      it = keep ? std::next(it) : history_.erase(it);
     }
     behind_stamps_.clear();
   } else {

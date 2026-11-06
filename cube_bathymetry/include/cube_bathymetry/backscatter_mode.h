@@ -113,10 +113,13 @@ namespace cube
 ///     state that was in force at its stamp.
 ///   - a hard cap of `kMaxHistory` entries, the oldest dropped first, for a
 ///     stream that changes state while no ping is resolved at all -- except
-///     that the state in force at the hold (`holdFrom`) and every later one
-///     stay: import_bag reads SonarInfo ahead of the pings waiting for the TF
+///     that the state in force at the newest resolved ping stays, and so do
+///     the state in force at the hold (`holdFrom`) and every later one:
+///     import_bag reads SonarInfo ahead of the pings waiting for the TF
 ///     frontier, and a TF stall through more than the cap's worth of state
-///     changes must not drop the states those pings need.
+///     changes must not drop the states those pings need. States stored
+///     behind the window (below) are not counted against this cap; they have
+///     a cap of `kMaxHistory` of their own.
 /// The stale count looks back over the same window only.
 ///
 /// **Time going backwards** (a sim restart, `ros2 bag play --loop`; ~/reset
@@ -126,9 +129,24 @@ namespace cube
 /// cut is stored as is (no pruning, no folding into an older entry), so the
 /// new timeline's states survive until its first ping re-anchors. Without
 /// both, the anchor (a running maximum) would stay on the old timeline and
-/// prune the new one to one entry. When such SonarInfo arrived and nothing
-/// in the window since, the re-anchoring ping also drops every entry that
-/// did not (the old timeline's); a lone late ping only moves the anchor.
+/// prune the new one to one entry. The re-anchoring ping also drops the old
+/// timeline: every entry more than the window ahead of it, and, when such
+/// SonarInfo arrived and nothing in the window since, every entry that did
+/// not. So a new timeline whose first ping comes before its first SonarInfo
+/// gets "no SonarInfo" until that SonarInfo arrives, never the old run's mode.
+/// Arrival order cannot tell a restart from input delivered more than the
+/// window late (a lone ping, or a SonarInfo and a ping with nothing in the
+/// window between them): those are taken as a restart too, and the current
+/// timeline's entries more than the window ahead of them go. The cost is
+/// unresolved pings until the next SonarInfo, not a wrong correction.
+///
+/// Why not a clock-jump callback (`rclcpp::Clock::create_jump_callback`): it
+/// fires only for a clock on the ROS time source, i.e. under use_sim_time
+/// with /clock going backwards. A bag replayed without `--clock` (wall time
+/// on the node, recorded stamps on the messages), a live restart of the
+/// sonar driver, and import_bag (no clock at all) never trigger it, and they
+/// are the cases this has to handle. The message stamps are the only
+/// timeline every path shares.
   class BackscatterModeResolver
   {
 public:
@@ -282,6 +300,9 @@ private:
     void remember(int64_t ping_stamp_ns, float frequency_hz, uint16_t idx);
     void rememberBehind(int64_t stamp_ns);
     void capHistory();
+  /// True when the state at @p it is the one in force at the hold
+  /// (`holdFrom`) or a later one, so no bound may drop it.
+    bool held(std::map < int64_t, SonarInfoState > ::const_iterator it) const;
 
     const BackscatterTable * table_;
     BackscatterModeFallback fallback_;

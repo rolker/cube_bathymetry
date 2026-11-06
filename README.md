@@ -708,7 +708,10 @@ the SonarInfo topic in the main pass and the live node keeps the SonarInfo
 history (a same-stamp re-delivery deduplicated, and bounded to 60 s behind the newest ping plus the
 state in force at that cut, at most 4096 states; a ping more than 60 s behind
 the newest one means time went backwards — a sim restart, a looped bag — and
-re-anchors that window on itself), and a ping's mode is the latest SonarInfo at or before its stamp plus
+re-anchors that window on itself, dropping the old timeline's states more than
+60 s ahead of it, so a new run's pings before its first SonarInfo get no mode
+rather than the old run's; a ping delivered more than 60 s late is read the
+same way, an accepted cost), and a ping's mode is the latest SonarInfo at or before its stamp plus
 the ping's frequency (`ping_info.frequency` offline; the `frequency` field
 `detections_to_pointcloud` now writes on every point, live — a cloud from an
 older `detections_to_pointcloud` has no such field, so its pings key as

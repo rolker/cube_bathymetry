@@ -352,7 +352,8 @@ TEST(BackscatterModeResolver, TimeGoingBackwardsReAnchorsTheWindow)
   EXPECT_NE(r.report().find("re-anchored"), std::string::npos) << r.report();
 
   // A lone ping more than the window late, with no SonarInfo behind the
-  // window, only moves the anchor: the current timeline keeps its history.
+  // window, moves the anchor; the current timeline keeps the entries within
+  // the window ahead of it.
   BackscatterModeResolver lone(&f.table);
   lone.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));
   for (int64_t t = 100; t <= 200; ++t) {
@@ -372,6 +373,101 @@ TEST(BackscatterModeResolver, TimeGoingBackwardsReAnchorsTheWindow)
   EXPECT_EQ(late.resolve(201 * s, kF), 2);
   EXPECT_EQ(late.resolve(60 * s, kF), 1) << "re-anchored, the 50 s state kept";
   EXPECT_EQ(late.resolve(202 * s, kF), 2) << "and the 100 s state too";
+
+  // The accepted cost of reading arrival order (review round 3): a lone ping
+  // more than the window late is taken as a restart, so the current
+  // timeline's entries more than the window ahead of it go. The pings after
+  // it are unresolved until the next SonarInfo, never given a wrong mode.
+  BackscatterModeResolver stray(&f.table);
+  stray.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));
+  ASSERT_EQ(stray.resolve(200 * s, kF), 2);
+  stray.resolve(20 * s, kF, why);                           // 180 s late
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo);
+  stray.resolve(201 * s, kF, why);
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "the 100 s entry was > 60 s ahead of 20 s";
+  stray.addSonarInfo(state(202 * s, 0.001f, 24000.0f, 2));
+  EXPECT_EQ(stray.resolve(203 * s, kF), 2) << "the next SonarInfo resolves again";
+}
+
+// cube_bathymetry#172 review round 3, order (a): the new timeline's first
+// PING arrives before its first SonarInfo, so no SonarInfo is behind the
+// window when the ping re-anchors it. The old timeline's entries more than the
+// window ahead of the ping still go: once the new run reaches their stamps,
+// a ping there gets the new run's mode, not the old one.
+TEST(BackscatterModeResolver, ANewTimelineWhosePingComesFirstDropsTheOldOne)
+{
+  Fixture f;
+  const int64_t s = 1000000000LL;
+  BackscatterModeResolver r(&f.table);
+  r.addSonarInfo(state(990 * s, 5e-5f, 20000.0f, 1));       // old timeline: CW 50 us
+  ASSERT_EQ(r.resolve(1000 * s, kF), 1);
+  ModeResolution why = ModeResolution::Resolved;
+  // The new timeline: a ping first.
+  EXPECT_EQ(r.resolve(10 * s, kF, why), kCorrectionUnresolved);
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo) << "not the old run's mode";
+  EXPECT_EQ(r.counts().window_reanchored, 1u);
+  EXPECT_EQ(r.historySize(), 0u) << "the 990 s entry is > 60 s ahead of 10 s";
+  // Then its SonarInfo (in the re-anchored window) and its pings.
+  r.addSonarInfo(state(11 * s, 0.001f, 24000.0f, 2));       // FMU 1 ms -> idx 2
+  EXPECT_EQ(r.resolve(12 * s, kF), 2);
+  EXPECT_EQ(r.resolve(995 * s, kF), 2) << "the old 990 s CW state does not come back";
+  EXPECT_EQ(r.counts().stale, 0u);
+
+  // Order (b), SonarInfo first, reaching the same end state.
+  BackscatterModeResolver o(&f.table);
+  o.addSonarInfo(state(990 * s, 5e-5f, 20000.0f, 1));
+  ASSERT_EQ(o.resolve(1000 * s, kF), 1);
+  o.addSonarInfo(state(11 * s, 0.001f, 24000.0f, 2));       // behind the window
+  EXPECT_EQ(o.resolve(12 * s, kF), 2);
+  EXPECT_EQ(o.counts().window_reanchored, 1u);
+  EXPECT_EQ(o.historySize(), 1u);
+  EXPECT_EQ(o.resolve(995 * s, kF), 2);
+}
+
+// cube_bathymetry#172 review round 3, order (b) at the cap: with the history
+// full of the window's states and no hold (live), the cap erased each
+// behind-window state the moment it was stored, and the re-anchoring ping
+// then erased every entry. Behind-window states are not counted against the
+// window's cap.
+TEST(BackscatterModeResolver, TheCapDoesNotDropANewTimelinesStates)
+{
+  Fixture f;
+  const int64_t s = 1000000000LL;
+  const int64_t ms = 1000000LL;
+  const int64_t cap = static_cast<int64_t>(BackscatterModeResolver::kMaxHistory);
+  BackscatterModeResolver r(&f.table);
+  r.addSonarInfo(state(999 * s, 5e-5f, 20000.0f, 1));
+  ASSERT_EQ(r.resolve(1000 * s, kF), 1);
+  // More than the cap's worth of state changes inside the window (1 kHz).
+  for (int64_t i = 1; i <= cap + 10; ++i) {
+    const int64_t t = 1000 * s + i * ms;
+    r.addSonarInfo(i % 2 == 0 ? state(t, 5e-5f, 20000.0f, 1) : state(t, 0.001f, 24000.0f, 2));
+  }
+  ASSERT_EQ(r.historySize(), BackscatterModeResolver::kMaxHistory);
+  ASSERT_NE(r.stateAt(1000 * s), nullptr) << "the state in force at the anchor stays";
+  EXPECT_EQ(r.stateAt(1000 * s)->stamp_ns, 999 * s);
+  // Time goes backwards; the new timeline's SonarInfo comes first.
+  r.addSonarInfo(state(10 * s, 0.001f, 24000.0f, 2));
+  EXPECT_EQ(r.historySize(), BackscatterModeResolver::kMaxHistory + 1) << "stored, not capped";
+  ModeResolution why = ModeResolution::NoSonarInfo;
+  EXPECT_EQ(r.resolve(10 * s + ms, kF, why), 2);
+  EXPECT_EQ(why, ModeResolution::Resolved) << "not an empty history";
+  EXPECT_EQ(r.historySize(), 1u);
+
+  // The behind-window states have a cap of their own: a new timeline that
+  // sends only SonarInfo cannot grow the history without bound, and the
+  // newest of them are the ones kept.
+  BackscatterModeResolver b(&f.table);
+  ASSERT_EQ(b.resolve(1000 * s, kF), kCorrectionUnresolved);
+  for (int64_t i = 0; i < cap + 10; ++i) {
+    const int64_t t = 10 * s + i * ms;
+    b.addSonarInfo(i % 2 == 0 ? state(t, 5e-5f, 20000.0f, 1) : state(t, 0.001f, 24000.0f, 2));
+  }
+  EXPECT_EQ(b.historySize(), BackscatterModeResolver::kMaxHistory);
+  const int64_t newest = 10 * s + (cap + 9) * ms;
+  EXPECT_EQ(b.resolve(newest + 1, kF), 2) << "re-anchored on the newest (odd i: FMU)";
+  EXPECT_EQ(b.historySize(), BackscatterModeResolver::kMaxHistory);
+  EXPECT_EQ(b.stateAt(10 * s), nullptr) << "the oldest went first";
 }
 
 // The node's unresolved-ping warning throttle: a clock that went backwards
