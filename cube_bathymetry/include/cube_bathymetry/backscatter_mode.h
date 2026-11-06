@@ -27,6 +27,8 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -75,6 +77,17 @@ namespace cube
 
   const char * toString(ModeResolution resolution);
 
+/// The live node's throttle for its unresolved-ping warning (cube#172): due
+/// when it has not fired yet (@p last_ns empty), once @p interval_ns has
+/// passed since @p last_ns, and when the clock went BACKWARDS past
+/// @p last_ns (a sim restart under use_sim_time): a negative elapsed time is
+/// "warn now", never a mute until the clock catches up with the old stamp.
+  inline bool warnIntervalDue(
+    std::optional < int64_t > last_ns, int64_t now_ns, int64_t interval_ns)
+  {
+    return !last_ns || now_ns < *last_ns || now_ns - *last_ns >= interval_ns;
+  }
+
 /// Resolves pings to `correction_idx` values. Time-ordered association:
 /// a ping uses the latest SonarInfo whose stamp is at or before the ping
 /// stamp. The history is keyed by stamp and deduplicated: a message at a
@@ -100,6 +113,17 @@ namespace cube
 ///   - a hard cap of `kMaxHistory` entries, the oldest dropped first, for a
 ///     stream that changes state while no ping is resolved at all.
 /// The stale count looks back over the same window only.
+///
+/// **Time going backwards** (a sim restart, `ros2 bag play --loop`; ~/reset
+/// keeps the resolver): a ping more than `kHistoryWindowNs` behind the anchor
+/// re-anchors the window on itself and clears the stale look-back
+/// (`Counts::window_reanchored`), and a SonarInfo stamped before the window
+/// cut is stored as is (no pruning, no folding into an older entry), so the
+/// new timeline's states survive until its first ping re-anchors. Without
+/// both, the anchor (a running maximum) would stay on the old timeline and
+/// prune the new one to one entry. When such SonarInfo arrived and nothing
+/// in the window since, the re-anchoring ping also drops every entry that
+/// did not (the old timeline's); a lone late ping only moves the anchor.
   class BackscatterModeResolver
   {
 public:
@@ -124,6 +148,10 @@ public:
     /// corrected under the previous mode. Looked for inside the window.
       uint64_t stale = 0;
       uint64_t late_sonar_info = 0;
+    /// Pings that arrived more than the window behind the newest one so far
+    /// (time went backwards: a sim restart, a looped bag); each re-anchored
+    /// the window on itself.
+      uint64_t window_reanchored = 0;
       uint64_t sonar_info_seen = 0;
     /// Beams of resolved pings handed to the estimator (`countBeam`), and
     /// those the table still cannot correct per (mode key, reason): no finite
@@ -228,6 +256,7 @@ private:
     uint16_t idxOf(const KeyDecision & d) const;
     const KeyDecision & decide(const std::string & key);
     void remember(int64_t ping_stamp_ns, float frequency_hz, uint16_t idx);
+    void rememberBehind(int64_t stamp_ns);
 
     const BackscatterTable * table_;
     BackscatterModeFallback fallback_;
@@ -243,6 +272,10 @@ private:
   /// The newest ping stamp resolved so far (the window's anchor).
     int64_t newest_resolved_ns_ = 0;
     bool have_resolved_ = false;
+  /// Stamps of the SonarInfo stored behind the window since the last
+  /// in-window message or ping: a new timeline's, if a ping behind the window
+  /// follows (time went backwards), else late messages.
+    std::set < int64_t > behind_stamps_;
 
   /// Oldest stamp the window keeps; meaningless before the first ping.
     int64_t windowCut() const;

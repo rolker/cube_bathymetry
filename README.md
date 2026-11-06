@@ -704,7 +704,9 @@ See
 is corrected by its own mode's entry instead of one curve: `import_bag` reads
 the SonarInfo topic in the main pass and the live node keeps the SonarInfo
 history (deduplicated, and bounded to 60 s behind the newest ping plus the
-state in force at that cut, at most 4096 states), and a ping's mode is the latest SonarInfo at or before its stamp plus
+state in force at that cut, at most 4096 states; a ping more than 60 s behind
+the newest one means time went backwards — a sim restart, a looped bag — and
+re-anchors that window on itself), and a ping's mode is the latest SonarInfo at or before its stamp plus
 the ping's frequency (`ping_info.frequency` offline; the `frequency` field
 `detections_to_pointcloud` now writes on every point, live — a cloud from an
 older `detections_to_pointcloud` has no such field, so its pings key as

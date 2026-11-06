@@ -256,6 +256,70 @@ TEST(BackscatterModeResolver, HistoryIsBoundedByTheWindowAndTheCap)
   EXPECT_EQ(idle.stateAt(0), nullptr) << "the oldest ones went first";
 }
 
+// cube_bathymetry#172 review round 2: time going backwards (a sim restart,
+// `ros2 bag play --loop`; ~/reset keeps the resolver). The window anchor was a
+// running maximum, so every SonarInfo of the new timeline pruned the history
+// to its newest entry before the OLD anchor, and a ping whose successor
+// SonarInfo had arrived first got no state at all.
+TEST(BackscatterModeResolver, TimeGoingBackwardsReAnchorsTheWindow)
+{
+  Fixture f;
+  const int64_t s = 1000000000LL;
+  BackscatterModeResolver r(&f.table);
+  r.addSonarInfo(state(990 * s, 5e-5f, 20000.0f, 1));       // old timeline: CW 50 us
+  ASSERT_EQ(r.resolve(1000 * s, kF), 1);
+  // The new timeline: two states arrive before its first ping (offline the
+  // pings wait for the TF frontier; live a mode switch precedes the ping).
+  r.addSonarInfo(state(10 * s, 5e-5f, 20000.0f, 1));        // CW 50 us -> idx 1
+  r.addSonarInfo(state(20 * s, 0.001f, 24000.0f, 2));       // FMU 1 ms -> idx 2
+  ModeResolution why = ModeResolution::Resolved;
+  EXPECT_EQ(r.resolve(15 * s, kF, why), 1) << "the 10 s state, not 'no SonarInfo'";
+  EXPECT_EQ(why, ModeResolution::Resolved);
+  EXPECT_EQ(r.counts().window_reanchored, 1u);
+  EXPECT_EQ(r.resolve(25 * s, kF), 2);
+  // The old timeline's 990 s entry is gone: when the new timeline reaches
+  // 995 s in a steady mode, the 20 s state is still the one in force.
+  EXPECT_EQ(r.resolve(995 * s, kF), 2);
+  EXPECT_EQ(r.counts().no_sonar_info, 0u);
+  EXPECT_EQ(r.counts().stale, 0u) << "the old timeline's pings are not looked back on";
+  EXPECT_NE(r.report().find("re-anchored"), std::string::npos) << r.report();
+
+  // A lone ping more than the window late, with no SonarInfo behind the
+  // window, only moves the anchor: the current timeline keeps its history.
+  BackscatterModeResolver lone(&f.table);
+  lone.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));
+  for (int64_t t = 100; t <= 200; ++t) {
+    ASSERT_EQ(lone.resolve(t * s, kF), 2) << t;
+  }
+  lone.resolve(50 * s, kF, why);
+  EXPECT_EQ(why, ModeResolution::NoSonarInfo);
+  EXPECT_EQ(lone.counts().window_reanchored, 1u);
+  EXPECT_EQ(lone.resolve(201 * s, kF), 2) << "the current state survives a stray late ping";
+
+  // A late SonarInfo behind the window, followed by an in-window ping, was a
+  // late message, not a new timeline: a later stray ping drops nothing.
+  BackscatterModeResolver late(&f.table);
+  late.addSonarInfo(state(100 * s, 0.001f, 24000.0f, 2));
+  ASSERT_EQ(late.resolve(200 * s, kF), 2);
+  late.addSonarInfo(state(50 * s, 5e-5f, 20000.0f, 1));     // 150 s behind: stored as is
+  EXPECT_EQ(late.resolve(201 * s, kF), 2);
+  EXPECT_EQ(late.resolve(60 * s, kF), 1) << "re-anchored, the 50 s state kept";
+  EXPECT_EQ(late.resolve(202 * s, kF), 2) << "and the 100 s state too";
+}
+
+// The node's unresolved-ping warning throttle: a clock that went backwards
+// (negative elapsed time) is "warn now", not a mute until it catches up.
+TEST(BackscatterModeResolver, WarnIntervalTreatsABackwardClockAsDue)
+{
+  const int64_t minute = 60LL * 1000000000LL;
+  EXPECT_TRUE(warnIntervalDue(std::nullopt, 5, minute)) << "never fired";
+  EXPECT_FALSE(warnIntervalDue(1000 * minute, 1000 * minute + 1, minute));
+  EXPECT_FALSE(warnIntervalDue(1000 * minute, 1001 * minute - 1, minute));
+  EXPECT_TRUE(warnIntervalDue(1000 * minute, 1001 * minute, minute));
+  EXPECT_TRUE(warnIntervalDue(1000 * minute, 3 * minute, minute)) << "clock went backwards";
+  EXPECT_TRUE(warnIntervalDue(1000 * minute, 1000 * minute - 1, minute));
+}
+
 // cube_bathymetry#172 review: a table run in which nothing resolved must be
 // detectable, with the reasons, so import_bag can fail it and the node warn.
 TEST(BackscatterModeResolver, ResolvedNothingAndTheUnresolvedSummary)

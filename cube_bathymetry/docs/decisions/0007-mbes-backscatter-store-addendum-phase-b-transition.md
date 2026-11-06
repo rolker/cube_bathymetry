@@ -244,7 +244,10 @@ curve corrects their mean and leaves each mode offset from it.
    `detections_to_pointcloud` writes on every point. The resolver keeps that
    SonarInfo history deduplicated and bounded — 60 s behind the newest
    resolved ping plus the one state in force at the cut, at most 4096
-   states — since a mode-switching sonar republishes on every switch.
+   states — since a mode-switching sonar republishes on every switch. A ping
+   more than the window behind the newest one (time went backwards: a sim
+   restart, a looped bag) re-anchors the window on itself, and SonarInfo
+   stamped behind the window is kept unpruned until such a ping arrives.
 3. **Per-ping state in the estimator.** `Sounding::correction_idx` names the
    table entry (0 = unresolved → the legacy curve path, byte-identical to
    before; reserved identity and exclude values) and rides the sounding

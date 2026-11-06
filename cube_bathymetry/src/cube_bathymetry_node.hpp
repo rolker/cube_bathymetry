@@ -969,10 +969,9 @@ private:
     if (why != cube::ModeResolution::Resolved) {
       // Throttled per configuration (a member, not the macro's call-site
       // static, so the first unresolved cloud after every configure warns).
-      const rclcpp::Time now = get_clock()->now();
-      if (!bs_unresolved_warned_at_ ||
-        (now - *bs_unresolved_warned_at_).seconds() >= kUnresolvedWarnIntervalS)
-      {
+      // A clock that went backwards (sim restart) warns at once.
+      const int64_t now = get_clock()->now().nanoseconds();
+      if (cube::warnIntervalDue(bs_unresolved_warned_at_, now, kUnresolvedWarnIntervalNs)) {
         RCLCPP_WARN(get_logger(),
           "Per-pulse-mode table: a cloud was not corrected by the table (%s). %s",
           cube::toString(why), bs_resolver_->unresolvedSummary().c_str());
@@ -1000,9 +999,10 @@ private:
         correction_idx, s.sounding.intensity, s.sounding.beam_angle, s.sounding.slant_range);
     }
   }
-  static constexpr double kUnresolvedWarnIntervalS = 60.0;
-  /// When the unresolved-cloud warning last fired in this configuration.
-  std::optional<rclcpp::Time> bs_unresolved_warned_at_;
+  static constexpr int64_t kUnresolvedWarnIntervalNs = 60LL * 1000000000LL;
+  /// When the unresolved-cloud warning last fired in this configuration
+  /// (node clock, ns).
+  std::optional<int64_t> bs_unresolved_warned_at_;
 
   // Latch-first curve adoption (#102). The latched (transient_local)
   // producer normally delivers before activation, so the whole grid is

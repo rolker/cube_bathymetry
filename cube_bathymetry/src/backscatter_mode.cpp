@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -81,11 +82,26 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
 {
   ++counts_.sonar_info_seen;
   const int64_t stamp = state.stamp_ns;
+  // A message stamped before the window cut is either far behind the pings
+  // or the first of a timeline that went BACKWARDS (a sim restart, a looped
+  // bag) before any ping of it arrived. Either way it is stored -- never
+  // folded into an older entry, which may belong to the old timeline -- and
+  // this call does not prune: pruning against the old anchor would cut the
+  // new timeline down to its newest entry before the anchor, message by
+  // message, until a ping of it re-anchors the window (resolve). It is older
+  // than the stale count looks back (the window), so it counts nothing stale.
+  const bool behind_window = have_resolved_ && stamp < windowCut();
+  if (!behind_window) {
+    behind_stamps_.clear();  // the current timeline goes on: those were late
+  }
   const auto existing = history_.find(stamp);
   if (existing != history_.end() && sameState(existing->second, state)) {
+    if (behind_window) {
+      rememberBehind(stamp);
+    }
     return true;  // a heartbeat: the same message again
   }
-  if (existing == history_.end()) {
+  if (existing == history_.end() && !behind_window) {
     // The state in force at this stamp, if any: the same state again under
     // a new stamp (a bridge republishing on every ping) changes nothing.
     const SonarInfoState * in_force = stateAt(stamp);
@@ -101,6 +117,9 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
   const auto next = history_.upper_bound(stamp);
   uint64_t stale_now = 0;
   for (const RecentPing & ping : recent_resolved_) {
+    if (behind_window) {
+      break;
+    }
     if (ping.stamp_ns < stamp || (next != history_.end() && ping.stamp_ns >= next->first)) {
       continue;
     }
@@ -117,8 +136,23 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
     counts_.stale += stale_now;
   }
   history_[stamp] = state;
-  prune();
+  if (behind_window) {
+    rememberBehind(stamp);
+    while (history_.size() > kMaxHistory) {
+      history_.erase(history_.begin());
+    }
+  } else {
+    prune();
+  }
   return stale_now == 0;
+}
+
+void BackscatterModeResolver::rememberBehind(int64_t stamp_ns)
+{
+  behind_stamps_.insert(stamp_ns);
+  while (behind_stamps_.size() > kMaxHistory) {
+    behind_stamps_.erase(behind_stamps_.begin());
+  }
 }
 
 int64_t BackscatterModeResolver::windowCut() const
@@ -210,6 +244,30 @@ uint16_t BackscatterModeResolver::resolve(
   if (!have_resolved_ || ping_stamp_ns > newest_resolved_ns_) {
     newest_resolved_ns_ = ping_stamp_ns;
     have_resolved_ = true;
+    behind_stamps_.clear();  // the current timeline goes on
+  } else if (ping_stamp_ns < windowCut()) {
+    // More than the window behind the anchor: time went backwards (a sim
+    // restart, `ros2 bag play --loop`; ~/reset keeps the resolver). The
+    // anchor is a running maximum, so without this it would stay on the old
+    // timeline and every addSonarInfo would prune the new one to a single
+    // entry until time passed the old maximum. Re-anchor on this ping, and
+    // drop the old timeline's pings from the stale look-back.
+    newest_resolved_ns_ = ping_stamp_ns;
+    recent_resolved_.clear();
+    ++counts_.window_reanchored;
+    if (!behind_stamps_.empty()) {
+      // SonarInfo arrived behind the window too, and nothing of the old
+      // timeline since: that is the new timeline's history. The old
+      // timeline's entries go, or one stamped later than the new timeline
+      // has reached would be selected once it gets there. (A lone late ping
+      // with no such SonarInfo only moves the anchor: nothing is dropped.)
+      for (auto it = history_.begin(); it != history_.end(); ) {
+        it = behind_stamps_.count(it->first) ? std::next(it) : history_.erase(it);
+      }
+    }
+    behind_stamps_.clear();
+  } else {
+    behind_stamps_.clear();  // an in-window ping: the current timeline goes on
   }
 
   const SonarInfoState * state = stateAt(ping_stamp_ns);
@@ -369,6 +427,11 @@ std::string BackscatterModeResolver::report() const
   for (const auto & kv : counts_.beam_fallback) {
     os << "  " << kv.first.first << ": " << kv.second << " beam(s), " << kv.first.second
        << ": " << toString(fallback_) << "\n";
+  }
+  if (counts_.window_reanchored > 0) {
+    os << "  " << counts_.window_reanchored << " ping(s) arrived more than "
+       << kHistoryWindowNs / 1000000000LL << " s behind the newest one (time went backwards: "
+       << "a restart or a looped bag); the history window was re-anchored on each\n";
   }
   if (counts_.stale > 0) {
     os << "  " << counts_.stale << " ping(s) resolved before a later-arriving SonarInfo ("
