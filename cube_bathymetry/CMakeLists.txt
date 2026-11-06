@@ -101,7 +101,7 @@ install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 add_library(cube_bathymetry_level_plan
   src/count_grid.cpp
   src/level_plan.cpp
-  src/build_fingerprint.cpp   # ADR-0003 schema v2, tiling only (#143)
+  src/build_fingerprint.cpp   # ADR-0003 schema v2: tiling (#143) + backscatter_correction (#172)
   src/recon.cpp               # recon pass: counts + decision depths + sounding spill
 )
 target_include_directories(cube_bathymetry_level_plan PUBLIC
