@@ -380,3 +380,54 @@ Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1410 tests, 0 err
 
 ### Next
 `/review-code` pre-push (round 2) on the branch, fresh context.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 11:31 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `36b5d26`
+**Mode**: pre-push
+**Depth**: Deep (reason: +4751 / -138 lines over 43 files, plus ADR-0003/ADR-0007 amendments; round 2 reviewed the round-1 fix commits 8f5a52f..c2ed3cf, with the whole branch read cross-model)
+**Must-fix**: 3 | **Suggestions**: 13
+**Round**: 2 of PR 2 (the earlier rounds 1-2 of 11-02 reviewed PR 1, merged as PR #174) | **Ship**: continue — must-fixes fell from 8 to 3, and each is a precise fix. Two of them were introduced by round-1 fixes in the resolver and the exit-4 path, so a short round 3 on just the new fix commits is worth it; a full re-dispatch is not.
+
+Specialists:
+- Static analysis on every changed C++/CMake/XML file: cpplint, uncrustify, lint_cmake, xmllint, plus cppcheck 2.13 run directly (ament skips it on this host). All clean.
+- Governance and plan drift: plan.md, README, ADR-0003 and ADR-0007 are in sync with the fixes. The repo has no `.agents/README.md` or `review-context.yaml`.
+- Claude Adversarial Lens A and Lens B ran on the fix commits (fresh context, Deep horizon).
+- Cross-model: Gemini and Codex ran on the whole branch, both EXIT=0.
+- Local Adversarial is off (the default).
+
+Round-1 closure: all 8 must-fixes and the 15 fixed suggestions are verified closed, and the 3 deferrals are still owed as PR-body text. Two round-1 fixes introduced new defects: must-fix 6 (bounded history) led to must-fix 2 below, and must-fix 7 (exit 4) led to must-fix 3 below.
+
+Dropped after checking:
+- Gemini, locale-dependent `snprintf`/`strtod`: nothing in the package calls `setlocale`.
+- Gemini, the SonarInfo curve path under a table: an explicit file returns early, and that warning is throttled.
+- Gemini, packed 22-byte `DepthAndUncertainty`: `pack(1)` was already there before this branch.
+- Gemini, `auto` vs `empirical` fingerprint mode: errs on the safe side (a false stale) and applies to single curves too.
+
+### Findings
+- [ ] (must-fix) The loader refuses an angle bin centred at or past 90 deg, but `derive_angular_response.py` `fit_mode` writes `(j + 0.5) * bin_width` up to `ceil(90 / width)`. At `--bin-width-deg` 4, 8, 12, 20, 40 or 60 (not divisors of 90), one beam in the last bin makes the whole table fail to load. Accept the last bin when its lower edge is under 90 (beams at 90 deg or more are already uncorrectable), and add a round-trip test at width 4. — `cube_bathymetry/src/backscatter_table.cpp:760` (Lens A; from `4a7db64`)
+- [ ] (must-fix) The history-window anchor `newest_resolved_ns_` is a running maximum and never moves back. After a backward stamp jump (sim restart, `ros2 bag play --loop`; `~/reset` keeps the resolver), each `addSonarInfo` prunes to the newest entry before the old maximum. A ping whose successor SonarInfo arrived first then gets no state and falls back, until time passes the old maximum. Before the bound, the unbounded history kept those states. The node's member throttle `(now - last).seconds() >= 60` is negative after the jump, so the unresolved warning is muted too. Fix: re-anchor (and clear `recent_resolved_`) when a ping lands more than the window behind the anchor, treat a negative elapsed time as "warn now", and add a test. Offline, a far-future ping blocks the head of the pending queue until the flush, so that case is weaker than Lens B states. — `cube_bathymetry/src/backscatter_mode.cpp:210-213,136-140`, `cube_bathymetry/src/cube_bathymetry_node.hpp:973-974` (Lens B + Gemini, cross-model confirmed; from `83d3858`)
+- [ ] (must-fix) The "nothing resolved" error prints "The store is otherwise complete; its fingerprint records kind 'table-unresolved' and the run exits 4" before the finish step runs. That is false in three cases: a recon-only `--level-plan-out` preflight (no store, no fingerprint, exits 0, so a preflight gate passes a wrong `--sonar-info-topic`), a finish that returns 1 (store may be incomplete), and a finish that returns 2 (no fingerprint). Keep the diagnosis in `reportModeResolution`, print the outcome sentence from `withTableResolution` once the code is known, and make the recon-only preflight exit 4, or say plainly that it failed. — `cube_bathymetry/src/import_bag_main.cpp:1196-1204,1213-1216` (Lens B must-fix, Lens A suggestion, cross-pass confirmed; from `c54c922`)
+- [ ] (suggestion) Deduplicating equal states across different stamps breaks out-of-order association. Example: A@100 is stored, A@300 is dropped as a duplicate, then a late B@200 arrives, and a ping at 350 gets B. The Python derive keeps distinct stamps. This was documented and accepted, and it needs non-monotonic stamps from one producer; Codex rates it must-fix. The 60 s window alone already bounds the history, so the dedup could go, but that would load the cap in import_bag (next item). — `cube_bathymetry/src/backscatter_mode.cpp:85-93` (Codex)
+- [ ] (suggestion) The `kMaxHistory` cap ignores pings still pending in import_bag. SonarInfo is fed at read time, while pings wait for the TF frontier. If TF stalls through more than 4096 state changes, the states those pings need are dropped, and the pings are reported as "before the first SonarInfo". — `cube_bathymetry/src/backscatter_mode.cpp:146-148`, `cube_bathymetry/src/import_bag_main.cpp:2723-2736` (Gemini)
+- [ ] (suggestion) The stale count can count one ping twice and never takes a count back. Example: a ping at 20 resolves under A@0, then a late B@10 arrives, then a late C@15, and the count is 2 for one ping. Count each ping at most once. — `cube_bathymetry/src/backscatter_mode.cpp:101-118` (Lens A)
+- [ ] (suggestion) A beam past the last written angle bin, or in a gap between bins, gets the nearest bin's clamped value, which the table never measured. This is the same reasoning as the 90 deg rule. Add a status for "no bin within half `angle_bin_width_deg`". — `cube_bathymetry/src/backscatter_table.cpp:460-471,442` (Lens A)
+- [ ] (suggestion) The live node's unresolved warning fires every minute on normal unresolved pings: a rare mode with no entry, the ping floor, pings before the first SonarInfo. import_bag treats only "nothing resolved" as an error, so the two disagree. Gate the warning on `resolvedNothing()`, or warn once per new reason. — `cube_bathymetry/src/cube_bathymetry_node.hpp:969` (Lens A + lead)
+- [ ] (suggestion) The loader's limits can be bypassed by a non-regular file such as a FIFO or `/dev/zero`:
+  - a `file_size` error skips the 64 MiB check;
+  - `getline` buffers the whole line before the 4096-character check;
+  - comment lines are not counted against the row limit;
+  - `isAngularResponseTable` has no bound and consumes the start of a FIFO;
+  - `sha256File` reads the file a second time, so an in-place rewrite between the reads fingerprints a table that was not applied.
+
+  Refuse a non-regular file, read at most the cap once, then probe, parse and hash that one buffer. — `cube_bathymetry/src/backscatter_table.cpp:214-219,516-547,567-571`, `cube_bathymetry/src/import_bag_main.cpp:1010` (Lens B)
+- [ ] (suggestion) `warned_` and `declared_mismatch` are keyed by the absorption text (6 significant digits). A sonar whose declared absorption drifts gets a new WARN and a new map key for each value, without bound. Key on (mode, TVG model), or round or cap. — `cube_bathymetry/src/backscatter_mode.cpp:234-236` (Lens B)
+- [ ] (suggestion) The declared absorption accepts ±inf from the table (no `isfinite` check) and from SonarInfo. `operator==` then treats inf as equal to any finite value, and inf is not equal to itself. Reject non-finite values in the loader and guard the comparison. — `cube_bathymetry/src/backscatter_table.cpp:739,395` (Gemini)
+- [ ] (suggestion) Under `identity`, `fallbackIdx()` returns `kCorrectionUnresolved` (the legacy single-curve path), not `kCorrectionIdentity`. This is correct today only because a table run carries no legacy curve. Return `kCorrectionIdentity` so the invariant is explicit. — `cube_bathymetry/src/backscatter_mode.cpp:160-164` (Gemini)
+- [ ] (suggestion) Written groups are bucketed by exact bounds but matched to declared groups within 1e-9. Two near-identical written groups (only possible in a hand-edited table) fill one slot, and the second silently overwrites the first. Refuse a second fill. — `cube_bathymetry/src/backscatter_table.cpp:~747` (Gemini)
+- [ ] (suggestion) The duplicate `# mode_summary:` and `pings=` errors name the column line's number, not the summary line's. — `cube_bathymetry/src/backscatter_table.cpp:652-661` (Lens A)
+- [ ] (suggestion) The comment "ADR-0003 schema 2, tiling only -- cube#143" sits on the `writeFingerprint` call that now records the backscatter correction. It is the same staleness as the CMake comment fixed in `a724a0b`. — `cube_bathymetry/src/import_bag_main.cpp:1746` (lead)
