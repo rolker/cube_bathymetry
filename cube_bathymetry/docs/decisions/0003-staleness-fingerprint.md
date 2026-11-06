@@ -214,6 +214,8 @@ table-corrected one (`import_bag` also exits 4 then). `isStale` compares `mode`,
 correction. A fingerprint without the key (written before #172) is stale
 against one that has it: what correction built its backscatter layer cannot
 be told. This replaces the schema-1 sketch above (`{"mode", "curve_sha256"}`)
-and keeps schema version 2 (additive). `tool_version` as specified reads `package.xml`'s
+and keeps schema version 2 (additive).
+
+`tool_version` as specified reads `package.xml`'s
 `<version>`, which is `0.0.0` and has never been bumped, so that key would be
 inert until a versioning practice exists — a follow-up, not this amendment.
