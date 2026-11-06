@@ -344,6 +344,10 @@ uint16_t BackscatterModeResolver::resolve(
     // and the cost is unresolved pings until the next SonarInfo or heartbeat,
     // never a wrong mode applied. See the header for why a clock-jump
     // callback is not the answer.
+    // This erase ignores the hold (holdFrom): in import_bag it would drop
+    // SonarInfo read ahead for pings still waiting on the TF frontier, but
+    // only on a bag whose detection stamps are out of order, which the hold
+    // itself already assumes away (see feedSonarInfo).
     for (auto it = history_.begin(); it != history_.end(); ) {
       it = behind_stamps_.count(it->first) > 0 ? std::next(it) : history_.erase(it);
     }
