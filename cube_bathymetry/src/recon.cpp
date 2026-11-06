@@ -45,6 +45,7 @@ SpilledSounding SpilledSounding::from(const GeoSounding & s)
   r.intensity = s.sounding.intensity;
   r.beam_angle = s.sounding.beam_angle;
   r.slant_range = s.sounding.slant_range;
+  r.correction_idx = s.sounding.correction_idx;
   r.sonar_relative_x = s.sounding.sonar_relative_position.x;
   r.sonar_relative_y = s.sounding.sonar_relative_position.y;
   r.sonar_relative_z = s.sounding.sonar_relative_position.z;
@@ -60,6 +61,7 @@ GeoSounding SpilledSounding::toGeoSounding() const
   s.sounding.intensity = intensity;
   s.sounding.beam_angle = beam_angle;
   s.sounding.slant_range = slant_range;
+  s.sounding.correction_idx = correction_idx;
   s.sounding.sonar_relative_position.x = sonar_relative_x;
   s.sounding.sonar_relative_position.y = sonar_relative_y;
   s.sounding.sonar_relative_position.z = sonar_relative_z;

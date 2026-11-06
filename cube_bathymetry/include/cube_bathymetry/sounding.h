@@ -25,6 +25,7 @@
 
 #include <cmath>
 
+#include "cube_bathymetry/backscatter_table.h"
 #include "cube_bathymetry/common.h"
 #include "geometry_msgs/msg/point.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
@@ -163,6 +164,17 @@ namespace cube
   /// becomes depth/range transferable. NaN when constructed without detections
   /// (the `explicit Sounding(float depth)` ctor); the TL term is then skipped.
     float slant_range = std::nan("");
+
+  /// Which per-pulse-mode table entry corrects this beam's backscatter
+  /// (cube_bathymetry#172), stamped per PING by the mode resolver from the
+  /// latest SonarInfo at or before the ping and the ping's own frequency:
+  /// k >= 1 names table entry k - 1; `kCorrectionUnresolved` (0, the
+  /// default) means no mode was resolved and the legacy single curve (if
+  /// any) applies, exactly as before #172; `kCorrectionExclude` drops the
+  /// beam's backscatter (its depth is still used); `kCorrectionIdentity`
+  /// records it uncorrected. Set by the importer / live node, read by
+  /// `Hypothesis::recordBeam` through `correctBeamIntensity`.
+    uint16_t correction_idx = kCorrectionUnresolved;
 
   // Position relative to the sonar head, in meters.
   // For a typical down looking sonar, x is along the heading, y is to starboard, and z is down.

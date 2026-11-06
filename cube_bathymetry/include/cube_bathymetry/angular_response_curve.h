@@ -94,8 +94,19 @@ namespace cube
 /// empty, and for the angle term when @p beam_angle is NaN. The caller gates a
 /// NaN @p raw_intensity (a NaN beam is never a sample). Computed and returned in
 /// `double` to match the estimator's accumulation precision.
+///
+/// @p correction_idx (cube_bathymetry#172) selects the correction per beam:
+///   - `kCorrectionUnresolved` (0, the default): the legacy path above,
+///     byte-identical to the pre-#172 behaviour;
+///   - `kCorrectionIdentity`: @p raw_intensity, whatever is configured;
+///   - `kCorrectionExclude`: NaN -- the caller (`Hypothesis::recordBeam`)
+///     skips the beam;
+///   - k >= 1: entry k - 1 of `parameters.backscatter_table`, via
+///     `correctWithTable` under `parameters.backscatter_mode_fallback`. The
+///     legacy curve and TL term do NOT apply to a table-corrected beam.
   double correctBeamIntensity(
-    float raw_intensity, float beam_angle, float range, const Parameters & parameters);
+    float raw_intensity, float beam_angle, float range, const Parameters & parameters,
+    uint16_t correction_idx = kCorrectionUnresolved);
 
 }  // namespace cube
 

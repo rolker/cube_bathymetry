@@ -430,6 +430,8 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_node test/test_node.cpp)
   target_link_libraries(test_node cube_bathymetry)
+  target_compile_definitions(test_node PRIVATE
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
 
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)

@@ -68,6 +68,7 @@ MultiLevelAccumulator::MultiLevelAccumulator(
       entry.sheet->setBackscatterCorrection(
         cfg_.backscatter_mode, cfg_.backscatter_curve, cfg_.backscatter_tl_removed,
         cfg_.backscatter_absorption_db_per_m);
+      entry.sheet->setBackscatterTable(cfg_.backscatter_table, cfg_.backscatter_mode_fallback);
     }
     if (!entry.sheet) {
       // Same invariant batch_regen applies to its factory (#143): a factory that

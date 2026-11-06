@@ -116,10 +116,12 @@ public:
   ///     the angle half of the {raw intensity, angle} sufficient-stats pair.
   ///   range: per-beam slant range (m, NaN when absent), for the tier-2 TL
   ///     correction (cube_bathymetry#87).
+  ///   correction_idx: the beam's per-mode correction index (cube#172),
+  ///     passed to recordBeam with the other three.
     bool update(
       float depth, float variance, const Parameters & parameters,
       float intensity = std::nan(""), float beam_angle = std::nan(""),
-      float range = std::nan(""));
+      float range = std::nan(""), uint16_t correction_idx = kCorrectionUnresolved);
 
   /// Find the closest matching hypothesis in the current linked list.
   /// This computes the normalised absolute error between one-step
@@ -170,10 +172,12 @@ public:
   ///     mismatches a depth with a foreign intensity (ADR-0007 D3).
   ///   range: per-beam slant range (m, NaN when absent), carried alongside so the
   ///     tier-2 TL correction reads the same beam's range (cube_bathymetry#87).
+  ///   correction_idx: the beam's per-mode correction index (cube#172), bound
+  ///     to its depth in the queue entry like the three above.
     bool queueEstimate(
       float depth, float variance, const Parameters & parameters,
       float intensity = std::nan(""), float beam_angle = std::nan(""),
-      float range = std::nan(""));
+      float range = std::nan(""), uint16_t correction_idx = kCorrectionUnresolved);
 
   /* Routine: cube_node_extract_depth_unct
   * Purpose:  Extract depth and uncertainty of current best estimate

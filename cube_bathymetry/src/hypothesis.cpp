@@ -118,7 +118,8 @@ bool Hypothesis::update(float depth, float variance, const Parameters & paramete
 }
 
 void Hypothesis::recordBeam(
-  float raw_intensity, float beam_angle, float range, const Parameters & parameters)
+  float raw_intensity, float beam_angle, float range, const Parameters & parameters,
+  uint16_t correction_idx)
 {
   // Skip beams with no reported intensity -- a NaN must never be mistaken for a
   // real backscatter sample (ADR-0007: missing intensity != zero backscatter).
@@ -134,7 +135,12 @@ void Hypothesis::recordBeam(
   // of retaining every raw beam. correctBeamIntensity is the exact per-beam math
   // that used to run at extract, so the node-output mean/variance are unchanged.
   const double corrected =
-    correctBeamIntensity(raw_intensity, beam_angle, range, parameters);
+    correctBeamIntensity(raw_intensity, beam_angle, range, parameters, correction_idx);
+  // An excluded beam (cube#172: kCorrectionExclude, or uncorrectable under the
+  // exclude fallback) comes back NaN and is not a sample either.
+  if (std::isnan(corrected)) {
+    return;
+  }
 
   // Welford online update (n, mean, M2) in double precision.
   ++intensity.n;

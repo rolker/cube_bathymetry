@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 #include "cube_bathymetry/angular_response_curve.h"
+#include "cube_bathymetry/backscatter_table.h"
 #include "cube_bathymetry/node.h"
 
 namespace cube
@@ -932,6 +933,35 @@ TEST_F(NodeTest, CaptureSpacingTermTracksGridResolution)
   p.setGridResolution(CellSizes(0.5f));
   Node narrow;
   EXPECT_FALSE(narrow.insert(1.3, captureProbe(-1.0f), p));  // 0.71 * 0.5 = 0.355
+}
+
+// cube_bathymetry#172: the per-ping correction index rides the sounding
+// through insert, the median queue and the hypothesis update, so the node
+// output is the TABLE-corrected level for a resolved beam, and the beams of
+// an excluded mode add depth but no backscatter.
+TEST_F(NodeTest, CorrectionIndexRidesTheQueueIntoTheRecord)
+{
+  std::string error;
+  params.backscatter_table = loadBackscatterTable(MODE_TABLE_FIXTURE_FILE, error);
+  ASSERT_TRUE(error.empty()) << error;
+  const float angle_11 = static_cast<float>(11.0 * M_PI / 180.0);
+  const float r = static_cast<float>(params.backscatter_table.range_ref_m) *
+    std::pow(10.0f, 0.25f);
+
+  Node n;
+  for (int i = 0; i < 12; ++i) {
+    Sounding s(-10.0f);
+    s.vertical_error = 0.01f;
+    s.intensity = -20.0f;
+    s.beam_angle = angle_11;
+    s.slant_range = r;
+    s.correction_idx = (i % 2 == 0) ? 2 : kCorrectionExclude;  // FMU 1 ms / excluded
+    ASSERT_TRUE(n.insert(0.0, s, params));
+  }
+  n.queueFlush(params);
+  const auto record = n.extractNodeRecord(params);
+  EXPECT_EQ(record.n_samples, 6u) << "the excluded beams add depth, not backscatter";
+  EXPECT_NEAR(record.intensity, -20.0 + 0.8 + 2.25, 1e-3);
 }
 
 }  // namespace cube
