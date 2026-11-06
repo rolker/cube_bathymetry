@@ -473,3 +473,51 @@ Full package suite (`./sensors_ws/test.sh cube_bathymetry`): **1421 tests, 0 err
 
 ### Next
 `/review-code` pre-push (round 3) on the new fix commits, `877a16a..7ed4fe4`, fresh context.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-06 12:16 -05:00
+**By**: Claude Code Agent (Claude Opus)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-172 at `498e782`
+**Mode**: pre-push
+**Depth**: Deep (reason: +859 / -143 lines over 13 files in the fix range, plus ADR-0007 addendum edits; scoped to the round-2 fix commits `877a16a..7ed4fe4`, cross-model read on that range too)
+**Must-fix**: 1 | **Suggestions**: 10
+**Round**: 3 of PR 2 (the 11-02 entries reviewed PR 1, merged as PR #174) | **Ship**: recommended — must-fixes went 8, 3, 1. The one left is a bounded gap in the round-2 time-jump fix with a clear correction, and the suggestions can ride the PR. Another full round is not justified. If the fix replaces the arrival-order heuristic with a clock-jump handler, a Light review of that one commit is enough.
+
+Specialists:
+- Static analysis on the 10 changed C++ files: cpplint and uncrustify are clean. cppcheck 2.13, run directly, reports only style notes (useStlAlgorithm, noExplicitConstructor), the same kinds as earlier rounds.
+- Governance and plan drift: README, the ADR-0007 addendum and plan decisions 9 and 10 match the fixes. The repo has no `.agents/README.md` or `review-context.yaml`.
+- Claude Adversarial Lens A and Lens B ran on the fix range with fresh context and a Deep horizon (Sonnet).
+- Cross-model: Gemini and Codex ran on `9e8a7ba..HEAD`, both EXIT=0.
+- Local Adversarial is off (the default).
+
+Round-2 closure:
+- All 3 must-fixes are closed: the 90 deg last bin (`877a16a`), the re-anchor (`167d794`) and the exit-4 wording (`f278fd5`). The re-anchor is closed for the order it tests. The two orders it misses are must-fix 1 below.
+- All 13 suggestions are closed, with one partly deferred: an interior gap between written bins is still interpolated, and that is still an operator decision.
+- Verified by reading: the hash is computed over the parsed bytes; `tableBeamStatus` gates the lookup itself, not only the counts; the live node is single-threaded, so the resolver has no race.
+
+Downgraded or dropped:
+- Gemini and Codex rated the cap-eviction case must-fix. It needs more than 4096 SonarInfo stamps in 60 s (above 68 Hz, past what the M3 or EM2040 ping) plus a time jump, so it is folded into must-fix 1.
+- Codex's delayed-pair case (suggestion 2) requires a SonarInfo and a ping that both arrive more than 60 s late with no ping between them. That is indistinguishable from a restart by arrival order.
+- Dropped: Lens B's stat-then-open race. The path is operator-supplied, and it needs a racing writer.
+
+### Findings
+- [ ] (must-fix) The re-anchor misses two orders after time goes backwards, both cross-model confirmed (Lens A + Gemini + lead, and Gemini + Codex):
+  - (a) When the new timeline's first ping arrives before its first SonarInfo, `behind_stamps_` is empty and the old timeline's entries survive, because `prune` keeps everything above the cut. Once the new run reaches those stamps, a ping stamped just after an old entry is resolved with the old run's mode. This is silent, and does harm only when the two runs used different modes.
+  - (b) With the history at the cap and no hold (live), `capHistory` erases each behind-window state the moment it is inserted, while `rememberBehind` keeps its stamp. The re-anchoring ping then erases every entry, leaving the history empty.
+  - Fix: exempt behind-stamped entries from the cap. For (a), the cleanest fix is a backward-jump callback on the node clock (`rclcpp::Clock::create_jump_callback`) that clears the resolver's timeline, since offline bags are merged in time order. Test both orders. — `cube_bathymetry/src/backscatter_mode.cpp:143-146,174-185,282-305`
+- [ ] (suggestion) The node's warned-reason set is filled before the throttle check. A reason first seen while the once-a-minute throttle is muting the "nothing resolved" warning is then never warned once clouds resolve, contrary to "each reason is warned about once per configuration". Insert only when the warning fires. — `cube_bathymetry/src/cube_bathymetry_node.hpp:980` (Gemini + Lens B, cross-model confirmed)
+- [ ] (suggestion) A SonarInfo and ping that both arrive more than 60 s late, with nothing in the window between them, are taken as a restart and drop the current timeline's states. Arrival order cannot tell the two apart. Document it as accepted, or remove the ambiguity with the clock-jump route from must-fix 1. — `cube_bathymetry/src/backscatter_mode.cpp:289-300` (Codex)
+- [ ] (suggestion) A false probe falls through to the unguarded legacy curve loader:
+  - A FIFO given as `--backscatter-curve` or `backscatter_curve_file` still blocks configure or import, and `/dev/zero` reads without bound. The "never a FIFO or device" guard covers only the table branch.
+  - An unreadable table (chmod 000) becomes an "EMPTY curve" warning and an uncorrected store with exit 0.
+  - Both predate this range. Refuse a non-regular or unreadable path before either loader runs. — `cube_bathymetry/src/backscatter_table.cpp:545`, `cube_bathymetry/src/import_bag_main.cpp:1044`, `cube_bathymetry/src/cube_bathymetry_node.hpp:235` (Codex + Lens B, cross-model confirmed)
+- [ ] (suggestion) A `--level-plan-out` preflight that resolved nothing still exits 0, after printing "Re-run with --level-plan" on stdout. A script running `preflight && import` therefore starts the full import blind. Round 2 accepted "say so plainly". The host should decide between exit 4 and documenting that callers must not gate on the preflight's exit 0. — `cube_bathymetry/src/import_bag_main.cpp:1227-1234,1932-1935` (Lens A + Lens B, cross-pass confirmed)
+- [ ] (suggestion) The README smoke-test sentence ("the same table on a `--level-plan-out` preflight keeps exit 0 ..., and with an unwritable fingerprint keeps exit 2") reads as if the preflight writes a fingerprint. Split the sentence. — `README.md:~585` (Lens B)
+- [ ] (suggestion) The depth-adaptive finish prints "done!" before `withTableResolution` turns its 0 into exit 4, so an exit-4 run ends with "done!" and then the error. Print "done!" after the code is known, or not at all on 4. — `cube_bathymetry/src/import_bag_main.cpp:2123` (Lens B)
+- [ ] (suggestion) A table without `# angle_bin_width_deg:` silently skips the OutsideAngleBins test, so a beam far past the last bin gets the clamped end value. Warn at load when the header is missing and the table has more than one bin, or require the header. — `cube_bathymetry/src/backscatter_table.cpp:~1015` (Lens A)
+- [ ] (suggestion) A last bin centred past 90 deg (100 deg at width 40) is used as that bin's interpolation x, although its beams lie between 80 and 90 deg. A beam at 85 deg is therefore pulled only 0.625 of the way to the bin's value. The PR 1 writer could write the clipped centre `(lo + min(hi, 90)) / 2`, or the loader could clip. Cross-PR, so it can go to a follow-up. — `cube_bathymetry/src/backscatter_table.cpp:820-830` (lead)
+- [ ] (suggestion) The "unsupported table format" error echoes the first content line uncapped, while every later line is capped at 4096 characters. Truncate it. — `cube_bathymetry/src/backscatter_table.cpp:609-611` (Lens B)
+- [ ] (suggestion) `holdFrom(pending.front())` assumes detections arrive in stamp order, the same assumption the drain loop makes. Say so in a comment. — `cube_bathymetry/src/import_bag_main.cpp:1315` (Lens A)
