@@ -256,6 +256,34 @@ TEST(BackscatterModeResolver, HistoryIsBoundedByTheWindowAndTheCap)
   EXPECT_EQ(idle.stateAt(0), nullptr) << "the oldest ones went first";
 }
 
+// cube_bathymetry#172 review round 2: import_bag reads SonarInfo as it comes
+// and resolves pings only once the TF frontier passes them. A TF stall through
+// more state changes than the cap must not drop the states the waiting pings
+// need (they would be reported as "before the first SonarInfo"): the oldest
+// waiting ping holds the history.
+TEST(BackscatterModeResolver, TheOldestWaitingPingHoldsTheHistoryPastTheCap)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table);
+  ASSERT_EQ(r.resolve(1, kF), kCorrectionUnresolved);   // a ping drained: the window is live
+  const int64_t many = 2 * static_cast<int64_t>(BackscatterModeResolver::kMaxHistory);
+  r.holdFrom(int64_t{10});   // the oldest ping still waiting for the TF frontier
+  for (int64_t i = 0; i < many; ++i) {
+    const int64_t t = 5 + i;
+    r.addSonarInfo(t % 2 == 0 ? state(t, 0.001f, 24000.0f, 2) : state(t, 5e-5f, 20000.0f, 1));
+  }
+  EXPECT_GT(r.historySize(), BackscatterModeResolver::kMaxHistory) << "held past the cap";
+  EXPECT_LE(r.historySize(), static_cast<std::size_t>(many) - 4) << "but not before the hold";
+  // Every waiting ping still finds the state in force at its stamp.
+  for (const int64_t ping : {10LL, 11LL, 4000LL, 8000LL}) {
+    EXPECT_EQ(r.resolve(ping, kF), ping % 2 == 0 ? 2 : 1) << ping;
+  }
+  // Released (nothing waiting), the next message brings it back to the cap.
+  r.holdFrom(std::nullopt);
+  r.addSonarInfo(state(5 + many, 0.001f, 24000.0f, 2));
+  EXPECT_EQ(r.historySize(), BackscatterModeResolver::kMaxHistory);
+}
+
 // cube_bathymetry#172 review round 2: time going backwards (a sim restart,
 // `ros2 bag play --loop`; ~/reset keeps the resolver). The window anchor was a
 // running maximum, so every SonarInfo of the new timeline pruned the history

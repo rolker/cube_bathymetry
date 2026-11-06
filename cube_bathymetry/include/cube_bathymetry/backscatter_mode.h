@@ -111,7 +111,11 @@ namespace cube
 ///     be selected again. A late ping inside the window still finds the
 ///     state that was in force at its stamp.
 ///   - a hard cap of `kMaxHistory` entries, the oldest dropped first, for a
-///     stream that changes state while no ping is resolved at all.
+///     stream that changes state while no ping is resolved at all -- except
+///     that the state in force at the hold (`holdFrom`) and every later one
+///     stay: import_bag reads SonarInfo ahead of the pings waiting for the TF
+///     frontier, and a TF stall through more than the cap's worth of state
+///     changes must not drop the states those pings need.
 /// The stale count looks back over the same window only.
 ///
 /// **Time going backwards** (a sim restart, `ros2 bag play --loop`; ~/reset
@@ -190,6 +194,13 @@ public:
   /// (the stale case above).
     bool addSonarInfo(const SonarInfoState & state);
 
+  /// The oldest stamp a ping may still be resolved at (import_bag: the
+  /// oldest ping waiting for the TF frontier; empty = none waiting). Neither
+  /// the window nor the cap drops the state in force there or any later one,
+  /// so the history can exceed `kMaxHistory` by the states read ahead of the
+  /// pings the caller is itself holding.
+    void holdFrom(std::optional < int64_t > stamp_ns);
+
   /// Resolve one ping. @p frequency_hz is the ping's own
   /// `PingInfo.frequency`. Returns the `correction_idx` to stamp on every
   /// sounding of the ping and sets @p resolution to why.
@@ -257,6 +268,7 @@ private:
     const KeyDecision & decide(const std::string & key);
     void remember(int64_t ping_stamp_ns, float frequency_hz, uint16_t idx);
     void rememberBehind(int64_t stamp_ns);
+    void capHistory();
 
     const BackscatterTable * table_;
     BackscatterModeFallback fallback_;
@@ -276,6 +288,8 @@ private:
   /// in-window message or ping: a new timeline's, if a ping behind the window
   /// follows (time went backwards), else late messages.
     std::set < int64_t > behind_stamps_;
+  /// See holdFrom.
+    std::optional < int64_t > hold_ns_;
 
   /// Oldest stamp the window keeps; meaningless before the first ping.
     int64_t windowCut() const;

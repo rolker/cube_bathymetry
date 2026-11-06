@@ -1302,10 +1302,16 @@ void stampCorrectionIndex(
 /// Feed one recorded SonarInfo message to the mode resolver (cube#172).
 /// Recorded as it arrives; pings resolve at drain time (a guard interval
 /// later), so a SonarInfo written just after its first ping is still seen.
-/// One stamped before a ping already drained is counted stale.
+/// One stamped before a ping already drained is counted stale. The oldest
+/// @p pending ping holds the history (`holdFrom`): its state, and every later
+/// one, survive the history cap however long the TF frontier stalls.
+template<typename Pending>
 void feedSonarInfo(
-  const rosbag2_storage::SerializedBagMessage & message, cube::BackscatterModeResolver & resolver)
+  const rosbag2_storage::SerializedBagMessage & message, cube::BackscatterModeResolver & resolver,
+  const Pending & pending)
 {
+  resolver.holdFrom(
+    pending.empty() ? std::nullopt : std::optional<int64_t>(pending.front().first));
   try {
     rclcpp::SerializedMessage sm(*message.serialized_data);
     marine_interfaces::msg::SonarInfo info;
@@ -2750,7 +2756,7 @@ int main(int argc, char * argv[])
     } else if (is_odom) {
       feedOdometry(*message->message, speed_by_ns, odom_samples_total);
     } else if (is_sonar_info) {
-      feedSonarInfo(*message->message, *mode_resolver);
+      feedSonarInfo(*message->message, *mode_resolver, pending);
     } else if (is_detection) {
       try {
         rclcpp::SerializedMessage sm(*message->message->serialized_data);

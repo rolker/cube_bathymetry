@@ -138,9 +138,7 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
   history_[stamp] = state;
   if (behind_window) {
     rememberBehind(stamp);
-    while (history_.size() > kMaxHistory) {
-      history_.erase(history_.begin());
-    }
+    capHistory();
   } else {
     prune();
   }
@@ -161,10 +159,28 @@ int64_t BackscatterModeResolver::windowCut() const
          std::numeric_limits<int64_t>::min() : newest_resolved_ns_ - kHistoryWindowNs;
 }
 
+void BackscatterModeResolver::holdFrom(std::optional<int64_t> stamp_ns)
+{
+  hold_ns_ = stamp_ns;
+}
+
+void BackscatterModeResolver::capHistory()
+{
+  // The oldest entry goes only while the state in force at the hold (the
+  // oldest ping still waiting to resolve) stays: the next entry is at or
+  // before the hold. Past that the history may exceed the cap, but only by
+  // the states read ahead of pings that are themselves still held in RAM.
+  while (history_.size() > kMaxHistory &&
+    (!hold_ns_ || std::next(history_.begin())->first <= *hold_ns_))
+  {
+    history_.erase(history_.begin());
+  }
+}
+
 void BackscatterModeResolver::prune()
 {
   if (have_resolved_) {
-    const int64_t cut = windowCut();
+    const int64_t cut = hold_ns_ ? std::min(windowCut(), *hold_ns_) : windowCut();
     // Keep the newest entry at or before the cut: a ping at or after the cut
     // may still resolve against it; nothing older can be selected again.
     auto keep = history_.upper_bound(cut);
@@ -172,13 +188,11 @@ void BackscatterModeResolver::prune()
       --keep;
       history_.erase(history_.begin(), keep);
     }
-    while (!recent_resolved_.empty() && recent_resolved_.front().stamp_ns < cut) {
+    while (!recent_resolved_.empty() && recent_resolved_.front().stamp_ns < windowCut()) {
       recent_resolved_.pop_front();
     }
   }
-  while (history_.size() > kMaxHistory) {
-    history_.erase(history_.begin());
-  }
+  capHistory();
 }
 
 const SonarInfoState * BackscatterModeResolver::stateAt(int64_t stamp_ns) const
