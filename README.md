@@ -13,8 +13,15 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | `coverage_assessment_node` (package `coverage_assessment`) | one or more CUBE `grid` topics (`grid_topics`), `survey_area` (`marine_interfaces/SurveyArea`, transient_local), TF | `coverage_assessment` (`marine_interfaces/CoverageAssessment`, one per area, transient_local), `coverage_grid` (`grid_map_msgs/GridMap`, layer `meets_standard`, transient_local) | Scores how much of each target polygon the sources' grids cover and how much of that meets the area's survey standard, with credit per source. Keeps the union over time of every source's `grid`, so the 200 m window does not matter. Lifecycle node; service `~/reset` (`std_srvs/Trigger`) empties the unions; see *Coverage assessment* below and `coverage_assessment/README.md`. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
-`soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
-`intensity`, `vertical_uncertainty`, `horizontal_uncertainty`, `beam_angle`.
+`soundings` carries eight `float32` fields per point (`point_step` 32), in
+order: `x`, `y`, `z`, `intensity`, `vertical_uncertainty`,
+`horizontal_uncertainty`, `beam_angle`, `frequency`. `frequency` is the ping's
+`PingInfo.frequency` in Hz, the same value on every point of a cloud; the live
+node reads it to build the ping's pulse-mode key (cube_bathymetry#172). It was
+added after `beam_angle`, so a consumer reading by field name is unaffected,
+and a cloud from an older `detections_to_pointcloud` (seven fields,
+`point_step` 28) still decodes; its pings key as `?kHz` and get the per-mode
+table's fallback.
 
 **Read the two uncertainty fields carefully: despite the names, they are
 VARIANCES in m², at one sigma, with no confidence-interval scaling applied** —
