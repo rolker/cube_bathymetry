@@ -31,3 +31,19 @@ Operator-settled facts taken as given: step +23.0 dB (pre minus post) from 2026-
 - [ ] (consequence) New parameter/CLI option for the declaration path: update the `.agents/README.md` verified-parameter table and the package README in the same PR; add the provenance field values (settings file | measured | operator-reported) to the schema validation.
 - [ ] (test) Targeted tests: step boundary ping on either side, overlap/gap rejection, fingerprint changes with the declaration, derive tool produces the same table from pre-only data and from pre+post data with the declaration, resolver summary reports uncovered pings.
 - [ ] (data) The 20:17:30 stamp is a measured boundary; record its provenance as measured from overlapping lines (528 cells, 20us/50us CW +23.0, 1ms FM +22.7 -- the 0.3 dB FM difference is within the quoted spread, but note it rather than claiming a mode-dependent gain).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-11-09 14:30 -05:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-176/plan.md` at `b5d8ddb`
+**Branch**: feature/issue-176 at `b5d8ddb` (local, not pushed)
+**Phases**: single (four atomic commits)
+
+### Open questions
+- [ ] `.agents/README.md` does not exist in this repo: create it here or document the parameter in the package README only?
+- [ ] batch_regen: check-only against the -o / --reference-store fingerprint, or also write one?
+- [ ] Refuse a pre-#176 table whenever a declaration is supplied (recommended), or warn?
+- [ ] Live node: reload the declaration on the reset service, or configure only?
+- [ ] Confirm provenance vocabulary: settings_file | measured | operator_reported (+ mandatory note).
