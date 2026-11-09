@@ -110,3 +110,28 @@ Dispatched fresh-context reviewer (handoff header present). Core mechanism verif
 - README claims (counts printed, cleanup logging, matrix) were checked against code; the README says the live node does not detect resume under another declaration.
 - Python and C++ loaders differ only on hex-float offsets (C++ strtod accepts them, Python rejects).
 - No real-bag smoke run was done.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-09 14:50 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-176 at `399a579` (diff vs origin/jazzy: 29 files, +4500 -55)
+**Mode**: pre-push
+**Depth**: Deep (reason: 4500 lines, 29 files, estimator + live node + tools)
+**Must-fix**: 3 | **Suggestions**: 4
+**Round**: 1 | **Ship**: continue — three must-fixes, all mechanical and well-localised; one more independent read after the fix pass.
+
+Specialists: Static analysis via the package suite (uncrustify, cpplint, flake8, pep257, lint_cmake, xmllint, copyright all green; 1584 tests / 0 failures / 100 skipped = cppcheck). Governance + plan drift by the lead: new option/parameter/derive flag documented in README; ADR-0003 and ADR-0007 addenda present; plan deviations recorded inline; no parameter-table file exists in this repo (follow-up noted in the plan). Claude Adversarial Lens A + Lens B (Sonnet, fresh context). Cross-Model gemini + codex (both EXIT=0). Local Adversarial: off.
+
+### Findings
+- [ ] (must-fix, cross-confirmed by Gemini, Codex, Lens A, Lens B) The live node loads `backscatter_gain_declaration` but never runs `gainRecordProblem` against the curve/table it applies, so a table fitted under a declaration with no (or another) declaration configured, or a pre-#176 table with a declaration, is accepted silently and mis-corrects live by the step — the one path that runs on the boat — `cube_bathymetry/src/cube_bathymetry_node.hpp:222-273`. Also no `isAngularResponseTable(gain_file)` refusal there (import_bag/batch_regen have one). Fix: call `gainRecordProblem` in `on_configure` after the declaration load, return FAILURE on a problem, refuse a table handed as a declaration; lifecycle test for each.
+- [ ] (must-fix, Codex reproduced + Lens A) `derive_angular_response.py` `GainTracker.restore` (~l.790/892): the accumulation cache is keyed on the canonical digest, which deliberately excludes segment ids, but per-segment counts are restored BY id — a renamed segment reports 0 pings/0 beams plus a false "no ping fell in it" warning; swapped ids attribute counts to the wrong interval. Fitted data unaffected; the provenance the feature exists for is wrong. Fix: restore counts by interval identity (start,end,offset) or include ids in the cache identity; test.
+- [ ] (must-fix, Gemini + Lens A + Lens B) C++/Python offset grammar and formatting are not pinned to the same rules: C++ `strtod` accepts hex floats and rejects underflow (`1e-400`, ERANGE) where Python's `GAIN_DECIMAL` does the opposite; `strtod`/`snprintf("%.6f")` are `LC_NUMERIC`-sensitive, so under a non-C locale the canonical digest or the parse can diverge — `gain_declaration.cpp:165-171, 423-437`. Fix: apply the same decimal regex in C++ before parsing, use a locale-independent parse/format (`std::from_chars`/`to_chars` or classic-locale stream) for the canonical form, and extend `gain_declaration_vectors.json` with hex, exponent, underflow, negative/fractional offsets (`-0.4`, `0.0000004`, `-0.0000001` → `-0.000000` normalisation), CRLF/BOM/tab/padding cases so both loaders are pinned on every case.
+- [ ] (suggestion, Gemini + Lens A) Per-segment ping counts are defined differently across tools (derive counts every ping incl. out-of-`--box`; import_bag counts pings that reach the shift after georeferencing; node skips empty clouds) and a segment covering only transit pings warns falsely under `--box`. Define the count once (pings the shift was applied to) or state in the report/README that the counts are per-tool diagnostics, and suppress the empty-segment warning when `--box` filtered pings fell in it.
+- [ ] (suggestion, Lens B) `ros2 param set backscatter_gain_declaration` mid-run is accepted and silently ignored until the next configure; reject or warn in `applyRefreshParameters`, and say so in the README next to "configure only".
+- [ ] (suggestion, Lens B) C++ loader accepts non-UTF-8 bytes in notes that the Python loader refuses ("not UTF-8"); validate UTF-8 in C++ (or document).
+- [ ] (suggestion, Gemini; pre-existing) `batch_regen` silently ignores `--backscatter-curve` under the default `--backscatter-correction none`, so a curve + declaration pairing can bypass `gainRecordProblem`; print the same notice import_bag prints.
+
+Dropped: digest rounding below 5e-7 dB (negligible; soften the ADR's "anything that changes the correction" wording in passing); `add_dependencies` on the test binaries (existing convention, fail-loud when the env var is set is in place).
