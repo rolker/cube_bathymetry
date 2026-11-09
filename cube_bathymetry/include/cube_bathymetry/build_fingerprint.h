@@ -27,6 +27,8 @@
 #include <set>
 #include <string>
 
+#include "cube_bathymetry/gain_declaration.h"
+
 /// @file
 /// @brief The store's build fingerprint sidecar (ADR-0003), schema version 2 --
 ///        the **tiling** part only (cube_bathymetry#143).
@@ -216,6 +218,12 @@ namespace cube
 
 /// @brief SHA-256 of @p text as lowercase hex.
   std::string sha256Text(const std::string & text);
+
+/// @brief SHA-256 of a gain declaration's canonical form (cube_bathymetry#176):
+///        the identity the fingerprint, the derive tool's table headers and
+///        the import-time consistency check compare. See
+///        `GainDeclaration::canonicalForm` for what is and is not in it.
+  std::string gainDeclarationSha256(const GainDeclaration & declaration);
 
 }  // namespace cube
 

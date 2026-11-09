@@ -300,6 +300,11 @@ std::string sha256Text(const std::string & text)
   return digestHex(d.ctx);
 }
 
+std::string gainDeclarationSha256(const GainDeclaration & declaration)
+{
+  return sha256Text(declaration.canonicalForm());
+}
+
 std::optional<BuildFingerprint> BuildFingerprint::read(const std::string & store_dir)
 {
   const auto path = std::filesystem::path(store_dir) / kFilename;

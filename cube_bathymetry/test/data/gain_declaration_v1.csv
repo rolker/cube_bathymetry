@@ -1,0 +1,6 @@
+# format: gain-state-declaration v1
+# reference_state: pre_step
+# sonar: TEST FIXTURE shaped like an Appledore-2026 M3 declaration; not a campaign file
+# sign: offset_db is ADDED to the reported level to reach the reference state
+segment,start_utc,end_utc,offset_db,provenance,provenance_note
+gain_step,2026-08-26T20:17:30Z,2026-08-29T00:00:00Z,23.0,measured,test fixture: step measured from overlapping lines of adjacent passes

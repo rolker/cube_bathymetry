@@ -56,6 +56,7 @@ add_library(cube_bathymetry
   src/backscatter_mode.cpp    # per-ping mode resolver (#172)
   src/detections_projector.cpp
   src/error_model.cpp
+  src/gain_declaration.cpp    # operator-declared sonar gain states (#176)
   src/geo_grid.cpp
   src/geo_map_sheet.cpp
   src/grid.cpp
@@ -438,6 +439,16 @@ if(BUILD_TESTING)
   target_link_libraries(test_node cube_bathymetry)
   target_compile_definitions(test_node PRIVATE
     MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
+
+  # Gain-state declaration loader + the shared vectors (#176): the C++ loader
+  # and derive_angular_response.py must agree on every case in
+  # gain_declaration_vectors.json (canonical form, digest, bad files).
+  ament_add_gtest(test_gain_declaration test/test_gain_declaration.cpp)
+  target_link_libraries(test_gain_declaration
+    cube_bathymetry cube_bathymetry_level_plan nlohmann_json::nlohmann_json)
+  target_compile_definitions(test_gain_declaration PRIVATE
+    GAIN_DECLARATION_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/gain_declaration_v1.csv"
+    GAIN_DECLARATION_VECTORS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/gain_declaration_vectors.json")
 
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
