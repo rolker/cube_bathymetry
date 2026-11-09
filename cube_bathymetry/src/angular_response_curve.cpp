@@ -26,7 +26,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -203,7 +202,7 @@ AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path
 }
 
 AngularResponseCurve loadAngularResponseCurveWithHeader(
-  const std::string & path, std::string * bytes_out)
+  const std::string & path, std::string * bytes_out, std::size_t max_bytes)
 {
   if (bytes_out) {
     bytes_out->clear();
@@ -220,21 +219,31 @@ AngularResponseCurve loadAngularResponseCurveWithHeader(
   if (!std::filesystem::is_regular_file(path, ec)) {
     return AngularResponseCurve();
   }
-  // Bounded like the table loader: a curve is a few kilobytes, and the whole
-  // file is held in memory for the parse and the caller's hash.
-  constexpr std::uintmax_t kMaxCurveBytes = 64u << 20;
-  const std::uintmax_t size = std::filesystem::file_size(path, ec);
-  if (ec || size > kMaxCurveBytes) {
-    return AngularResponseCurve();
-  }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     return AngularResponseCurve();
   }
-  // One read of the file: the parse and the caller's hash see the same bytes.
-  std::ostringstream buffer;
-  buffer << in.rdbuf();
-  std::string text = buffer.str();
+  // One read of the file, bounded WHILE reading like the table loader: a
+  // curve is a few kilobytes, the whole file is held in memory for the parse
+  // and the caller's hash, and a size checked before the read would not hold
+  // for a file that grows under us (PR #175 review). Reading max_bytes + 1
+  // tells a file at the cap from one past it.
+  std::string text;
+  char chunk[65536];
+  for (;; ) {
+    in.read(chunk, sizeof(chunk));
+    const std::streamsize got = in.gcount();
+    if (got <= 0) {
+      break;
+    }
+    text.append(chunk, static_cast<std::size_t>(got));
+    if (text.size() > max_bytes) {
+      return AngularResponseCurve();
+    }
+  }
+  if (in.bad()) {
+    return AngularResponseCurve();
+  }
   const AngularResponseCurve result = parseAngularResponseCurve(text);
   if (bytes_out) {
     *bytes_out = std::move(text);

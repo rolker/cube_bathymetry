@@ -229,6 +229,21 @@ TEST(AngularResponseCurve, LoaderReturnsTheBytesItParsed)
   bytes = "stale";
   EXPECT_TRUE(loadAngularResponseCurveWithHeader("/nonexistent/curve.csv", &bytes).points.empty());
   EXPECT_TRUE(bytes.empty());
+
+  // The size cap holds while reading (PR #175 review): a file one byte over a
+  // small cap loads as nothing, one exactly at the cap loads; a directory is
+  // not a curve.
+  const std::string content = expected.str();
+  EXPECT_TRUE(
+    loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE, &bytes, content.size() - 1)
+    .points.empty());
+  EXPECT_TRUE(bytes.empty());
+  EXPECT_EQ(
+    loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE, &bytes, content.size()).points,
+    loaded.points);
+  EXPECT_EQ(bytes, content);
+  EXPECT_TRUE(loadAngularResponseCurveWithHeader("/tmp", &bytes).points.empty());
+  EXPECT_TRUE(bytes.empty());
 }
 
 TEST(AngularResponseCurve, ModeTableLoadsAsAnEmptyCurve)

@@ -23,6 +23,7 @@
 #ifndef CUBE_BATHYMETRY__ANGULAR_RESPONSE_CURVE_H_
 #define CUBE_BATHYMETRY__ANGULAR_RESPONSE_CURVE_H_
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -77,9 +78,13 @@ namespace cube
 /// read: a hash of @p bytes_out is a hash of the curve applied, never of a
 /// second read of a file a derivation may have replaced meanwhile (PR #175
 /// review, the fingerprint's provenance). A path that is not a regular file,
-/// or a file over 64 MiB, loads as an empty curve.
+/// or a file over @p max_bytes (default `kMaxCurveBytes`, 64 MiB), loads as
+/// an empty curve; the cap is enforced WHILE reading, so a file that grows
+/// after it was opened cannot get past it (PR #175 review).
+  constexpr std::size_t kMaxCurveBytes = std::size_t{64} << 20;
   AngularResponseCurve loadAngularResponseCurveWithHeader(
-    const std::string & path, std::string * bytes_out);
+    const std::string & path, std::string * bytes_out,
+    std::size_t max_bytes = kMaxCurveBytes);
 
 /// Parse a curve from CSV text -- what the file loaders do once they have the
 /// bytes. Same format, same header handling, same skip-the-malformed rules.
