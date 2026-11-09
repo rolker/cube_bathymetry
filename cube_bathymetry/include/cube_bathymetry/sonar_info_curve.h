@@ -24,6 +24,7 @@
 
 #include <string>
 #include "cube_bathymetry/angular_response_curve.h"
+#include "cube_bathymetry/backscatter_mode.h"
 #include "marine_interfaces/msg/sonar_info.hpp"
 
 namespace cube
@@ -46,6 +47,12 @@ namespace cube
   bool curveFromSonarInfo(
     const marine_interfaces::msg::SonarInfo & info,
     AngularResponseCurve & out, std::string & reject_reason);
+
+/// The fields the per-pulse-mode resolver reads from a SonarInfo
+/// (cube_bathymetry#172): `header.stamp`, the transmit-sector arrays and the
+/// declared TVG state. Pure copy; nothing is validated here (the key spec
+/// turns absent or non-finite values into `?` / `UNK` itself).
+  SonarInfoState sonarInfoStateFrom(const marine_interfaces::msg::SonarInfo & info);
 
 }  // namespace cube
 

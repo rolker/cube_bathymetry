@@ -26,7 +26,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -84,8 +86,25 @@ double curveRelativeDb(
 }  // namespace
 
 double correctBeamIntensity(
-  float raw_intensity, float beam_angle, float range, const Parameters & parameters)
+  float raw_intensity, float beam_angle, float range, const Parameters & parameters,
+  uint16_t correction_idx)
 {
+  // Per-mode table path (cube#172): a resolved beam is corrected by its mode's
+  // entry only; the reserved values short-circuit. Unresolved (0) falls
+  // through to the legacy single-curve path below, unchanged.
+  if (correction_idx == kCorrectionIdentity) {
+    return raw_intensity;
+  }
+  if (correction_idx == kCorrectionExclude) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  if (correction_idx != kCorrectionUnresolved) {
+    return correctWithTable(
+      raw_intensity, beamAbsAngleDeg(beam_angle), range, parameters.backscatter_table,
+      correction_idx,
+      parameters.backscatter_mode_fallback);
+  }
+
   // Exact per-beam math formerly in Node::extractNodeRecord (cube#80/#81/#87),
   // moved to record time (cube#93). Apply order is TL add-back THEN angular
   // residual, accumulated in double -- identical to the old extract.
@@ -179,16 +198,64 @@ bool matchHeaderComment(
 // SonarInfo (marine_tools#71). Keep parsing-semantics changes in sync.
 AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path)
 {
+  return loadAngularResponseCurveWithHeader(path, nullptr);
+}
+
+AngularResponseCurve loadAngularResponseCurveWithHeader(
+  const std::string & path, std::string * bytes_out, std::size_t max_bytes)
+{
+  if (bytes_out) {
+    bytes_out->clear();
+  }
+  if (path.empty()) {
+    return AngularResponseCurve();
+  }
+  // A directory, FIFO or device is not a curve. The tools refuse those
+  // before calling (explicitBackscatterFileProblem), but this loader is
+  // public, and `<< rdbuf()` below reports a read error on the SOURCE
+  // stream to nobody (it extracts from the streambuf, not through `in`),
+  // so the type check has to happen here, not after the read.
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec)) {
+    return AngularResponseCurve();
+  }
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return AngularResponseCurve();
+  }
+  // One read of the file, bounded WHILE reading like the table loader: a
+  // curve is a few kilobytes, the whole file is held in memory for the parse
+  // and the caller's hash, and a size checked before the read would not hold
+  // for a file that grows under us (PR #175 review). Reading max_bytes + 1
+  // tells a file at the cap from one past it.
+  std::string text;
+  char chunk[65536];
+  for (;; ) {
+    in.read(chunk, sizeof(chunk));
+    const std::streamsize got = in.gcount();
+    if (got <= 0) {
+      break;
+    }
+    text.append(chunk, static_cast<std::size_t>(got));
+    if (text.size() > max_bytes) {
+      return AngularResponseCurve();
+    }
+  }
+  if (in.bad()) {
+    return AngularResponseCurve();
+  }
+  const AngularResponseCurve result = parseAngularResponseCurve(text);
+  if (bytes_out) {
+    *bytes_out = std::move(text);
+  }
+  return result;
+}
+
+AngularResponseCurve parseAngularResponseCurve(const std::string & text)
+{
   AngularResponseCurve result;
   std::vector<std::pair<float, float>> & curve = result.points;
-  if (path.empty()) {
-    return result;
-  }
-
-  std::ifstream in(path);
-  if (!in) {
-    return result;
-  }
+  std::istringstream in(text);
 
   std::string line;
   while (std::getline(in, line)) {

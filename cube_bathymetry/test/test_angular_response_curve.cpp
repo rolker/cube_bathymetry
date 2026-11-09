@@ -20,10 +20,13 @@
 // THE SOFTWARE.
 
 #include <gtest/gtest.h>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include "cube_bathymetry/angular_response_curve.h"
+#include "cube_bathymetry/backscatter_table.h"
 
 namespace cube
 {
@@ -201,6 +204,48 @@ TEST(AngularResponseCurve, LoadsDeriveToolSeawaterCurve)
 // letter, so std::stof rejects every row, and the table carries no tl_removed
 // or absorption_db_per_m header. The fixture is written by
 // test_derive_angular_response.py (mode_table_lines).
+// PR #175 review: import_bag fingerprints the curve it applied, so the loader
+// hands back the bytes it parsed, and parsing those bytes again gives the same
+// curve -- one read, one hash, one parse.
+TEST(AngularResponseCurve, LoaderReturnsTheBytesItParsed)
+{
+  std::string bytes;
+  const auto loaded = loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE, &bytes);
+  ASSERT_FALSE(loaded.points.empty());
+  std::ifstream in(DERIVED_CURVE_GOLDEN_FILE, std::ios::binary);
+  std::ostringstream expected;
+  expected << in.rdbuf();
+  EXPECT_EQ(bytes, expected.str()) << "the bytes are the file's, exactly";
+
+  const auto reparsed = parseAngularResponseCurve(bytes);
+  EXPECT_EQ(reparsed.points, loaded.points);
+  EXPECT_EQ(reparsed.tl_removed, loaded.tl_removed);
+  EXPECT_FLOAT_EQ(reparsed.absorption_db_per_m, loaded.absorption_db_per_m);
+
+  // The one-argument loader is the two-argument one without the bytes.
+  EXPECT_EQ(loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE).points, loaded.points);
+
+  // A missing file leaves the bytes empty rather than stale.
+  bytes = "stale";
+  EXPECT_TRUE(loadAngularResponseCurveWithHeader("/nonexistent/curve.csv", &bytes).points.empty());
+  EXPECT_TRUE(bytes.empty());
+
+  // The size cap holds while reading (PR #175 review): a file one byte over a
+  // small cap loads as nothing, one exactly at the cap loads; a directory is
+  // not a curve.
+  const std::string content = expected.str();
+  EXPECT_TRUE(
+    loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE, &bytes, content.size() - 1)
+    .points.empty());
+  EXPECT_TRUE(bytes.empty());
+  EXPECT_EQ(
+    loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE, &bytes, content.size()).points,
+    loaded.points);
+  EXPECT_EQ(bytes, content);
+  EXPECT_TRUE(loadAngularResponseCurveWithHeader("/tmp", &bytes).points.empty());
+  EXPECT_TRUE(bytes.empty());
+}
+
 TEST(AngularResponseCurve, ModeTableLoadsAsAnEmptyCurve)
 {
   auto loaded = loadAngularResponseCurveWithHeader(MODE_TABLE_FIXTURE_FILE);
@@ -256,6 +301,48 @@ TEST(AngularResponseCurve, ParsesMode)
   mode = BackscatterAngleCorrection::Empirical;
   EXPECT_FALSE(parseBackscatterAngleCorrection("bogus", mode));
   EXPECT_EQ(mode, BackscatterAngleCorrection::Empirical);
+}
+
+// cube_bathymetry#172: the per-beam correction index selects the path. 0 is
+// the legacy curve (unchanged values); the reserved values short-circuit; a
+// table entry applies `raw - rel - r_g - offset` and ignores the legacy curve.
+TEST(AngularResponseCurve, CorrectionIndexSelectsThePath)
+{
+  Parameters params{CellSizes(1.0f), "order1a"};
+  params.backscatter_angle_correction = BackscatterAngleCorrection::Empirical;
+  params.angular_response_curve = {{1.0f, 0.0f}, {41.0f, -8.0f}};  // legacy: -4 dB at 21 deg
+  std::string error;
+  params.backscatter_table = loadBackscatterTable(MODE_TABLE_FIXTURE_FILE, error);
+  ASSERT_TRUE(error.empty()) << error;
+  const float angle_11 = static_cast<float>(11.0 * M_PI / 180.0);
+  const float angle_21 = static_cast<float>(21.0 * M_PI / 180.0);
+  const float r0 = static_cast<float>(params.backscatter_table.range_ref_m);
+
+  // Unresolved -> the legacy curve, as before #172 (the default argument).
+  EXPECT_NEAR(correctBeamIntensity(-20.0f, angle_21, r0, params), -16.0, 1e-5);
+  EXPECT_NEAR(correctBeamIntensity(-20.0f, angle_21, r0, params, kCorrectionUnresolved),
+    -16.0, 1e-5);
+  // Reserved values.
+  EXPECT_FLOAT_EQ(correctBeamIntensity(-20.0f, angle_21, r0, params, kCorrectionIdentity), -20.0f);
+  EXPECT_TRUE(std::isnan(correctBeamIntensity(-20.0f, angle_21, r0, params, kCorrectionExclude)));
+  // Entry 2 (FMU 1 ms) at 11 deg, a quarter decade beyond R0: +0.8 +2.25.
+  EXPECT_NEAR(
+    correctBeamIntensity(-20.0f, angle_11, r0 * std::pow(10.0f, 0.25f), params, 2),
+    -20.0 + 0.8 + 2.25, 1e-4);
+  // A table-corrected beam never sees the legacy curve or the TL term.
+  params.backscatter_tl_removed = true;
+  params.backscatter_absorption_db_per_m = 0.1f;
+  EXPECT_NEAR(correctBeamIntensity(-20.0f, angle_11, r0, params, 2), -19.2, 1e-4);
+  // Uncorrectable under each fallback: entry 3 is unanchored.
+  EXPECT_FLOAT_EQ(correctBeamIntensity(-20.0f, angle_11, r0, params, 3), -20.0f);
+  params.backscatter_mode_fallback = BackscatterModeFallback::Exclude;
+  EXPECT_TRUE(std::isnan(correctBeamIntensity(-20.0f, angle_11, r0, params, 3)));
+  // Mode None does not switch a resolved table beam off: the table is its own
+  // enable (the caller gates None by never resolving modes).
+  params.backscatter_mode_fallback = BackscatterModeFallback::Identity;
+  params.backscatter_angle_correction = BackscatterAngleCorrection::None;
+  EXPECT_NEAR(correctBeamIntensity(-20.0f, angle_11, r0, params, 2), -19.2, 1e-4);
+  EXPECT_FLOAT_EQ(correctBeamIntensity(-20.0f, angle_21, r0, params, 0), -20.0f);
 }
 
 }  // namespace cube

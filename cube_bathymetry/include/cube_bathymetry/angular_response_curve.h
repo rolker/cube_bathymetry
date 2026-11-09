@@ -23,6 +23,7 @@
 #ifndef CUBE_BATHYMETRY__ANGULAR_RESPONSE_CURVE_H_
 #define CUBE_BATHYMETRY__ANGULAR_RESPONSE_CURVE_H_
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -72,6 +73,23 @@ namespace cube
 /// Empirical correction then degrades to a no-op -- callers should warn).
   AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path);
 
+/// Load a curve and hand back the exact bytes that were parsed in @p bytes_out
+/// (may be null; cleared first, left empty when the file cannot be read). One
+/// read: a hash of @p bytes_out is a hash of the curve applied, never of a
+/// second read of a file a derivation may have replaced meanwhile (PR #175
+/// review, the fingerprint's provenance). A path that is not a regular file,
+/// or a file over @p max_bytes (default `kMaxCurveBytes`, 64 MiB), loads as
+/// an empty curve; the cap is enforced WHILE reading, so a file that grows
+/// after it was opened cannot get past it (PR #175 review).
+  constexpr std::size_t kMaxCurveBytes = std::size_t{64} << 20;
+  AngularResponseCurve loadAngularResponseCurveWithHeader(
+    const std::string & path, std::string * bytes_out,
+    std::size_t max_bytes = kMaxCurveBytes);
+
+/// Parse a curve from CSV text -- what the file loaders do once they have the
+/// bytes. Same format, same header handling, same skip-the-malformed rules.
+  AngularResponseCurve parseAngularResponseCurve(const std::string & text);
+
 /// Backward-compatible convenience: the curve `points` only (drops the TL
 /// provenance). Equivalent to `loadAngularResponseCurveWithHeader(path).points`.
   std::vector < std::pair < float, float >> loadAngularResponseCurve(const std::string & path);
@@ -94,8 +112,19 @@ namespace cube
 /// empty, and for the angle term when @p beam_angle is NaN. The caller gates a
 /// NaN @p raw_intensity (a NaN beam is never a sample). Computed and returned in
 /// `double` to match the estimator's accumulation precision.
+///
+/// @p correction_idx (cube_bathymetry#172) selects the correction per beam:
+///   - `kCorrectionUnresolved` (0, the default): the legacy path above,
+///     byte-identical to the pre-#172 behaviour;
+///   - `kCorrectionIdentity`: @p raw_intensity, whatever is configured;
+///   - `kCorrectionExclude`: NaN -- the caller (`Hypothesis::recordBeam`)
+///     skips the beam;
+///   - k >= 1: entry k - 1 of `parameters.backscatter_table`, via
+///     `correctWithTable` under `parameters.backscatter_mode_fallback`. The
+///     legacy curve and TL term do NOT apply to a table-corrected beam.
   double correctBeamIntensity(
-    float raw_intensity, float beam_angle, float range, const Parameters & parameters);
+    float raw_intensity, float beam_angle, float range, const Parameters & parameters,
+    uint16_t correction_idx = kCorrectionUnresolved);
 
 }  // namespace cube
 

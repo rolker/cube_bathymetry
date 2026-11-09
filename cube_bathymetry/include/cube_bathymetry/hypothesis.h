@@ -128,9 +128,14 @@ namespace cube
   /// inject a phantom sample); a NaN @p beam_angle is still counted (a valid
   /// intensity sample, merely uncorrected for angle); a NaN / non-positive
   /// @p range still counted (the tier-2 TL term is skipped for it, cube#87).
+  ///
+  /// @p correction_idx (cube_bathymetry#172) selects the per-mode table entry
+  /// (see `correctBeamIntensity`); a beam the correction EXCLUDES (NaN back
+  /// from it: `kCorrectionExclude`, or an uncorrectable beam under the
+  /// `exclude` fallback) is skipped like a NaN intensity.
     void recordBeam(
       float raw_intensity, float beam_angle, float range,
-      const Parameters & parameters);
+      const Parameters & parameters, uint16_t correction_idx = kCorrectionUnresolved);
 
   /// Current depth mean estimate
     double current_estimate;

@@ -211,20 +211,120 @@ in the Context, Consequences, and Tier-2 sections above, and the backscatter
 "out of scope; re-derivable per cube#15" trade-off note in
 `0001-tile-eviction-and-incremental-publish.md` (§ Negative / trade-offs).
 
+## Per-pulse-mode addendum — the table replaces the curve for a mode-switching sonar (cube_bathymetry#172)
+
+**Context.** The Appledore 2026 M3 product (2026-10-30) showed two things the
+decision above cannot express. Within one pulse mode the M3's raw reflectivity
+is nearly flat with slant range, so the tier-2 add-back of `40 log10 R + 2αR`
+double-counts a range gain the sonar already applied; and the M3 switches
+among five pulse modes hundreds of times per bag, with the modes 10 to 17 dB
+apart at equal range — the pass-to-pass steps in the mosaic. One `|angle|`
+curve corrects their mean and leaves each mode offset from it.
+
+**Decision (amends D1, D3 and the tier-2 addendum).**
+
+1. **A per-mode table is the correction for a mode-switching sonar.**
+   `derive_angular_response.py --by-mode` writes one entry per pulse mode
+   (`angular-response-table v1`): an angular curve `A(|θ|)` at a reference
+   range R0, an EMPIRICAL range term `r_g(log10(R / R0))` per angle group of
+   `|θ|` (binned log-range residual, measured, not modelled — it carries
+   whatever range gain the sonar applied, absorption included), and the
+   mode's level offset against one reference mode, measured at mode
+   switches. The corrected beam is
+   `raw − db_relative_to_nadir(|θ|) − r_g(log10(R/R0)) − offset`, every mode
+   on the reference mode's nadir level at R0. No modelled transmission loss
+   is added back to a table-corrected beam; the tier-2 add-back stays for
+   single curves derived with `--remove-tl`.
+2. **The mode key is shared.** `<TYPE>_<pulse_us>us_<bw_Hz>Hz` per transmit
+   sector, `+`-joined, then `_<freq_kHz>kHz` from the ping's own frequency;
+   one spec in the derive tool, the C++ `canonicalModeKey` tested on the same
+   vectors (`test/data/mode_keys.json`). A ping's mode is the latest
+   `SonarInfo` at or before its stamp plus its `PingInfo.frequency`; the live
+   node reads the frequency from the `frequency` field
+   `detections_to_pointcloud` writes on every point. The resolver keeps that
+   SonarInfo history (same-stamp re-deliveries deduplicated) bounded — 60 s behind the newest
+   resolved ping plus the one state in force at the cut, at most 4096
+   states — since a mode-switching sonar republishes on every switch. A ping
+   more than the window behind the newest one (time went backwards: a sim
+   restart, a looped bag) re-anchors the window on itself. SonarInfo
+   stamped behind the window is kept unpruned (and outside the 4096 cap,
+   under a cap of its own) until such a ping arrives, and is then all the
+   re-anchoring ping keeps; with none, it drops every stored state, since
+   the old run's state in force can be stamped near the new run's start
+   (SonarInfo is sent on change, and a heartbeat keeps the original stamp).
+   Arrival order is the only signal: a clock-jump callback fires only for
+   the ROS time source, which a replay without `--clock` and `import_bag`
+   never use, and input delivered more than the window late is taken as a
+   restart too. Its cost is unresolved pings until the next SonarInfo or
+   heartbeat, never the old run's mode.
+   `import_bag` holds the history from its oldest ping still waiting for the
+   TF frontier, so a TF stall cannot cap away the states those pings need.
+3. **Per-ping state in the estimator.** `Sounding::correction_idx` names the
+   table entry (0 = unresolved → the legacy curve path, byte-identical to
+   before; reserved identity and exclude values) and rides the sounding
+   through the median queue to `Hypothesis::recordBeam`; the recon spill
+   carries it so pass two corrects by pass one's mode.
+4. **Declared state is a check, not an input.** The table records the
+   `SonarInfo.tvg_model` / absorption each mode was seen under; the resolver
+   compares every ping's declaration with it, warns once per (mode, state)
+   and counts, and applies the table regardless (UNKNOWN matches only
+   UNKNOWN; MIXED matches nothing).
+5. **Uncorrectable pings and beams get a policy, never a plausible number.**
+   A ping before the first SonarInfo, a mode with no entry or no measured
+   offset (`offset_anchored=false`), an entry under the operator's ping
+   floor, a beam in an angle bin whose variance the table could not write,
+   a beam at or beyond 90°, a beam more than half a bin width beyond the
+   outermost angle bin the table wrote (or short of the nadir-most one),
+   or a beam with no finite angle or range, gets
+   `identity` (recorded uncorrected, the default) or `exclude` (backscatter
+   dropped, depth kept) — `--backscatter-mode-fallback`,
+   `backscatter_mode_fallback`. Every case is counted per reason in the pass
+   report: the ping-level cases per ping, the beam-level ones per beam and
+   mode (counted as the beams are handed to the estimator, by the same test
+   it applies). A table that does not load is an error, not an identity.
+6. **Provenance.** The build fingerprint's `backscatter_correction` key
+   records the mode, the curve/table kind and SHA-256, the fallback and the
+   ping floor (ADR-0003); a store built under another table is stale.
+   `batch_regen_bag` refuses a table (it reads no SonarInfo). A table run in
+   which not one ping resolved to an entry is recorded as `kind:
+   "table-unresolved"`, never `table`, and `import_bag` exits 4 with the
+   reasons. Exit 4 means a table was given and no ping resolved a pulse
+   mode; on a full run the store and its `table-unresolved` fingerprint
+   were still written (exits 1 and 2 keep their code), and a
+   `--level-plan-out` preflight, which writes neither, exits 4 too; the live node warns from the first unresolved
+   cloud (once a minute while nothing has resolved, then once per new
+   reason).
+
+**Not done here, deliberately.** The inverse-variance beam weighting the
+table's `var_db2` column was written for (plan decision 6) is not applied:
+the persisted per-cell statistic is the unweighted Welford `{n, mean, M2}`
+(the 3-band `MbesCell` reconstructs `n` from `sample_sd / standard_error`),
+and a weighted Welford needs the weight sum and the sum of squared weights to
+stay lossless across eviction, reload and the store round trip. On the M3 the
+weights are flat (105–145 dB² in every bin) so the product is unchanged; the
+loader uses the column only to tell an unweighable bin (decision 5). Applying
+the weights is a follow-up with its own persisted-statistic change.
+
 ## Deferred (explicit follow-ups)
 
 - **Full radiometric GeoCoder (tier-3)** — insonified-area, beam-pattern, TVG
   residual, and the depth/slope incidence term (ADR-0007 D3 / cube_bathymetry#15
   / #59). The empirical curve (tier-1) absorbs the aggregate angular falloff for a
-  flat bottom; tier-2 makes it range/depth transferable; the slope-aware incidence
-  correction and the area/beam-pattern terms remain future work, gated on the
-  predicted-surface producer (#59). **Follow-up to file:** author the full,
+  flat bottom; tier-2 makes it range/depth transferable; the per-mode table
+  (#172 addendum above) absorbs the sonar's own range gain and mode offsets;
+  the slope-aware incidence correction (cube_bathymetry#173, the shared
+  seabed-geometry module of unh_marine_autonomy#304) and the area/beam-pattern
+  terms remain future work. **Follow-up to file:** author the full,
   canonical `docs/decisions/0007-mbes-backscatter-store.md` document (this
   addendum folds into it).
-- **TVG/absorption/frequency state in SonarInfo** (unh_marine_autonomy#240): the
-  M3's already-applied TVG is the one genuine remaining unknown; the tier-1-vs-2
-  comparison resolves it empirically. Until then α is computed locally from the
-  per-ping frequency + water temperature.
+- **Inverse-variance beam weighting** from the table's `var_db2` column
+  (#172 addendum, "Not done here"): needs the intensity Welford to carry the
+  weight sum and the sum of squared weights through the eviction spill and
+  the `MbesCell` round trip.
+- **TVG/absorption/frequency state in SonarInfo** (unh_marine_autonomy#240,
+  marine_tools#95): the M3's gain law is still undeclared (`tvg_model`
+  UNKNOWN); the per-mode table measures its effect instead of modelling it,
+  and a declaration is checked against the table, not used by it.
 - **Intensity domain (dB vs linear) as a first-class sonar property.** The
   correction assumes dB (a subtraction). Sonars reporting linear intensity would
   need a divide, or a domain conversion at ingest. **Follow-up to file:** model

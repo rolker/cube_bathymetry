@@ -35,6 +35,7 @@
        the need for an explicit find_package(nlohmann_json) (the store now exports it),
        but not the build-time install dependency. -->
   <depend>nlohmann-json-dev</depend>
+  <depend>libssl-dev</depend>  <!-- SHA-256 of the backscatter curve/table in the fingerprint (#172) -->
   <depend>rclcpp</depend>
   <depend>rosbag2_cpp</depend>  <!-- bag readers in import_bag / bag_to_geotiff -->
   <depend>rosbag2_transport</depend>
@@ -67,6 +68,8 @@
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>
+  <!-- test_import_bag_mode_table.py reads the store tiles back through GDAL's Python bindings -->
+  <test_depend>python3-gdal</test_depend>
   <!-- test_derive_angular_response.py writes its synthetic bags as mcap -->
   <test_depend>rosbag2_storage_mcap</test_depend>
   <test_depend>ament_lint_auto</test_depend>

@@ -124,7 +124,9 @@
     "(abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir). Required for "
     "--backscatter-correction empirical; empty -> correction is a no-op. A tier-2 "
     "curve (header '# tl_removed: true' + '# absorption_db_per_m: <a>') also makes "
-    "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87)\n";
+    "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87). A "
+    "per-pulse-mode TABLE (angular-response-table v1, cube#172) is refused here: "
+    "it needs the SonarInfo stream, which only import_bag reads\n";
   std::cout << "  --index-db <path>: DRY-RUN dirty-tile query (cube#111, ADR-0002). "
     "Given the marine_survey_index sidecar (survey_index.db) and the bags treated "
     "as newly-added, prints the store-level (L10) tiles a tile-scoped rebuild would "
@@ -836,6 +838,23 @@ int main(int argc, char * argv[])
     usage();
   }
 
+  // The explicit backscatter file is checked before any bag opens and before
+  // either loader (cube#172 review round 3): a FIFO or device would block or
+  // read without bound, and an unreadable file cannot be probed, so a table
+  // there would reach the curve loader and run as a NO-OP.
+  cube::BackscatterAngleCorrection requested_mode = cube::BackscatterAngleCorrection::None;
+  if (!backscatter_curve_file.empty() &&
+    cube::parseBackscatterAngleCorrection(backscatter_correction_str, requested_mode) &&
+    requested_mode == cube::BackscatterAngleCorrection::Empirical)
+  {
+    const std::string problem = cube::explicitBackscatterFileProblem(backscatter_curve_file);
+    if (!problem.empty()) {
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "' " << problem
+                << "\n";
+      usage();
+    }
+  }
+
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;
   std::cout << "Store dir: " << store_dir << std::endl;
@@ -915,6 +934,16 @@ int main(int argc, char * argv[])
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
     !backscatter_curve_file.empty())
   {
+    if (cube::isAngularResponseTable(backscatter_curve_file)) {
+      // A per-mode table (cube#172) needs each ping's pulse mode from the
+      // SonarInfo stream, which batch_regen does not read: accepting it
+      // would be a silent identity on every beam. Same class as 'auto'.
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file
+                << "' is a per-pulse-mode table (angular-response-table v1, cube#172); "
+        "batch_regen has no SonarInfo source to resolve pulse modes, so it cannot "
+        "apply one -- rebuild with import_bag, or pass a single-curve CSV\n";
+      usage();
+    }
     backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
   }
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&

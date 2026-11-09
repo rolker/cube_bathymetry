@@ -92,6 +92,10 @@ namespace cube
     std::vector < std::pair < float, float >> backscatter_curve;
     bool backscatter_tl_removed = false;
     float backscatter_absorption_db_per_m = 0.0f;
+  /// Per-pulse-mode table + fallback (cube_bathymetry#172), applied to every
+  /// level's sheet like the legacy curve above; empty = none.
+    BackscatterTable backscatter_table;
+    BackscatterModeFallback backscatter_mode_fallback = BackscatterModeFallback::Identity;
   };
 
   class MultiLevelAccumulator

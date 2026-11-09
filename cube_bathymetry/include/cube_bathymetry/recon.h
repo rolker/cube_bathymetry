@@ -91,6 +91,9 @@ namespace cube
     float intensity = 0.0f;
     float beam_angle = 0.0f;
     float slant_range = 0.0f;
+    /// Per-ping correction index (cube#172); replayed so pass two corrects
+    /// each beam by the mode pass one resolved.
+    uint16_t correction_idx = 0;
     double sonar_relative_x = 0.0;
     double sonar_relative_y = 0.0;
     double sonar_relative_z = 0.0;

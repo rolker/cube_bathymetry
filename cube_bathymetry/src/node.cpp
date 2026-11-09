@@ -71,7 +71,7 @@ void Node::seedSettledDepth(
 
 bool Node::update(
   float depth, float variance, const Parameters & parameters,
-  float intensity, float beam_angle, float range)
+  float intensity, float beam_angle, float range, uint16_t correction_idx)
 {
   /* Find the best matching hypothesis for the current input sample given
    * those currently being tracked.
@@ -86,14 +86,15 @@ bool Node::update(
     addHypothesis(depth, variance);
     // This beam seeded (and so is a member of) the new hypothesis: record its
     // backscatter on it. Without this the first beam at every node is dropped.
-    depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range, parameters);
+    depth_hypotheses_.back()->recordBeam(
+      intensity, beam_angle, range, parameters, correction_idx);
     return true;
   } else {
     /* Update the best hypothesis with the current data */
     if(best->update(depth, variance, parameters)) {
       // Accepted into the winning hypothesis -- accumulate its backscatter on
       // the SAME hypothesis (ADR-0007 D2: intensity rides the winning depth).
-      best->recordBeam(intensity, beam_angle, range, parameters);
+      best->recordBeam(intensity, beam_angle, range, parameters, correction_idx);
     } else {
       /* Failed update --- indicates an intervention, so that we need to
                          * start a new hypothesis to capture the outlier/datum shift.
@@ -103,7 +104,8 @@ bool Node::update(
       // The beam was REJECTED from `best` (depth-geometry outlier) and used to
       // seed the new hypothesis, so its backscatter belongs to the new
       // hypothesis, NOT to `best` (exclusion-on-intervention invariant).
-      depth_hypotheses_.back()->recordBeam(intensity, beam_angle, range, parameters);
+      depth_hypotheses_.back()->recordBeam(
+        intensity, beam_angle, range, parameters, correction_idx);
     }
   }
   return true;
@@ -217,18 +219,19 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
   nominated_hypothesis_.reset();
 
   return queueEstimate(sounding.depth + offset, variance, parameters,
-      sounding.intensity, sounding.beam_angle, sounding.slant_range);
+      sounding.intensity, sounding.beam_angle, sounding.slant_range,
+      sounding.correction_idx);
 }
 
 bool Node::queueEstimate(
   float depth, float variance, const Parameters & parameters,
-  float intensity, float beam_angle, float range)
+  float intensity, float beam_angle, float range, uint16_t correction_idx)
 {
   if(queue_.size() >= parameters.median_length) {
     auto mi = queue_.begin();
     advance(mi, parameters.median_length / 2);
     update(mi->depth, mi->uncertainty, parameters, mi->intensity, mi->beam_angle,
-      mi->range);
+      mi->range, mi->correction_idx);
     queue_.erase(mi);
   }
 
@@ -236,7 +239,8 @@ bool Node::queueEstimate(
   while(i != queue_.end() && i->depth > depth) {
     i++;
   }
-  queue_.insert(i, DepthAndUncertainty(depth, variance, intensity, beam_angle, range));
+  queue_.insert(
+    i, DepthAndUncertainty(depth, variance, intensity, beam_angle, range, correction_idx));
 
   if(queue_.size() >= parameters.median_length) {
     /* Compute the likely 99% confidence bound below the shallowest point, and
@@ -471,7 +475,7 @@ void Node::queueFlush(const Parameters & parameters)
 
   while (ex_pt >= 0) {
     update(q[ex_pt].depth, q[ex_pt].uncertainty, parameters,
-      q[ex_pt].intensity, q[ex_pt].beam_angle, q[ex_pt].range);
+      q[ex_pt].intensity, q[ex_pt].beam_angle, q[ex_pt].range, q[ex_pt].correction_idx);
     ex_pt += direction * scale;
     direction = -direction;
     scale++;

@@ -13,8 +13,15 @@ It is based on Brian Calder's original c code found [here](https://bitbucket.org
 | `coverage_assessment_node` (package `coverage_assessment`) | one or more CUBE `grid` topics (`grid_topics`), `survey_area` (`marine_interfaces/SurveyArea`, transient_local), TF | `coverage_assessment` (`marine_interfaces/CoverageAssessment`, one per area, transient_local), `coverage_grid` (`grid_map_msgs/GridMap`, layer `meets_standard`, transient_local) | Scores how much of each target polygon the sources' grids cover and how much of that meets the area's survey standard, with credit per source. Keeps the union over time of every source's `grid`, so the 200 m window does not matter. Lifecycle node; service `~/reset` (`std_srvs/Trigger`) empties the unions; see *Coverage assessment* below and `coverage_assessment/README.md`. |
 | `bag_to_geotiff` | (offline, reads a bag) | GeoTIFF on disk | Offline gridding tool. Reads pre-projected soundings (`-t /soundings`) or, with `-d /detections`, projects raw `SonarDetections` to soundings in-process via the same `DetectionsProjector` the node uses — no live graph, full CPU speed, deterministic. The `-d` path needs the projector frames to match the bag's (namespaced) frames; override with `--base-link-frame` / `--level-frame` / `--tide-frame` (see *Configuring frames per platform* below), or the grid comes out empty (a one-line warning is printed). |
 
-`soundings` carries seven `float32` fields per point, in order: `x`, `y`, `z`,
-`intensity`, `vertical_uncertainty`, `horizontal_uncertainty`, `beam_angle`.
+`soundings` carries eight `float32` fields per point (`point_step` 32), in
+order: `x`, `y`, `z`, `intensity`, `vertical_uncertainty`,
+`horizontal_uncertainty`, `beam_angle`, `frequency`. `frequency` is the ping's
+`PingInfo.frequency` in Hz, the same value on every point of a cloud; the live
+node reads it to build the ping's pulse-mode key (cube_bathymetry#172). It was
+added after `beam_angle`, so a consumer reading by field name is unaffected,
+and a cloud from an older `detections_to_pointcloud` (seven fields,
+`point_step` 28) still decodes; its pings key as `?kHz` and get the per-mode
+table's fallback.
 
 **Read the two uncertainty fields carefully: despite the names, they are
 VARIANCES in m², at one sigma, with no confidence-interval scaling applied** —
@@ -113,8 +120,12 @@ activated (`reset_cube_nodes.sh` then activates it, see below).
 **`cube_bathymetry_node`.** It builds the new session aside and swaps it in only when
 complete, so a failure (the response says why) leaves the running session untouched. The
 new session has the same sheet-level settings as the old one (`capture_spacing_scale`, the
-backscatter curve that arrived on `sonar_info`, which is not redelivered) and re-reads
-`prior_store_dir`, so the blunder gate is active from the first ping. A prior that cannot be
+backscatter curve that arrived on `sonar_info`, which is not redelivered, and a per-pulse-mode
+table with its fallback) and re-reads
+`prior_store_dir`, so the blunder gate is active from the first ping. The per-mode
+resolver is kept too, by design: its SonarInfo history is not redelivered either. So are
+its counters, so the per-mode report logged at `cleanup` covers every ping since the
+`configure`, before and after any reset, and says so. A prior that cannot be
 loaded **fails the reset** (the running session, which has the gate, is kept and the response
 says why), whereas a `configure` only warns and runs ungated: replacing a gated session
 with an ungated one is worse than keeping the old one. The same holds for a prior that
@@ -570,7 +581,11 @@ in short:
   a truncated spill and a failed `finalize()` both abort through
   `abortDirtyReplay` (exit 1, "NOT empty and NOT complete"), while an
   unwritable `build_fingerprint.json` over a store that IS complete is exit 2
-  and says so. Every other test drives the library directly, so nothing else
+  and says so. A per-pulse-mode table run over the excerpt (it records no
+  SonarInfo) is exit 4 with the fingerprint kind `table-unresolved`. The same
+  table on a `--level-plan-out` preflight also exits 4 and says it resolved
+  nothing; that preflight writes no fingerprint. A full table run with an
+  unwritable fingerprint keeps exit 2. Every other test drives the library directly, so nothing else
   reaches `import_bag`'s `main()` past argument validation. It runs against a
   3,000-ping excerpt of the 2026-06-09 UNH pier M3 bag, which is **survey data
   referenced by path**, not a committed fixture (18 MB); it lives beside its
@@ -683,8 +698,69 @@ stay uncorrected, exactly the pre-SonarInfo behavior. Pass
 `backscatter_curve_file`) to override the published curve with an explicit
 CSV (e.g. reprocessing with a better curve; `--sonar-info-topic` overrides
 the scanned topic, default = the detections topic's sibling `sonar_info`).
+An explicit file (curve or table) that is not a regular file (a FIFO, a
+device, a directory) or cannot be opened for reading is refused before it is
+read: `import_bag` and `batch_regen` exit with an error, the node fails
+configure. A missing file is still the loud "EMPTY curve" warning.
 See
 `docs/decisions/0007-mbes-backscatter-store-addendum-phase-b-transition.md`.
+
+**Per-pulse-mode tables (#172).** When the explicit file is a table written by
+`derive_angular_response.py --by-mode` (first line
+`# format: angular-response-table v1`, see *Per-mode tables* below), each ping
+is corrected by its own mode's entry instead of one curve: `import_bag` reads
+the SonarInfo topic in the main pass and the live node keeps the SonarInfo
+history (a same-stamp re-delivery deduplicated, and bounded to 60 s behind the newest ping plus the
+state in force at that cut, at most 4096 states; a ping more than 60 s behind
+the newest one means time went backwards — a sim restart, a looped bag — and
+re-anchors that window on itself; unless the new run's SonarInfo already
+arrived behind the window, every stored state is dropped, so a new run's pings
+before its first SonarInfo get no mode rather than the old run's; a ping
+delivered more than 60 s late is read the same way, an accepted cost: the
+pings after it stay unresolved until the next SonarInfo or heartbeat), and a ping's mode is the latest SonarInfo at or before its stamp plus
+the ping's frequency (`ping_info.frequency` offline; the `frequency` field
+`detections_to_pointcloud` now writes on every point, live — a cloud from an
+older `detections_to_pointcloud` has no such field, so its pings key as
+`?kHz`, match no entry and get the fallback). Two settings
+decide what a ping the table cannot correct gets — no SonarInfo yet, a mode
+with no entry or no measured offset, an entry under the ping floor, or a beam
+in an angle bin the table could not weight, at or beyond 90°, more than half
+a bin width beyond the outermost angle bin the table wrote (or short of the
+nadir-most one; a gap between written bins is interpolated), or with no
+finite angle or range: `--backscatter-mode-fallback
+identity|exclude` (node: `backscatter_mode_fallback`; default `identity`
+records the beam uncorrected, `exclude` drops its backscatter and keeps its
+depth; **for a mode-switching sonar `exclude` is the safe choice**: an
+`identity` beam is raw intensity, 10 to 17 dB off the reference mode's level,
+and it is averaged into the same cells as the table-corrected beams, so every
+uncorrected mode puts its own step back into the mosaic) and
+`--backscatter-mode-min-pings <N>` (node:
+`backscatter_mode_min_pings`; default 0 keeps every entry, a floor treats a
+rarer mode's entry as absent). The pass ends with a per-mode count of
+resolved pings and every unresolved reason, per ping, and the beams of
+resolved pings the table still could not correct, per mode and reason (counted
+as they are handed to the estimator); the SonarInfo-declared TVG
+state is compared with what the table recorded per mode (a mismatch is warned
+once per mode and counted; a resolved entry is applied as is, and the warning
+says so when the entry was not applied at all). The build fingerprint
+records the correction (mode, curve/table SHA-256, fallback, floor). A table
+that does not load is an error (`import_bag`) or a failed configure (node),
+never a silent identity; `batch_regen_bag` refuses a table, since it reads no
+SonarInfo. A table that loads but corrects NOTHING — not one ping resolved to
+an entry, the usual causes being a wrong `--sonar-info-topic`, no SonarInfo in
+the bags, or clouds without `frequency` — is loud too: `import_bag` prints an
+error with the reason counts, still writes the store and the fingerprint but
+with `kind` `table-unresolved` (so no staleness check takes it for a
+table-corrected store), and exits 4. Exit 4 means a table was given and no
+ping resolved a pulse mode; on a full run the store and its
+`table-unresolved` fingerprint were still written. A run that failed (1) or
+could not write the fingerprint (2) keeps its code. A `--level-plan-out`
+preflight, which writes neither, exits 4 too, so `preflight && import` stops
+on a wrong topic before the import starts. The live node warns at the first
+unresolved cloud after each configure, with the count and the reasons so far,
+at most once a minute while nothing has resolved; once clouds do resolve, an
+unresolved one is the normal case (a rare mode, the ping floor) and each
+reason is warned about once per configuration.
 
 ### Deriving a curve (`derive_angular_response.py`)
 
@@ -850,6 +926,25 @@ reads only `tl_removed` and `absorption_db_per_m` and ignores the rest:
 | `box` | with `--box` | `LATMIN LONMIN LATMAX LONMAX` |
 | `source_bags` | always | comma-separated basenames of the input bags |
 
+A per-mode table (`--by-mode`, below) has its own header, after the
+`# format: angular-response-table v1` line. The C++ table loader
+(`backscatter_table.h`) reads the keys marked *read*; the rest are the
+record of how the table was made:
+
+| Key | Loader | Meaning |
+|---|---|---|
+| `reference_mode`, `reference_mode_source` | read (required) / record | the mode every offset is measured against, and whether it was requested or chosen |
+| `range_ref_m`, `range_ref_source` | read (required, > 0) / record | R0 in metres, and how it was chosen |
+| `range_node_spacing_decades` | read | range-term node spacing in `log10(R / R0)` |
+| `range_angle_groups_deg` | read | every range-term group, `lo-hi` comma-separated; the loader creates each declared group per mode, an unfitted one as a zero term |
+| `range_term_lookup`, `offset_meaning`, `empty_fields` | record | the apply rule, the offset's meaning and the empty-field cases, stated once more in the file |
+| `angle_bin_width_deg`, `specular_exclusion_deg` | read | the angle binning and the specular band left out of the range fit; without `angle_bin_width_deg` a beam beyond the outermost written bin cannot be told from one inside it, so a table with more than one bin per mode loads with a warning |
+| `key_spec` | record | where the mode-key spec and its shared vectors live |
+| `adjacency_window_s`, `misfit_threshold_db`, `absorption` | record | the switch window, the misfit flag threshold, and that absorption is carried by the range term |
+| `box`, `source_bags` | record / read (reports) | the `--box`, and the input bags |
+| `mode_summary` | read (`pings=`, `beams=`) | one line per mode: counts, declared TVG, offset, anchoring, misfit; `pings=` is required (the ping floor reads it) and a mode has at most one |
+| `range_term` | record | one line per mode and group: fitted with its node count and span, or the zero reason |
+
 ### Per-mode tables (`--by-mode`, #172)
 
 A sonar that switches pulse modes (the Kongsberg M3 has five) produces
@@ -879,12 +974,22 @@ this script on this host, not an interchange format: a pickle runs code when
 loaded, so the script loads only a regular file owned by the current user that
 nobody else can write, and refuses anything else.
 
-**The estimator does not read the table yet.** That is PR 2 of #172 (C++ table
-loader and mode resolver, per-ping correction in the estimator, `import_bag` and
-the live node, fingerprint, ADR-0007/0003 amendments). Today's single-curve
-loader, and the marine_tools SonarInfo mirror, read a table as an empty curve,
-which every caller already reports as an empty or unparseable curve; they never
-read rows out of it. PR 1 exists so the format is settled on real fits first.
+**Applying the table.** Pass it where a curve goes:
+
+```bash
+import_bag -o store -d /bizzy/sensors/m3/detections --bs-store bs_store \
+    --backscatter-correction empirical --backscatter-curve m3_mode_table.csv \
+    --backscatter-mode-fallback exclude <bags...>
+```
+
+The C++ loader (`backscatter_table.h`) reads a table whole or refuses it, the
+resolver (`backscatter_mode.h`) turns each ping's SonarInfo + frequency into
+the mode key and a table entry, and the estimator corrects every beam of the
+ping by that entry at record time (`Sounding::correction_idx`, see
+*Backscatter fidelity* above for the fallback and floor settings). The
+single-curve loader and the marine_tools SonarInfo mirror still read a table
+as an empty curve (letter-first keys), so an older binary reports it as an
+unparseable curve rather than reading rows out of it.
 
 **Mode attribution.** Detections, `marine_interfaces/SonarInfo`
 (`--sonar-info-topic`, default the detections topic's sibling `sonar_info`) and,
@@ -896,7 +1001,7 @@ and are counted. The declared TVG state (`tvg_model`,
 `tvg_absorption_db_per_km`) is recorded per mode, never used in the maths; a
 mode seen under two states is written `MIXED` with a warning.
 
-**Mode key** (the spec PR 2's C++ must match, vectors in
+**Mode key** (the spec the C++ `canonicalModeKey` matches, vectors in
 `test/data/mode_keys.json`): `<TYPE>_<pulse_us>us_<bw_Hz>Hz` per transmit
 sector, sectors joined with `+`, then `_<freq_kHz>kHz` from the ping's own
 `ping_info.frequency`, e.g. `FMU_1000us_24000Hz_500kHz`. TYPE is `CW`, `FMU`,
@@ -1000,7 +1105,12 @@ of order).
 `# format: angular-response-table v1`, then `# key: value` comments (reference
 mode and its source, `range_ref_m` and its source, node spacing, angle bin
 width, specular exclusion, window, misfit threshold, absorption handling, box,
-source bags, and one `mode_summary` and `range_term` line per mode), then:
+source bags, and one `mode_summary` and `range_term` line per mode), then the
+column line and rows (below). The C++ side treats any file whose first
+non-blank line (a UTF-8 byte-order mark ignored) starts with
+`# format: angular-response-table` as a table, and loads only `v1`: another
+version is an error, never handed to the single-curve loader as an empty
+curve. Then:
 
 ```
 mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,declared_tvg_absorption_db_per_km
@@ -1017,15 +1127,24 @@ and repeat on every row of it. The header carries the groups once
 mode AND group (fitted with its node count, or the zero reason), the lookup
 rule (`# range_term_lookup:`) and what the offset means (`# offset_meaning:`).
 
-**Applying it** (PR 2's loader, stated here so the format is the contract): a
+**Applying it** (what the C++ loader, `backscatter_table.h`, implements;
+stated here so the format is the contract): a
 beam of mode `m` at `|angle|` and slant range R uses the `range` rows of `m`
 whose `angle_lo_deg <= |angle| < angle_hi_deg`, interpolated linearly in
 `log10(R / R0)` between nodes and clamped beyond the end nodes; below the first
 `angle_lo_deg` (the specular band) it uses the first group; a mode or group
-with no `range` rows has a zero term. The corrected value is
+with no `range` rows has a zero term. The groups are the ones
+`# range_angle_groups_deg` declares, not the ones that happen to have rows: the
+writer omits the rows of a group it did not fit, so the C++ loader creates
+every declared group for every mode (an unfitted one as a zero term), and the
+specular band takes the first DECLARED group. Only a table without that header
+line falls back to the groups its rows name. The corrected value is
 `raw - db_relative_to_nadir - r_g - offset_db_vs_ref`, which puts every mode on
-the reference mode's nadir level at R0, and the beam is weighted by
-`1 / var_db2` of its angle bin. The cases the loader must handle are all
+the reference mode's nadir level at R0. The `var_db2` column was written so
+a beam could be weighted by `1 / var_db2` of its angle bin; the estimator does
+NOT apply that weight yet (every corrected beam enters the cell's Welford
+mean with weight 1, see the ADR-0007 per-mode addendum, "Not done here") and
+uses the column only to tell an unweighable bin. The cases the loader must handle are all
 written as EMPTY fields rather than plausible numbers: a mode with
 `offset_anchored=false` has no measured offset (both offset columns empty) and
 **must not be corrected by this table** (it is the fallback policy's case, or a
@@ -1043,12 +1162,15 @@ states these rules once more (`# empty_fields:`, `# offset_meaning:`).
 **Decisions carried in the format (2026-11-02).** Rare modes keep their table
 entries however few pings they have (on Appledore the 10 ms and 5 ms FM modes
 had 530 and 169 pings against hundreds of thousands); their `n`, `se_db` and
-`offset_se_db` are the quality record, and what PR 2 does with a ping whose
-mode has no entry at all is its fallback policy, not a derive-time cut. The
-variance column stays although on the M3 it is nearly flat (105-145 dB^2, a
-10-12 dB per-beam scatter in every bin of every main mode), because a sonar
-whose scatter does vary with angle needs the weights, and the format must not
-change when one turns up.
+`offset_se_db` are the quality record, and what the estimator does with a
+ping whose mode has no entry at all is its fallback policy
+(`--backscatter-mode-fallback`, and `--backscatter-mode-min-pings` to treat a
+thin entry as absent), not a derive-time cut. The variance column stays
+although on the M3 it is nearly flat (105-145 dB^2, a 10-12 dB per-beam
+scatter in every bin of every main mode), because a sonar whose scatter does
+vary with angle needs the weights, and the format must not change when one
+turns up; the estimator applying them is the follow-up named in the ADR-0007
+addendum.
 
 ## Live prior-gate prime (`prior_store_dir`)
 
