@@ -50,6 +50,7 @@
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "cube_bathymetry/build_fingerprint.h"
 #include "cube_bathymetry/coverage_refresh.h"
 #include "cube_bathymetry/gain_declaration.h"
 #include "cube_bathymetry/geo_map_sheet.h"
@@ -256,6 +257,12 @@ public:
       declareOnce<std::string>("backscatter_gain_declaration", "");
     if (!gain_file.empty()) {
       std::string error;
+      if (!cube::isGainDeclaration(gain_file) && cube::isAngularResponseTable(gain_file)) {
+        RCLCPP_ERROR(get_logger(),
+          "backscatter_gain_declaration='%s' is a per-pulse-mode table, not a gain-state "
+          "declaration (backscatter_curve_file takes the table)", gain_file.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
       gain_declaration_ = cube::loadGainDeclaration(gain_file, error);
       if (!error.empty()) {
         RCLCPP_ERROR(get_logger(),
@@ -317,6 +324,39 @@ public:
       }
     }
     bs_applied_curve_ = bs_curve;  // kept for mid-run change comparison (#102)
+
+    // The curve or table the node applies must have been fitted under the
+    // declaration it is run with, or neither (cube_bathymetry#176, decision 8:
+    // the live node is the path that runs on the boat). A curve fitted in the
+    // reference state and applied to un-shifted post-step clouds is wrong by
+    // the step, and one fitted across the step is invalid.
+    {
+      const cube::GainDeclaration * declared = gain_resolver_ ? &gain_declaration_ : nullptr;
+      const std::string declared_sha =
+        declared ? cube::gainDeclarationSha256(gain_declaration_) : std::string();
+      std::string problem;
+      if (bs_file_is_table) {
+        problem = cube::gainRecordProblem(
+          "backscatter_curve_file table " + bs_curve_file,
+          bs_table_.gain_declaration_sha256, bs_table_.gain_reference_state, declared,
+          declared_sha);
+      } else if (bs_curve_applied_ && bs_explicit_file_) {
+        problem = cube::gainRecordProblem(
+          "backscatter_curve_file " + bs_curve_file, bs_curve.gain_declaration_sha256,
+          bs_curve.gain_reference_state, declared, declared_sha);
+      } else if (declared && bs_mode == cube::BackscatterAngleCorrection::Auto) {
+        RCLCPP_WARN(get_logger(),
+          "backscatter_gain_declaration is set but any angular-response curve will come from "
+          "SonarInfo, which records no gain state: its gain state is UNKNOWN. Set "
+          "backscatter_curve_file to a curve derived with this declaration.");
+      }
+      if (!problem.empty()) {
+        RCLCPP_ERROR(get_logger(), "%s", problem.c_str());
+        gain_resolver_.reset();
+        gain_declaration_ = cube::GainDeclaration();
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
+    }
 
     // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
     // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
@@ -1402,6 +1442,17 @@ private:
     bool touched = false;
 
     for (const auto & parameter : parameters) {
+      if (parameter.get_name() == "backscatter_gain_declaration" &&
+        get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED)
+      {
+        // Read at configure only (cube_bathymetry#176): accepting a runtime
+        // set would be silently ignored until the next configure.
+        result.successful = false;
+        result.reason =
+          "backscatter_gain_declaration is read at configure only; set it while "
+          "unconfigured (or in the launch file) and reconfigure";
+        return result;
+      }
       if (parameter.get_name() == "subwindow_refresh_interval") {
         const double value = parameter.as_double();
         if (!std::isfinite(value) || value < 0.0) {

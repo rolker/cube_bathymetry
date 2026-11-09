@@ -60,15 +60,15 @@ Decisions this plan adds (flag any you disagree with):
    range, not intensity magnitude, so ordering relative to the shift is harmless.
 8. **Declaration x fitted-curve consistency (per-mode tables AND single-curve CSVs).** The derive tool, with a
    declaration, writes `# gain_declaration_sha256:` and `# gain_reference_state:` into the per-mode table header and
-   into the single-curve CSV header (`loadAngularResponseCurveWithHeader` reads them too). `import_bag` and
-   `batch_regen` refuse (before any bag is read) a curve/table whose recorded digest/reference differs from the
+   into the single-curve CSV header (`loadAngularResponseCurveWithHeader` reads them too). `import_bag`,
+   `batch_regen` AND the live node (at `configure`: FAILURE; pre-push round 1) refuse (before any bag/cloud is read) a curve/table whose recorded digest/reference differs from the
    declaration supplied, a curve/table that records none while a declaration is supplied, and one that records a
    declaration while none is supplied. Reason: a curve fitted in the reference state applied to un-shifted post-step
    pings is wrong by the step, and one fitted across the step is invalid. Pre-#176 files carry no keys, so with a
    declaration they are refused; with no declaration they load as before. **Escape hatch (operator answer):** a
    season that never crossed a step re-derives with, or imports with, a zero-segment declaration (it still changes
    the fingerprint through the reference label, which is intended: that store is in a named reference state).
-   Explicit curve paths only; the SonarInfo-delivered curve (`auto`, import_bag) carries no header, so
+   The node also refuses a per-mode table handed as the declaration and rejects a runtime set of the parameter while configured. Explicit curve paths only; the SonarInfo-delivered curve (`auto`, import_bag) carries no header, so
    `auto` + declaration emits a loud warning that the curve's gain state is unknown.
 9. **Provenance vocabulary** (confirmed by the operator): `settings_file | measured | operator_reported`, plus a mandatory non-empty free-text
    `provenance_note` (the Appledore numbers live in the campaign file and the test fixture only). Both

@@ -1985,6 +1985,32 @@ TEST_F(NodeLifecycle, TheCallbackGroupAuditNoticesWhatItIsFor)
 }
 
 
+namespace
+{
+/// The mode-table fixture with `# gain_*` header lines inserted after its format
+/// line, as a derivation under a declaration writes them.
+std::filesystem::path tableWithGainKeys(
+  const std::string & tag, const std::string & sha, const std::string & reference)
+{
+  std::ifstream in(MODE_TABLE_FIXTURE_FILE);
+  std::string first, rest, line;
+  std::getline(in, first);
+  while (std::getline(in, line)) {
+    rest += line + "\n";
+  }
+  const auto path = std::filesystem::temp_directory_path() /
+    ("cube_gain_table_" + tag + "_" + std::to_string(::getpid()) + ".csv");
+  std::ofstream out(path);
+  out << first << "\n# gain_reference_state: " << reference << "\n# gain_declaration_sha256: "
+      << sha << "\n" << rest;
+  return path;
+}
+
+// Digest of the shared fixture declaration (gain_declaration_vectors.json).
+const char * kFixtureDeclarationSha =
+  "428912fc9f3f157a1ed1843c8c2e3b7b3004649adb3958cab1e84e6776895ac8";
+}  // namespace
+
 // cube_bathymetry#176: a declared gain state is added to the raw intensity of
 // every cloud in a segment, with NO table and NO resolver (the shift is a
 // receiver calibration, not part of the mode correction).
@@ -2026,7 +2052,8 @@ TEST_F(NodeLifecycle, GainDeclarationShiftsCloudIntensityAndSurvivesReset)
 {
   auto node = std::make_shared<CubeBathymetry>(
     withParams({
-    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+    rclcpp::Parameter("backscatter_curve_file",
+    tableWithGainKeys("reset", kFixtureDeclarationSha, "pre_step").string()),
     rclcpp::Parameter("backscatter_mode_fallback", std::string("identity")),
     rclcpp::Parameter("backscatter_gain_declaration",
     std::string(GAIN_DECLARATION_FIXTURE_FILE))}));
@@ -2070,4 +2097,88 @@ TEST_F(NodeLifecycle, ABrokenGainDeclarationFailsConfigure)
   EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_TRUE(log.contains("backscatter_gain_declaration could not be loaded")) << log.all();
   std::filesystem::remove(broken);
+}
+
+
+// cube_bathymetry#176 (pre-push round 1): the live node is the path that runs on
+// the boat, so it applies the same table/declaration consistency check as
+// import_bag and batch_regen.
+TEST_F(NodeLifecycle, ATableFittedUnderTheDeclarationConfigures)
+{
+  const auto table = tableWithGainKeys("match", kFixtureDeclarationSha, "pre_step");
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", table.string()),
+    rclcpp::Parameter("backscatter_gain_declaration",
+    std::string(GAIN_DECLARATION_FIXTURE_FILE))}));
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  std::filesystem::remove(table);
+}
+
+TEST_F(NodeLifecycle, ATableFittedUnderAnotherDeclarationFailsConfigure)
+{
+  const auto table = tableWithGainKeys("other", std::string(64, 'a'), "pre_step");
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", table.string()),
+    rclcpp::Parameter("backscatter_gain_declaration",
+    std::string(GAIN_DECLARATION_FIXTURE_FILE))}));
+  EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(log.contains("they are different corrections")) << log.all();
+  EXPECT_FALSE(CubeBathymetryTestAccess::hasGainResolver(*node));
+  std::filesystem::remove(table);
+}
+
+TEST_F(NodeLifecycle, APre176TableWithADeclarationFailsConfigure)
+{
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+    rclcpp::Parameter("backscatter_gain_declaration",
+    std::string(GAIN_DECLARATION_FIXTURE_FILE))}));
+  EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(log.contains("records no gain-state declaration")) << log.all();
+}
+
+TEST_F(NodeLifecycle, ADeclaredTableWithNoDeclarationFailsConfigure)
+{
+  const auto table = tableWithGainKeys("nodecl", kFixtureDeclarationSha, "pre_step");
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_curve_file", table.string())}));
+  EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(log.contains("no gain-state declaration was given")) << log.all();
+  std::filesystem::remove(table);
+}
+
+TEST_F(NodeLifecycle, ATableHandedAsTheDeclarationFailsConfigure)
+{
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_gain_declaration",
+    std::string(MODE_TABLE_FIXTURE_FILE))}));
+  EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(log.contains("is a per-pulse-mode table")) << log.all();
+}
+
+TEST_F(NodeLifecycle, TheGainDeclarationCannotBeSetWhileConfigured)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_gain_declaration",
+    std::string(GAIN_DECLARATION_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  const auto result = node->set_parameter(
+    rclcpp::Parameter("backscatter_gain_declaration", std::string("")));
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("configure only"), std::string::npos) << result.reason;
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  // Unconfigured, the operator may change it and reconfigure.
+  EXPECT_TRUE(node->set_parameter(
+      rclcpp::Parameter("backscatter_gain_declaration", std::string(""))).successful);
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_FALSE(CubeBathymetryTestAccess::hasGainResolver(*node));
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
