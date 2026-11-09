@@ -405,6 +405,21 @@ TEST(GainDeclaration, OffsetGrammarAndCanonicalRounding)
   }
 }
 
+TEST(GainDeclaration, NonUtf8BytesAreRefusedLikeThePythonLoader)
+{
+  const std::string good = std::string(kHeader) +
+    "a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,";
+  GainDeclaration d;
+  EXPECT_EQ(tryLoad("utf8_ok", good + "caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x8C\x8A\n", d), "");
+  for (const char * bad : {"\xFF", "\xC3", "\xC0\x80", "\xE0\x80\x80", "\xED\xA0\x80",
+      "\xF4\x90\x80\x80", "\x80", "ab\xE2\x82"})
+  {
+    const std::string error = tryLoad("utf8_bad", good + bad + "\n", d);
+    EXPECT_NE(error.find("not UTF-8"), std::string::npos) << error;
+    EXPECT_FALSE(d.loaded());
+  }
+}
+
 TEST(GainDeclaration, FileFramingVariantsHaveTheSameCanonicalForm)
 {
   for (const auto & c : vectors().at("canonical_files")) {

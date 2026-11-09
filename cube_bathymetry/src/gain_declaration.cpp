@@ -104,6 +104,48 @@ bool isIdentifier(const std::string & s)
     });
 }
 
+/// Strict UTF-8 (no overlongs, surrogates or values past U+10FFFF): the Python
+/// loader refuses a file that does not decode, so this one does too.
+bool isValidUtf8(const std::string & s)
+{
+  std::size_t i = 0;
+  while (i < s.size()) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    std::size_t n = 0;
+    uint32_t cp = 0;
+    if (c < 0x80) {
+      ++i;
+      continue;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+      n = 1;
+      cp = c & 0x1F;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+      n = 2;
+      cp = c & 0x0F;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+      n = 3;
+      cp = c & 0x07;
+    } else {
+      return false;
+    }
+    if (i + n >= s.size()) {
+      return false;
+    }
+    for (std::size_t k = 1; k <= n; ++k) {
+      const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+      if ((cc & 0xC0) != 0x80) {return false;}
+      cp = (cp << 6) | (cc & 0x3F);
+    }
+    if ((n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) || cp > 0x10FFFF ||
+      (cp >= 0xD800 && cp <= 0xDFFF))
+    {
+      return false;
+    }
+    i += n + 1;
+  }
+  return true;
+}
+
 bool firstContentLine(std::istream & in, std::string & out, std::size_t & line_no)
 {
   std::string line;
@@ -353,6 +395,10 @@ GainDeclaration loadGainDeclaration(
     return GainDeclaration();
   }
 
+  if (!isValidUtf8(content)) {
+    error = path + ": not UTF-8";
+    return GainDeclaration();
+  }
   std::istringstream in(content);
   std::string line;
   std::size_t line_no = 0;
