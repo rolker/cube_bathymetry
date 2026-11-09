@@ -79,3 +79,34 @@ Dispatched fresh-context reviewer (handoff header present). Core mechanism verif
 - [ ] Q3 Refuse pre-#176 table when a declaration is supplied: agree (matches the Appledore candidate-D case); document the zero-segment declaration escape.
 - [ ] Q4 Node: configure-only, no hot reload: agree (a mid-run edit would split one store across two declarations undetected; reconfigure is the explicit act).
 - [ ] Q5 Provenance vocabulary `settings_file | measured | operator_reported` + mandatory note: confirm.
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-09
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-176/plan.md` (kept in sync inline; implementation notes under each commit)
+
+### Commits (feature/issue-176, not pushed)
+1. b440cb9 Gain-state declaration: schema, loader, canonical digest, shared fixture and vectors
+2. d1de1b9 import_bag, batch_regen and the live node apply a gain-state declaration
+3. 2133b68 derive_angular_response: --gain-declaration fits in the reference state
+4. 0434e0d Build fingerprint schema 3 records the gain declaration; ADR addenda and README
+
+### Full suite
+`./sensors_ws/test.sh cube_bathymetry`: 1584 tests, 0 errors, 0 failures, 100 skipped (the skips are pre-existing; the new pytest/gtest suites report skipped=0). New suites: test_gain_declaration (21), test_gain_state_resolver (4), test_batch_regen_gain.py (18), plus new cases in test_import_bag_mode_table.py (20 total), test_derive_angular_response.py (555 total), test_build_fingerprint, test_backscatter_table, test_angular_response_curve, test_node_lifecycle.
+
+### Deviations from the plan
+- batch_regen fingerprint matrix landed in commit 4 (needs the field); added: unreadable fingerprint is refused either way.
+- Nested fingerprint record is `GainDeclarationRecord`; `gainDeclarationSha256` lives in build_fingerprint.h (OpenSSL only in the level-plan lib).
+- `gainRecordProblem` shared helper; `gain_*` fields on BackscatterTable landed in commit 2 (needed by the import check).
+- Node seam is `prepareCloudBackscatter` (gain shift then stampCloudMode).
+- batch_regen opens bag readers before the declaration check (refusal is before any message is read, not before the bag opens).
+- PingRecord gained `stamp_ns`; ACCUMULATION_VERSION 1 -> 2; extra header lines (`gain_sign`, `gain_segment`, `gain_undeclared`).
+- Extracted `setupGainOrUsage`/`applyGainState` helpers to keep main() under cpplint's 500-line limit.
+
+### For the reviewer
+- Depth-adaptive path: no backscatter store, so shifted values in the spill can only be argued from the call order (shift precedes `recon->add`), not read back; fingerprint is tested there.
+- README claims (counts printed, cleanup logging, matrix) were checked against code; the README says the live node does not detect resume under another declaration.
+- Python and C++ loaders differ only on hex-float offsets (C++ strtod accepts them, Python rejects).
+- No real-bag smoke run was done.
