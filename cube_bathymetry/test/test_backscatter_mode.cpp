@@ -23,6 +23,7 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <filesystem>
@@ -293,6 +294,39 @@ TEST(BackscatterModeResolver, HistoryIsBoundedByTheWindowAndTheCap)
   EXPECT_EQ(idle.historySize(), BackscatterModeResolver::kMaxHistory);
   ASSERT_NE(idle.stateAt(many), nullptr) << "the newest states are the ones kept";
   EXPECT_EQ(idle.stateAt(0), nullptr) << "the oldest ones went first";
+}
+
+// PR #175 review: a SonarInfo stream stamped consistently more than the window
+// behind the pings (a skewed driver clock) went in through the behind-window
+// path, which never prunes; the next advancing ping cleared the tracking set
+// but left the entries, and nothing dropped them afterwards. The history grew
+// by one entry per message for the run. Now the current timeline going on
+// prunes them like any entry older than the window, keeping the one in force.
+TEST(BackscatterModeResolver, BehindWindowStatesInterleavedWithPingsStayBounded)
+{
+  Fixture f;
+  BackscatterModeResolver r(&f.table);
+  const int64_t step = 100000000LL;                 // 10 Hz pings
+  const int64_t skew = 100LL * 1000000000LL;        // SonarInfo 100 s behind
+  const int64_t t0 = 1000LL * 1000000000LL;
+  const int n = 5000;
+  std::size_t peak = 0;
+  for (int i = 0; i < n; ++i) {
+    const int64_t t = t0 + i * step;
+    const bool fm = i % 2 == 0;
+    r.addSonarInfo(fm ? state(t - skew, 0.001f, 24000.0f, 2) : state(t - skew, 5e-5f, 20000.0f, 1));
+    // The newest behind-window state is the one in force at the ping.
+    ASSERT_EQ(r.resolve(t, kF), fm ? 2 : 1) << i;
+    peak = std::max(peak, r.historySize());
+  }
+  EXPECT_LE(peak, 3u) << "one entry per behind-window message must not accumulate";
+  EXPECT_LE(r.historySize(), 2u);
+  EXPECT_EQ(r.counts().stale, 0u);
+  EXPECT_EQ(r.counts().window_reanchored, 0u) << "pings advanced; nothing re-anchored";
+  // A later in-window SonarInfo still takes over as usual.
+  const int64_t t = t0 + n * step;
+  r.addSonarInfo(state(t - 1, 5e-5f, 20000.0f, 1));
+  EXPECT_EQ(r.resolve(t, kF), 1);
 }
 
 // cube_bathymetry#172 review round 2: import_bag reads SonarInfo as it comes

@@ -332,6 +332,9 @@ private:
   /// Oldest stamp the window keeps; meaningless before the first ping.
     int64_t windowCut() const;
     void prune();
+    /// Stop tracking the behind-window states once the current timeline goes on
+    /// and prune them like any other entry older than the window (PR #175 review).
+    void releaseBehind();
   };
 
 }  // namespace cube

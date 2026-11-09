@@ -182,6 +182,23 @@ void BackscatterModeResolver::rememberBehind(int64_t stamp_ns)
   }
 }
 
+void BackscatterModeResolver::releaseBehind()
+{
+  // The current timeline went on, so the behind-window states are not a new
+  // timeline's history after all (no re-anchor came). Untracked, they are
+  // plain entries older than the window, and only prune drops those -- which
+  // runs on an in-window SonarInfo, something a stream stamped consistently
+  // behind the window (a skewed driver clock) never sends. Without this the
+  // history grew by one entry per such message for the whole run, past both
+  // caps (PR #175 review). prune keeps the newest entry at or before the cut,
+  // the state these pings resolve against, and drops the rest.
+  if (behind_stamps_.empty()) {
+    return;
+  }
+  behind_stamps_.clear();
+  prune();
+}
+
 int64_t BackscatterModeResolver::windowCut() const
 {
   return newest_resolved_ns_ < std::numeric_limits<int64_t>::min() + kHistoryWindowNs ?
@@ -312,7 +329,7 @@ uint16_t BackscatterModeResolver::resolve(
   if (!have_resolved_ || ping_stamp_ns > newest_resolved_ns_) {
     newest_resolved_ns_ = ping_stamp_ns;
     have_resolved_ = true;
-    behind_stamps_.clear();  // the current timeline goes on
+    releaseBehind();  // the current timeline goes on
   } else if (ping_stamp_ns < windowCut()) {
     // More than the window behind the anchor: time went backwards (a sim
     // restart, `ros2 bag play --loop`; ~/reset keeps the resolver). The
@@ -353,7 +370,7 @@ uint16_t BackscatterModeResolver::resolve(
     }
     behind_stamps_.clear();
   } else {
-    behind_stamps_.clear();  // an in-window ping: the current timeline goes on
+    releaseBehind();  // an in-window ping: the current timeline goes on
   }
 
   const SonarInfoState * state = stateAt(ping_stamp_ns);
