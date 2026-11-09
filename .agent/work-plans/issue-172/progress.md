@@ -620,3 +620,23 @@ Dropped from Lens A: a restart jump under 60 s is not detected (the header state
 
 ### Next
 Per the round-4 Ship note (recommended; a test run is enough, no further review round needed), the branch is ready for the host to push and open or update the PR.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-11-09 11:51 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+
+**PR**: rolker/cube_bathymetry#175 (PR 2 of #172) at `cd651b8`
+**Sources**: Copilot code review of 2026-11-06 18:31 UTC (4 inline findings, "Changes recommended"); CI (industrial_ci Jazzy) green; the four pre-push `Local Review (Pre-Push)` rounds above all predate it. No human review: the operator asked for the PR to be made ready without their read.
+
+### Findings
+- [x] (valid, cross-confirmed by the lead against `import_bag_main.cpp`) Fingerprint hashes a second read of `--backscatter-curve`: `loadAngularResponseCurveWithHeader(path)` then `sha256File(path)`. The table branch already hashed the bytes it parsed; the curve branch did not. A derivation rewriting the CSV between the reads fingerprints a curve the store did not use. Fix: `c6cad36`.
+- [x] (valid, cross-confirmed by tracing `addSonarInfo`/`resolve`) Behind-window SonarInfo states inserted via `rememberBehind` are never pruned once `resolve()` clears the tracking set: the behind path skips `prune()`, `resolve()` never prunes, and `capHistory` only runs from `prune()`. A stream stamped consistently >60 s behind the pings (a skewed driver clock; the 08-20 timing captures show the M3 clock can drift) grows the history by one entry per message for the run. Fix: `35bd4bc` (`releaseBehind()` prunes; interleaved regression test).
+- [x] (valid) `# angle_bin_width_deg:` checked only for finiteness; 0 or a negative width silently disabled the outside-bin check. Writer already enforces 0 < w <= 90. Fix: `4e3c191` (loader holds the contract; edge values 0.5 and 90 load; tests).
+- [x] (valid) No end-to-end test of the main-pass SonarInfo association: the CLI tests use the pier excerpt (no SonarInfo) and only reach exit 4. Fix: `0150689` (`test/test_import_bag_mode_table.py`: synthetic two-mode bag, SonarInfo stamped before / recorded after its first ping, table derived from the same bag, float backscatter store read back with GDAL; control run; depth-adaptive path checked for the same resolution outcome and fingerprint, since it persists no backscatter yet). Found and documented along the way: a noise-free synthetic stream gives the derive tool unweighable bins (variance under its 0.0005 dB² floor), and a bag without attitude/heave frames needs `--level-frame`/`--tide-frame` naming an existing frame or the estimator's gate refuses every sounding.
+
+### Tests
+Full package suite after the fixes: **1439 tests, 0 errors, 0 failures, 96 skipped** (cppcheck skips as before; was 1430 before the four new tests). uncrustify, cpplint, flake8, pep257, lint_cmake, copyright clean on the changed files.
+
+### Next
+Pre-push `review-code` round on the delta, ci-local full-scope attestation on the new head, push, PR body update. Operator's instruction: make the PR ready without their read; the merge itself still waits for their word.
