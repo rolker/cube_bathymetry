@@ -307,7 +307,7 @@ def _step_declaration(tmp_path, offset=GAIN_STEP_DB, start=STEP_START_NS, end=ST
 
 
 def _with_gain_keys(table, tmp_path, sha, reference='pre_step'):
-    """Copy ``table`` with the ``# gain_*`` header lines a derivation under a declaration writes."""
+    """Copy ``table`` with the ``# gain_*`` lines a derivation under a declaration writes."""
     lines = table.read_text().split('\n')
     out = [lines[0], '# gain_reference_state: %s' % reference,
            '# gain_declaration_sha256: %s' % sha] + lines[1:]
@@ -512,7 +512,7 @@ def test_auto_with_declaration_warns(tmp_path):
 
 
 def test_table_without_declaration_hash_refused(tmp_path, mode_bag, table):
-    """A pre-#176 table (no gain keys) run under a declaration is refused before any bag is read."""
+    """A pre-#176 table (no gain keys) under a declaration is refused before any bag is read."""
     decl = _step_declaration(tmp_path)
     store = tmp_path / 'store'
     rc, out = _run(store, mode_bag, _table_args(table) + [
@@ -563,3 +563,31 @@ def test_declaration_that_is_not_one_is_refused(tmp_path, mode_bag, table):
         '--backscatter-gain-declaration', str(table)])
     assert rc != 0, out
     assert 'is a per-pulse-mode table' in out, out
+
+
+def test_derived_table_under_the_declaration_imports_end_to_end(tmp_path, step_bag):
+    """
+    The whole chain: derive across the step with the declaration, import with it.
+
+    The table comes from the step bag itself (half of it 23 dB low), so it is only
+    right if the derive tool shifted before fitting; the import then shifts the same
+    pings, and the digest the Python tool wrote is the one the C++ import recomputes.
+    """
+    decl = _step_declaration(tmp_path)
+    table = tmp_path / 'table.csv'
+    assert helpers.dar.main([str(step_bag), '-t', helpers.TOPIC, '-o', str(table), '--by-mode',
+                             '--gain-declaration', str(decl)]) == 0
+    text = table.read_text()
+    sha = _canonical_sha('pre_step', [('gain_step', STEP_START_NS, STEP_END_NS, GAIN_STEP_DB)])
+    assert '# gain_declaration_sha256: %s' % sha in text
+    bs_store = tmp_path / 'bs_store'
+    rc, out = _run(tmp_path / 'store', step_bag, _table_args(table) + [
+        '--backscatter-gain-declaration', str(decl), '--bs-store', str(bs_store)])
+    assert rc == 0, out
+    means, spread = _spread_and_means(bs_store)
+    assert max(abs(m - REF_LEVEL) for m in means) < 1.0, (min(means), max(means))
+    assert max(spread) < 1.0, (min(spread), max(spread))
+    # The same table without the declaration is refused: it was fitted under one.
+    rc, out = _run(tmp_path / 'store2', step_bag, _table_args(table))
+    assert rc != 0, out
+    assert 'no gain-state declaration was given' in out, out

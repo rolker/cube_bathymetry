@@ -2751,3 +2751,337 @@ def test_offset_summary_compact_gives_the_same_level():
     s.compact()
     assert isinstance(s.cell_counts, tuple) and len(s.cell_counts[0]) == 3
     assert s.level(rel, rng) == pytest.approx(dense, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Gain-state declaration (cube_bathymetry#176)
+# ---------------------------------------------------------------------------
+
+GAIN_VECTORS = HERE / 'data' / 'gain_declaration_vectors.json'
+GAIN_FIXTURE = HERE / 'data' / 'gain_declaration_v1.csv'
+GAIN_STEP_DB = 23.0
+GAIN_STEP_START_NS = 110 * 10**9      # ping 200 of the bag below (100 s + 200 * 50 ms)
+GAIN_STEP_END_NS = 3600 * 10**9
+GAIN_HEADER = ('# format: gain-state-declaration v1\n# reference_state: pre_step\n'
+               'segment,start_utc,end_utc,offset_db,provenance,provenance_note\n')
+
+
+def write_gain_mode_bag(path, low_from=None, low_db=0.0):
+    """
+    Write the two-mode bag of write_mode_bag with a small jitter and an optional gain step.
+
+    From ping ``low_from`` on every ping reads ``low_db`` lower, as a receiver whose gain
+    stepped without telling anyone. The jitter is needed: a noise-free stream gives angle
+    bins whose variance is under the 0.0005 dB^2 floor, which the table writes as
+    unweighable.
+    """
+    events = []
+    for i in range(400):
+        ts = 100.0 + 0.05 * i
+        mode = CW_KEY if (i // 50) % 2 else REF_KEY
+        if i == 5 or (i % 50 == 0 and i):
+            events.append((ts + 0.01, INFO_TOPIC, _sonar_info(ts - 0.001, mode)))
+        level = (-30.0 + (12.0 if mode == CW_KEY else 0.0) + ((i * 7) % 5 - 2) * 0.1
+                 - (low_db if low_from is not None and i >= low_from else 0.0))
+        events.append((ts, TOPIC, _ping(ts, 'mbes', level)))
+    events.sort(key=lambda e: e[0])
+    write_bag(path, events, MODE_BAG_TOPICS)
+
+
+def write_flat_gain_bag(path, low_from=None, low_db=0.0):
+    """Write one mode, no SonarInfo: 400 pings with a jitter and an optional gain step."""
+    events = []
+    for i in range(400):
+        ts = 100.0 + 0.05 * i
+        level = (-30.0 + ((i * 7) % 5 - 2) * 0.1
+                 - (low_db if low_from is not None and i >= low_from else 0.0))
+        events.append((ts, TOPIC, _ping(ts, 'mbes', level)))
+    write_bag(path, events)
+
+
+def write_gain_declaration(path, segments, reference='pre_step', header=None):
+    """Write ``(id, start_ns, end_ns, offset_db)`` segments as a declaration file."""
+    head = GAIN_HEADER.rstrip('\n').replace('reference_state: pre_step',
+                                            'reference_state: %s' % reference)
+    lines = [header or head]
+    for seg_id, start, end, offset in segments:
+        lines.append('%s,%s,%s,%s,measured,synthetic test bag'
+                     % (seg_id, dar.utc_text(start), dar.utc_text(end), offset))
+    path.write_text('\n'.join(lines) + '\n')
+    return path
+
+
+def step_declaration(tmp_path, offset=GAIN_STEP_DB, name='gain.csv'):
+    return write_gain_declaration(
+        tmp_path / name, [('gain_step', GAIN_STEP_START_NS, GAIN_STEP_END_NS, offset)])
+
+
+def table_rows(path):
+    """Return the table's data rows as lists of fields, the column line skipped."""
+    rows = [ln.split(',') for ln in path.read_text().splitlines() if not ln.startswith('#')]
+    assert rows[0] == list(dar.TABLE_COLUMNS)
+    return rows[1:]
+
+
+def nadir_row(rows, mode=REF_KEY):
+    return next(r for r in rows if r[0] == mode and r[1] == 'angle')
+
+
+def assert_rows_close(rows_a, rows_b, tol=0.01):
+    """Every non-numeric field equal, every number within ``tol``."""
+    assert len(rows_a) == len(rows_b)
+    for ra, rb in zip(rows_a, rows_b):
+        assert len(ra) == len(rb)
+        for fa, fb in zip(ra, rb):
+            try:
+                a, b = float(fa), float(fb)
+            except ValueError:
+                assert fa == fb, (ra, rb)
+                continue
+            assert abs(a - b) <= tol or (a != a and b != b), (ra, rb)
+
+
+def test_gain_declaration_same_table_from_pre_only_and_pre_plus_post(tmp_path, capsys):
+    """
+    The issue's acceptance: the declaration makes the post-step data usable.
+
+    The same pings, once all at the reference level and once with the second half 23 dB
+    low and declared, derive the same table (curve, range term and offsets).
+    """
+    pre = tmp_path / 'pre_bag'
+    both = tmp_path / 'both_bag'
+    write_gain_mode_bag(pre)
+    write_gain_mode_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    t_pre, t_both = tmp_path / 'pre.csv', tmp_path / 'both.csv'
+    assert dar.main([str(pre), '-t', TOPIC, '-o', str(t_pre), '--by-mode']) == 0
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(t_both), '--by-mode',
+                     '--gain-declaration', str(step_declaration(tmp_path))]) == 0
+    out = capsys.readouterr().out
+    assert 'gain_step' in out and '200 pings' in out, out
+    assert 'undeclared (at reference): 200 pings' in out, out
+    assert_rows_close(table_rows(t_pre), table_rows(t_both))
+    # ... and the mode offset is still the 12 dB the two modes differ by.
+    assert float(nadir_row(table_rows(t_both), CW_KEY)[10]) == pytest.approx(12.0, abs=0.05)
+
+
+def test_without_declaration_post_data_corrupts_the_table(tmp_path, capsys):
+    """Control: the same step bag fitted without the declaration is wrong, so the test can fail."""
+    pre = tmp_path / 'pre_bag'
+    both = tmp_path / 'both_bag'
+    write_gain_mode_bag(pre)
+    write_gain_mode_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    t_pre, t_both = tmp_path / 'pre.csv', tmp_path / 't_both.csv'
+    assert dar.main([str(pre), '-t', TOPIC, '-o', str(t_pre), '--by-mode']) == 0
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(t_both), '--by-mode']) == 0
+    capsys.readouterr()
+    good, bad = nadir_row(table_rows(t_pre)), nadir_row(table_rows(t_both))
+    assert float(good[5]) - float(bad[5]) > GAIN_STEP_DB / 2 - 2.0      # level of the nadir bin
+    assert float(bad[7]) > 100.0 > float(good[7])                       # variance: two states
+
+
+def test_wrong_sign_declaration_doubles_the_split(tmp_path, capsys):
+    """-23 instead of +23 makes the post-step data 46 dB from the pre-step data."""
+    both = tmp_path / 'both_bag'
+    write_gain_mode_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    right, wrong = tmp_path / 'right.csv', tmp_path / 'wrong.csv'
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(right), '--by-mode',
+                     '--gain-declaration', str(step_declaration(tmp_path))]) == 0
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(wrong), '--by-mode',
+                     '--gain-declaration',
+                     str(step_declaration(tmp_path, -GAIN_STEP_DB, 'wrong.csv'))]) == 0
+    capsys.readouterr()
+    assert float(nadir_row(table_rows(right))[7]) < 1.0
+    assert float(nadir_row(table_rows(wrong))[7]) > 400.0      # (46 / 2)^2 = 529
+
+
+def test_declaration_header_lines_in_table(tmp_path, capsys):
+    """The table records the reference state, the canonical digest and per-segment counts."""
+    both = tmp_path / 'both_bag'
+    write_gain_mode_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    decl = step_declaration(tmp_path)
+    table = tmp_path / 'table.csv'
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(table), '--by-mode',
+                     '--gain-declaration', str(decl)]) == 0
+    capsys.readouterr()
+    hd = table_header(table.read_text().splitlines())
+    loaded = dar.load_gain_declaration(str(decl))
+    assert hd['gain_reference_state'] == 'pre_step'
+    assert hd['gain_declaration_sha256'] == loaded.sha256()
+    assert hd['gain_declaration_source'] == str(decl)
+    assert 'gain_sign' in hd
+    seg = [ln for ln in table.read_text().splitlines() if ln.startswith('# gain_segment: ')]
+    assert seg == ['# gain_segment: gain_step [1970-01-01T00:01:50Z, 1970-01-01T01:00:00Z) '
+                   'offset_db=23.000000 provenance=measured pings=200 beams=400']
+    assert '# gain_undeclared: 200 pings at the reference state' in table.read_text()
+    # Without a declaration the table carries none of it.
+    plain = tmp_path / 'plain.csv'
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(plain), '--by-mode']) == 0
+    assert 'gain_' not in plain.read_text()
+
+
+def test_single_curve_header_carries_gain_keys(tmp_path, capsys):
+    """The single-curve CSV records the declaration too, and its curve ignores the step."""
+    pre, both = tmp_path / 'pre_bag', tmp_path / 'both_bag'
+    write_flat_gain_bag(pre)
+    write_flat_gain_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    c_pre, c_both, c_bad = tmp_path / 'pre.csv', tmp_path / 'both.csv', tmp_path / 'bad.csv'
+    decl = step_declaration(tmp_path)
+    assert dar.main([str(pre), '-t', TOPIC, '-o', str(c_pre)]) == 0
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(c_both),
+                     '--gain-declaration', str(decl)]) == 0
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(c_bad)]) == 0
+    capsys.readouterr()
+    hd = table_header(c_both.read_text().splitlines())
+    assert hd['gain_reference_state'] == 'pre_step'
+    assert hd['gain_declaration_sha256'] == dar.load_gain_declaration(str(decl)).sha256()
+    assert 'gain_' not in c_pre.read_text()
+
+    def curve(path):
+        return [ln.split(',') for ln in path.read_text().splitlines() if not ln.startswith('#')]
+    pre_rows, both_rows, bad_rows = curve(c_pre), curve(c_both), curve(c_bad)
+    assert pre_rows[0] == both_rows[0]
+    for a, b in zip(pre_rows[1:], both_rows[1:]):
+        assert float(a[1]) == pytest.approx(float(b[1]), abs=0.01)      # mean_bs_db
+    assert float(bad_rows[1][1]) < float(pre_rows[1][1]) - GAIN_STEP_DB / 2 + 1.0
+
+
+def test_single_curve_gain_applies_before_the_tier2_add_back(tmp_path, capsys):
+    """The offset is added to the reported level; the TL add-back then sees the shifted one."""
+    pre, both = tmp_path / 'pre_bag', tmp_path / 'both_bag'
+    write_flat_gain_bag(pre)
+    write_flat_gain_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    c_pre, c_both = tmp_path / 'pre.csv', tmp_path / 'both.csv'
+    tl = ['--remove-tl', '--absorption-db-per-m', '0.1']
+    assert dar.main([str(pre), '-t', TOPIC, '-o', str(c_pre)] + tl) == 0
+    assert dar.main([str(both), '-t', TOPIC, '-o', str(c_both),
+                     '--gain-declaration', str(step_declaration(tmp_path))] + tl) == 0
+    capsys.readouterr()
+    rows_pre = [ln for ln in c_pre.read_text().splitlines() if not ln.startswith('#')]
+    rows_both = [ln for ln in c_both.read_text().splitlines() if not ln.startswith('#')]
+    assert len(rows_pre) == len(rows_both)
+    for a, b in zip(rows_pre[1:], rows_both[1:]):
+        assert float(a.split(',')[1]) == pytest.approx(float(b.split(',')[1]), abs=0.01)
+
+
+def test_cache_not_reused_across_declaration(tmp_path, capsys):
+    """A cache accumulated without a declaration is never refitted with one, nor the reverse."""
+    both = tmp_path / 'both_bag'
+    write_gain_mode_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    decl = step_declaration(tmp_path)
+    other = step_declaration(tmp_path, 22.0, 'other.csv')
+    cache = tmp_path / 'acc.pkl'
+    out = tmp_path / 't.csv'
+    base = [str(both), '-t', TOPIC, '--by-mode', '-o', str(out),
+            '--accumulation-cache', str(cache)]
+    assert dar.main(base) == 0
+    with pytest.raises(SystemExit, match='different.*gain_declaration'):
+        dar.main(base + ['--gain-declaration', str(decl)])
+    cache.unlink()
+    assert dar.main(base + ['--gain-declaration', str(decl)]) == 0
+    capsys.readouterr()
+    # Same declaration: the cache is reused, counters and header intact.
+    assert dar.main(base + ['--gain-declaration', str(decl)]) == 0
+    assert 'bag pass skipped' in capsys.readouterr().out
+    assert 'pings=200 beams=400' in out.read_text()
+    with pytest.raises(SystemExit, match='different.*gain_declaration'):
+        dar.main(base + ['--gain-declaration', str(other)])
+    with pytest.raises(SystemExit, match='different.*gain_declaration'):
+        dar.main(base)
+
+
+def test_empty_segment_warns_and_undeclared_pings_are_counted(tmp_path, capsys):
+    """A segment stamped a day late catches nothing: the run says so."""
+    bag = tmp_path / 'bag'
+    write_flat_gain_bag(bag)
+    day = 86400 * 10**9
+    decl = write_gain_declaration(tmp_path / 'late.csv',
+                                  [('late', GAIN_STEP_END_NS + day, GAIN_STEP_END_NS + 2 * day,
+                                    5.0)])
+    assert dar.main([str(bag), '-t', TOPIC, '-o', str(tmp_path / 'c.csv'),
+                     '--gain-declaration', str(decl)]) == 0
+    cap = capsys.readouterr()
+    assert 'undeclared (at reference): 400 pings' in cap.out, cap.out
+    assert "gain segment 'late' is declared but no ping fell in it" in cap.err, cap.err
+
+
+def test_gain_declaration_errors_are_fatal_before_reading(tmp_path):
+    bag = tmp_path / 'bag'
+    write_flat_gain_bag(bag)
+    bad = tmp_path / 'bad.csv'
+    bad.write_text(GAIN_HEADER + 'a,1970-01-01T00:00:00Z,1970-01-02T00:00:00Z,5.0,guessed,n\n')
+    with pytest.raises(SystemExit, match='--gain-declaration could not be loaded.*provenance'):
+        dar.main([str(bag), '-t', TOPIC, '-o', str(tmp_path / 'c.csv'),
+                  '--gain-declaration', str(bad)])
+    assert not (tmp_path / 'c.csv').exists()
+
+
+def _gain_vectors():
+    import json
+    return json.loads(GAIN_VECTORS.read_text())
+
+
+@pytest.mark.parametrize('case', _gain_vectors()['timestamps'], ids=lambda c: c['text'])
+def test_shared_vectors_timestamps_match_cpp(case):
+    """The timestamp cases the C++ parseUtcNs is tested on."""
+    assert dar.parse_utc_ns(case['text']) == case['ns']
+
+
+def test_shared_vectors_fixture_match_cpp():
+    """Canonical form, digest and offsets of the shared fixture: byte for byte what C++ checks."""
+    fx = _gain_vectors()['fixture']
+    decl = dar.load_gain_declaration(str(GAIN_FIXTURE))
+    assert decl.reference_state == fx['reference_state']
+    assert decl.canonical_form() == fx['canonical']
+    assert decl.sha256() == fx['canonical_sha256']
+    for o in fx['offsets']:
+        assert decl.offset_db_at(o['stamp_ns']) == o['offset_db']
+
+
+@pytest.mark.parametrize('case', _gain_vectors()['bad_files'], ids=lambda c: c['name'])
+def test_shared_vectors_bad_files_match_cpp(tmp_path, case):
+    """Every file the C++ loader rejects is rejected here, for the same stated reason."""
+    path = tmp_path / 'bad.csv'
+    path.write_text(case['text'])
+    with pytest.raises(ValueError) as e:
+        dar.load_gain_declaration(str(path))
+    assert case['error_contains'] in str(e.value), str(e.value)
+
+
+@pytest.mark.parametrize('case', _gain_vectors()['ok_files'], ids=lambda c: c['name'])
+def test_shared_vectors_ok_files_load(tmp_path, case):
+    path = tmp_path / 'ok.csv'
+    path.write_text(case['text'])
+    assert dar.load_gain_declaration(str(path)).reference_state
+
+
+def test_overlap_rejected_and_touching_accepted(tmp_path):
+    bad = write_gain_declaration(tmp_path / 'overlap.csv',
+                                 [('a', 0, 10**9, 1.0), ('b', 10**9 - 1, 2 * 10**9, 1.0)])
+    with pytest.raises(ValueError, match="'a' and 'b' overlap"):
+        dar.load_gain_declaration(str(bad))
+    ok = write_gain_declaration(tmp_path / 'touch.csv',
+                                [('b', 10**9, 2 * 10**9, 2.0), ('a', 0, 10**9, 1.0)])
+    decl = dar.load_gain_declaration(str(ok))
+    assert [s.id for s in decl.segments] == ['a', 'b']
+    assert decl.offset_db_at(10**9 - 1) == 1.0 and decl.offset_db_at(10**9) == 2.0
+    assert decl.segment_at(2 * 10**9) is None
+
+
+def test_sign_is_added():
+    """Reported 40 dB in a +23 segment is 63 dB in the reference state."""
+    decl = dar.load_gain_declaration(str(GAIN_FIXTURE))
+    inside = decl.segments[0].start_ns
+    assert 40.0 + decl.offset_db_at(inside) == 63.0
+    assert 40.0 + decl.offset_db_at(inside - 1) == 40.0
+
+
+def test_canonical_digest_ignores_notes_ids_and_order(tmp_path):
+    a = write_gain_declaration(
+        tmp_path / 'a.csv', [('x', 0, 10**9, 5.0), ('y', 2 * 10**9, 3 * 10**9, -0.0)])
+    b = tmp_path / 'b.csv'
+    b.write_text('﻿# format: gain-state-declaration v1\r\n# sonar: other\r\n'
+                 '# reference_state: pre_step\r\n'
+                 'segment,start_utc,end_utc,offset_db,provenance,provenance_note\r\n'
+                 'q,1970-01-01T00:00:02Z,1970-01-01T00:00:03Z,0,settings_file,n\r\n'
+                 'p,1970-01-01T00:00:00Z,1970-01-01T00:00:01Z,5,operator_reported,edited\r\n')
+    assert dar.load_gain_declaration(str(a)).sha256() == dar.load_gain_declaration(str(b)).sha256()

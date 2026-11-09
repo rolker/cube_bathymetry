@@ -224,6 +224,13 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   declaration hash so a cache built without it is never reused with it.
 - Per-segment ping counts and beams reported in the run summary and `mode_report_lines`; an undeclared-time count is
   printed beside it (decision 1's check, same as the C++ side). A declared segment with zero pings is a warning.
+- Implementation notes (commit 3): `PingRecord` gained a `stamp_ns` slot (the single-curve path had no ping stamp);
+  per-ping offsets are added in `ping_beams` / `bin_ping` (`offset_db` argument); a `GainTracker` mirrors the C++
+  resolver and counts pings and beams per segment; the headers also carry `# gain_declaration_source:`, `# gain_sign:`,
+  one `# gain_segment:` line per segment and `# gain_undeclared:`; `ACCUMULATION_VERSION` goes 1 -> 2 (the cache payload
+  holds the tracker counters) and the cache identity carries `[reference_state, digest]`. The two end-to-end tests
+  (derive across the step with the declaration, import with it; and the same table refused without it) live in
+  `test_import_bag_mode_table.py`, where both tools meet.
 - Make sure the C++ table loader tolerates the new `#` header lines (it ignores unknown `# key:` lines today per the
   README, but verify with a test: `test_backscatter_table.cpp::UnknownGainHeaderLinesIgnored`) and read the two
   keys into `BackscatterTable::gain_declaration_sha256 / gain_reference_state` for the decision-8 check.

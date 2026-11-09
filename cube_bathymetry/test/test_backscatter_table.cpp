@@ -391,6 +391,46 @@ TEST(BackscatterTable, LookupFollowsTheTableContract)
   EXPECT_NEAR(beamAbsAngleDeg(-static_cast<float>(M_PI) / 4.0f), 45.0, 1e-5);
 }
 
+// cube_bathymetry#176: the gain-declaration header lines of a table derived
+// under a declaration are read into the table (the import compares them with
+// the declaration it is given); the other gain_* lines are ignored, and a
+// table written before #176 carries none.
+TEST(BackscatterTable, GainHeaderLinesAreReadAndTheRestIgnored)
+{
+  const std::string with_gain =
+    "# format: angular-response-table v1\n"
+    "# reference_mode: FMU_1000us_24000Hz_500kHz\n"
+    "# range_ref_m: 10\n"
+    "# gain_reference_state: pre_step\n"
+    "# gain_declaration_sha256: 428912fc9f3f157a1ed1843c8c2e3b7b3004649adb3958cab1e84e6776895ac8\n"
+    "# gain_declaration_source: /campaign/gain.csv\n"
+    "# gain_sign: offset_db was ADDED to the reported level of each ping before fitting\n"
+    "# gain_segment: gain_step [2026-08-26T20:17:30Z, 2026-08-29T00:00:00Z) offset_db=23.000000"
+    " provenance=measured pings=200 beams=400\n"
+    "# gain_undeclared: 200 pings at the reference state\n"
+    "# mode_summary: FMU_1000us_24000Hz_500kHz pings=12 beams=345 declared_tvg=UNKNOWN\n"
+    "mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,"
+    "offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,"
+    "declared_tvg_absorption_db_per_km\n";
+  const auto path = writeTemp("gain_header", with_gain + kGoodRows);
+  std::string error;
+  const auto table = loadBackscatterTable(path, error);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_EQ(table.gain_reference_state, "pre_step");
+  EXPECT_EQ(
+    table.gain_declaration_sha256,
+    "428912fc9f3f157a1ed1843c8c2e3b7b3004649adb3958cab1e84e6776895ac8");
+  EXPECT_EQ(table.entries.size(), 1u);
+  std::filesystem::remove(path);
+
+  const auto plain_path = writeTemp("no_gain_header", std::string(kHeader) + kGoodRows);
+  const auto plain = loadBackscatterTable(plain_path, error);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_TRUE(plain.gain_reference_state.empty());
+  EXPECT_TRUE(plain.gain_declaration_sha256.empty());
+  std::filesystem::remove(plain_path);
+}
+
 TEST(BackscatterTable, AMinimalTableLoads)
 {
   const auto path = writeTemp("good", std::string(kHeader) + kGoodRows);

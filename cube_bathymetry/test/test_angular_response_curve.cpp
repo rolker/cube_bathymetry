@@ -120,6 +120,29 @@ TEST(AngularResponseCurve, ParsesTier2Header)
   EXPECT_FLOAT_EQ(loaded.points[1].second, -1.0f);
 }
 
+// cube_bathymetry#176: a curve derived under a gain declaration records its
+// digest and reference state; the import compares them with the declaration
+// it is given. A curve without them (every curve before #176) reads empty.
+TEST(AngularResponseCurve, ParsesGainDeclarationHeader)
+{
+  const std::string text =
+    "# tl_removed: false\n"
+    "# gain_reference_state: pre_step\n"
+    "# gain_declaration_sha256: abc123\n"
+    "# gain_segment: gain_step [a, b) offset_db=23.000000 provenance=measured pings=2 beams=4\n"
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n"
+    "1.0,-30.000,100,+0.000\n"
+    "3.0,-31.000,100,-1.000\n";
+  const AngularResponseCurve curve = parseAngularResponseCurve(text);
+  EXPECT_EQ(curve.points.size(), 2u);
+  EXPECT_EQ(curve.gain_reference_state, "pre_step");
+  EXPECT_EQ(curve.gain_declaration_sha256, "abc123");
+  const AngularResponseCurve plain = parseAngularResponseCurve(
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n1.0,-30.000,100,+0.000\n");
+  EXPECT_TRUE(plain.gain_reference_state.empty());
+  EXPECT_TRUE(plain.gain_declaration_sha256.empty());
+}
+
 // Absence of the TL header -> tier-1 defaults (tl_removed=false, absorption=0),
 // so a tier-1 curve keeps loading unchanged.
 TEST(AngularResponseCurve, AbsentHeaderDefaultsToTier1)
