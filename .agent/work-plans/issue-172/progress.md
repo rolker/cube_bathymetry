@@ -665,3 +665,21 @@ Specialists: Static analysis run by the lead (uncrustify, cpplint, flake8, pep25
 - [ ] (suggestion, Lens A) The pytest imports the derive test module's underscore helpers and matches exact stdout strings; a wording change breaks it. Accepted as a regression test; not changed.
 
 Dropped: Lens B's "capHistory over-cap erasure with a stale hold" (pre-existing, needs >4096 in-window states plus a stall; unchanged by this delta); `sha256File` is test-only now, kept with its test.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-11-09 12:17 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+
+**PR**: rolker/cube_bathymetry#175 at `26e80fd` (pushed after round 7)
+**Sources**: Copilot re-review of 2026-11-09 17:10 UTC on the pushed fixes: 1 new inline finding, 3 of the 4 earlier threads marked resolved, the import_bag-test thread left open by the bot although the test exists (`test/test_import_bag_mode_table.py`). Hosted CI pending (a mirror for a project repo; the gate is the ci-local attestation).
+
+### Findings
+- [x] (valid, Copilot) The curve loader's 64 MiB cap was a `file_size()` check before the read, so a file that grows after it was opened read past it — `src/angular_response_curve.cpp:237`. Closed: `d450217` reads in chunks and stops one byte past the cap, as the table loader does; the cap is a parameter (`kMaxCurveBytes` default) and the boundary is tested at a small size plus a directory path.
+- [x] (open thread, Copilot) "Add an import_bag test for SonarInfo association and drain ordering" — addressed by `0150689`/`fd64039` (4 pytest cases); the bot did not resolve the thread on its own.
+
+### Tests
+Targeted after the fix: `test_angular_response_curve` 13/13, `test_import_bag_mode_table` 4/4, `test_build_fingerprint` 8/8, `test_mixed_level_import` 14/14; cpplint + uncrustify clean after a reformat. Full suite on the previous head: 1440/0/0 (this change is a bounded loop in one loader). ci-local re-attestation on the new head follows.
+
+### Next
+ci-local attestation on the new head, push, `refs/notes/ci-local` push, merge via `merge_pr.sh --issue 172` (operator said yes to the merge on 2026-11-09).
