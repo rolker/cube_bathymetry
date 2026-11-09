@@ -47,3 +47,35 @@ Operator-settled facts taken as given: step +23.0 dB (pre minus post) from 2026-
 - [ ] Refuse a pre-#176 table whenever a declaration is supplied (recommended), or warn?
 - [ ] Live node: reload the declaration on the reset service, or configure only?
 - [ ] Confirm provenance vocabulary: settings_file | measured | operator_reported (+ mandatory note).
+
+
+## Plan Review
+**Status**: complete
+**When**: 2026-11-09 13:58 -05:00
+**By**: Claude Code Agent (Claude Sonnet)
+
+**Plan**: `.agent/work-plans/issue-176/plan.md` at `b5d8ddb`
+**PR**: PR-less
+**Verdict**: changes-requested
+
+Dispatched fresh-context reviewer (handoff header present). Core mechanism verified sound: the table correction is `raw - curve(|theta|) - r_g(log10 R/R0) - offset` (`backscatter_table.h:47`), so an additive dB shift of raw `Sounding::intensity` commutes with every table term, and shifting before the table is correct provided the table was fitted from shifted data (commit 3 does that). The shift is baked in before the recon spill / `ScatterRecord` (single call site `import_bag_main.cpp:2689`, `recon->add` after it), so no double application there. Operator decisions 1-5 honoured; no drift found.
+
+### Findings
+- [ ] (must-fix) Decision 7 ("applies with `--backscatter-correction none`, to unresolved-mode pings") contradicts the actual gating: `import_bag_main.cpp:2686` stamps only `if (mode_resolver)` and the node's `stampCloudMode` returns early on `!bs_resolver_ || soundings.empty()` (`cube_bathymetry_node.hpp:1018-1023`). A declaration with no table (or a single curve) would silently do nothing. Plan must say the shift is hoisted out of both guards (own function, called unconditionally when a declaration is loaded), and add tests for declaration-only (no table) on import_bag and node — `plan.md:53`, `:23`
+- [ ] (must-fix) `batch_regen` cannot take a per-mode table at all (`batch_regen_main.cpp` ~l.937 refuses `isAngularResponseTable`; it only applies a single-curve CSV). The plan's "bit-exact parity with `import_bag` on the same bag" and "batch_regen consumes the declaration" must be restated for the single-curve / `none` path only (parity test = same bag, same single curve or `none`, declaration on both). Say explicitly that table+declaration parity is out of reach until batch_regen reads SonarInfo — `plan.md:39,170-171,271`
+- [ ] (must-fix) Decision 8's table-vs-declaration consistency check covers only per-mode tables. A single-curve CSV (`loadAngularResponseCurveWithHeader`, used by batch_regen and import_bag) fitted across the step is the same failure with no guard. Either carry the two `# gain_*` header keys in single-curve files too and check them in both tools, or state the gap and emit a loud warning when a declaration is combined with a curve that records none — `plan.md:57-63`
+- [ ] (must-fix) Define the fingerprint comparison table completely. `fromJson` returns a bare readable-but-stale object for schema != current, so for a schema-2 file `gain_declaration` reads as "absent". The plan's batch_regen rule "absent vs present counts as different" therefore refuses a declaration against every pre-#176 store (intended?) and, with no declaration, must NOT refuse against a schema-2 store. Also the no-fingerprint-file case (batch_regen into a store with none) is unspecified: pass silently or warn? State all four cells (declaration x {null, present, schema-2, no file}) and test them — `plan.md:151-153,203-207`
+- [ ] (must-fix) `--reference-store` should not be in the batch_regen gain check. It only seeds the CUBE predicted depth surface (`batch_regen_main.cpp:94`, `:1013`); backscatter gain is irrelevant to it and refusing on it is a false refusal. Check the `-o` store only (and only if batch_regen actually merges into an existing `-o` store; confirm in the incremental path) — `plan.md:151,249,289`
+- [ ] (suggestion) Staleness semantics: hashing the raw file bytes means editing a `provenance_note`, a comment, whitespace, or appending a segment for an unrelated date marks every store and every derived table stale and forces a re-derive (decision 8 compares the same hash). Prefer a canonical hash over semantic content only (format version, reference_state, and per-segment start_ns/end_ns/offset_db in sorted order; exclude notes, ids, `sonar`, comments) and say so in ADR-0003. Keep strict equality (no "covers the data" reasoning) — `plan.md:41,57-63,203-207`
+- [ ] (suggestion) Zero-segment declaration is the natural escape hatch for decision 8's "refuse a pre-#176 table with a declaration": document it (a season that never crossed a step re-derives with an empty declaration, or imports with no declaration). Also decide whether a zero-segment declaration still changes the fingerprint (it does, via reference label) and say that is intended — `plan.md:61,125`
+- [ ] (suggestion) Node resume mixing: a store primed/resumed by the live node (`~/reset`, prior-store prime) holds already-shifted sums; the node writes no fingerprint, so starting a node with a different declaration than the one that built the store it resumes from is undetected. Not double application, but note it in the README/ADR addendum as a known unguarded case — `plan.md:155-160`
+- [ ] (suggestion) Format/vocabulary genericity is good (reference label, no Appledore constant in code). Trim the example header: `# sonar:` is informational and the example line "Kongsberg M3 (Appledore 2026)" / M3 numbers belong only in the fixture, not the README format section. Keep `provenance` three words + mandatory note — `plan.md:92-97,112`
+- [ ] (suggestion) Sign-pinning coverage is good (C++ unit, import_bag wrong-sign control, derive wrong-sign control). Add one test where the shifted segment edge falls mid-bag at a ping stamp exactly equal to `start_ns` through the real import_bag path (not just the loader), since the half-open boundary is where a stamp-source mismatch (header stamp vs `ping_ns`) would show — `plan.md:164-170`
+- [ ] (suggestion) `countBeam` must see the shifted intensity only for NaN gating; confirm the shift preserves NaN and that `tableBeamStatus` does not depend on intensity magnitude (it uses angle/range per `backscatter_mode.cpp:455`), so ordering is harmless — note, not a defect.
+
+### Open questions
+- [ ] Q1 `.agents/README.md` absent: agree with package README now, guide creation as its own issue (no verified-parameter table exists to edit; don't expand scope).
+- [ ] Q2 batch_regen check-only: agree; it writes no fingerprint today and ADR-0003's consumer is unimplemented (fix must-fix 4/5 first).
+- [ ] Q3 Refuse pre-#176 table when a declaration is supplied: agree (matches the Appledore candidate-D case); document the zero-segment declaration escape.
+- [ ] Q4 Node: configure-only, no hot reload: agree (a mid-run edit would split one store across two declarations undetected; reconfigure is the explicit act).
+- [ ] Q5 Provenance vocabulary `settings_file | measured | operator_reported` + mandatory note: confirm.
