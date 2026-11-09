@@ -50,24 +50,41 @@ Decisions this plan adds (flag any you disagree with):
 6. **Sign, pinned and tested.** `offset_db` is added: `level_in_reference = reported + offset_db`. The Appledore
    post-step segment is `+23.0` (reported is low); undeclared/pre-step is 0. A known-sign test (reported 40 dB in a
    +23 segment -> 63 dB) guards it; a flipped sign would double the split, the #172 candidate-D failure.
-7. **The offset applies to every ping in a segment, whether or not its pulse mode resolved.** It is a receiver
-   calibration, independent of the mode table: an `identity`-fallback ping in a +23 segment is still shifted; an
-   `exclude`d ping stays excluded. It also applies with `--backscatter-correction none` (the declaration alone puts
-   the emitted intensity in the reference state). NaN intensity stays NaN.
-8. **Declaration x table consistency.** A table derived with a declaration records `# gain_declaration_sha256:` and
-   `# gain_reference_state:` in its header. `import_bag` refuses (exit 1, before any bag is read) a table whose
-   recorded hash/reference differs from the declaration supplied, and refuses a declaration supplied with a table
-   that records none (and the reverse: a table that records one, run without a declaration). Reason: a table fitted
-   in the reference state applied to un-shifted post-step pings is the wrong correction by exactly the step, and a
-   table fitted across the step is invalid. Pre-#176 tables carry no header and so are refused when a declaration is
-   in play; with no declaration at all they keep loading (the Appledore season outside the step is unaffected, and
-   decision 3's staleness is carried by the fingerprint, not by refusing every old table).
-9. **Provenance vocabulary:** `settings_file | measured | operator_reported`, plus a mandatory non-empty free-text
-   `provenance_note` (e.g. "528 overlapping 10 m cells; 20us/50us CW +23.0, 1 ms FM +22.7, within spread"). Both
+7. **The offset applies to every ping in a segment, whether or not a mode table is loaded or the ping's mode
+   resolved.** It is a receiver calibration, independent of the mode table. The shift is its own function
+   (`shiftSoundings`), called unconditionally whenever a declaration is loaded: in `import_bag` it is hoisted OUT of
+   the `if (mode_resolver)` guard around `stampCorrectionIndex` (~l.2686), and in the node out of the
+   `!bs_resolver_ || soundings.empty()` early return of `stampCloudMode` (only the empty-cloud skip remains).
+   An `identity`-fallback ping is still shifted; an `exclude`d ping stays excluded; `--backscatter-correction none`
+   and a single-curve run are shifted too. NaN intensity stays NaN; `countBeam`/`tableBeamStatus` use angle and
+   range, not intensity magnitude, so ordering relative to the shift is harmless.
+8. **Declaration x fitted-curve consistency (per-mode tables AND single-curve CSVs).** The derive tool, with a
+   declaration, writes `# gain_declaration_sha256:` and `# gain_reference_state:` into the per-mode table header and
+   into the single-curve CSV header (`loadAngularResponseCurveWithHeader` reads them too). `import_bag` and
+   `batch_regen` refuse (before any bag is read) a curve/table whose recorded digest/reference differs from the
+   declaration supplied, a curve/table that records none while a declaration is supplied, and one that records a
+   declaration while none is supplied. Reason: a curve fitted in the reference state applied to un-shifted post-step
+   pings is wrong by the step, and one fitted across the step is invalid. Pre-#176 files carry no keys, so with a
+   declaration they are refused; with no declaration they load as before. **Escape hatch (operator answer):** a
+   season that never crossed a step re-derives with, or imports with, a zero-segment declaration (it still changes
+   the fingerprint through the reference label, which is intended: that store is in a named reference state).
+   Explicit curve paths only; the SonarInfo-delivered curve (`auto`, import_bag) carries no header, so
+   `auto` + declaration emits a loud warning that the curve's gain state is unknown.
+9. **Provenance vocabulary** (confirmed by the operator): `settings_file | measured | operator_reported`, plus a mandatory non-empty free-text
+   `provenance_note` (the Appledore numbers live in the campaign file and the test fixture only). Both
    required on every segment; a segment without them fails the load.
 10. **The reference is a name, not a number.** `reference_state` is a free label (`pre_step`); the offsets are
     relative to it. Two declarations with different reference labels are different corrections (the label is in the
     fingerprint), so a store in `pre_step` is never silently merged with one in another state.
+12. **The hash is of a canonical form, not the file bytes:** format version, reference state, and each segment's
+    `start_ns`, `end_ns`, `offset_db` (`%.6f`) in sorted order. Notes, ids, `sonar`, comments, whitespace and field
+    order are excluded, so editing a note does not stale every store and table; strict equality otherwise (no
+    "covers the data" reasoning). Both the C++ and Python loaders compute it; the shared vectors pin the digest. The
+    loader still returns the raw bytes, but the fingerprint and headers carry the canonical digest.
+13. **Operator answers 2026-11-09 to the review questions:** package README documents the option/parameter now
+    (`.agents/README.md` does not exist; creating that guide is its own follow-up issue, not filed here);
+    `batch_regen` checks the fingerprint only and writes none; a pre-#176 table with a declaration is refused
+    (zero-segment declaration is the escape); the live node loads the declaration at configure only.
 11. **Future-proof for marine_tools#97.** A source-declared gain would be one more input on the same timeline; the
     loader/resolver expose `offsetDbAt(stamp_ns)` and nothing else, so a later source-side term composes by sum.
     Not implemented here.
@@ -80,10 +97,10 @@ rejects them rather than half-parsing).
 ```
 # format: gain-state-declaration v1
 # reference_state: pre_step
-# sonar: Kongsberg M3 (Appledore 2026)          <- optional, informational
+# sonar: <free text>                            <- optional, informational, not hashed
 # sign: offset_db is ADDED to the reported level to reach the reference state
 segment,start_utc,end_utc,offset_db,provenance,provenance_note
-m3_gain_step,2026-08-26T20:17:30Z,2026-08-29T00:00:00Z,23.0,measured,528 overlapping 10 m cells; CW 20/50us +23.0; 1ms FM +22.7 within spread
+gain_step,2026-01-02T03:04:05Z,2026-01-03T00:00:00Z,23.0,measured,<how the offset was obtained>
 ```
 
 Rules (each one a rejecting load error naming file, line and reason):
@@ -97,8 +114,8 @@ Rules (each one a rejecting load error naming file, line and reason):
 - `offset_db` finite; `|offset_db| <= 60` (a typo guard); `0.0` allowed (an explicit "reference here" segment).
 - `segment` ids unique, `[A-Za-z0-9_.-]+`. `provenance` one of the three words; `provenance_note` non-empty.
 - Zero segments is legal (declares only the reference state) and loads with a warning.
-- The loader returns the bytes it parsed (as `loadBackscatterTable` does) so the fingerprint hashes exactly what was
-  applied.
+- The loader returns the bytes it parsed and the canonical digest (decision 12), so the fingerprint records exactly
+  what was applied.
 
 ## Approach
 
@@ -140,45 +157,58 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   the stamps"). A convenience `void shiftSoundings(std::vector<GeoSounding>&, double offset_db)` adds the offset to
   every finite `sounding.intensity`.
 - `import_bag_main.cpp`: new option `--backscatter-gain-declaration <file>`; load before any bag opens (next to the
-  table load at ~l.974-1040), print reference state + segments, `isGainDeclaration` probe, decision-8 table
-  consistency check. In `stampCorrectionIndex` (~l.1319), apply the gain shift FIRST (before `countBeam`, so its
-  uncorrectable-beam accounting sees the shifted intensity as the estimator will), then resolve the mode. Print
+  table load at ~l.974-1040), print reference state + segments, `isGainDeclaration` probe, decision-8 curve/table
+  consistency check (per-mode tables and single-curve CSVs). The shift is a separate call at the ping-stamping site (~l.2686), made whenever a declaration is loaded and NOT
+  inside `if (mode_resolver)`; `stampCorrectionIndex` stays table-only and runs after it. Print
   `GainStateResolver::report()` next to the mode report; fail (exit 4 class, same as `resolvedNothing`) never: an
   all-undeclared run is legal, it is reported. Verify during implementation that the depth-adaptive pass and the
   fixed pass share this one stamping function (l.2689 is one call site; confirm there is no second).
-- `batch_regen_main.cpp`: same option; apply in the per-ping loop (~l.1118-1152) before scatter to buckets; since
-  buckets store `ScatterRecord` with the already-shifted intensity, the gather step needs nothing. It writes no
-  fingerprint today, so add a **read-only consistency check**: if `-o <store_dir>` (or `--reference-store`) holds a
-  `build_fingerprint.json` whose `gain_declaration` differs from the one supplied (hash or reference state; absent
-  vs present counts as different), refuse with both values named. This is what stops "uncorrected tiles inside a
-  corrected store". Print the same resolver report.
+- `batch_regen_main.cpp`: same option; apply in the per-ping loop (~l.1118-1152) before scatter to buckets (buckets
+  hold the already-shifted intensity; the gather needs nothing). batch_regen refuses per-mode tables
+  (`isAngularResponseTable`, ~l.937: no SonarInfo source), so its supported paths are `none` and a single-curve CSV;
+  **table + declaration parity with `import_bag` is out of reach until batch_regen reads SonarInfo** (stated in the
+  README). Decision 8's check applies to the single-curve CSV. Fingerprint check on the `-o` store ONLY (not
+  `--reference-store`, which only seeds the predicted depth surface), and only when `-o` already holds a store that
+  batch_regen merges into (confirm in the implementation; if it always rebuilds fresh, the check fires only when a
+  fingerprint is present). Outcomes (batch_regen writes no fingerprint):
+
+  | given declaration | `-o` fingerprint | outcome |
+  |---|---|---|
+  | present | present, same reference + digest | proceed |
+  | present | present, different | refuse, both values named |
+  | present | present, `gain_declaration: null` | refuse (store built uncorrected) |
+  | present | schema-2 (pre-#176) | refuse (its gain state is unknowable) |
+  | present | no fingerprint file | proceed with a warning (nothing to compare) |
+  | none | present with a declaration | refuse (would rebuild tiles uncorrected inside a corrected store) |
+  | none | `null`, schema-2, or no file | proceed (schema-2 is NOT refused when no declaration is given) |
+
+  Prints the same resolver report.
 - `cube_bathymetry_node.hpp`: parameter `backscatter_gain_declaration` (string, default `""`), loaded in
   `on_configure` (a load error returns FAILURE like the bad-fallback path); `stampCloudMode` applies it by cloud
   stamp; the resolver and loaded declaration survive the reset service's `buildSession` (same rule as the mode
-  resolver). Report is logged at deactivate/cleanup with the mode report; a ping in a +offset segment logs nothing
+  resolver). The shift is hoisted out of the `!bs_resolver_` early return. The node writes no fingerprint, so a node
+  resuming/priming from a store built under a different declaration is NOT detected (README + ADR addendum say so). Report is logged at deactivate/cleanup with the mode report; a ping in a +offset segment logs nothing
   per ping. The file is read at configure; a gain change that happens mid-run is entered by editing the file and
-  reconfiguring (no hot reload; stated in the README).
+  reconfiguring (configure only, no hot reload; stated in the README).
 - Tests: `test_gain_state_resolver` (gtest): `CountsPerSegmentAndUndeclared`, `ShiftAddsOffsetToFiniteIntensityOnly`,
   `UnresolvedModePingStillShifted`, `ReportNamesEmptySegment`. `test_import_bag_mode_table.py` gets new cases
   (extend, same synthetic two-mode bag with a table derived in-reference): `test_declared_step_restores_reference_level`
   (bag whose second half is generated 23 dB low, declaration covering it: corrected cells equal the undeclared
   baseline; same run without the declaration shows the 23 dB seam, proving the test can fail),
   `test_wrong_sign_would_double_the_step` (a declaration with `-23.0` over the same bag produces a ~46 dB seam; assert
-  it, documenting why the sign is pinned), `test_declaration_report_counts` (report lists per-segment and undeclared
+  it, documenting why the sign is pinned), `test_declaration_without_table_shifts` (declaration only, no curve; and with `--backscatter-correction none`: the 23 dB seam disappears), `test_stamp_equal_to_start_ns_is_shifted` (a ping stamped exactly at a segment's `start_ns`, through the real import_bag path, is shifted; one 1 ns earlier is not), `test_single_curve_without_gain_header_refused`, `test_auto_with_declaration_warns`, `test_declaration_report_counts` (report lists per-segment and undeclared
   counts; a segment stamped a day late reads `0 pings` and warns), `test_table_without_declaration_hash_refused`,
-  `test_hash_mismatch_refused`. A `batch_regen` end-to-end case in `test_batch_regen.cpp` (or a pytest if it already
-  has a CLI harness; implementation to pick the cheaper): shifted-ping parity with `import_bag` on the same bag
-  (bit-exact tile values, the ADR-0007 parity rule), and the fingerprint mismatch refusal. Node: `test_node.cpp` /
-  `test_node_lifecycle.cpp` case `GainDeclarationShiftsCloudIntensityAndSurvivesReset`.
+  `test_hash_mismatch_refused`. `batch_regen` cases (`test_batch_regen.cpp` or a pytest, whichever has the CLI harness): bit-exact parity with `import_bag` on the same bag for the `none` and single-curve paths only, declaration on both; one test per row of the outcome table above (`FingerprintDeclarationMatrix_*`); `--reference-store` with a differing fingerprint does not refuse; a per-mode table is still refused. Node: `test_node.cpp` /
+  `test_node_lifecycle.cpp` cases `GainDeclarationShiftsCloudIntensityWithoutTable` (no table, no resolver) and `GainDeclarationShiftsCloudIntensityAndSurvivesReset`.
 
 **Commit 3: derive tool consumes it (+ tests)**
 
-- `derive_angular_response.py`: `--gain-declaration <file>` (only with `--by-mode`; refused otherwise, like the other
-  `--by-mode`-only options in `check_by_mode_args`). New `load_gain_declaration(path)` implements the same format and
+- `derive_angular_response.py`: `--gain-declaration <file>` (single-curve and `--by-mode`). New `load_gain_declaration(path)` implements the same format and
   the same checks as the C++ loader (shared vectors test). In `accumulate_by_mode`'s ping loop (~l.3084) and
   `ping_beams` (~l.1929) the segment offset for `stamp_ns(msg.header.stamp)` is added to each beam's intensity
   BEFORE binning, so the angle bins, range term, switch-offset events and `solve_offsets` all see reference-state
   data; the switch-adjacency offsets across the step boundary are thereby consistent.
+- Single-curve output (`write_csv` / `build_header`) gets the same `# gain_*` header keys when a declaration is given; `--gain-declaration` is accepted in the single-curve mode as well as `--by-mode` (offset applied per ping before binning in `accumulate`/`bin_ping`).
 - Table header gains `# gain_reference_state:` and `# gain_declaration_sha256:` (and `# gain_declaration_source:`
   informational), written only when a declaration was given; `mode_table_lines` adds a `# gain_segments:` summary
   line per segment with ping counts. The accumulation cache identity (`accumulation_cache_identity`) includes the
@@ -192,7 +222,7 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   issue's acceptance: synthetic bag pre-only vs the same bag with a second half 23 dB low and the declaration -> equal
   curve/range/offset columns within tolerance), `test_without_declaration_post_data_corrupts_the_table` (control),
   `test_wrong_sign_declaration_doubles_the_split`, `test_declaration_header_lines_in_table`,
-  `test_declaration_refused_without_by_mode`, `test_cache_not_reused_across_declaration`,
+  `test_single_curve_header_carries_gain_keys`, `test_cache_not_reused_across_declaration`,
   `test_shared_vectors_match_cpp` (reads `gain_declaration_vectors.json`), `test_overlap_rejected`.
 
 **Commit 4: fingerprint + ADR addenda + docs**
@@ -200,15 +230,15 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
 - `build_fingerprint.h/cpp`: `kSchemaVersion` 2 -> 3. New `struct GainDeclaration {std::string reference_state,
   sha256, source;}` and `std::optional<GainDeclaration> gain_declaration` in `BuildFingerprint`; JSON key
   `"gain_declaration": {"reference_state": ..., "sha256": ..., "source": ...}` or `null`; `isStale` compares
-  `reference_state` and `sha256` (not `source`) and treats absent vs present as stale. `fromJson` already returns a
+  `reference_state` and `sha256` (not `source`) and treats absent vs present as stale (the generic comparison; batch_regen's matrix above is stricter in one cell and laxer in another by design, since it is not a staleness check). `fromJson` already returns a
   non-current `schema_version` as readable-but-stale without interpreting its fields, so every pre-#176 store reads
   stale with no extra code (decision 3); the existing test that pins "schema 2 file reads stale" is updated and a
   new one added. `import_bag` `writeFingerprint` passes the declaration's reference state and the hash of the bytes
   the loader returned (`cube::sha256Text`).
 - Tests (`test_build_fingerprint.cpp`): `SchemaVersion2FileReadsStale`, `GainDeclarationRoundTrips`,
   `DifferentDeclarationHashIsStale`, `DifferentReferenceStateIsStale`, `SameDeclarationUnderAnotherPathNotStale`,
-  `NullVsPresentIsStale`, `SourcePathNotCompared`.
-- ADR-0003 addendum (schema 3: `gain_declaration`, what it hashes, why the bump invalidates old stores and tables)
+  `NullVsPresentIsStale`, `SourcePathNotCompared`, `CanonicalDigestIgnoresNotesAndComments`, `Schema2FileHasNoDeclaration`.
+- ADR-0003 addendum (schema 3, canonical-form digest: `gain_declaration`, what it hashes, why the bump invalidates old stores and tables)
   and ADR-0007 addendum ("Gain-state declaration addendum (#176)": additive receiver-gain term applied to raw
   intensity before the mode table; reference state; sign; undeclared = reference; interplay with the mode-table
   consistency check; why not folded into `correction_idx`; source-side declaration via marine_tools#97 remains a
@@ -216,9 +246,7 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
 - Docs: package `README.md` (a "Gain-state declaration" section: the format, the sign, the Appledore example as
   prose with the file living in campaign config, the four consumers, and the explicit consequence that
   per-mode tables derived across the step must be re-derived with `--gain-declaration`), the options in the
-  `import_bag`/`batch_regen`/derive usage text, and the node parameter. `.agents/README.md`: see Open Questions
-  (it does not exist in this repo at this commit); the parameter table entry for `backscatter_gain_declaration` is
-  written wherever the repo's verified-parameter table actually lives, with the source-checked description.
+  `import_bag`/`batch_regen`/derive usage text, and the node parameter. The parameter is documented in the package README only (`.agents/README.md` does not exist; creating it is a separate follow-up issue, not filed here). README also states: the live node writes no fingerprint (resume under another declaration undetected), batch_regen has no table+declaration support, the zero-segment escape hatch. The README format section carries no Appledore text (fixture only).
 
 ## Files to Change
 
@@ -226,7 +254,7 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
 |------|--------|
 | `cube_bathymetry/include/cube_bathymetry/gain_declaration.h`, `src/gain_declaration.cpp` | New: types, loader, `offsetDbAt`, `GainStateResolver`, report |
 | `cube_bathymetry/CMakeLists.txt` | Add sources and the new gtest targets |
-| `cube_bathymetry/src/import_bag_main.cpp` | `--backscatter-gain-declaration`; load, table consistency check, shift in `stampCorrectionIndex`, report, fingerprint input |
+| `cube_bathymetry/src/import_bag_main.cpp` | `--backscatter-gain-declaration`; load, curve/table consistency check, unconditional shift at the ping site, report, fingerprint input |
 | `cube_bathymetry/src/batch_regen_main.cpp` | Same option; shift in the per-ping loop; fingerprint mismatch refusal; report |
 | `cube_bathymetry/src/cube_bathymetry_node.hpp` | `backscatter_gain_declaration` param; shift in `stampCloudMode`; survive reset; report |
 | `cube_bathymetry/include/cube_bathymetry/backscatter_table.h`, `src/backscatter_table.cpp` | Read `gain_*` header lines into the table struct |
@@ -236,7 +264,7 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
 | `cube_bathymetry/test/test_gain_declaration.cpp` | New (loader + resolver tests) |
 | `cube_bathymetry/test/test_import_bag_mode_table.py`, `test_derive_angular_response.py`, `test_build_fingerprint.cpp`, `test_backscatter_table.cpp`, `test_batch_regen.cpp`, `test_node*.cpp` | New cases listed above |
 | `cube_bathymetry/docs/decisions/0003-staleness-fingerprint.md`, `0007-*.md` | Addenda |
-| `README.md` (repo root = package README as in #172), `.agents/README.md` | Format, option, parameter table |
+| `README.md` (package README) | Format, options, node parameter, known gaps |
 
 ## Consequences
 
@@ -246,7 +274,7 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
 | Intensity shifted before the correction | `countBeam` accounting sees shifted values; recon spill / `ScatterRecord` hold already-shifted intensity (no second application; no format change) | Yes (commit 2, parity test) |
 | Per-mode tables derived across the step (candidate D inputs) | Must be re-derived with `--gain-declaration`; decision 8 refuses a table/declaration mismatch; fingerprint flags the stores | Yes; stated in README + ADR addenda |
 | Derive `--by-mode` | Accumulation cache identity includes the declaration hash; table header lines; C++ loader reads them | Yes (commit 3) |
-| `batch_regen` gains the option | Fingerprint read-only check against `-o` / `--reference-store`; it still writes no fingerprint | Yes; writing one stays the ADR-0003 follow-up |
+| `batch_regen` gains the option | Fingerprint read-only check against the `-o` store only (outcome matrix); it still writes no fingerprint | Yes; writing one stays the ADR-0003 follow-up |
 | Live node | New parameter; configure-time load; reset keeps it; no hot reload | Yes |
 | Appledore declaration file | Lives in unh_echoboats_project11 / archive, not here | No - follow-up for the campaign repo (operator) |
 | marine_tools#97 source-side gain | Would add an input on the same timeline; not built here | No - out of scope |
@@ -282,17 +310,9 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
 
 ## Open Questions
 
-- `.agents/README.md` does not exist in this repo at the branch base (`.agents/` holds only `ci_local_*.sh`), and
-  `grep` finds no verified-parameter table in the package README. Create it in this PR (a dedicated guide is
-  `.agent/templates/project_agents_guide.md`'s own task per AGENTS.md), or record the parameter in the package
-  README only? Recommended: package README now, guide creation as its own issue.
-- `batch_regen` mismatch check reads the `-o` and `--reference-store` fingerprints. Is that enough, or should it
-  also write a fingerprint (the ADR-0003 consumer is unimplemented)? Recommended: check only.
-- Decision 8 refuses a pre-#176 table whenever a declaration is supplied. Alternative: allow it with a loud warning
-  for re-importing seasons that never crossed a step. Recommended: refuse (the Appledore case is exactly a table
-  derived across the step).
-- Live node: reload the file on the reset service as well as on configure? Recommended: configure only.
-- Provenance vocabulary (`settings_file | measured | operator_reported`) as written in the issue review; confirm.
+None blocking; the review questions are answered (decision 13). Follow-up (not filed): create `.agents/README.md`
+for this repo from the workspace template. To confirm in implementation: whether batch_regen merges into an existing
+`-o` store (affects only how often its fingerprint check can fire).
 
 ## Estimated Scope
 
