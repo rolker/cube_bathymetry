@@ -91,7 +91,11 @@ bool BackscatterModeResolver::addSonarInfo(const SonarInfoState & state)
   // than the stale count looks back (the window), so it counts nothing stale.
   const bool behind_window = have_resolved_ && stamp < windowCut();
   if (!behind_window) {
-    behind_stamps_.clear();  // the current timeline goes on: those were late
+    // The current timeline goes on: those were late. Prune them here too --
+    // a heartbeat returns below before the prune at the end, and a behind
+    // state left untracked by a heartbeat was the one leak releaseBehind in
+    // resolve did not reach (PR #175 cross-model review).
+    releaseBehind();
   }
   const auto existing = history_.find(stamp);
   if (existing != history_.end() && sameState(existing->second, state)) {
@@ -187,11 +191,13 @@ void BackscatterModeResolver::releaseBehind()
   // The current timeline went on, so the behind-window states are not a new
   // timeline's history after all (no re-anchor came). Untracked, they are
   // plain entries older than the window, and only prune drops those -- which
-  // runs on an in-window SonarInfo, something a stream stamped consistently
-  // behind the window (a skewed driver clock) never sends. Without this the
-  // history grew by one entry per such message for the whole run, past both
-  // caps (PR #175 review). prune keeps the newest entry at or before the cut,
-  // the state these pings resolve against, and drops the rest.
+  // ran only at the end of an in-window addSonarInfo, something a stream
+  // stamped consistently behind the window (a skewed driver clock) never
+  // sends, and which a heartbeat skips. Without this the history grew by one
+  // entry per such message for the whole run, past both caps (PR #175
+  // review). prune keeps the newest entry at or before the cut, the state
+  // these pings resolve against, and drops the rest. Called wherever the set
+  // is released: an advancing or in-window ping, an in-window SonarInfo.
   if (behind_stamps_.empty()) {
     return;
   }

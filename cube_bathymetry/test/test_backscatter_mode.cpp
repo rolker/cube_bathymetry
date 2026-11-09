@@ -327,6 +327,23 @@ TEST(BackscatterModeResolver, BehindWindowStatesInterleavedWithPingsStayBounded)
   const int64_t t = t0 + n * step;
   r.addSonarInfo(state(t - 1, 5e-5f, 20000.0f, 1));
   EXPECT_EQ(r.resolve(t, kF), 1);
+
+  // Cross-model review of the fix: the release in addSonarInfo. An in-window
+  // HEARTBEAT (the same state again under its original stamp) returns before
+  // the prune at the end of addSonarInfo, yet it releases the behind-window
+  // set; repeating "behind state, heartbeat, ping" grew the history by one
+  // entry per cycle. The heartbeat's stamp stays inside the window while the
+  // pings advance 50 ms a step, so this interleaving stays live.
+  const int64_t t1 = t;
+  peak = 0;
+  for (int i = 0; i < 1000; ++i) {
+    const int64_t tp = t1 + (i + 1) * step / 2;
+    r.addSonarInfo(state(tp - skew, 0.001f, 24000.0f, 2));   // behind the window
+    r.addSonarInfo(state(t - 1, 5e-5f, 20000.0f, 1));         // heartbeat, in force
+    ASSERT_EQ(r.resolve(tp, kF), 1) << i;
+    peak = std::max(peak, r.historySize());
+  }
+  EXPECT_LE(peak, 4u) << "a behind state released by a heartbeat must not accumulate";
 }
 
 // cube_bathymetry#172 review round 2: import_bag reads SonarInfo as it comes
