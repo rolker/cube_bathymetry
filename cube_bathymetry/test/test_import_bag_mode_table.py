@@ -302,8 +302,9 @@ def _declaration(tmp_path, segments, reference='pre_step', name='gain.csv'):
     return path
 
 
-def _step_declaration(tmp_path, offset=GAIN_STEP_DB, start=STEP_START_NS, end=STEP_END_NS):
-    return _declaration(tmp_path, [('gain_step', start, end, offset)])
+def _step_declaration(tmp_path, offset=GAIN_STEP_DB, start=STEP_START_NS, end=STEP_END_NS,
+                      name='gain.csv'):
+    return _declaration(tmp_path, [('gain_step', start, end, offset)], name=name)
 
 
 def _with_gain_keys(table, tmp_path, sha, reference='pre_step'):
@@ -591,3 +592,30 @@ def test_derived_table_under_the_declaration_imports_end_to_end(tmp_path, step_b
     rc, out = _run(tmp_path / 'store2', step_bag, _table_args(table))
     assert rc != 0, out
     assert 'no gain-state declaration was given' in out, out
+
+
+def test_fingerprint_records_the_declaration_fixed_and_depth_adaptive(tmp_path, flat_step_bag):
+    """Schema 3: the reference state and canonical digest, null without a declaration."""
+    decl = _step_declaration(tmp_path)
+    sha = _canonical_sha('pre_step', [('gain_step', STEP_START_NS, STEP_END_NS, GAIN_STEP_DB)])
+    store = tmp_path / 'store'
+    rc, out = _run(store, flat_step_bag, ['--backscatter-gain-declaration', str(decl)])
+    assert rc == 0, out
+    fp = _fingerprint(store)
+    assert fp['schema_version'] == 3, fp
+    assert fp['gain_declaration'] == {'reference_state': 'pre_step', 'sha256': sha,
+                                      'source': str(decl)}, fp
+
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
+    adaptive = tmp_path / 'adaptive'
+    rc, out = _run(adaptive, flat_step_bag, [
+        '--backscatter-gain-declaration', str(decl), '--depth-adaptive',
+        '--scratch-dir', str(scratch), '--min-obs-per-node', '1'])
+    assert rc == 0, out
+    assert _fingerprint(adaptive)['gain_declaration']['sha256'] == sha
+
+    plain = tmp_path / 'plain'
+    rc, out = _run(plain, flat_step_bag, [])
+    assert rc == 0, out
+    assert _fingerprint(plain)['gain_declaration'] is None

@@ -30,6 +30,7 @@
 #include <string>
 
 #include "cube_bathymetry/build_fingerprint.h"
+#include "cube_bathymetry/gain_declaration.h"
 
 namespace cube
 {
@@ -74,7 +75,7 @@ TEST(BuildFingerprint, RoundTripsBothModes)
 {
   for (const auto & original : {adaptive(), fixed(1.0)}) {
     const auto back = BuildFingerprint::fromJson(original.toJson());
-    EXPECT_EQ(back.schema_version, 2);
+    EXPECT_EQ(back.schema_version, 3);
     EXPECT_EQ(back.mode, original.mode);
     EXPECT_EQ(back.cell_size_m.has_value(), original.cell_size_m.has_value());
     if (original.cell_size_m) {
@@ -250,6 +251,112 @@ TEST(BuildFingerprint, BackscatterCorrectionRoundTripsAndDecidesStaleness)
   EXPECT_FALSE(BuildFingerprint::fromJson(old.toJson()).backscatter_correction.has_value());
 }
 
+// cube_bathymetry#176: the gain-state declaration a build applied is part of
+// the fingerprint (schema 3).
+namespace
+{
+BuildFingerprint withGain(
+  const std::string & reference, const std::string & sha, const std::string & source = "/c/g.csv")
+{
+  auto f = fixed(1.0);
+  f.gain_declaration = BuildFingerprint::GainDeclarationRecord{reference, sha, source};
+  return f;
+}
+}  // namespace
+
+TEST(BuildFingerprint, SchemaVersion2FileReadsStale)
+{
+  // A pre-#176 store (schema 2) is stale against every schema-3 fingerprint:
+  // the gain state it was built in cannot be told. Its other fields are not
+  // interpreted, so it has no declaration.
+  const auto v2 = BuildFingerprint::fromJson(
+    "{\"schema_version\": 2, \"tiling\": {\"mode\": \"fixed\"}}");
+  EXPECT_EQ(v2.schema_version, 2);
+  EXPECT_FALSE(v2.gain_declaration.has_value());
+  EXPECT_TRUE(fixed(1.0).isStale(v2));
+  EXPECT_TRUE(withGain("pre_step", "abc").isStale(v2));
+  EXPECT_TRUE(adaptive().isStale(v2));
+}
+
+TEST(BuildFingerprint, Schema2FileHasNoDeclaration)
+{
+  const auto v2 = BuildFingerprint::fromJson(
+    "{\"schema_version\": 2, \"gain_declaration\": {\"reference_state\": \"x\", "
+    "\"sha256\": \"y\", \"source\": \"z\"}}");
+  EXPECT_FALSE(v2.gain_declaration.has_value());
+}
+
+TEST(BuildFingerprint, GainDeclarationRoundTrips)
+{
+  const auto f = withGain("pre_step", sha256Text("a declaration"), "/campaign/gain.csv");
+  const std::string json = f.toJson();
+  EXPECT_NE(json.find("\"gain_declaration\": {"), std::string::npos) << json;
+  EXPECT_NE(json.find("\"reference_state\": \"pre_step\""), std::string::npos) << json;
+  const auto back = BuildFingerprint::fromJson(json);
+  ASSERT_TRUE(back.gain_declaration.has_value());
+  EXPECT_EQ(back.gain_declaration->reference_state, "pre_step");
+  EXPECT_EQ(back.gain_declaration->sha256, sha256Text("a declaration"));
+  EXPECT_EQ(back.gain_declaration->source, "/campaign/gain.csv");
+  EXPECT_FALSE(back.isStale(f));
+  // No declaration is written as an explicit null.
+  const std::string none_json = fixed(1.0).toJson();
+  EXPECT_NE(none_json.find("\"gain_declaration\": null"), std::string::npos) << none_json;
+  EXPECT_FALSE(BuildFingerprint::fromJson(none_json).gain_declaration.has_value());
+}
+
+TEST(BuildFingerprint, DifferentDeclarationHashIsStale)
+{
+  EXPECT_TRUE(withGain("pre_step", "aaa").isStale(withGain("pre_step", "bbb")));
+  EXPECT_FALSE(withGain("pre_step", "aaa").isStale(withGain("pre_step", "aaa")));
+}
+
+TEST(BuildFingerprint, DifferentReferenceStateIsStale)
+{
+  EXPECT_TRUE(withGain("pre_step", "aaa").isStale(withGain("post_step", "aaa")));
+}
+
+TEST(BuildFingerprint, SameDeclarationUnderAnotherPathNotStale)
+{
+  EXPECT_FALSE(withGain("pre_step", "aaa",
+      "/a/g.csv").isStale(withGain("pre_step", "aaa", "/b/h.csv")));
+}
+
+TEST(BuildFingerprint, SourcePathNotCompared)
+{
+  const auto a = withGain("pre_step", "aaa", "");
+  const auto b = withGain("pre_step", "aaa", "/anywhere");
+  EXPECT_FALSE(a.isStale(b));
+  EXPECT_FALSE(b.isStale(a));
+}
+
+TEST(BuildFingerprint, NullVsPresentIsStale)
+{
+  EXPECT_TRUE(fixed(1.0).isStale(withGain("pre_step", "aaa")));
+  EXPECT_TRUE(withGain("pre_step", "aaa").isStale(fixed(1.0)));
+  EXPECT_FALSE(fixed(1.0).isStale(fixed(1.0)));
+  // A zero-segment declaration is still a declaration: that store is in a named reference state.
+  EXPECT_TRUE(fixed(1.0).isStale(withGain("pre_step", sha256Text("gain-state-declaration v1\n"))));
+}
+
+TEST(BuildFingerprint, CanonicalDigestIgnoresNotesAndComments)
+{
+  GainDeclaration a, b;
+  a.reference_state = b.reference_state = "pre_step";
+  a.segments = {{"x", 10, 20, 23.0, "measured", "first note"}};
+  b.segments = {{"renamed", 10, 20, 23.0, "settings_file", "an edited note"}};
+  b.sonar = "another sonar";
+  b.path = "/other/path.csv";
+  EXPECT_EQ(gainDeclarationSha256(a), gainDeclarationSha256(b));
+  b.segments[0].offset_db = 23.5;
+  EXPECT_NE(gainDeclarationSha256(a), gainDeclarationSha256(b));
+  b.segments[0].offset_db = 23.0;
+  b.segments[0].end_ns = 21;
+  EXPECT_NE(gainDeclarationSha256(a), gainDeclarationSha256(b));
+  b.segments[0].end_ns = 20;
+  b.reference_state = "other";
+  EXPECT_NE(gainDeclarationSha256(a), gainDeclarationSha256(b));
+}
+
 TEST(BuildFingerprint, Sha256HelpersMatchTheReferenceDigests)
 {
   // FIPS 180-4 reference vectors.
@@ -297,9 +404,9 @@ TEST(BuildFingerprint, ReadWriteAtomically)
     bad << "{ this is not json";
   }
   EXPECT_THROW(BuildFingerprint::read(dir), std::runtime_error);
-  EXPECT_THROW(BuildFingerprint::fromJson("{\"schema_version\": 2}"), std::runtime_error);
+  EXPECT_THROW(BuildFingerprint::fromJson("{\"schema_version\": 3}"), std::runtime_error);
   EXPECT_THROW(BuildFingerprint::fromJson(
-      "{\"schema_version\": 2, \"tiling\": {\"mode\": \"weird\", "
+      "{\"schema_version\": 3, \"tiling\": {\"mode\": \"weird\", "
       "\"policy\": {}, \"levels_used\": []}}"),
     std::runtime_error);
   std::filesystem::remove_all(dir);

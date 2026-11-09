@@ -1222,6 +1222,9 @@ struct GainSetup
   std::string sha256;
   /// Null without a declaration.
   std::unique_ptr<cube::GainStateResolver> resolver;
+  /// What the fingerprint records (reference state, digest, source); nullopt
+  /// without a declaration.
+  std::optional<cube::BuildFingerprint::GainDeclarationRecord> record;
 };
 
 /// Load the declaration (when given) BEFORE any bag is read and check it
@@ -1250,6 +1253,8 @@ bool setupGainDeclaration(
     }
     out.sha256 = cube::gainDeclarationSha256(out.declaration);
     out.resolver = std::make_unique<cube::GainStateResolver>(&out.declaration);
+    out.record = cube::BuildFingerprint::GainDeclarationRecord{
+      out.declaration.reference_state, out.sha256, declaration_file};
     std::cout << "Gain-state declaration " << declaration_file << ": reference state '"
               << out.declaration.reference_state << "', " << out.declaration.segments.size()
               << " segment(s), sha256 " << out.sha256 << std::endl;
@@ -1774,10 +1779,14 @@ bool writeFingerprint(
   const std::string & store_dir, cube::BuildFingerprint::Mode mode, double cell_size_m,
   const cube::Parameters & parameters, const std::string & iho_order,
   const cube::LevelPlanPolicy * policy, const std::set<uint8_t> & levels_used,
-  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction)
+  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction,
+  const std::optional<cube::BuildFingerprint::GainDeclarationRecord> & gain_declaration)
 {
   cube::BuildFingerprint f;
   f.mode = mode;
+  // The declared receiver gain states the intensities were shifted by before
+  // any correction (cube#176): reference state and canonical digest.
+  f.gain_declaration = gain_declaration;
   // What corrected the backscatter layer (cube#172): mode, curve/table hash,
   // fallback and ping floor, so a store built under another table is stale.
   f.backscatter_correction = backscatter_correction;
@@ -1892,7 +1901,8 @@ int cube_fixed_level_finish(
   std::optional<TileSizeReporter> & tile_reporter,
   const std::string & tile_size_report_path, double tile_refresh_interval_s,
   int tile_refresh_tiles_per_cycle, double phase_secs,
-  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction)
+  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction,
+  const std::optional<cube::BuildFingerprint::GainDeclarationRecord> & gain_declaration)
 {
   std::cout << "Building store tiles..." << std::endl;
 
@@ -1923,12 +1933,14 @@ int cube_fixed_level_finish(
   reportPersisted(
     accumulator, store_dir, bs_store_dir, evicted_count,
     resident_before_final, phase_secs);
-  // Build fingerprint (ADR-0003 schema 2: tiling, cube#143, and the backscatter
-  // correction, cube#172): a fixed-level store records its mode, the requested
-  // cell size, the capture policy and how its backscatter was corrected.
+  // Build fingerprint (ADR-0003 schema 3: tiling, cube#143, the backscatter
+  // correction, cube#172, and the gain-state declaration, cube#176): a
+  // fixed-level store records its mode, the requested cell size, the capture
+  // policy and how its backscatter was corrected.
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
-    iho_order, nullptr, {geo_map_sheet.gridLevel().level()}, backscatter_correction);
+    iho_order, nullptr, {geo_map_sheet.gridLevel().level()}, backscatter_correction,
+    gain_declaration);
 
   // Exit codes rank by what is wrong with the DATA: 1 says the store may be
   // incomplete, so a failed diagnostic CSV must not borrow it -- that run's
@@ -1963,6 +1975,7 @@ int cube_depth_adaptive_finish(
   const cube::BackscatterTable & backscatter_table,
   cube::BackscatterModeFallback backscatter_mode_fallback,
   const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction,
+  const std::optional<cube::BuildFingerprint::GainDeclarationRecord> & gain_declaration,
   const marine_bathymetry_store::StoreMetadata & store_metadata,
   const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, double recon_secs)
 {
@@ -2263,7 +2276,7 @@ int cube_depth_adaptive_finish(
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::DepthAdaptive, 0.0,
     accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &effective_policy,
-    plan->levels(), backscatter_correction);
+    plan->levels(), backscatter_correction, gain_declaration);
   if (!fingerprinted) {
     return 2;
   }
@@ -2961,12 +2974,13 @@ int main(int argc, char * argv[])
       reference_store_dir, bs_store_dir, max_resident_tiles, iho_order,
       capture_spacing_scale, capture_spacing_scale_given, backscatter.mode,
       backscatter.curve, backscatter.table, backscatter.fallback, backscatter.provenance,
-      store_metadata, bs_metadata, projection_secs), table_unresolved, !level_plan_out.empty());
+      gain.record, store_metadata, bs_metadata, projection_secs), table_unresolved,
+      !level_plan_out.empty());
   }
 
   return withTableResolution(cube_fixed_level_finish(
     accumulator, geo_map_sheet, store_dir, bs_store_dir, resolution, iho_order,
     store_metadata, bs_metadata, tile_reporter, tile_size_report_path,
     tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs(),
-    backscatter.provenance), table_unresolved, false);
+    backscatter.provenance, gain.record), table_unresolved, false);
 }

@@ -305,6 +305,84 @@ weights are flat (105–145 dB² in every bin) so the product is unchanged; the
 loader uses the column only to tell an unweighable bin (decision 5). Applying
 the weights is a follow-up with its own persisted-statistic change.
 
+## Gain-state declaration addendum — an additive receiver-gain term before the table (cube_bathymetry#176)
+
+**Context.** The per-mode table (previous addendum) cannot see a gain change the
+sonar did not record. The Appledore M3 receiver gain stepped between
+2026-08-26T20:17:30Z and the end of 2026-08-28: the reported level fell by 23 dB,
+uniformly over the modes (CW 20/50 us +23.0 dB, 1 ms FM +22.7 dB, within the
+quoted spread; measured from 528 overlapping 10 m cells). `SonarInfo` carries no
+gain. A table derived across the step is fitted over two gain states, and every
+import across it puts a 23 dB seam in the mosaic. Capturing the gain at the
+source is rolker/marine_tools#97 and is not built here.
+
+**Decision.**
+
+1. **The operator declares the gain states.** A `gain-state-declaration v1`
+   file names a reference gain state (a free label) and lists the deviations
+   from it as half-open UTC intervals `[start, end)` with an additive offset in
+   dB, a mandatory provenance (`settings_file`, `measured`,
+   `operator_reported`) and a mandatory note. The offset is the value ADDED to
+   the reported level to reach the reference state: a segment that read 23 dB
+   low is `+23.0`. Overlap is an error; a ping in no segment is AT the
+   reference, offset zero, not unknown, and the run counts the pings per
+   segment and in undeclared time so that a mistyped stamp shows as a wrong
+   count. There is no fallback knob (decision 5 of the previous addendum is
+   about modes, not gain). The file is campaign configuration: this repository
+   ships the schema, the loaders and a test fixture only.
+2. **The offset is applied to the raw intensity of the ping, before
+   everything else** (`shiftSoundings`, at the three places that stamp
+   `correction_idx`: `import_bag`, the node's `prepareCloudBackscatter`,
+   `batch_regen`'s per-ping loop), for every ping in a segment whether or not a
+   table is loaded or the ping's mode resolved. It is a receiver calibration,
+   independent of the mode table. A ping whose mode fell back to `identity` is
+   still shifted, an `exclude`d ping stays excluded, `--backscatter-correction
+   none` and a single-curve run are shifted too, and a NaN intensity stays
+   NaN. The corrected beam is therefore
+   `(raw + offset) − db_relative_to_nadir − r_g − offset_db_vs_ref`: the table's
+   terms are all additive dB, so the shift commutes with them and shifting
+   first is correct provided the table was fitted from shifted data.
+3. **Why not fold it into `correction_idx`.** That index is per mode and rides
+   `Sounding`, the recon spill and the packed `ScatterRecord`; a mode × segment
+   product would explode it and would leave a ping whose mode did not resolve
+   uncorrected for gain, which is exactly the seam this addendum removes.
+   Because the offset is baked into `Sounding::intensity` before the recon spill
+   and the bucket write, nothing downstream applies it twice and no persisted
+   record format changes.
+4. **The derive tool fits in the reference state.** `derive_angular_response.py
+   --gain-declaration` adds each ping's offset to its intensities before
+   binning (single curve and `--by-mode`, and before the tier-2 add-back), so
+   the angle bins, the range term, the switch offsets and the least-squares
+   chain all see reference-state data and one table comes out, with no
+   per-segment fitting. A table or curve derived under a declaration records
+   `# gain_reference_state:` and `# gain_declaration_sha256:`.
+5. **Declared inputs stay checked, not silently used.** `import_bag` and
+   `batch_regen_bag` refuse, before any message is read, a curve or table whose
+   recorded digest or reference state differs from the declaration supplied,
+   one that records none while a declaration is supplied (a pre-#176 file
+   carries none, and a zero-segment declaration is the escape hatch for a season
+   that never crossed a step), and one that records a declaration while none is
+   supplied. The `SonarInfo`-delivered curve (`auto`) has no header: a
+   declaration with `auto` warns that the curve's gain state is unknown. A
+   source-side gain declaration (marine_tools#97) would be one more input on the
+   same timeline — the loaders expose `offsetDbAt(stamp)` and nothing else, so
+   such a term composes by sum — and, per the #172 addendum, would be checked
+   against the declaration, not used by it.
+6. **Provenance.** The build fingerprint (ADR-0003, schema 3) records the
+   declaration's reference state and canonical digest; every store and
+   per-mode table built before the declaration existed reads stale. The
+   digest is of the canonical form (reference state, and each segment's start,
+   end and offset), so editing a note does not stale anything.
+
+**Not done here, deliberately.** `batch_regen_bag` cannot apply a per-mode
+table (no `SonarInfo` source), so table + declaration parity with `import_bag`
+waits for it to read `SonarInfo`; its supported paths (`none`, a single curve)
+are bit-exact with `import_bag`. The live node reads the declaration at
+`configure` only (no hot reload: a mid-run edit would split one store across
+two declarations undetected), and writes no fingerprint, so a node resuming
+from a store built under another declaration is not detected. The Appledore
+declaration file itself is campaign configuration, not part of this repository.
+
 ## Deferred (explicit follow-ups)
 
 - **Full radiometric GeoCoder (tier-3)** — insonified-area, beam-pattern, TVG

@@ -703,13 +703,87 @@ bool setupGainDeclaration(
   return true;
 }
 
-/// setupGainDeclaration, exiting via usage() on failure (keeps main() short).
+/// Whether the store in @p store_dir (the `-o` store ONLY: `--reference-store`
+/// seeds the predicted depth surface and never carries backscatter) was built
+/// under the gain state this run applies (cube#176, ADR-0003). batch_regen
+/// writes no fingerprint, so this is a read-only check; it refuses what would
+/// leave tiles in two gain states inside one store:
+///
+///   declaration given | `-o` fingerprint                 | outcome
+///   present           | same reference state and digest  | proceed
+///   present           | different                        | refuse, both named
+///   present           | `gain_declaration: null`         | refuse (built uncorrected)
+///   present           | older schema (pre-#176)          | refuse (gain state unknowable)
+///   present           | no fingerprint file              | proceed, warning
+///   none              | records a declaration            | refuse (tiles would be rebuilt
+///                     |                                  | uncorrected in a corrected store)
+///   none              | null, older schema, no file      | proceed
+///
+/// A fingerprint that exists but cannot be read is refused either way: the gain
+/// state it records cannot be told. Returns the reason, or "" to proceed.
+std::string gainFingerprintProblem(const std::string & store_dir, const GainSetup & gain)
+{
+  std::optional<cube::BuildFingerprint> fp;
+  try {
+    fp = cube::BuildFingerprint::read(store_dir);
+  } catch (const std::exception & e) {
+    return "the build fingerprint in " + store_dir + " cannot be read (" + e.what() +
+           "), so the gain state the store was built in cannot be told; repair or remove it "
+           "(a full rebuild is then the only exact option)";
+  }
+  const bool current = fp && fp->schema_version == cube::BuildFingerprint::kSchemaVersion;
+  if (!gain.resolver) {
+    if (current && fp->gain_declaration) {
+      return "the store in " + store_dir + " was built under gain-state declaration '" +
+             fp->gain_declaration->reference_state + "' (sha256 " + fp->gain_declaration->sha256 +
+             "), but no --backscatter-gain-declaration was given: regenerating would rebuild "
+             "tiles uncorrected inside a corrected store. Pass the same declaration";
+    }
+    return "";
+  }
+  if (!fp) {
+    std::cerr << "warning: " << store_dir << " has no build fingerprint, so the gain state it "
+      "was built in cannot be checked against --backscatter-gain-declaration\n";
+    return "";
+  }
+  if (!current) {
+    return "the store in " + store_dir + " has a build fingerprint of schema " +
+           std::to_string(fp->schema_version) + " (older than the gain-state declaration, "
+           "cube_bathymetry#176): the gain state it was built in is unknowable, and the "
+           "declaration would put the tiles rebuilt here in " + gain.declaration.reference_state +
+           ". Rebuild the whole store with import_bag";
+  }
+  if (!fp->gain_declaration) {
+    return "the store in " + store_dir + " was built with no gain-state declaration (its "
+           "fingerprint records none), but --backscatter-gain-declaration " +
+           gain.declaration.path + " was given: the tiles rebuilt here would be in reference "
+           "state '" + gain.declaration.reference_state + "', the rest of the store not";
+  }
+  if (fp->gain_declaration->sha256 != gain.sha256 ||
+    fp->gain_declaration->reference_state != gain.declaration.reference_state)
+  {
+    return "the store in " + store_dir + " was built under gain-state declaration '" +
+           fp->gain_declaration->reference_state + "' (sha256 " + fp->gain_declaration->sha256 +
+           "), but " + gain.declaration.path + " is reference state '" +
+           gain.declaration.reference_state + "' (sha256 " + gain.sha256 +
+           "): they are different corrections";
+  }
+  return "";
+}
+
+/// setupGainDeclaration plus the `-o` fingerprint check, exiting via usage() on
+/// failure (keeps main() short).
 void setupGainOrUsage(
-  GainSetup & out, const std::string & declaration_file,
+  GainSetup & out, const std::string & declaration_file, const std::string & store_dir,
   cube::BackscatterAngleCorrection backscatter_mode,
   const cube::AngularResponseCurve & curve, const std::string & curve_file)
 {
   if (!setupGainDeclaration(out, declaration_file, backscatter_mode, curve, curve_file)) {
+    usage();
+  }
+  const std::string problem = gainFingerprintProblem(store_dir, out);
+  if (!problem.empty()) {
+    std::cerr << "error: " << problem << "\n";
     usage();
   }
 }
@@ -1055,7 +1129,7 @@ int main(int argc, char * argv[])
     std::cout << std::endl;
   }
   GainSetup gain;
-  setupGainOrUsage(gain, gain_declaration_file, backscatter_mode, backscatter_curve,
+  setupGainOrUsage(gain, gain_declaration_file, store_dir, backscatter_mode, backscatter_curve,
     backscatter_curve_file);
   geo_map_sheet.setBackscatterCorrection(
     backscatter_mode, backscatter_curve.points,

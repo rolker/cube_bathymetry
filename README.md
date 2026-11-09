@@ -743,7 +743,8 @@ as they are handed to the estimator); the SonarInfo-declared TVG
 state is compared with what the table recorded per mode (a mismatch is warned
 once per mode and counted; a resolved entry is applied as is, and the warning
 says so when the entry was not applied at all). The build fingerprint
-records the correction (mode, curve/table SHA-256, fallback, floor). A table
+records the correction (mode, curve/table SHA-256, fallback, floor) and the
+gain-state declaration (reference state and canonical digest, #176). A table
 that does not load is an error (`import_bag`) or a failed configure (node),
 never a silent identity; `batch_regen_bag` refuses a table, since it reads no
 SonarInfo. A table that loads but corrects NOTHING — not one ping resolved to
@@ -761,6 +762,10 @@ unresolved cloud after each configure, with the count and the reasons so far,
 at most once a minute while nothing has resolved; once clouds do resolve, an
 unresolved one is the normal case (a rare mode, the ping floor) and each
 reason is warned about once per configuration.
+
+An unrecorded receiver-gain step is handled by a declaration, not by splitting
+data: see *Gain-state declaration* below (`--backscatter-gain-declaration`,
+node parameter `backscatter_gain_declaration`, derive `--gain-declaration`).
 
 ### Deriving a curve (`derive_angular_response.py`)
 
@@ -1171,6 +1176,131 @@ scatter in every bin of every main mode), because a sonar whose scatter does
 vary with angle needs the weights, and the format must not change when one
 turns up; the estimator applying them is the follow-up named in the ADR-0007
 addendum.
+
+### Gain-state declaration (`--backscatter-gain-declaration`, #176)
+
+A sonar's receiver gain can step without the sonar saying so. On Appledore the
+M3 stepped to a level 23 dB lower between 2026-08-26T20:17:30Z and the end of
+2026-08-28, uniformly over its modes (measured from 528 overlapping 10 m cells:
+CW 20/50 us +23.0 dB, 1 ms FM +22.7 dB, within the quoted spread). `SonarInfo`
+carries no gain, so neither the mode table (#172) nor anything else in the
+pipeline can see it; a table derived across the step is fitted over two gain
+states, and every import across it puts a 23 dB seam in the mosaic.
+Source-side capture is rolker/marine_tools#97 (not built here). Until then the
+operator **declares** the steps.
+
+**What is declared.** A reference gain state (a free label, `pre_step`) and the
+deviations from it, as half-open UTC intervals `[start, end)` with an additive
+dB offset: the value **ADDED to the reported level to reach the reference
+state**. A segment where the sonar read 23 dB low is therefore `+23.0`
+(reported 40 dB becomes 63 dB), and a ping in no segment is AT the reference,
+offset zero, not unknown. Every run prints how many pings fell in each segment
+and how many fell in none, so a mistyped stamp shows as a wrong count (and a
+segment no ping fell in is warned about).
+
+```
+# format: gain-state-declaration v1
+# reference_state: pre_step
+# sonar: <free text, optional, not hashed>
+# sign: offset_db is ADDED to the reported level to reach the reference state
+segment,start_utc,end_utc,offset_db,provenance,provenance_note
+gain_step,2026-01-02T03:04:05Z,2026-01-03T00:00:00Z,23.0,measured,<how the offset was obtained>
+```
+
+Each rule below is a rejecting load error that names the file, the line and
+the reason; the declaration is read whole or not at all:
+
+- `# format:` is the first non-blank line and the version is exactly `v1`;
+  `# reference_state:` appears once, non-empty, `[A-Za-z0-9_.-]+`.
+- Timestamps are `YYYY-MM-DDTHH:MM:SS[.fff...]Z`, UTC only (a numeric offset
+  or a missing `Z` is refused), to nanoseconds. `end_utc` is explicit and
+  exclusive, so "the end of 2026-08-28" is written `2026-08-29T00:00:00Z`;
+  `start_utc` is before `end_utc`.
+- Segments are given in any order but must not overlap (`a.end > b.start`);
+  touching (`a.end == b.start`) is fine and gaps mean the reference state.
+- `offset_db` is finite and at most 60 dB in magnitude (a typo guard); `0.0`
+  is allowed, an explicit "reference here". Segment ids are unique,
+  `[A-Za-z0-9_.-]+`.
+- `provenance` is one of `settings_file`, `measured`, `operator_reported` and
+  `provenance_note` is non-empty, on every segment: how the number was
+  obtained is not optional.
+- No quoting: a field may not contain a comma, a quote or a newline. At most
+  64 KiB, a regular file.
+- Zero segments is legal (it declares only the reference state) and loads with
+  a warning.
+
+The declaration is **campaign configuration**: this repository ships the
+schema, the loaders and a test fixture (`test/data/gain_declaration_v1.csv`),
+never a campaign's file. The Appledore file belongs with the campaign or
+platform metadata.
+
+**What it does.** The offset is added to the raw intensity of every ping in a
+segment, before the mode table or any curve, whatever the ping's pulse mode and
+whether or not a table, a curve or a resolved mode exists
+(`--backscatter-correction none` is shifted too; an `exclude`d ping stays excluded; a NaN
+intensity stays NaN). It is a receiver calibration, independent of the mode
+table, and it is baked into `Sounding::intensity` before the recon spill and
+the bucket write, so nothing downstream applies it twice and no persisted
+record format changes. Four consumers read it:
+
+| Tool | Option | Notes |
+|---|---|---|
+| `import_bag` | `--backscatter-gain-declaration <file>` | loaded before any bag is read; the per-segment counts print after the pass; recorded in the build fingerprint |
+| `batch_regen_bag` | `--backscatter-gain-declaration <file>` | same shift at the same point, so a regen never rebuilds tiles uncorrected inside a corrected store; bit-exact with `import_bag` on the `none` and single-curve paths. It still refuses a per-mode table (no SonarInfo source), so **table + declaration parity with `import_bag` is not available** until it reads SonarInfo |
+| `cube_bathymetry_node` | parameter `backscatter_gain_declaration` (string, default empty) | read at `configure` only: a mid-run edit would split one store across two declarations undetected, so reconfigure is the explicit act. It survives `~/reset`, and its counts are logged at cleanup. A load error fails the configure. The live node writes no fingerprint, so a node resuming from a store built under another declaration is **not** detected |
+| `derive_angular_response.py` | `--gain-declaration <file>` (single curve and `--by-mode`) | each ping's offset is added to its intensities before binning, so one curve or table comes out in the reference state from data on both sides of the step |
+
+**A curve or table must be fitted under the declaration it is applied with.**
+A curve fitted in the reference state and applied to un-shifted post-step pings
+is wrong by the step, and one fitted across the step is invalid. The derive
+tool therefore writes `# gain_reference_state:` and `# gain_declaration_sha256:`
+(plus `# gain_declaration_source:`, a per-segment summary and the undeclared
+ping count) into the per-mode table and the single-curve CSV when it is given a
+declaration. `import_bag` and `batch_regen` refuse, before any message is read, a
+curve or table whose recorded digest or reference state differs from the
+declaration supplied, one that records none while a declaration is supplied,
+and one that records a declaration while none is supplied. Files written before
+#176 carry no keys, so with a declaration they are refused and with none they
+load as before. The `auto` curve (`SonarInfo`-delivered, `import_bag`) has no
+header: a declaration with `auto` prints a loud warning that the curve's gain
+state is unknown. **Per-mode tables derived across a step (candidate D inputs)
+must be re-derived with `--gain-declaration`.** A season that never crossed a
+step re-derives with, or imports with, a zero-segment declaration; that still
+changes the fingerprint through the reference label, which is intended: that
+store is in a named reference state.
+
+**The digest is of a canonical form**, not of the file bytes: the format
+version, the reference state, and each segment's start and end (integer
+nanoseconds) and `offset_db` (`%.6f`) in sorted order. Ids, provenance, notes,
+`# sonar:`, comments, whitespace and field order are not in it, so rewording a
+note does not make every store and table stale; anything that changes the
+correction does. Both loaders compute it, and `test/data/gain_declaration_vectors.json`
+pins the timestamp parse, the canonical text, the digest and the
+rejected files for both.
+
+**The fingerprint.** `build_fingerprint.json` is now schema 3 and carries
+`"gain_declaration": {"reference_state", "sha256", "source"}` or `null`
+(ADR-0003 addendum). Every store built before #176 therefore reads stale. A
+declaration against none, or a different reference state or digest, is stale;
+`source` is informational. `batch_regen_bag` writes no fingerprint, but checks
+the one in the `-o` store (not `--reference-store`, which only seeds the
+predicted depth surface and carries no backscatter):
+
+| Declaration given | `-o` fingerprint | Outcome |
+|---|---|---|
+| yes | same reference state and digest | proceed |
+| yes | different | refuse, both values named |
+| yes | `gain_declaration: null` | refuse (the store was built uncorrected) |
+| yes | older schema | refuse (its gain state is unknowable) |
+| yes | no fingerprint file | proceed, with a warning (nothing to compare) |
+| no | records a declaration | refuse (would rebuild tiles uncorrected inside a corrected store) |
+| no | `null`, older schema, or no file | proceed |
+
+A fingerprint that exists but cannot be read is refused either way.
+
+Re-importing Appledore with the new tooling is an operator step after the
+merge: write the declaration (campaign configuration), re-derive the per-mode
+table with `--gain-declaration`, and re-run `import_bag` with both.
 
 ## Live prior-gate prime (`prior_store_dir`)
 

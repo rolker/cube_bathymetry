@@ -251,6 +251,15 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   stale with no extra code (decision 3); the existing test that pins "schema 2 file reads stale" is updated and a
   new one added. `import_bag` `writeFingerprint` passes the declaration's reference state and the hash of the bytes
   the loader returned (`cube::sha256Text`).
+- Implementation notes (commit 4): the nested record is `BuildFingerprint::GainDeclarationRecord` (not
+  `GainDeclaration`, which is the loaded-declaration type in `gain_declaration.h`); `gainDeclarationSha256` lives in
+  `build_fingerprint.h` (it needs OpenSSL, which only the level-plan library links) and landed with commit 1's tests;
+  `import_bag` passes `GainSetup::record` (reference state, canonical digest, path) through the two finish functions.
+  `batch_regen`'s matrix (`gainFingerprintProblem`) is in `batch_regen_main.cpp` with `FingerprintMatrix_*` cases in
+  `test/test_batch_regen_gain.py` (they build the `-o` store with a real `import_bag` run, so the fingerprint is the
+  one a user has). Added beyond the plan's table: a fingerprint that exists but cannot be read is refused either way
+  (the gain state it records cannot be told), and a note-only edit of the declaration after the import is NOT a change
+  (canonical digest). Writing a fingerprint from `batch_regen` stays the ADR-0003 follow-up.
 - Tests (`test_build_fingerprint.cpp`): `SchemaVersion2FileReadsStale`, `GainDeclarationRoundTrips`,
   `DifferentDeclarationHashIsStale`, `DifferentReferenceStateIsStale`, `SameDeclarationUnderAnotherPathNotStale`,
   `NullVsPresentIsStale`, `SourcePathNotCompared`, `CanonicalDigestIgnoresNotesAndComments`, `Schema2FileHasNoDeclaration`.

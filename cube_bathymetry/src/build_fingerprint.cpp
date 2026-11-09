@@ -59,6 +59,11 @@ bool BuildFingerprint::BackscatterCorrection::operator==(const BackscatterCorrec
          min_pings == o.min_pings;
 }
 
+bool BuildFingerprint::GainDeclarationRecord::operator==(const GainDeclarationRecord & o) const
+{
+  return reference_state == o.reference_state && sha256 == o.sha256;
+}
+
 bool BuildFingerprint::isStale(const BuildFingerprint & previous) const
 {
   if (previous.schema_version != schema_version || previous.mode != mode) {
@@ -70,6 +75,15 @@ bool BuildFingerprint::isStale(const BuildFingerprint & previous) const
     return true;
   }
   if (backscatter_correction && *backscatter_correction != *previous.backscatter_correction) {
+    return true;
+  }
+  // The gain state the intensities were shifted to (cube#176): a build with a
+  // declaration and one without are different corrections, as are two
+  // declarations that differ in reference state or digest.
+  if (gain_declaration.has_value() != previous.gain_declaration.has_value()) {
+    return true;
+  }
+  if (gain_declaration && *gain_declaration != *previous.gain_declaration) {
     return true;
   }
   if (mode == Mode::Fixed) {
@@ -163,6 +177,15 @@ std::string BuildFingerprint::toJson() const
   } else {
     j["backscatter_correction"] = nullptr;
   }
+  if (gain_declaration) {
+    nlohmann::json g;
+    g["reference_state"] = gain_declaration->reference_state;
+    g["sha256"] = gain_declaration->sha256;
+    g["source"] = gain_declaration->source;
+    j["gain_declaration"] = g;
+  } else {
+    j["gain_declaration"] = nullptr;
+  }
   return j.dump(2) + "\n";
 }
 
@@ -229,6 +252,16 @@ BuildFingerprint BuildFingerprint::fromJson(const std::string & json)
         c.min_pings = b.at("min_pings").get<uint64_t>();
       }
       f.backscatter_correction = c;
+    }
+    if (j.contains("gain_declaration") && !j.at("gain_declaration").is_null()) {
+      const auto & g = j.at("gain_declaration");
+      GainDeclarationRecord r;
+      r.reference_state = g.at("reference_state").get<std::string>();
+      r.sha256 = g.at("sha256").get<std::string>();
+      if (g.contains("source") && !g.at("source").is_null()) {
+        r.source = g.at("source").get<std::string>();
+      }
+      f.gain_declaration = r;
     }
   } catch (const nlohmann::json::exception & e) {
     throw std::runtime_error(std::string("build_fingerprint: ") + e.what());
