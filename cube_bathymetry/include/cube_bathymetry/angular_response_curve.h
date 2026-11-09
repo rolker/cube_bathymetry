@@ -76,7 +76,8 @@ namespace cube
 /// (may be null; cleared first, left empty when the file cannot be read). One
 /// read: a hash of @p bytes_out is a hash of the curve applied, never of a
 /// second read of a file a derivation may have replaced meanwhile (PR #175
-/// review, the fingerprint's provenance).
+/// review, the fingerprint's provenance). A path that is not a regular file,
+/// or a file over 64 MiB, loads as an empty curve.
   AngularResponseCurve loadAngularResponseCurveWithHeader(
     const std::string & path, std::string * bytes_out);
 

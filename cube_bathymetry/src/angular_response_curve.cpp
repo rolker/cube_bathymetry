@@ -26,6 +26,8 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -209,6 +211,22 @@ AngularResponseCurve loadAngularResponseCurveWithHeader(
   if (path.empty()) {
     return AngularResponseCurve();
   }
+  // A directory, FIFO or device is not a curve. The tools refuse those
+  // before calling (explicitBackscatterFileProblem), but this loader is
+  // public, and `<< rdbuf()` below reports a read error on the SOURCE
+  // stream to nobody (it extracts from the streambuf, not through `in`),
+  // so the type check has to happen here, not after the read.
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec)) {
+    return AngularResponseCurve();
+  }
+  // Bounded like the table loader: a curve is a few kilobytes, and the whole
+  // file is held in memory for the parse and the caller's hash.
+  constexpr std::uintmax_t kMaxCurveBytes = 64u << 20;
+  const std::uintmax_t size = std::filesystem::file_size(path, ec);
+  if (ec || size > kMaxCurveBytes) {
+    return AngularResponseCurve();
+  }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     return AngularResponseCurve();
@@ -216,9 +234,6 @@ AngularResponseCurve loadAngularResponseCurveWithHeader(
   // One read of the file: the parse and the caller's hash see the same bytes.
   std::ostringstream buffer;
   buffer << in.rdbuf();
-  if (in.bad()) {
-    return AngularResponseCurve();
-  }
   std::string text = buffer.str();
   const AngularResponseCurve result = parseAngularResponseCurve(text);
   if (bytes_out) {

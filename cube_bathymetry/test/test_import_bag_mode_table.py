@@ -45,9 +45,19 @@ import test_derive_angular_response as helpers  # noqa: E402  (the synthetic bag
 
 IMPORT_BAG = os.environ.get('IMPORT_BAG_EXE', '')
 
+# Skip only on a bare `pytest` run with nothing handed over. When CMake DID
+# set the variable and the binary is not there (a renamed target, a moved
+# output directory), that is a failure, not a quiet skip of every test here.
 pytestmark = pytest.mark.skipif(
-    not (IMPORT_BAG and os.access(IMPORT_BAG, os.X_OK)),
-    reason='IMPORT_BAG_EXE is not an executable (CMake sets it to the built import_bag)')
+    not IMPORT_BAG, reason='IMPORT_BAG_EXE unset (CMake sets it to the built import_bag)')
+
+
+@pytest.fixture(autouse=True)
+def _import_bag_is_built():
+    assert os.access(IMPORT_BAG, os.X_OK), (
+        'IMPORT_BAG_EXE=%r is not an executable: the import_bag target moved or was not '
+        'built' % IMPORT_BAG)
+
 
 REF_LEVEL = -30.0      # the reference mode's nadir level written into every ping
 CW_STEP = 12.0         # the second mode reads this much brighter (its offset)
@@ -103,7 +113,7 @@ def _run(store, bag, extra):
            '--base-link-frame', 'base_link', '--level-frame', 'base_link',
            '--tide-frame', 'base_link', '-r', '1.0'] + list(extra) + [str(bag)]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, timeout=600)
+                          text=True, timeout=300)
     return proc.returncode, proc.stdout
 
 
@@ -183,6 +193,19 @@ def test_fixed_path_corrects_every_ping_to_the_reference_level(tmp_path, mode_ba
     assert bc['kind'] == 'table', bc
     assert bc['fallback'] == 'exclude', bc
     assert bc['sha256'] == hashlib.sha256(table.read_bytes()).hexdigest(), bc
+
+
+def test_plain_curve_fingerprint_hashes_the_bytes_parsed(tmp_path, mode_bag):
+    """The legacy single-curve branch fingerprints the file it applied (one read)."""
+    curve = HERE / 'data' / 'derived_curve_tier2_seawater.csv'
+    store = tmp_path / 'store'
+    rc, out = _run(store, mode_bag, ['--backscatter-correction', 'empirical',
+                                     '--backscatter-curve', str(curve)])
+    assert rc == 0, out
+    bc = _fingerprint(store)['backscatter_correction']
+    assert bc['kind'] == 'curve', bc
+    assert bc['source'] == str(curve), bc
+    assert bc['sha256'] == hashlib.sha256(curve.read_bytes()).hexdigest(), bc
 
 
 def test_without_the_table_the_modes_stay_apart(tmp_path, mode_bag):
