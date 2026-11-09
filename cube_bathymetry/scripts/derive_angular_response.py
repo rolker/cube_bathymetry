@@ -881,16 +881,29 @@ class GainTracker:
             self.beams[seg.id] += n_beams
 
     def state(self):
-        """Return the counters as plain data (the accumulation cache payload)."""
+        """
+        Return the counters as plain data (the accumulation cache payload).
+
+        Per segment BY POSITION (the sorted order), not by id: the cache identity is the
+        canonical digest, which excludes ids, so a cache may be refitted under a declaration
+        whose segments were renamed or whose ids were swapped; the intervals are identical
+        in the same order, and the counts belong to the interval.
+        """
         return {'pings': self.pings, 'undeclared': self.undeclared,
-                'by_segment': dict(self.by_segment), 'beams': dict(self.beams)}
+                'segments': [[self.by_segment[s.id], self.beams[s.id]]
+                             for s in self.declaration.segments]}
 
     def restore(self, state):
-        """Set the counters from ``state`` (see ``state``)."""
+        """Set the counters from ``state`` (see ``state``), onto the current ids by position."""
+        segments = self.declaration.segments
+        if len(state['segments']) != len(segments):
+            raise ValueError('the cached gain counters have %d segments, the declaration %d'
+                             % (len(state['segments']), len(segments)))
         self.pings = state['pings']
         self.undeclared = state['undeclared']
-        self.by_segment.update(state['by_segment'])
-        self.beams.update(state['beams'])
+        for seg, (pings, beams) in zip(segments, state['segments']):
+            self.by_segment[seg.id] = pings
+            self.beams[seg.id] = beams
 
     def summary(self):
         """Return what the table header and the run report print, as plain data."""

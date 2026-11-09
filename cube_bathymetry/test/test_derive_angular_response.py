@@ -3085,3 +3085,36 @@ def test_canonical_digest_ignores_notes_ids_and_order(tmp_path):
                  'q,1970-01-01T00:00:02Z,1970-01-01T00:00:03Z,0,settings_file,n\r\n'
                  'p,1970-01-01T00:00:00Z,1970-01-01T00:00:01Z,5,operator_reported,edited\r\n')
     assert dar.load_gain_declaration(str(a)).sha256() == dar.load_gain_declaration(str(b)).sha256()
+
+
+def test_cache_counts_follow_the_interval_not_the_segment_id(tmp_path, capsys):
+    """
+    A renamed or id-swapped segment reuses the cache (the digest ignores ids).
+
+    The per-segment counts belong to the interval: a rename must not report 0 pings and a
+    false 'no ping fell in it' warning, and swapped ids must not swap the counts.
+    """
+    both = tmp_path / 'both_bag'
+    write_gain_mode_bag(both, low_from=200, low_db=GAIN_STEP_DB)
+    # Two touching segments: ping 0-199 (1970-01-01T00:01:40Z..00:01:50Z) and 200-399.
+    mid, end = GAIN_STEP_START_NS, GAIN_STEP_END_NS
+    first = write_gain_declaration(
+        tmp_path / 'first.csv', [('early', 100 * 10**9, mid, 0.0), ('late', mid, end, 23.0)])
+    swapped = write_gain_declaration(
+        tmp_path / 'swapped.csv', [('late', 100 * 10**9, mid, 0.0), ('early', mid, end, 23.0)])
+    renamed = write_gain_declaration(
+        tmp_path / 'renamed.csv', [('a', 100 * 10**9, mid, 0.0), ('b', mid, end, 23.0)])
+    cache, out = tmp_path / 'acc.pkl', tmp_path / 't.csv'
+    base = [str(both), '-t', TOPIC, '--by-mode', '-o', str(out),
+            '--accumulation-cache', str(cache)]
+    assert dar.main(base + ['--gain-declaration', str(first)]) == 0
+    capsys.readouterr()
+    for decl, ids in ((swapped, ('late', 'early')), (renamed, ('a', 'b'))):
+        assert dar.main(base + ['--gain-declaration', str(decl)]) == 0
+        cap = capsys.readouterr()
+        assert 'bag pass skipped' in cap.out
+        assert 'no ping fell in it' not in cap.err, cap.err
+        lines = [ln for ln in out.read_text().splitlines() if ln.startswith('# gain_segment: ')]
+        assert [ln.split()[2] for ln in lines] == list(ids)
+        # The first five pings precede the first SonarInfo and contribute no beams.
+        assert 'pings=200 beams=390' in lines[0] and 'pings=200 beams=400' in lines[1], lines
