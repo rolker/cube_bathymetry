@@ -778,6 +778,10 @@ void setupGainOrUsage(
   cube::BackscatterAngleCorrection backscatter_mode,
   const cube::AngularResponseCurve & curve, const std::string & curve_file)
 {
+  if (backscatter_mode == cube::BackscatterAngleCorrection::None && !curve_file.empty()) {
+    std::cout << "--backscatter-correction none: any --backscatter-curve file is ignored "
+      "(add --backscatter-correction empirical to apply it)." << std::endl;
+  }
   if (!setupGainDeclaration(out, declaration_file, backscatter_mode, curve, curve_file)) {
     usage();
   }

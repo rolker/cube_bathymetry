@@ -305,3 +305,11 @@ def test_reference_store_fingerprint_is_not_checked(tmp_path, flat_step_bag):
                           ['--reference-store', str(prior)])
     assert rc == 0, out
     assert 'different corrections' not in out, out
+
+
+def test_curve_ignored_under_correction_none_says_so(tmp_path, flat_step_bag):
+    """A --backscatter-curve under the default 'none' is not applied: the run says so."""
+    curve = _curve_with_gain_keys(tmp_path)
+    rc, out = _regen(tmp_path / 'store', flat_step_bag, ['--backscatter-curve', str(curve)])
+    assert rc == 0, out
+    assert '--backscatter-correction none: any --backscatter-curve file is ignored' in out, out
