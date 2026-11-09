@@ -409,7 +409,8 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   # Per-mode table fixture (#172): the live node loads it from backscatter_curve_file.
   target_compile_definitions(test_node_lifecycle PRIVATE
-    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv")
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv"
+    GAIN_DECLARATION_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/gain_declaration_v1.csv")
   target_link_libraries(test_node_lifecycle cube_bathymetry_node_link)
   set_tests_properties(test_node_lifecycle PROPERTIES
     ENVIRONMENT "${CUBE_ISOLATED_TEST_ENV}")
@@ -449,6 +450,11 @@ if(BUILD_TESTING)
   target_compile_definitions(test_gain_declaration PRIVATE
     GAIN_DECLARATION_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/gain_declaration_v1.csv"
     GAIN_DECLARATION_VECTORS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/gain_declaration_vectors.json")
+
+  # The resolver that applies a declaration ping by ping, its report and the
+  # intensity shift (#176).
+  ament_add_gtest(test_gain_state_resolver test/test_gain_state_resolver.cpp)
+  target_link_libraries(test_gain_state_resolver cube_bathymetry)
 
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
@@ -496,6 +502,16 @@ if(BUILD_TESTING)
     test/test_import_bag_mode_table.py
     TIMEOUT 600
     ENV ${CUBE_ISOLATED_TEST_ENV} "IMPORT_BAG_EXE=${CMAKE_CURRENT_BINARY_DIR}/import_bag")
+
+  # batch_regen_bag and the gain-state declaration (#176): the same shift as
+  # import_bag, bit-exact parity on the paths they share, and the curve/
+  # declaration consistency refusals. Needs both built binaries.
+  ament_add_pytest_test(test_batch_regen_gain
+    test/test_batch_regen_gain.py
+    TIMEOUT 600
+    ENV ${CUBE_ISOLATED_TEST_ENV}
+      "IMPORT_BAG_EXE=${CMAKE_CURRENT_BINARY_DIR}/import_bag"
+      "BATCH_REGEN_EXE=${CMAKE_CURRENT_BINARY_DIR}/batch_regen_bag")
 
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)
   target_link_libraries(test_sonar_info_curve cube_bathymetry_sonar_info_curve)

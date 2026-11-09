@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -468,6 +469,136 @@ GainDeclaration loadGainDeclaration(
     *bytes_out = std::move(content);
   }
   return declaration;
+}
+
+GainStateResolver::GainStateResolver(const GainDeclaration * declaration)
+: declaration_(declaration)
+{
+  for (const GainSegment & s : declaration_->segments) {
+    counts_.by_segment[s.id] = 0;
+  }
+}
+
+double GainStateResolver::apply(int64_t ping_stamp_ns)
+{
+  ++counts_.pings;
+  const GainSegment * segment = declaration_->segmentAt(ping_stamp_ns);
+  if (!segment) {
+    ++counts_.undeclared;
+    return 0.0;
+  }
+  ++counts_.by_segment[segment->id];
+  return segment->offset_db;
+}
+
+std::vector<std::string> GainStateResolver::emptySegments() const
+{
+  std::vector<std::string> out;
+  for (const GainSegment & s : declaration_->segments) {
+    if (counts_.by_segment.at(s.id) == 0) {
+      out.push_back(s.id);
+    }
+  }
+  return out;
+}
+
+namespace
+{
+std::string utcText(int64_t ns)
+{
+  const int64_t secs = ns / 1000000000LL;
+  const int64_t frac = ns % 1000000000LL;
+  // Civil date from days (Hinnant's inverse).
+  int64_t z = secs / 86400 + 719468;
+  const int64_t sod = secs % 86400;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const int64_t doe = z - era * 146097;
+  const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const int64_t mp = (5 * doy + 2) / 153;
+  const int64_t d = doy - (153 * mp + 2) / 5 + 1;
+  const int64_t m = mp < 10 ? mp + 3 : mp - 9;
+  const int64_t y = yoe + era * 400 + (m <= 2);
+  char buf[64];
+  std::snprintf(
+    buf, sizeof(buf), "%04" PRId64 "-%02" PRId64 "-%02" PRId64 "T%02" PRId64 ":%02" PRId64
+    ":%02" PRId64, y, m, d, sod / 3600, sod / 60 % 60, sod % 60);
+  std::string out = buf;
+  if (frac != 0) {
+    char f[16];
+    std::snprintf(f, sizeof(f), ".%09" PRId64, frac);
+    out += f;
+    while (out.back() == '0') {
+      out.pop_back();
+    }
+  }
+  return out + "Z";
+}
+}  // namespace
+
+std::string GainStateResolver::report() const
+{
+  std::ostringstream os;
+  os << "Gain-state declaration " << declaration_->path << ": reference state '"
+     << declaration_->reference_state << "', " << declaration_->segments.size()
+     << " segment(s); " << counts_.pings << " ping(s) seen\n";
+  for (const GainSegment & s : declaration_->segments) {
+    char offset[32];
+    std::snprintf(offset, sizeof(offset), "%+.3f", s.offset_db);
+    os << "  " << s.id << " [" << utcText(s.start_ns) << ", " << utcText(s.end_ns) << ") "
+       << offset << " dB (" << s.provenance << "): " << counts_.by_segment.at(s.id)
+       << " pings\n";
+  }
+  os << "  undeclared (at reference): " << counts_.undeclared << " pings\n";
+  for (const std::string & id : emptySegments()) {
+    os << "  warning: segment '" << id
+       << "' is declared but no ping fell in it: check its stamps\n";
+  }
+  return os.str();
+}
+
+std::string gainRecordProblem(
+  const std::string & what, const std::string & recorded_sha,
+  const std::string & recorded_reference, const GainDeclaration * declaration,
+  const std::string & declaration_sha)
+{
+  const bool recorded = !recorded_sha.empty() || !recorded_reference.empty();
+  if (!declaration) {
+    if (!recorded) {
+      return "";
+    }
+    return what + " was fitted under gain-state declaration '" + recorded_reference +
+           "' (sha256 " + recorded_sha + "), but no gain-state declaration was given: "
+           "supply that declaration, or use a curve/table fitted without one";
+  }
+  if (!recorded) {
+    return what + " records no gain-state declaration (derived before cube_bathymetry#176 or "
+           "without --gain-declaration), but declaration " + declaration->path +
+           " (reference state '" + declaration->reference_state + "') was given: pings in a "
+           "declared segment are shifted to the reference, so the curve must have been fitted "
+           "in that state. Re-derive it with the same declaration (a season that never crossed "
+           "a step re-derives with a zero-segment declaration)";
+  }
+  if (recorded_sha != declaration_sha || recorded_reference != declaration->reference_state) {
+    return what + " was fitted under gain-state declaration '" + recorded_reference +
+           "' (sha256 " + recorded_sha + "), but declaration " + declaration->path +
+           " is reference state '" + declaration->reference_state + "' (sha256 " +
+           declaration_sha + "): they are different corrections. Re-derive with this "
+           "declaration, or import with the one the file was fitted under";
+  }
+  return "";
+}
+
+void shiftSoundings(std::vector<GeoSounding> & soundings, double offset_db)
+{
+  if (offset_db == 0.0) {
+    return;
+  }
+  for (GeoSounding & s : soundings) {
+    if (std::isfinite(s.sounding.intensity)) {
+      s.sounding.intensity = static_cast<float>(s.sounding.intensity + offset_db);
+    }
+  }
 }
 
 }  // namespace cube

@@ -728,6 +728,12 @@ BackscatterTable loadBackscatterTable(
   if (header.count("source_bags")) {
     table.source_bags = header["source_bags"];
   }
+  if (header.count("gain_declaration_sha256")) {
+    table.gain_declaration_sha256 = header["gain_declaration_sha256"];
+  }
+  if (header.count("gain_reference_state")) {
+    table.gain_reference_state = header["gain_reference_state"];
+  }
   // The declared range-term groups (cube#172 review): the writer omits the
   // rows of a group it did not fit (its zero term), so the rows alone cannot
   // say where the first group starts. With this line every mode carries every

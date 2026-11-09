@@ -28,6 +28,8 @@
 #include <string>
 #include <vector>
 
+#include "cube_bathymetry/geo_sounding.h"
+
 /// @file
 /// @brief The operator-written gain-state declaration
 ///        (`gain-state-declaration v1`, cube_bathymetry#176).
@@ -120,6 +122,60 @@ namespace cube
 /// Unix epoch. False for anything else: a numeric offset, a missing `Z`, an
 /// impossible date, a leap second, a year outside 1970..2200.
   bool parseUtcNs(const std::string & text, int64_t & out);
+
+/// What `GainStateResolver` counted.
+  struct GainStateCounts
+  {
+    uint64_t pings = 0;
+    uint64_t undeclared = 0;
+    std::map < std::string, uint64_t > by_segment;
+  };
+
+/// Applies a declaration ping by ping and counts what it did.
+  class GainStateResolver
+  {
+public:
+  /// @p declaration must be loaded and must outlive the resolver.
+    explicit GainStateResolver(const GainDeclaration * declaration);
+
+  /// The offset to add to the intensity of a ping stamped @p ping_stamp_ns;
+  /// counts the ping against its segment, or as undeclared (at reference).
+    double apply(int64_t ping_stamp_ns);
+
+    const GainStateCounts & counts() const {return counts_;}
+    const GainDeclaration & declaration() const {return *declaration_;}
+
+  /// A segment of the declaration that no ping fell in.
+    std::vector < std::string > emptySegments() const;
+
+  /// Human-readable report: reference state, source, one line per segment
+  /// (`id [start, end) +offset dB (provenance): N pings`), the undeclared
+  /// count, and a warning line per segment no ping fell in.
+    std::string report() const;
+
+private:
+    const GainDeclaration * declaration_;
+    GainStateCounts counts_;
+  };
+
+/// Whether a fitted curve or table (@p what, for the message) agrees with the
+/// declaration an import is run under (cube_bathymetry#176, decision 8): a
+/// curve fitted in the reference state and applied to un-shifted post-step
+/// pings is wrong by the step, and one fitted across the step is invalid.
+/// @p recorded_sha / @p recorded_reference are the file's `# gain_*` header
+/// values (empty when it has none); @p declaration may be null (none given)
+/// and @p declaration_sha is its canonical digest. Returns "" when they
+/// agree (including: neither side has a declaration), else the reason.
+  std::string gainRecordProblem(
+    const std::string & what, const std::string & recorded_sha,
+    const std::string & recorded_reference, const GainDeclaration * declaration,
+    const std::string & declaration_sha);
+
+/// Add @p offset_db to the intensity of every sounding whose intensity is
+/// finite (a NaN stays NaN: it is no sample). Called for a ping of ANY
+/// pulse mode, resolved or not, table or no table -- the offset is a
+/// receiver calibration, not part of the mode correction.
+  void shiftSoundings(std::vector < GeoSounding > &soundings, double offset_db);
 
 }  // namespace cube
 

@@ -158,6 +158,21 @@ struct CubeBathymetryTestAccess
   {
     n.stampCloudMode(stamp_ns, frequency_hz, soundings);
   }
+  /// The path pingCallback takes: gain shift, then pulse-mode stamp (#176).
+  static void prepareCloud(
+    CubeBathymetry & n, int64_t stamp_ns, float frequency_hz,
+    std::vector<cube::GeoSounding> & soundings)
+  {
+    n.prepareCloudBackscatter(stamp_ns, frequency_hz, soundings);
+  }
+  static bool hasGainResolver(const CubeBathymetry & n)
+  {
+    return static_cast<bool>(n.gain_resolver_);
+  }
+  static uint64_t gainPings(const CubeBathymetry & n)
+  {
+    return n.gain_resolver_ ? n.gain_resolver_->counts().pings : 0;
+  }
   static uint64_t resolvedPings(const CubeBathymetry & n)
   {
     return n.bs_resolver_ ? n.bs_resolver_->counts().pings : 0;
@@ -1967,4 +1982,92 @@ TEST_F(NodeLifecycle, TheCallbackGroupAuditNoticesWhatItIsFor)
   EXPECT_EQ(auditGroups(*node).unspun_foreign_waitables, 1u)
     << "a waitable outside the executor was not noticed";
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+
+// cube_bathymetry#176: a declared gain state is added to the raw intensity of
+// every cloud in a segment, with NO table and NO resolver (the shift is a
+// receiver calibration, not part of the mode correction).
+TEST_F(NodeLifecycle, GainDeclarationShiftsCloudIntensityWithoutTable)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_gain_declaration",
+    std::string(GAIN_DECLARATION_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_FALSE(CubeBathymetryTestAccess::hasResolver(*node)) << "no table, no mode resolver";
+  ASSERT_TRUE(CubeBathymetryTestAccess::hasGainResolver(*node));
+
+  // 2026-08-26T20:17:30Z is 1787775450 s: the fixture's step start.
+  const int64_t start_ns = 1787775450LL * 1000000000LL;
+  auto cloud = [](float intensity) {
+      std::vector<cube::GeoSounding> v(
+        2, cube::GeoSounding(gz4d::GeoPointLatLongDegrees(43.07, -70.71, -10.0)));
+      v[0].sounding.intensity = intensity;
+      v[1].sounding.intensity = std::nanf("");
+      return v;
+    };
+  auto before = cloud(40.0f);
+  CubeBathymetryTestAccess::prepareCloud(*node, start_ns - 1, 500000.0f, before);
+  EXPECT_FLOAT_EQ(before[0].sounding.intensity, 40.0f);
+  auto inside = cloud(40.0f);
+  CubeBathymetryTestAccess::prepareCloud(*node, start_ns, 500000.0f, inside);
+  EXPECT_FLOAT_EQ(inside[0].sounding.intensity, 63.0f) << "reported 40 + 23 = 63: the sign";
+  EXPECT_TRUE(std::isnan(inside[1].sounding.intensity));
+  std::vector<cube::GeoSounding> none;
+  CubeBathymetryTestAccess::prepareCloud(*node, start_ns, 500000.0f, none);
+  EXPECT_EQ(CubeBathymetryTestAccess::gainPings(*node), 2u) << "an empty cloud is no ping";
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+  EXPECT_FALSE(CubeBathymetryTestAccess::hasGainResolver(*node)) << "cleanup releases it";
+}
+
+// ... and with a table: the shift is first, a ping of an unresolved mode is
+// shifted too, and the declaration and its counters survive a `~/reset`.
+TEST_F(NodeLifecycle, GainDeclarationShiftsCloudIntensityAndSurvivesReset)
+{
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_curve_file", std::string(MODE_TABLE_FIXTURE_FILE)),
+    rclcpp::Parameter("backscatter_mode_fallback", std::string("identity")),
+    rclcpp::Parameter("backscatter_gain_declaration",
+    std::string(GAIN_DECLARATION_FIXTURE_FILE))}));
+  ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+  const int64_t inside_ns = 1787775450LL * 1000000000LL + 1000;
+  std::vector<cube::GeoSounding> one(
+    1, cube::GeoSounding(gz4d::GeoPointLatLongDegrees(43.07, -70.71, -10.0)));
+  one[0].sounding.intensity = 10.0f;
+  // No SonarInfo yet: the ping's mode is unresolved, and it is shifted anyway.
+  CubeBathymetryTestAccess::prepareCloud(*node, inside_ns, 500000.0f, one);
+  EXPECT_FLOAT_EQ(one[0].sounding.intensity, 33.0f);
+  EXPECT_EQ(one[0].sounding.correction_idx, cube::kCorrectionUnresolved);
+
+  ResetCaller caller(node);
+  const auto [ok, message] = caller.call();
+  ASSERT_TRUE(ok) << message;
+  ASSERT_TRUE(CubeBathymetryTestAccess::hasGainResolver(*node)) << "survives the reset";
+  EXPECT_EQ(CubeBathymetryTestAccess::gainPings(*node), 1u);
+  one[0].sounding.intensity = 10.0f;
+  CubeBathymetryTestAccess::prepareCloud(*node, inside_ns, 500000.0f, one);
+  EXPECT_FLOAT_EQ(one[0].sounding.intensity, 33.0f);
+  EXPECT_EQ(CubeBathymetryTestAccess::gainPings(*node), 2u);
+  EXPECT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
+TEST_F(NodeLifecycle, ABrokenGainDeclarationFailsConfigure)
+{
+  const auto broken = std::filesystem::temp_directory_path() /
+    ("cube_gain_broken_" + std::to_string(::getpid()) + ".csv");
+  {
+    std::ofstream out(broken);
+    out << "# format: gain-state-declaration v1\n# reference_state: r\n"
+      "segment,start_utc,end_utc,offset_db,provenance,provenance_note\n"
+      "a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,guessed,n\n";
+  }
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_gain_declaration", broken.string())}));
+  EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(log.contains("backscatter_gain_declaration could not be loaded")) << log.all();
+  std::filesystem::remove(broken);
 }

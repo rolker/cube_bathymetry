@@ -272,6 +272,10 @@ AngularResponseCurve parseAngularResponseCurve(const std::string & text)
             lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
           }
           result.tl_removed = (lower == "true" || lower == "1");
+        } else if (matchHeaderComment(line, "gain_declaration_sha256", value)) {
+          result.gain_declaration_sha256 = value;
+        } else if (matchHeaderComment(line, "gain_reference_state", value)) {
+          result.gain_reference_state = value;
         } else if (matchHeaderComment(line, "absorption_db_per_m", value)) {
           try {
             std::size_t used = 0;

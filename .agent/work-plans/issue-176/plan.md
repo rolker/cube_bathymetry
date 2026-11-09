@@ -167,7 +167,8 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   hold the already-shifted intensity; the gather needs nothing). batch_regen refuses per-mode tables
   (`isAngularResponseTable`, ~l.937: no SonarInfo source), so its supported paths are `none` and a single-curve CSV;
   **table + declaration parity with `import_bag` is out of reach until batch_regen reads SonarInfo** (stated in the
-  README). Decision 8's check applies to the single-curve CSV. Fingerprint check on the `-o` store ONLY (not
+  README). Decision 8's check applies to the single-curve CSV. **The fingerprint check and its matrix land in commit 4**, with the `gain_declaration` field they read (implementation
+  deviation: commit 2 has no field to compare against yet). Fingerprint check on the `-o` store ONLY (not
   `--reference-store`, which only seeds the predicted depth surface), and only when `-o` already holds a store that
   batch_regen merges into (confirm in the implementation; if it always rebuilds fresh, the check fires only when a
   fingerprint is present). Outcomes (batch_regen writes no fingerprint):
@@ -190,6 +191,14 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   resuming/priming from a store built under a different declaration is NOT detected (README + ADR addendum say so). Report is logged at deactivate/cleanup with the mode report; a ping in a +offset segment logs nothing
   per ping. The file is read at configure; a gain change that happens mid-run is entered by editing the file and
   reconfiguring (configure only, no hot reload; stated in the README).
+- Implementation notes (commit 2): the shared curve/table check is `gainRecordProblem` in `gain_declaration.{h,cpp}`
+  (decision 8; the digest comes from `gainDeclarationSha256` in `build_fingerprint.h`, so the core library needs no
+  OpenSSL); `AngularResponseCurve` and `BackscatterTable` gained `gain_declaration_sha256` / `gain_reference_state`
+  read from the `# gain_*` header lines (the table fields were planned for commit 3; they are needed by the
+  import-time check, so they land here). The node's pingCallback calls `prepareCloudBackscatter` (gain shift, then
+  `stampCloudMode`), which is also the test seam. batch_regen's `--bs-store` parity tests live in the new
+  `test/test_batch_regen_gain.py` (pytest, both tools handed over by CMake); batch_regen opens its bag readers before
+  the declaration is checked (it always did; the refusal is before any message is read).
 - Tests: `test_gain_state_resolver` (gtest): `CountsPerSegmentAndUndeclared`, `ShiftAddsOffsetToFiniteIntensityOnly`,
   `UnresolvedModePingStillShifted`, `ReportNamesEmptySegment`. `test_import_bag_mode_table.py` gets new cases
   (extend, same synthetic two-mode bag with a table derived in-reference): `test_declared_step_restores_reference_level`

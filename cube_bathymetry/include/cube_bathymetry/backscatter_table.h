@@ -242,6 +242,12 @@ namespace cube
     double specular_exclusion_deg = std::numeric_limits < double > ::quiet_NaN();
   /// `# source_bags:` verbatim (reports).
     std::string source_bags;
+  /// The gain-state declaration the table was derived under (cube_bathymetry
+  /// #176), from `# gain_declaration_sha256:` / `# gain_reference_state:`;
+  /// both empty for a table derived without one and for every table written
+  /// before #176. Compared with the declaration an import is given.
+    std::string gain_declaration_sha256;
+    std::string gain_reference_state;
   /// Entry k corresponds to `correction_idx == k + 1`.
     std::vector < ModeEntry > entries;
   /// Problems that do not refuse the table, one sentence each, for the

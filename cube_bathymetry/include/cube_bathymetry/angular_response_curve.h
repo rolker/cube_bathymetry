@@ -52,6 +52,12 @@ namespace cube
     std::vector < std::pair < float, float >> points;
     bool tl_removed = false;
     float absorption_db_per_m = 0.0f;
+  /// The gain-state declaration the curve was fitted under (cube_bathymetry
+  /// #176), from `# gain_declaration_sha256:` / `# gain_reference_state:`;
+  /// both empty for a curve fitted without one (and for every curve written
+  /// before #176). Compared with the declaration an import is given.
+    std::string gain_declaration_sha256;
+    std::string gain_reference_state;
   };
 
 /// Load an empirical angular-response curve from a CSV file matching the seed at
