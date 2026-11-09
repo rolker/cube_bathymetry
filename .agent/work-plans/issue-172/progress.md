@@ -640,3 +640,28 @@ Full package suite after the fixes: **1439 tests, 0 errors, 0 failures, 96 skipp
 
 ### Next
 Pre-push `review-code` round on the delta, ci-local full-scope attestation on the new head, push, PR body update. Operator's instruction: make the PR ready without their read; the merge itself still waits for their word.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-09 11:57 -05:00
+**By**: Claude Code Agent (Claude Fable 5.1)
+**Verdict**: approved
+
+**Branch**: feature/issue-172 at `101ce1a` (reviewed delta: `cd651b8..0dfeadb`, the Copilot-finding fixes; the closures below are `77f6194`, `fd64039`)
+**Mode**: pre-push
+**Depth**: Deep (reason: 447 lines across 13 files; mostly tests)
+**Must-fix**: 2 | **Suggestions**: 5
+**Round**: 7 | **Ship**: recommended — both must-fixes were mechanical and are closed in this round; the loop converged (8, 3, 1, 1, Copilot 4, now 2 → 0).
+
+Specialists: Static analysis run by the lead (uncrustify, cpplint, flake8, pep257, lint_cmake, xmllint, copyright: clean). Governance + plan drift by the lead (no parameter/topic/service change; ADR-0003 provenance now hashes the bytes applied in both branches; plan synced). Claude Adversarial Lens A + Lens B (Sonnet, fresh context). Cross-Model: gemini + codex via `cross_model_review.sh`, both EXIT=0. Local Adversarial: off.
+
+### Findings
+- [x] (must-fix, Codex) The behind-window release had a twin: `addSonarInfo` cleared the set for every in-window message and a heartbeat returns before its end-of-function prune, so "behind state, heartbeat, ping" still grew the history — `src/backscatter_mode.cpp:88`. Closed: `releaseBehind()` there too; regression test extended with the heartbeat interleaving.
+- [x] (must-fix, Codex + Lens B, cross-confirmed) `test_import_bag_mode_table.py` imports `osgeo.gdal` with no `python3-gdal` test_depend (only `libgdal-dev`) — a clean CI image fails, not skips. Closed: `package.xml` test_depend.
+- [x] (suggestion, Gemini) `<< in.rdbuf()` reports a source read error to nobody, so the `in.bad()` check was dead; a directory path read as an empty curve by accident — `src/angular_response_curve.cpp`. Closed: regular-file check before the read, dead check removed.
+- [x] (suggestion, Lens B) The curve read is unbounded where the table loader is bounded. Closed: 64 MiB cap via `file_size`.
+- [x] (suggestion, Lens A + Lens B, cross-confirmed) The pytest skipped silently whenever `IMPORT_BAG_EXE` was unset or stale, so a renamed target would keep CI green. Closed: skip only when unset; an autouse fixture fails when set but not executable; subprocess timeout 300 s under the 600 s ctest bound.
+- [x] (suggestion, Lens A) The plain-curve fingerprint branch (`sha256Text(curve_bytes)`) had no end-to-end test. Closed: `test_plain_curve_fingerprint_hashes_the_bytes_parsed`.
+- [ ] (suggestion, Lens A) The pytest imports the derive test module's underscore helpers and matches exact stdout strings; a wording change breaks it. Accepted as a regression test; not changed.
+
+Dropped: Lens B's "capHistory over-cap erasure with a stale hold" (pre-existing, needs >4096 in-window states plus a stall; unchanged by this delta); `sha256File` is test-only now, kept with its test.
