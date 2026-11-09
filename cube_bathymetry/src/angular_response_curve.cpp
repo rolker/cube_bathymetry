@@ -197,16 +197,41 @@ bool matchHeaderComment(
 // SonarInfo (marine_tools#71). Keep parsing-semantics changes in sync.
 AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path)
 {
+  return loadAngularResponseCurveWithHeader(path, nullptr);
+}
+
+AngularResponseCurve loadAngularResponseCurveWithHeader(
+  const std::string & path, std::string * bytes_out)
+{
+  if (bytes_out) {
+    bytes_out->clear();
+  }
+  if (path.empty()) {
+    return AngularResponseCurve();
+  }
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    return AngularResponseCurve();
+  }
+  // One read of the file: the parse and the caller's hash see the same bytes.
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  if (in.bad()) {
+    return AngularResponseCurve();
+  }
+  std::string text = buffer.str();
+  const AngularResponseCurve result = parseAngularResponseCurve(text);
+  if (bytes_out) {
+    *bytes_out = std::move(text);
+  }
+  return result;
+}
+
+AngularResponseCurve parseAngularResponseCurve(const std::string & text)
+{
   AngularResponseCurve result;
   std::vector<std::pair<float, float>> & curve = result.points;
-  if (path.empty()) {
-    return result;
-  }
-
-  std::ifstream in(path);
-  if (!in) {
-    return result;
-  }
+  std::istringstream in(text);
 
   std::string line;
   while (std::getline(in, line)) {

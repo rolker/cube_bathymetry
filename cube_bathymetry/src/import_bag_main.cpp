@@ -1053,7 +1053,9 @@ bool resolveBackscatterCorrection(
       return true;
     }
     // Explicit file wins over SonarInfo (the reprocessing override, #102).
-    backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
+    std::string curve_bytes;
+    backscatter_curve =
+      cube::loadAngularResponseCurveWithHeader(backscatter_curve_file, &curve_bytes);
     if (backscatter_curve.points.empty()) {
       // Loud in EVERY mode: the explicit file also suppresses the SonarInfo
       // pre-pass (it stays the operator's chosen source), so a failed load
@@ -1065,13 +1067,12 @@ bool resolveBackscatterCorrection(
     } else {
       provenance.kind = "curve";
       provenance.source = backscatter_curve_file;
-      try {
-        provenance.sha256 = cube::sha256File(backscatter_curve_file);
-      } catch (const std::exception & e) {
-        std::cerr << "error: cannot hash --backscatter-curve for the fingerprint: "
-                  << e.what() << "\n";
-        return false;
-      }
+      // The bytes that were parsed, as the table branch does -- never a second
+      // read of the path: a derivation replacing the CSV between the two reads
+      // would fingerprint a curve the store did not use, and a later build of
+      // that curve would then pass the staleness check against incorrectly
+      // corrected data (PR #175 review).
+      provenance.sha256 = cube::sha256Text(curve_bytes);
     }
   } else {
     // SonarInfo pre-pass (#102): scan the bags' sonar_info topic for the

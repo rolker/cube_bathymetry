@@ -72,6 +72,18 @@ namespace cube
 /// Empirical correction then degrades to a no-op -- callers should warn).
   AngularResponseCurve loadAngularResponseCurveWithHeader(const std::string & path);
 
+/// Load a curve and hand back the exact bytes that were parsed in @p bytes_out
+/// (may be null; cleared first, left empty when the file cannot be read). One
+/// read: a hash of @p bytes_out is a hash of the curve applied, never of a
+/// second read of a file a derivation may have replaced meanwhile (PR #175
+/// review, the fingerprint's provenance).
+  AngularResponseCurve loadAngularResponseCurveWithHeader(
+    const std::string & path, std::string * bytes_out);
+
+/// Parse a curve from CSV text -- what the file loaders do once they have the
+/// bytes. Same format, same header handling, same skip-the-malformed rules.
+  AngularResponseCurve parseAngularResponseCurve(const std::string & text);
+
 /// Backward-compatible convenience: the curve `points` only (drops the TL
 /// provenance). Equivalent to `loadAngularResponseCurveWithHeader(path).points`.
   std::vector < std::pair < float, float >> loadAngularResponseCurve(const std::string & path);

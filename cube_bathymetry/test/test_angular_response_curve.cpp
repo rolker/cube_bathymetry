@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/backscatter_table.h"
@@ -203,6 +204,33 @@ TEST(AngularResponseCurve, LoadsDeriveToolSeawaterCurve)
 // letter, so std::stof rejects every row, and the table carries no tl_removed
 // or absorption_db_per_m header. The fixture is written by
 // test_derive_angular_response.py (mode_table_lines).
+// PR #175 review: import_bag fingerprints the curve it applied, so the loader
+// hands back the bytes it parsed, and parsing those bytes again gives the same
+// curve -- one read, one hash, one parse.
+TEST(AngularResponseCurve, LoaderReturnsTheBytesItParsed)
+{
+  std::string bytes;
+  const auto loaded = loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE, &bytes);
+  ASSERT_FALSE(loaded.points.empty());
+  std::ifstream in(DERIVED_CURVE_GOLDEN_FILE, std::ios::binary);
+  std::ostringstream expected;
+  expected << in.rdbuf();
+  EXPECT_EQ(bytes, expected.str()) << "the bytes are the file's, exactly";
+
+  const auto reparsed = parseAngularResponseCurve(bytes);
+  EXPECT_EQ(reparsed.points, loaded.points);
+  EXPECT_EQ(reparsed.tl_removed, loaded.tl_removed);
+  EXPECT_FLOAT_EQ(reparsed.absorption_db_per_m, loaded.absorption_db_per_m);
+
+  // The one-argument loader is the two-argument one without the bytes.
+  EXPECT_EQ(loadAngularResponseCurveWithHeader(DERIVED_CURVE_GOLDEN_FILE).points, loaded.points);
+
+  // A missing file leaves the bytes empty rather than stale.
+  bytes = "stale";
+  EXPECT_TRUE(loadAngularResponseCurveWithHeader("/nonexistent/curve.csv", &bytes).points.empty());
+  EXPECT_TRUE(bytes.empty());
+}
+
 TEST(AngularResponseCurve, ModeTableLoadsAsAnEmptyCurve)
 {
   auto loaded = loadAngularResponseCurveWithHeader(MODE_TABLE_FIXTURE_FILE);
