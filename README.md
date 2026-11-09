@@ -1254,6 +1254,15 @@ record format changes. Four consumers read it:
 | `cube_bathymetry_node` | parameter `backscatter_gain_declaration` (string, default empty) | read at `configure` only: a mid-run edit would split one store across two declarations undetected, so reconfigure is the explicit act and a runtime `ros2 param set` while configured is rejected. The curve or table the node applies (`backscatter_curve_file`) is checked against it exactly as `import_bag` does: a mismatch, a pre-#176 file with a declaration, a file fitted under a declaration with none set, or a per-mode table handed as the declaration fails the configure. It survives `~/reset`, and its counts are logged at cleanup. A load error fails the configure. The live node writes no fingerprint, so a node resuming from a store built under another declaration is **not** detected |
 | `derive_angular_response.py` | `--gain-declaration <file>` (single curve and `--by-mode`) | each ping's offset is added to its intensities before binning, so one curve or table comes out in the reference state from data on both sides of the step |
 
+**The per-segment counts are per-tool diagnostics, each counting the pings that
+tool applied the shift to.** `import_bag` and `batch_regen_bag` count pings that
+reached the shift after georeferencing (a ping with no earth transform is
+dropped first), the node counts non-empty clouds, and the derive tool counts the
+pings it used: with `--box` a ping outside the box is not counted, so a segment
+that covers only transit reads 0 pings there, and the derive tool says that
+instead of calling the stamps wrong. The `0 pings` warning is therefore a
+prompt to look, decisive only for a run over the whole bag.
+
 **A curve or table must be fitted under the declaration it is applied with.**
 A curve fitted in the reference state and applied to un-shifted post-step pings
 is wrong by the step, and one fitted across the step is invalid. The derive

@@ -967,10 +967,18 @@ def gain_report_lines(summary):
     return out
 
 
-def gain_empty_segment_warnings(summary):
-    """Return one warning per declared segment that no ping fell in (a mistyped stamp)."""
-    return ["warning: gain segment '%s' is declared but no ping fell in it: check its stamps"
-            % s['id'] for s in summary['segments'] if s['pings'] == 0]
+def gain_empty_segment_warnings(summary, box=False):
+    """
+    Return one warning per declared segment that no ping fell in (a mistyped stamp).
+
+    The counts are of the pings this run used. With ``--box`` the pings outside the box never
+    reach the counters, so a segment covering only transit is not evidence of a mistyped
+    stamp: the warning says the counts are box-filtered instead.
+    """
+    note = (' (counts cover only pings inside --box; this may just be transit)' if box
+            else ': check its stamps')
+    return ["warning: gain segment '%s' is declared but no ping fell in it%s" % (s['id'], note)
+            for s in summary['segments'] if s['pings'] == 0]
 
 
 class PingRecord:
@@ -3728,7 +3736,8 @@ def main_by_mode(args, source_bags, gain=None):
                            args.range_node_spacing_decades)
     for warning in table['warnings']:
         print(warning, file=sys.stderr)
-    for warning in (gain_empty_segment_warnings(table['gain']) if table['gain'] else []):
+    for warning in (gain_empty_segment_warnings(table['gain'], args.box is not None)
+                    if table['gain'] else []):
         print(warning, file=sys.stderr)
     write_text_atomically(args.output, ''.join(
         line + '\n' for line in mode_table_lines(table, source_bags, args.box)))
@@ -3819,7 +3828,7 @@ def main(argv=None):
         header += gain_header_lines(summary)
         for line in gain_report_lines(summary):
             print(line)
-        for warning in gain_empty_segment_warnings(summary):
+        for warning in gain_empty_segment_warnings(summary, args.box is not None):
             print(warning, file=sys.stderr)
     n_rows = write_csv(
         bins, args.bin_width_deg, args.output, args.remove_tl, alpha, header)

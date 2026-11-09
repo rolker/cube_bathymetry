@@ -3173,3 +3173,21 @@ def test_canonical_form_ignores_lc_numeric(tmp_path):
         assert decl.canonical_form().splitlines()[-1].endswith(',23.500000')
     finally:
         locale.setlocale(locale.LC_NUMERIC, saved)
+
+
+def test_non_utf8_declaration_is_refused(tmp_path):
+    """The C++ loader refuses the same bytes (test_gain_declaration.cpp)."""
+    path = tmp_path / 'g.csv'
+    path.write_bytes((GAIN_HEADER + 'a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,'
+                      ).encode() + b'bad \xff note\n')
+    with pytest.raises(ValueError, match='not UTF-8'):
+        dar.load_gain_declaration(str(path))
+
+
+def test_empty_segment_warning_under_box_says_counts_are_box_filtered():
+    summary = {'segments': [{'id': 'transit', 'pings': 0}, {'id': 'busy', 'pings': 3}]}
+    plain = dar.gain_empty_segment_warnings(summary)
+    boxed = dar.gain_empty_segment_warnings(summary, box=True)
+    assert len(plain) == len(boxed) == 1
+    assert 'check its stamps' in plain[0]
+    assert 'only pings inside --box' in boxed[0] and 'check its stamps' not in boxed[0]
