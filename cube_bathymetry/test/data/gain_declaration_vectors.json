@@ -192,5 +192,154 @@
    "name": "zero_segments",
    "text": "# format: gain-state-declaration v1\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\n"
   }
+ ],
+ "offset_cases": [
+  {
+   "text": "23.0",
+   "canonical_offset": "23.000000"
+  },
+  {
+   "text": "-23",
+   "canonical_offset": "-23.000000"
+  },
+  {
+   "text": "+5",
+   "canonical_offset": "5.000000"
+  },
+  {
+   "text": "5.",
+   "canonical_offset": "5.000000"
+  },
+  {
+   "text": ".5",
+   "canonical_offset": "0.500000"
+  },
+  {
+   "text": "-.5",
+   "canonical_offset": "-0.500000"
+  },
+  {
+   "text": "1e1",
+   "canonical_offset": "10.000000"
+  },
+  {
+   "text": "1E1",
+   "canonical_offset": "10.000000"
+  },
+  {
+   "text": "2.5e-1",
+   "canonical_offset": "0.250000"
+  },
+  {
+   "text": "-0.4",
+   "canonical_offset": "-0.400000"
+  },
+  {
+   "text": "0.0000004",
+   "canonical_offset": "0.000000"
+  },
+  {
+   "text": "0.0000005",
+   "canonical_offset": "0.000000"
+  },
+  {
+   "text": "0.0000015",
+   "canonical_offset": "0.000002"
+  },
+  {
+   "text": "-0.0000001",
+   "canonical_offset": "0.000000"
+  },
+  {
+   "text": "-0.0",
+   "canonical_offset": "0.000000"
+  },
+  {
+   "text": "0",
+   "canonical_offset": "0.000000"
+  },
+  {
+   "text": "-0.0000004",
+   "canonical_offset": "0.000000"
+  },
+  {
+   "text": "59.9999995",
+   "canonical_offset": "60.000000"
+  },
+  {
+   "text": "-60",
+   "canonical_offset": "-60.000000"
+  },
+  {
+   "text": "60",
+   "canonical_offset": "60.000000"
+  },
+  {
+   "text": "1.2345675",
+   "canonical_offset": "1.234568"
+  },
+  {
+   "text": "-1.2345675",
+   "canonical_offset": "-1.234568"
+  },
+  {
+   "text": "0.1",
+   "canonical_offset": "0.100000"
+  },
+  {
+   "text": "12.3456789",
+   "canonical_offset": "12.345679"
+  }
+ ],
+ "offset_rejects": [
+  "0x1p3",
+  "0x10",
+  "1e-400",
+  "1e400",
+  "1_0",
+  "inf",
+  "-inf",
+  "nan",
+  "1,5",
+  "1.2.3",
+  "--5",
+  "+-5",
+  "e5",
+  ".",
+  "+",
+  "-",
+  "1e",
+  "1e+",
+  "５",
+  "1e-320",
+  "61",
+  "-60.0000001"
+ ],
+ "canonical_files": [
+  {
+   "name": "crlf",
+   "text": "# format: gain-state-declaration v1\r\n# reference_state: r\r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\r\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\r\n",
+   "canonical": "gain-state-declaration v1\nreference_state=r\n1767225600000000000,1767312000000000000,5.000000\n"
+  },
+  {
+   "name": "bom",
+   "text": "﻿# format: gain-state-declaration v1\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n",
+   "canonical": "gain-state-declaration v1\nreference_state=r\n1767225600000000000,1767312000000000000,5.000000\n"
+  },
+  {
+   "name": "tabs_and_padding",
+   "text": "# format: gain-state-declaration v1\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\n  a\t,\t2026-01-01T00:00:00Z , 2026-01-02T00:00:00Z\t,\t 5.0 \t,  measured ,\t n \t\n",
+   "canonical": "gain-state-declaration v1\nreference_state=r\n1767225600000000000,1767312000000000000,5.000000\n"
+  },
+  {
+   "name": "blank_lines_and_comments",
+   "text": "\n\n# format: gain-state-declaration v1\n# a free comment\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\n\n# between\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n\n",
+   "canonical": "gain-state-declaration v1\nreference_state=r\n1767225600000000000,1767312000000000000,5.000000\n"
+  },
+  {
+   "name": "sonar_and_sign_ignored",
+   "text": "# format: gain-state-declaration v1\n# sonar: x: y\n# sign: z\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n",
+   "canonical": "gain-state-declaration v1\nreference_state=r\n1767225600000000000,1767312000000000000,5.000000\n"
+  }
  ]
 }

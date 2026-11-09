@@ -1218,7 +1218,11 @@ the reason; the declaration is read whole or not at all:
   `start_utc` is before `end_utc`.
 - Segments are given in any order but must not overlap (`a.end > b.start`);
   touching (`a.end == b.start`) is fine and gaps mean the reference state.
-- `offset_db` is finite and at most 60 dB in magnitude (a typo guard); `0.0`
+- `offset_db` is a plain decimal (`[+-]digits[.digits][e[+-]digits]`: no hex, no
+  `inf`/`nan`, no separators; a literal that overflows, underflows or is
+  subnormal is refused), finite, and at most 60 dB in magnitude (a typo guard).
+  Both loaders parse and format locale-independently, and the canonical form
+  writes it `%.6f` with `-0.000000` as `0.000000`; `0.0`
   is allowed, an explicit "reference here". Segment ids are unique,
   `[A-Za-z0-9_.-]+`.
 - `provenance` is one of `settings_file`, `measured`, `operator_reported` and

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
@@ -162,12 +163,60 @@ int daysInMonth(int y, int m)
   return (m == 2 && isLeap(y)) ? 29 : kDays[m - 1];
 }
 
+/// @p value with @p precision decimals, locale-independent (std::to_chars is
+/// specified in terms of the "C" locale, unlike snprintf's LC_NUMERIC).
+std::string fixedText(double value, int precision)
+{
+  char buf[400];
+  const auto res = std::to_chars(buf, buf + sizeof(buf), value, std::chars_format::fixed,
+        precision);
+  return std::string(buf, res.ptr);
+}
+
 std::string offsetText(double offset_db)
 {
-  char buf[64];
-  // Negative zero prints as zero: the digest must not depend on it.
-  std::snprintf(buf, sizeof(buf), "%.6f", offset_db == 0.0 ? 0.0 : offset_db);
-  return buf;
+  // The digest must not depend on the sign of zero, nor on a tiny negative
+  // offset that prints as "-0.000000": both are "0.000000".
+  const std::string text = fixedText(offset_db, 6);
+  return text == "-0.000000" ? "0.000000" : text;
+}
+
+/// The offset grammar both loaders share (decimal only, no hex, no
+/// inf/nan, no digit separators): [+-]? (digits [. digits?] | . digits)
+/// ([eE] [+-]? digits)?
+bool matchesDecimal(const std::string & t)
+{
+  std::size_t i = 0;
+  auto digits = [&]() {
+      const std::size_t start = i;
+      while (i < t.size() && t[i] >= '0' && t[i] <= '9') {++i;}
+      return i - start;
+    };
+  if (i < t.size() && (t[i] == '+' || t[i] == '-')) {++i;}
+  const std::size_t whole = digits();
+  std::size_t frac = 0;
+  if (i < t.size() && t[i] == '.') {
+    ++i;
+    frac = digits();
+  }
+  if (whole + frac == 0) {return false;}
+  if (i < t.size() && (t[i] == 'e' || t[i] == 'E')) {
+    ++i;
+    if (i < t.size() && (t[i] == '+' || t[i] == '-')) {++i;}
+    if (digits() == 0) {return false;}
+  }
+  return i == t.size();
+}
+
+/// Parse a grammar-checked decimal; false on overflow, underflow or a
+/// subnormal result (a literal that is not representable as a normal double is
+/// refused rather than rounded to 0 or inf; the Python loader does the same).
+bool parseDecimal(const std::string & text, double & out)
+{
+  const char * first = text.data() + (text[0] == '+' ? 1 : 0);
+  const auto res = std::from_chars(first, text.data() + text.size(), out);
+  return res.ec == std::errc() && res.ptr == text.data() + text.size() && std::isfinite(out) &&
+         std::fpclassify(out) != FP_SUBNORMAL;
 }
 
 }  // namespace
@@ -420,12 +469,8 @@ GainDeclaration loadGainDeclaration(
       return fail(line_no, "start_utc must be before end_utc (the interval is [start, end))");
     }
     {
-      char * end = nullptr;
-      errno = 0;
-      const double v = std::strtod(f[3].c_str(), &end);
-      if (f[3].empty() || end == f[3].c_str() || *end != '\0' || errno == ERANGE ||
-        !std::isfinite(v))
-      {
+      double v = 0.0;
+      if (!matchesDecimal(f[3]) || !parseDecimal(f[3], v)) {
         return fail(line_no, "offset_db '" + clip(f[3]) + "' is not a finite number");
       }
       if (std::abs(v) > kMaxAbsOffsetDb) {
@@ -543,8 +588,7 @@ std::string GainStateResolver::report() const
      << declaration_->reference_state << "', " << declaration_->segments.size()
      << " segment(s); " << counts_.pings << " ping(s) seen\n";
   for (const GainSegment & s : declaration_->segments) {
-    char offset[32];
-    std::snprintf(offset, sizeof(offset), "%+.3f", s.offset_db);
+    const std::string offset = (s.offset_db < 0.0 ? "" : "+") + fixedText(s.offset_db, 3);
     os << "  " << s.id << " [" << utcText(s.start_ns) << ", " << utcText(s.end_ns) << ") "
        << offset << " dB (" << s.provenance << "): " << counts_.by_segment.at(s.id)
        << " pings\n";

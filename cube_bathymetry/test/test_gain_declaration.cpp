@@ -23,7 +23,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <clocale>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -368,6 +370,87 @@ TEST(GainDeclaration, SharedVectors)
     EXPECT_EQ(tryLoad(g.at("name"), g.at("text"), good), "") << g.at("name");
     EXPECT_TRUE(good.loaded());
   }
+}
+
+// cube_bathymetry#176 (pre-push round 1): the offset grammar, rounding and
+// file framing are pinned for both loaders on the same cases.
+namespace
+{
+std::string offsetFile(const std::string & offset)
+{
+  return std::string(kHeader) +
+         "a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z," + offset + ",measured,n\n";
+}
+}  // namespace
+
+TEST(GainDeclaration, OffsetGrammarAndCanonicalRounding)
+{
+  const auto doc = vectors();
+  for (const auto & c : doc.at("offset_cases")) {
+    GainDeclaration d;
+    const std::string text = c.at("text");
+    const std::string error = tryLoad("grammar", offsetFile(text), d);
+    ASSERT_EQ(error, "") << text;
+    // The file header of this helper says reference_state pre_step.
+    const std::string expected = "gain-state-declaration v1\nreference_state=pre_step\n" +
+      std::to_string(d.segments[0].start_ns) + "," + std::to_string(d.segments[0].end_ns) + "," +
+      c.at("canonical_offset").get<std::string>() + "\n";
+    EXPECT_EQ(d.canonicalForm(), expected) << text;
+  }
+  for (const auto & text : doc.at("offset_rejects")) {
+    GainDeclaration d;
+    const std::string error = tryLoad("grammar_bad", offsetFile(text.get<std::string>()), d);
+    EXPECT_NE(error, "") << "offset '" << text.get<std::string>() << "' was accepted";
+    EXPECT_FALSE(d.loaded());
+  }
+}
+
+TEST(GainDeclaration, FileFramingVariantsHaveTheSameCanonicalForm)
+{
+  for (const auto & c : vectors().at("canonical_files")) {
+    GainDeclaration d;
+    const std::string name = c.at("name");
+    ASSERT_EQ(tryLoad(name, c.at("text"), d), "") << name;
+    // The vector files name reference state "r".
+    EXPECT_EQ(d.canonicalForm(), c.at("canonical").get<std::string>()) << name;
+  }
+}
+
+// strtod and snprintf follow LC_NUMERIC; the loader and the canonical form must
+// not. Needs a locale with a decimal comma installed; skipped with a message
+// when none is.
+TEST(GainDeclaration, ParseAndCanonicalFormIgnoreLcNumeric)
+{
+  const char * previous = std::setlocale(LC_NUMERIC, nullptr);
+  const std::string saved = previous ? previous : "C";
+  const char * candidates[] = {"de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8",
+    "nl_NL.UTF-8", "ru_RU.UTF-8", "es_ES.UTF-8", "it_IT.UTF-8", "pt_BR.UTF-8"};
+  const char * chosen = nullptr;
+  for (const char * name : candidates) {
+    if (std::setlocale(LC_NUMERIC, name)) {
+      char probe[16];
+      std::snprintf(probe, sizeof(probe), "%.1f", 1.5);
+      if (std::string(probe).find(',') != std::string::npos) {
+        chosen = name;
+        break;
+      }
+    }
+  }
+  if (!chosen) {
+    std::setlocale(LC_NUMERIC, saved.c_str());
+    GTEST_SKIP() << "no locale with a decimal comma is installed (tried de_DE, fr_FR, nl_NL, "
+      "ru_RU, es_ES, it_IT, pt_BR); the check did not run";
+  }
+  GainDeclaration d;
+  const std::string error = tryLoad("locale", offsetFile("23.5"), d);
+  const std::string canonical = d.canonicalForm();
+  GainStateResolver resolver(&d);
+  resolver.apply(d.segments.empty() ? 0 : d.segments[0].start_ns);
+  const std::string report = resolver.report();
+  std::setlocale(LC_NUMERIC, saved.c_str());
+  EXPECT_EQ(error, "") << chosen;
+  EXPECT_NE(canonical.find(",23.500000\n"), std::string::npos) << canonical;
+  EXPECT_NE(report.find("+23.500 dB"), std::string::npos) << report;
 }
 
 }  // namespace cube

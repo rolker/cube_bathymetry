@@ -3118,3 +3118,58 @@ def test_cache_counts_follow_the_interval_not_the_segment_id(tmp_path, capsys):
         assert [ln.split()[2] for ln in lines] == list(ids)
         # The first five pings precede the first SonarInfo and contribute no beams.
         assert 'pings=200 beams=390' in lines[0] and 'pings=200 beams=400' in lines[1], lines
+
+
+@pytest.mark.parametrize('case', _gain_vectors()['offset_cases'], ids=lambda c: c['text'])
+def test_shared_vectors_offset_grammar_and_rounding(tmp_path, case):
+    """Every offset the C++ loader accepts parses here and canonicalises to the same text."""
+    path = tmp_path / 'g.csv'
+    path.write_text(GAIN_HEADER + 'a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,%s,measured,n\n'
+                    % case['text'])
+    decl = dar.load_gain_declaration(str(path))
+    assert decl.canonical_form().splitlines()[-1].split(',')[2] == case['canonical_offset']
+
+
+@pytest.mark.parametrize('text', _gain_vectors()['offset_rejects'])
+def test_shared_vectors_offset_rejects(tmp_path, text):
+    """Hex, inf/nan, separators, underflow, overflow and out-of-range offsets are refused."""
+    path = tmp_path / 'g.csv'
+    path.write_text(GAIN_HEADER + 'a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,%s,measured,n\n'
+                    % text)
+    with pytest.raises(ValueError):
+        dar.load_gain_declaration(str(path))
+
+
+@pytest.mark.parametrize('case', _gain_vectors()['canonical_files'], ids=lambda c: c['name'])
+def test_shared_vectors_file_framing(tmp_path, case):
+    """CRLF, BOM, tabs, padding and comments leave the canonical form unchanged."""
+    path = tmp_path / 'g.csv'
+    path.write_bytes(case['text'].encode('utf-8'))
+    assert dar.load_gain_declaration(str(path)).canonical_form() == case['canonical']
+
+
+def test_canonical_form_ignores_lc_numeric(tmp_path):
+    """The canonical text and the parse do not follow LC_NUMERIC (skipped when none installed)."""
+    import locale
+    saved = locale.setlocale(locale.LC_NUMERIC)
+    chosen = None
+    for name in ('de_DE.UTF-8', 'de_DE.utf8', 'fr_FR.UTF-8', 'nl_NL.UTF-8', 'ru_RU.UTF-8',
+                 'es_ES.UTF-8', 'it_IT.UTF-8', 'pt_BR.UTF-8'):
+        try:
+            locale.setlocale(locale.LC_NUMERIC, name)
+        except locale.Error:
+            continue
+        if locale.localeconv()['decimal_point'] == ',':
+            chosen = name
+            break
+    if chosen is None:
+        locale.setlocale(locale.LC_NUMERIC, saved)
+        pytest.skip('no locale with a decimal comma is installed; the check did not run')
+    try:
+        path = tmp_path / 'g.csv'
+        path.write_text(GAIN_HEADER + 'a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,23.5,'
+                        'measured,n\n')
+        decl = dar.load_gain_declaration(str(path))
+        assert decl.canonical_form().splitlines()[-1].endswith(',23.500000')
+    finally:
+        locale.setlocale(locale.LC_NUMERIC, saved)

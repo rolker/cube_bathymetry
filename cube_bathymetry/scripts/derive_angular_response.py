@@ -638,7 +638,7 @@ GAIN_MAX_BYTES = 64 * 1024
 GAIN_IDENTIFIER = re.compile(r'^[A-Za-z0-9_.-]+$')
 GAIN_UTC = re.compile(r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$',
                       re.ASCII)
-GAIN_DECIMAL = re.compile(r'^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$', re.ASCII)
+GAIN_DECIMAL = re.compile(r'[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?', re.ASCII)
 
 
 def parse_utc_ns(text):
@@ -660,7 +660,8 @@ def parse_utc_ns(text):
 
 def _gain_offset_text(offset_db):
     """Return ``offset_db`` as ``%.6f``, negative zero as zero (the digest's spelling)."""
-    return '%.6f' % (0.0 if offset_db == 0.0 else offset_db)
+    text = '%.6f' % offset_db
+    return '0.000000' if text == '-0.000000' else text
 
 
 class GainSegment(collections.namedtuple(
@@ -828,7 +829,13 @@ def load_gain_declaration(path):
                        % f[2][:200])
         if not start < end:
             raise fail(i, 'start_utc must be before end_utc (the interval is [start, end))')
-        offset = float(f[3]) if GAIN_DECIMAL.match(f[3]) else float('nan')
+        offset = float('nan')
+        if GAIN_DECIMAL.fullmatch(f[3]):
+            offset = float(f[3])
+            mantissa = re.split('[eE]', f[3])[0]
+            if (offset == 0.0 and any(c in '123456789' for c in mantissa)) or (
+                    0.0 < abs(offset) < sys.float_info.min):
+                offset = float('nan')     # underflow or subnormal: refused, as the C++ loader does
         if not math.isfinite(offset):
             raise fail(i, "offset_db '%s' is not a finite number" % f[3][:200])
         if abs(offset) > GAIN_MAX_ABS_OFFSET_DB:
