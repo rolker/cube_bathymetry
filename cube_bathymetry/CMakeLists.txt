@@ -477,6 +477,15 @@ if(BUILD_TESTING)
     TIMEOUT 300
     ENV ${CUBE_ISOLATED_TEST_ENV})
 
+  # import_bag over a synthetic two-mode bag (PR #175 review): the main-pass
+  # SonarInfo association, the table correction and the fingerprint, on the
+  # fixed path and the depth-adaptive (recon spill + replay) path. The built
+  # binary is handed over in IMPORT_BAG_EXE; without it the test skips.
+  ament_add_pytest_test(test_import_bag_mode_table
+    test/test_import_bag_mode_table.py
+    TIMEOUT 600
+    ENV ${CUBE_ISOLATED_TEST_ENV} "IMPORT_BAG_EXE=${CMAKE_CURRENT_BINARY_DIR}/import_bag")
+
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)
   target_link_libraries(test_sonar_info_curve cube_bathymetry_sonar_info_curve)
 
