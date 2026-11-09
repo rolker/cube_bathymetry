@@ -406,6 +406,41 @@ TEST(BackscatterTable, AMinimalTableLoads)
   std::filesystem::remove(path);
 }
 
+// PR #175 review: a supplied width was checked only for finiteness, so 0, a
+// negative width or one above 90 loaded, and a zero or negative width turned
+// the OutsideAngleBins test off without a word. The loader now holds the
+// writer's contract (derive_angular_response.py: 0 < --bin-width-deg <= 90);
+// an absent header is still allowed (the test below).
+TEST(BackscatterTable, ABinWidthOutsideTheWritersRangeIsRejected)
+{
+  for (const char * width : {"0", "-2", "90.5", "1e9"}) {
+    std::string header(kHeader);
+    header.insert(header.find("mode,term"),
+      std::string("# angle_bin_width_deg: ") + width + "\n");
+    const auto path = writeTemp(std::string("bad_width_") + width, header + kGoodRows);
+    std::string error;
+    const auto table = loadBackscatterTable(path, error);
+    EXPECT_FALSE(error.empty()) << "width " << width << " must be refused";
+    EXPECT_NE(error.find("'# angle_bin_width_deg:' must be > 0 and <= 90"), std::string::npos)
+      << error;
+    EXPECT_NE(error.find(width), std::string::npos) << "the offending value is named: " << error;
+    EXPECT_TRUE(table.entries.empty()) << "a refused table is empty";
+    std::filesystem::remove(path);
+  }
+  // The edges of the contract load.
+  for (const char * width : {"90", "0.5"}) {
+    std::string header(kHeader);
+    header.insert(header.find("mode,term"),
+      std::string("# angle_bin_width_deg: ") + width + "\n");
+    const auto path = writeTemp(std::string("edge_width_") + width, header + kGoodRows);
+    std::string error;
+    const auto table = loadBackscatterTable(path, error);
+    EXPECT_TRUE(error.empty()) << width << ": " << error;
+    EXPECT_DOUBLE_EQ(table.angle_bin_width_deg, std::stod(width));
+    std::filesystem::remove(path);
+  }
+}
+
 // cube_bathymetry#172 review round 3: without `# angle_bin_width_deg:` the
 // OutsideAngleBins test cannot run, so a beam far past the outermost bin gets
 // its clamped value. The table still loads, with a warning for the caller to

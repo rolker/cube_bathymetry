@@ -710,6 +710,18 @@ BackscatterTable loadBackscatterTable(
   if (!headerNumber("angle_bin_width_deg", table.angle_bin_width_deg, false)) {
     return fail(line_no, "malformed '# angle_bin_width_deg:'");
   }
+  // The writer's contract (derive_angular_response.py refuses --bin-width-deg
+  // outside 0 < w <= 90). A zero or negative width here would turn the
+  // outside-bin test off without a word, so a beam past the outermost bin got
+  // the clamped edge value instead of the fallback (PR #175 review). An
+  // absent header stays allowed: the loader warns about it elsewhere.
+  if (std::isfinite(table.angle_bin_width_deg) &&
+    !(table.angle_bin_width_deg > 0.0 && table.angle_bin_width_deg <= 90.0))
+  {
+    return fail(
+      line_no, "'# angle_bin_width_deg:' must be > 0 and <= 90 degrees (the writer's "
+      "contract), got " + header["angle_bin_width_deg"]);
+  }
   if (!headerNumber("specular_exclusion_deg", table.specular_exclusion_deg, false)) {
     return fail(line_no, "malformed '# specular_exclusion_deg:'");
   }
