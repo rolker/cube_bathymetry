@@ -39,3 +39,28 @@ issue: 173
 - [ ] Live node v1: flat-normal earth-frame (L1) versus staying on beam angle; running-surface slope deferred
 - [ ] batch_regen_bag with incidence: refuse versus support
 - [ ] Include --slope-surface (skip pass one) now; stencil floor default; one PR or two; default basis stays beam until Appledore comparison
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-11-10 14:20 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+
+**Plan**: `.agent/work-plans/issue-173/plan.md` updated with the operator decisions (a "Decisions" section) at commit 6213722
+
+### Decisions (2026-11-10, operator)
+1. uma#304 geometry module first: done (merged, unh_marine_autonomy PR #413, jazzy dd737cd7).
+2. The derive tool gets its angle from the import's per-beam output (the ledger), not a Python re-implementation.
+3. Fallback angle where there is no surface: earth-frame angle from vertical, not the sonar-frame |rx_angle|.
+4. Live node, first version: earth-frame angle with a flat normal, no_surface counted; a running own surface is deferred.
+5. batch_regen_bag refuses incidence-angle runs.
+6. Include --slope-surface <store> (reuse a depth store, skip pass one).
+7. Slope stencil: 3 cells with a minimum baseline in metres (default 4 m).
+8. Two PRs, split after commit group D.
+9. Existing beam-angle tables stay valid for beam runs and are refused for incidence runs, and the reverse.
+10. Default angle basis stays beam until an Appledore upslope/downslope comparison shows the correction helps.
+11. The 4 m default is provisional; measure the pass-one depth uncertainty on real data first. Kept as a parameter, marked provisional in README and plan.
+
+### Plan sync with the merged module
+- Geometry-module section rewritten to the merged API (heights ellipsoidal up-positive, flat fallback with reasons, caller counts, tile-seam behaviour, thread-safety, cache sizing).
+- Angle selection moved to Node::update's door, so the median queue layout is unchanged; beam_index moved to PR 2 (ledger).
+- Implementation instruction for PR 1 lists the module-dependent content (sampler adapter, two-pass import, --slope-surface) as PR 1 content; the plan records PR 1 = groups A to E, PR 2 = group F. This differs from the literal "split after D" of decision 8 and is flagged for the operator.
