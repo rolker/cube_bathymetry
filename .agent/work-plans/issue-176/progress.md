@@ -135,3 +135,32 @@ Specialists: Static analysis via the package suite (uncrustify, cpplint, flake8,
 - [x] (suggestion, Gemini; pre-existing) `batch_regen` silently ignores `--backscatter-curve` under the default `--backscatter-correction none`, so a curve + declaration pairing can bypass `gainRecordProblem`; print the same notice import_bag prints.
 
 Dropped: digest rounding below 5e-7 dB (negligible; soften the ADR's "anything that changes the correction" wording in passing); `add_dependencies` on the test binaries (existing convention, fail-loud when the env var is set is in place).
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-10 08:27 -05:00
+**By**: Claude Code Agent (Claude Fable 5.2)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-176 at `e898f8a`
+**Mode**: pre-push
+**Depth**: Standard (reason: round 2 on the fix delta 361a8d6..HEAD, 698 lines / 12 files; Claude Lens A + Lens B on the delta, Gemini + Codex on the whole branch; static analysis left to pre-commit)
+**Must-fix**: 4 | **Suggestions**: 11
+**Round**: 2 | **Ship**: continue — 4 must-fixes (3 in round 1), all mechanical with an obvious correction; fix, then a Light check of the delta rather than another full round
+
+### Findings
+- [ ] (must-fix, Codex) Range-for over `vectors().at("canonical_files")` iterates a reference into a destroyed temporary (UB under C++17); hold `vectors()` in a local — `cube_bathymetry/test/test_gain_declaration.cpp:425`
+- [ ] (must-fix, Codex) A second `# reference_state:` / `# format:` line after the column line is skipped as a comment, so a conflicting label loads silently; refuse reserved header keys anywhere after the first, in BOTH loaders, with shared rejection vectors — `cube_bathymetry/src/gain_declaration.cpp:473`, `cube_bathymetry/scripts/derive_angular_response.py`
+- [ ] (must-fix, Lens B) The node's single-curve branch of the configure-time gain check (`bs_curve_applied_ && bs_explicit_file_`) and the Auto warning have no lifecycle test; deleting the branch leaves the suite green. Add configure-FAILURE tests for a single-curve CSV that records another sha, records none with a declaration set, and records one with none set — `cube_bathymetry/src/cube_bathymetry_node.hpp:343`, `cube_bathymetry/test/test_node_lifecycle.cpp`
+- [ ] (must-fix, Lens B) Warning "any angular-response curve will come from SonarInfo" is false when `backscatter_curve_file` is set but empty/unparseable (SonarInfo is then ignored); gate on `!bs_explicit_file_` — `cube_bathymetry/src/cube_bathymetry_node.hpp:347`
+- [ ] (suggestion, Lens B) Same warning should cover every mode that adopts a SonarInfo curve (`bs_mode != None && !bs_explicit_file_`), not only Auto — `cube_bathymetry/src/cube_bathymetry_node.hpp:347`
+- [ ] (suggestion, Codex + Lens A) The digest rounds offsets to 6 decimals but the applied value is the unrounded double (0 and 0.0000004 share a digest, differ in effect; `-0` prints `+-0.000 dB` in the resolver report). Apply the canonical 6-decimal value in both loaders (normalising -0 to 0) and test the report text with a negative-zero offset — `cube_bathymetry/src/gain_declaration.cpp:222,633`
+- [ ] (suggestion, Gemini) Curve and table loaders accept one of `# gain_declaration_sha256:` / `# gain_reference_state:` without the other, an empty value, or (curve) a duplicate key; require both-or-neither, non-empty, once — `cube_bathymetry/src/angular_response_curve.cpp:275`, `cube_bathymetry/src/backscatter_table.cpp:731`
+- [ ] (suggestion, Gemini) derive: a segment whose pings all lacked SonarInfo or usable beams has pings>0, beams==0 and suppresses the empty-segment warning; warn when no BEAM from a segment entered the fit — `cube_bathymetry/scripts/derive_angular_response.py:981`
+- [ ] (suggestion, Gemini + Lens A) A FAILURE return from on_configure leaves `bs_*` (gain-check failure) or `gain_*` (later failures) populated in UNCONFIGURED; clear both on every FAILURE exit (scope guard) and add a fail → correct the parameter → configure succeeds test — `cube_bathymetry/src/cube_bathymetry_node.hpp:353`
+- [ ] (suggestion, Gemini) No guard for a gain declaration handed to `--backscatter-curve` / `backscatter_curve_file` (the converse swap is refused); name the swapped flag in import_bag, batch_regen and the node — `cube_bathymetry/src/import_bag_main.cpp:1239`
+- [ ] (suggestion, Gemini) Raw invisible U+FEFF literal in source and vectors; use the `\ufeff` escape — `cube_bathymetry/scripts/derive_angular_response.py:749`, `cube_bathymetry/test/data/gain_declaration_vectors.json`
+- [ ] (suggestion, Lens A + Lens B) `ACCUMULATION_VERSION` not bumped although the cached gain payload changed shape; bump to 3 — `cube_bathymetry/scripts/derive_angular_response.py:3542`
+- [ ] (suggestion, Lens B) Node-side operator wording: prefix `gainRecordProblem` text with the parameter to set (`backscatter_gain_declaration`), and reword the runtime-set rejection ("set it while unconfigured" only applies after a cleanup) — `cube_bathymetry/src/cube_bathymetry_node.hpp:338,1445`
+- [ ] (suggestion, Lens B) Docs/plan sync: README row should say the node check is skipped under `backscatter_angle_correction=none` and only warns for a SonarInfo curve; ADR-0007 addendum "Not done here" and plan.md Commit-2 node bullet + test list should name the configure-time check, the table-as-declaration refusal, the runtime-set rejection and the new lifecycle tests — `README.md:1254`, `cube_bathymetry/docs/decisions/0007-*.md:380`, `.agent/work-plans/issue-176/plan.md:187`
+- [ ] (suggestion, Lens B) New lifecycle tests leak temp files (one never removed, the rest only on the passing path); use a RAII remover — `cube_bathymetry/test/test_node_lifecycle.cpp:2054`
