@@ -2376,6 +2376,25 @@ def test_accumulation_cache_round_trip(tmp_path, capsys):
     capsys.readouterr()
 
 
+def test_accumulation_cache_from_version_two_is_not_reused(tmp_path):
+    """Version 3: the gain counters changed shape (per segment position), so older caches miss."""
+    import pickle
+    bag = tmp_path / 'mode_bag'
+    write_mode_bag(bag)
+    cache = tmp_path / 'acc.pkl'
+    base = [str(bag), '-t', TOPIC, '--by-mode', '--accumulation-cache', str(cache),
+            '-o', str(tmp_path / 't.csv')]
+    assert dar.main(base) == 0
+    assert dar.ACCUMULATION_VERSION == 3
+    data = pickle.loads(cache.read_bytes())
+    assert data['identity']['version'] == 3
+    data['identity']['version'] = 2
+    cache.write_bytes(pickle.dumps(data))
+    cache.chmod(0o600)
+    with pytest.raises(SystemExit, match='different.*version'):
+        dar.main(base)
+
+
 def test_accumulation_cache_is_loaded_only_when_this_user_wrote_it(tmp_path, capsys):
     """A group- or world-writable cache, or a non-regular file, is refused before unpickling."""
     bag = tmp_path / 'mode_bag'

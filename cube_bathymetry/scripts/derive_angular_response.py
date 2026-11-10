@@ -3545,7 +3545,7 @@ ACCUMULATION_CACHE_FORMAT = 'derive-accumulation-cache v1'
 # Bump when the accumulation changes (ping_beams filters, the cell grid, the
 # mode key, OffsetSummary, ModeAccumulator): a cache made by older code must
 # not be refitted as if it were current.
-ACCUMULATION_VERSION = 2   # 2: the gain declaration's counters (#176)
+ACCUMULATION_VERSION = 3   # 3: the gain counters are per segment position, not id (#176)
 
 
 def bag_identity(bag_path):
