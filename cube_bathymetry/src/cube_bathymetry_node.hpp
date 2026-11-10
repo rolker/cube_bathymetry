@@ -110,6 +110,16 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_configure(const rclcpp_lifecycle::State & state)
   {
+    // A configure that fails (or throws) returns to UNCONFIGURED without
+    // on_cleanup, so whatever it had already filled in of the backscatter and
+    // gain-state members must not be left behind for a reader to mistake for a
+    // configured node (cube_bathymetry#176).
+    bool configured = false;
+    const ScopeExit clear_on_failure([this, &configured] {
+        if (!configured) {
+          clearBackscatterAndGainState();
+        }
+      });
     map_frame_ = declareOnce<std::string>("map_frame", "map");
 
     cell_size_ = declareOnce<double>("cell_size", 1.0);
@@ -210,6 +220,12 @@ public:
           bs_curve_file.c_str(), problem.c_str());
         return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
       }
+      if (cube::isGainDeclaration(bs_curve_file)) {
+        RCLCPP_ERROR(get_logger(),
+          "backscatter_curve_file='%s' is a gain-state declaration, not a curve or table "
+          "(backscatter_gain_declaration takes the declaration)", bs_curve_file.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
     }
     const bool bs_file_is_table = bs_mode != cube::BackscatterAngleCorrection::None &&
       !bs_curve_file.empty() && cube::isAngularResponseTable(bs_curve_file);
@@ -220,12 +236,6 @@ public:
       RCLCPP_WARN(get_logger(),
         "backscatter_mode_fallback / backscatter_mode_min_pings apply only to a "
         "per-pulse-mode table, and backscatter_curve_file is not one (or the correction "
-      if (cube::isGainDeclaration(bs_curve_file)) {
-        RCLCPP_ERROR(get_logger(),
-          "backscatter_curve_file='%s' is a gain-state declaration, not a curve or table "
-          "(backscatter_gain_declaration takes the declaration)", bs_curve_file.c_str());
-        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
-      }
         "is none): they are ignored.");
     }
     if (bs_file_is_table) {
@@ -351,16 +361,19 @@ public:
         problem = cube::gainRecordProblem(
           "backscatter_curve_file " + bs_curve_file, bs_curve.gain_declaration_sha256,
           bs_curve.gain_reference_state, declared, declared_sha);
-      } else if (declared && bs_mode == cube::BackscatterAngleCorrection::Auto) {
+      } else if (declared && bs_mode != cube::BackscatterAngleCorrection::None &&
+        !bs_explicit_file_)
+      {
+        // No explicit file: any curve this mode adopts arrives with SonarInfo.
+        // (An explicit file that failed to load already warned above, and
+        // SonarInfo is ignored then.)
         RCLCPP_WARN(get_logger(),
           "backscatter_gain_declaration is set but any angular-response curve will come from "
           "SonarInfo, which records no gain state: its gain state is UNKNOWN. Set "
           "backscatter_curve_file to a curve derived with this declaration.");
       }
       if (!problem.empty()) {
-        RCLCPP_ERROR(get_logger(), "%s", problem.c_str());
-        gain_resolver_.reset();
-        gain_declaration_ = cube::GainDeclaration();
+        RCLCPP_ERROR(get_logger(), "backscatter_gain_declaration: %s", problem.c_str());
         return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
       }
     }
@@ -721,6 +734,7 @@ public:
       std::bind(&CubeBathymetry::resetService, this, std::placeholders::_1,
       std::placeholders::_2));
 
+    configured = true;
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
 
@@ -908,6 +922,33 @@ private:
       name.c_str(), value, kMinTimerIntervalSeconds, kMaxTimerIntervalSeconds, fallback);
     set_parameter(rclcpp::Parameter(name, fallback));
     return fallback;
+  }
+
+  /// Runs a callable when it goes out of scope (return, throw alike).
+  class ScopeExit
+  {
+public:
+    explicit ScopeExit(std::function<void()> f)
+    : f_(std::move(f)) {}
+    ScopeExit(const ScopeExit &) = delete;
+    ScopeExit & operator=(const ScopeExit &) = delete;
+    ~ScopeExit() {f_();}
+
+private:
+    std::function<void()> f_;
+  };
+
+  /// Forget the backscatter table/curve and the gain-state declaration that a
+  /// configure had loaded: the failure path of on_configure, and the end of
+  /// releaseConfiguredEntities.
+  void clearBackscatterAndGainState()
+  {
+    bs_table_ = cube::BackscatterTable();
+    bs_resolver_.reset();
+    bs_curve_applied_ = false;
+    bs_applied_curve_ = cube::AngularResponseCurve();
+    gain_resolver_.reset();
+    gain_declaration_ = cube::GainDeclaration();
   }
 
   /// Release everything on_configure and on_activate created, so nothing of the
@@ -1456,8 +1497,9 @@ private:
         // set would be silently ignored until the next configure.
         result.successful = false;
         result.reason =
-          "backscatter_gain_declaration is read at configure only; set it while "
-          "unconfigured (or in the launch file) and reconfigure";
+          "backscatter_gain_declaration is read at configure only and cannot be changed "
+          "while the node is configured: clean it up, set the parameter, and configure "
+          "again (or set it in the launch file)";
         return result;
       }
       if (parameter.get_name() == "subwindow_refresh_interval") {
