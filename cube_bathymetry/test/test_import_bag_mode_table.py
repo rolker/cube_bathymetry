@@ -363,7 +363,7 @@ def test_declared_step_restores_reference_level(tmp_path, step_bag, table):
     means, spread = _spread_and_means(bs_store)
     assert max(abs(m - REF_LEVEL) for m in means) < 1.0, (min(means), max(means))
     assert max(spread) < 1.0, (min(spread), max(spread))
-    assert ('gain_step [1970-01-01T00:01:50Z, 1970-01-01T01:00:00Z) +23.000 dB (measured): 200'
+    assert ('gain_step [1970-01-01T00:01:50Z, 1970-01-01T01:00:00Z) +23.000000 dB (measured): 200'
             in out), out
     assert 'undeclared (at reference): 200 pings' in out, out
 

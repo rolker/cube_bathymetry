@@ -3165,7 +3165,19 @@ def test_zero_like_offsets_apply_as_positive_zero_and_report_without_plus_minus(
     tracker = dar.GainTracker(decl)
     assert tracker.offset(decl.segments[0].start_ns) == 0.0
     report = '\n'.join(dar.gain_report_lines(tracker.summary()))
-    assert '+-' not in report and '+0.000 dB' in report
+    assert '+-' not in report and '+0.000000 dB' in report
+
+
+def test_small_negative_offset_prints_at_six_decimals_like_the_cpp_report(tmp_path):
+    """-0.0004 is applied at 6 decimals, so the report prints -0.000400, not a lone -0.000."""
+    path = tmp_path / 'g.csv'
+    path.write_text(GAIN_HEADER + 'a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,-0.0004,'
+                    'measured,n\n')
+    decl = dar.load_gain_declaration(str(path))
+    tracker = dar.GainTracker(decl)
+    tracker.offset(decl.segments[0].start_ns)
+    report = '\n'.join(dar.gain_report_lines(tracker.summary()))
+    assert ') -0.000400 dB (' in report and '-0.000 dB' not in report
 
 
 def test_small_negative_offset_applies_rounded(tmp_path):

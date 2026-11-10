@@ -966,8 +966,10 @@ def gain_report_lines(summary):
            % (summary['source'], summary['reference_state'], summary['sha256'],
               summary['pings'])]
     for s in summary['segments']:
-        out.append('  %s [%s, %s) %+.3f dB (%s): %d pings, %d beams'
-                   % (s['id'], utc_text(s['start_ns']), utc_text(s['end_ns']), s['offset_db'],
+        offset = _gain_offset_text(s['offset_db'])
+        out.append('  %s [%s, %s) %s dB (%s): %d pings, %d beams'
+                   % (s['id'], utc_text(s['start_ns']), utc_text(s['end_ns']),
+                      offset if offset.startswith('-') else '+' + offset,
                       s['provenance'], s['pings'], s['beams']))
     out.append('  undeclared (at reference): %d pings' % summary['undeclared_pings'])
     return out

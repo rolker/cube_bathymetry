@@ -424,8 +424,17 @@ TEST(GainDeclaration, AppliedOffsetIsTheCanonicalSixDecimalValue)
     EXPECT_EQ(resolver.apply(d.segments[0].start_ns), 0.0) << text;
     const std::string report = resolver.report();
     EXPECT_EQ(report.find("+-"), std::string::npos) << report;
-    EXPECT_NE(report.find("+0.000 dB"), std::string::npos) << report;
+    EXPECT_NE(report.find("+0.000000 dB"), std::string::npos) << report;
   }
+  // A small negative offset is applied at 6 decimals and printed at 6, so it
+  // does not read as a negative zero.
+  GainDeclaration tiny;
+  ASSERT_EQ(tryLoad("tiny", offsetFile("-0.0004"), tiny), "");
+  GainStateResolver tiny_resolver(&tiny);
+  tiny_resolver.apply(tiny.segments[0].start_ns);
+  const std::string tiny_report = tiny_resolver.report();
+  EXPECT_NE(tiny_report.find(") -0.000400 dB ("), std::string::npos) << tiny_report;
+  EXPECT_EQ(tiny_report.find("-0.000 dB"), std::string::npos) << tiny_report;
   GainDeclaration d;
   ASSERT_EQ(tryLoad("round", offsetFile("-0.4000004"), d), "");
   EXPECT_EQ(d.segments[0].offset_db, -0.4);
@@ -495,7 +504,7 @@ TEST(GainDeclaration, ParseAndCanonicalFormIgnoreLcNumeric)
   std::setlocale(LC_NUMERIC, saved.c_str());
   EXPECT_EQ(error, "") << chosen;
   EXPECT_NE(canonical.find(",23.500000\n"), std::string::npos) << canonical;
-  EXPECT_NE(report.find("+23.500 dB"), std::string::npos) << report;
+  EXPECT_NE(report.find("+23.500000 dB"), std::string::npos) << report;
 }
 
 }  // namespace cube

@@ -652,7 +652,7 @@ std::string GainStateResolver::report() const
      << declaration_->reference_state << "', " << declaration_->segments.size()
      << " segment(s); " << counts_.pings << " ping(s) seen\n";
   for (const GainSegment & s : declaration_->segments) {
-    std::string offset = fixedText(s.offset_db, 3);
+    std::string offset = offsetText(s.offset_db);
     if (offset[0] != '-') {
       offset = "+" + offset;
     }

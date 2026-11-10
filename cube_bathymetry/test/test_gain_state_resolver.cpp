@@ -109,7 +109,8 @@ TEST(GainStateResolver, ReportNamesEmptySegment)
   const std::string report = resolver.report();
   EXPECT_NE(report.find("reference state 'pre_step'"), std::string::npos) << report;
   EXPECT_NE(
-    report.find("low [1970-01-01T00:01:40Z, 1970-01-01T00:03:20Z) +23.000 dB (measured): 1 pings"),
+    report.find(
+      "low [1970-01-01T00:01:40Z, 1970-01-01T00:03:20Z) +23.000000 dB (measured): 1 pings"),
     std::string::npos) << report;
   EXPECT_NE(report.find("(operator_reported): 0 pings"), std::string::npos) << report;
   EXPECT_NE(report.find("undeclared (at reference): 1 pings"), std::string::npos) << report;
