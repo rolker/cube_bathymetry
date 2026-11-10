@@ -977,14 +977,20 @@ def gain_empty_segment_warnings(summary, box=False):
     """
     Return one warning per declared segment that no ping fell in (a mistyped stamp).
 
+    A segment that pings fell in but no beam of which entered the fit is warned about too.
     The counts are of the pings this run used. With ``--box`` the pings outside the box never
     reach the counters, so a segment covering only transit is not evidence of a mistyped
     stamp: the warning says the counts are box-filtered instead.
     """
     note = (' (counts cover only pings inside --box; this may just be transit)' if box
             else ': check its stamps')
-    return ["warning: gain segment '%s' is declared but no ping fell in it%s" % (s['id'], note)
-            for s in summary['segments'] if s['pings'] == 0]
+    out = ["warning: gain segment '%s' is declared but no ping fell in it%s" % (s['id'], note)
+           for s in summary['segments'] if s['pings'] == 0]
+    out += ["warning: gain segment '%s': %d ping(s) fell in it but no beam of them entered the "
+            'fit (no SonarInfo or no usable beams there), so it shaped nothing'
+            % (s['id'], s['pings'])
+            for s in summary['segments'] if s['pings'] > 0 and s.get('beams', 1) == 0]
+    return out
 
 
 class PingRecord:

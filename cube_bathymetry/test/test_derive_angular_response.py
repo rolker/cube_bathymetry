@@ -3230,6 +3230,19 @@ def test_non_utf8_declaration_is_refused(tmp_path):
         dar.load_gain_declaration(str(path))
 
 
+def test_segment_whose_pings_fed_no_beam_is_warned_about():
+    """Pings with no SonarInfo or no usable beams leave beams == 0: not 'it caught something'."""
+    summary = {'segments': [{'id': 'blind', 'pings': 5, 'beams': 0},
+                            {'id': 'fed', 'pings': 5, 'beams': 40},
+                            {'id': 'none', 'pings': 0, 'beams': 0}]}
+    warnings = dar.gain_empty_segment_warnings(summary)
+    assert len(warnings) == 2
+    assert any("'none'" in w and 'no ping fell in it' in w for w in warnings)
+    blind = [w for w in warnings if "'blind'" in w]
+    assert len(blind) == 1 and '5 ping(s) fell in it but no beam' in blind[0]
+    assert not any("'fed'" in w for w in warnings)
+
+
 def test_empty_segment_warning_under_box_says_counts_are_box_filtered():
     summary = {'segments': [{'id': 'transit', 'pings': 0}, {'id': 'busy', 'pings': 3}]}
     plain = dar.gain_empty_segment_warnings(summary)
