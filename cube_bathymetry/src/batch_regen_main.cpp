@@ -656,6 +656,28 @@ struct GainSetup
   std::unique_ptr<cube::GainStateResolver> resolver;
 };
 
+/// What is wrong with the file given as --backscatter-curve before either
+/// loader reads it, or empty: not a regular file, or a gain-state declaration
+/// handed to the wrong flag.
+std::string curveFileProblem(const std::string & path)
+{
+  const std::string problem = cube::explicitBackscatterFileProblem(path);
+  if (!problem.empty()) {
+    return problem;
+  }
+  if (cube::isGainDeclaration(path)) {
+    return "is a gain-state declaration, not a curve "
+           "(--backscatter-gain-declaration takes the declaration)";
+  }
+  return "";
+}
+
+/// " (reason)" when the curve was refused for a malformed header, else "".
+std::string headerErrorNote(const cube::AngularResponseCurve & curve)
+{
+  return curve.header_error.empty() ? "" : " (" + curve.header_error + ")";
+}
+
 /// Load the declaration (when given) before any bag opens and check it
 /// against the single curve the run applies (cube#176 decision 8). The curve
 /// is checked only when it is applied: --backscatter-correction empirical with
@@ -1013,16 +1035,10 @@ int main(int argc, char * argv[])
     cube::parseBackscatterAngleCorrection(backscatter_correction_str, requested_mode) &&
     requested_mode == cube::BackscatterAngleCorrection::Empirical)
   {
-    const std::string problem = cube::explicitBackscatterFileProblem(backscatter_curve_file);
+    const std::string problem = curveFileProblem(backscatter_curve_file);
     if (!problem.empty()) {
       std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "' " << problem
                 << "\n";
-      usage();
-    }
-    if (cube::isGainDeclaration(backscatter_curve_file)) {
-      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file
-                << "' is a gain-state declaration, not a curve "
-        "(--backscatter-gain-declaration takes the declaration)\n";
       usage();
     }
   }
@@ -1123,9 +1139,8 @@ int main(int argc, char * argv[])
   {
     // Loud, not silent: enabled but no curve loaded -> correction is a no-op.
     std::cerr << "warning: --backscatter-correction empirical but no curve was "
-      "loaded from --backscatter-curve '" << backscatter_curve_file << "'"
-              << (backscatter_curve.header_error.empty() ? "" :
-      " (" + backscatter_curve.header_error + ")")
+      "loaded from --backscatter-curve '" << backscatter_curve_file
+              << "'" << headerErrorNote(backscatter_curve)
               << " -- the correction is ENABLED but a NO-OP (intensity emitted "
       "uncorrected). Provide a valid curve CSV.\n";
   } else if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical) {

@@ -351,6 +351,8 @@ public:
       const cube::GainDeclaration * declared = gain_resolver_ ? &gain_declaration_ : nullptr;
       const std::string declared_sha =
         declared ? cube::gainDeclarationSha256(gain_declaration_) : std::string();
+      const bool curve_from_sonar_info =
+        declared && bs_mode != cube::BackscatterAngleCorrection::None && !bs_explicit_file_;
       std::string problem;
       if (bs_file_is_table) {
         problem = cube::gainRecordProblem(
@@ -361,9 +363,7 @@ public:
         problem = cube::gainRecordProblem(
           "backscatter_curve_file " + bs_curve_file, bs_curve.gain_declaration_sha256,
           bs_curve.gain_reference_state, declared, declared_sha);
-      } else if (declared && bs_mode != cube::BackscatterAngleCorrection::None &&
-        !bs_explicit_file_)
-      {
+      } else if (curve_from_sonar_info) {
         // No explicit file: any curve this mode adopts arrives with SonarInfo.
         // (An explicit file that failed to load already warned above, and
         // SonarInfo is ignored then.)

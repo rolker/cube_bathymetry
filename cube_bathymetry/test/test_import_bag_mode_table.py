@@ -572,7 +572,7 @@ def test_declaration_handed_as_the_curve_is_refused_naming_the_flag(tmp_path, fl
         '--backscatter-correction', 'empirical', '--backscatter-curve', str(decl),
         '--backscatter-gain-declaration', str(decl)])
     assert rc != 0, out
-    assert "--backscatter-curve" in out and 'is a gain-state declaration' in out, out
+    assert '--backscatter-curve' in out and 'is a gain-state declaration' in out, out
     assert '--backscatter-gain-declaration takes the declaration' in out, out
     assert not (tmp_path / 'store' / 'build_fingerprint.json').exists()
 

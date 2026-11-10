@@ -777,7 +777,7 @@ def load_gain_declaration(path):
                 key = ln[1:].strip(' \t').partition(':')[0].strip(' \t') if ':' in ln else ''
                 if key in ('format', 'reference_state'):
                     raise fail(i, "a '# %s:' line after the column line (header keys come "
-                               "before it)" % key)
+                               'before it)' % key)
             elif ln:
                 rows.append((i, ln))
             continue
