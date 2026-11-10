@@ -773,7 +773,12 @@ def load_gain_declaration(path):
             continue
         last = i
         if rows is not None:
-            if ln and not ln.startswith('#'):
+            if ln.startswith('#'):
+                key = ln[1:].strip(' \t').partition(':')[0].strip(' \t') if ':' in ln else ''
+                if key in ('format', 'reference_state'):
+                    raise fail(i, "a '# %s:' line after the column line (header keys come "
+                               "before it)" % key)
+            elif ln:
                 rows.append((i, ln))
             continue
         if not ln:

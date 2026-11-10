@@ -177,6 +177,21 @@
    "name": "bad_columns",
    "text": "# format: gain-state-declaration v1\n# reference_state: r\nsegment,start,end\n",
    "error_contains": "column line"
+  },
+  {
+   "name": "reference_state_after_columns",
+   "text": "# format: gain-state-declaration v1\n# reference_state: pre_step\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n# reference_state: other\n",
+   "error_contains": "'# reference_state:' line after the column line"
+  },
+  {
+   "name": "reference_state_after_rows_padded",
+   "text": "# format: gain-state-declaration v1\n# reference_state: pre_step\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n#   reference_state :  pre_step\n",
+   "error_contains": "'# reference_state:' line after the column line"
+  },
+  {
+   "name": "format_after_columns",
+   "text": "# format: gain-state-declaration v1\n# reference_state: pre_step\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\n# format: gain-state-declaration v1\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n",
+   "error_contains": "'# format:' line after the column line"
   }
  ],
  "ok_files": [
@@ -191,6 +206,10 @@
   {
    "name": "zero_segments",
    "text": "# format: gain-state-declaration v1\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\n"
+  },
+  {
+   "name": "plain_comments_after_columns",
+   "text": "# format: gain-state-declaration v1\n# reference_state: pre_step\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n# a plain comment\n# note: not a reserved key\n# reference_state is mentioned here, with no colon\n"
   }
  ],
  "offset_cases": [

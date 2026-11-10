@@ -470,7 +470,19 @@ GainDeclaration loadGainDeclaration(
   while (std::getline(in, line)) {
     ++line_no;
     line = stripCr(line);
-    if (line.empty() || line[0] == '#') {
+    if (line.empty()) {
+      continue;
+    }
+    if (line[0] == '#') {
+      // A plain comment after the column line is fine; a reserved header key is
+      // not: it would be read as a comment and a conflicting label would load.
+      const std::string body = trim(line.substr(1));
+      const auto colon = body.find(':');
+      const std::string key = colon == std::string::npos ? "" : trim(body.substr(0, colon));
+      if (key == "format" || key == "reference_state") {
+        return fail(
+          line_no, "a '# " + key + ":' line after the column line (header keys come before it)");
+      }
       continue;
     }
     if (line.find('"') != std::string::npos) {
