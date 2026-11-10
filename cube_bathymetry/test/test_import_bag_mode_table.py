@@ -477,7 +477,7 @@ def test_single_curve_with_matching_gain_header_accepted(tmp_path, flat_step_bag
     sha = _canonical_sha('pre_step', [('gain_step', STEP_START_NS, STEP_END_NS, GAIN_STEP_DB)])
     curve = tmp_path / 'curve.csv'
     base = (HERE / 'data' / 'derived_curve_tier2_seawater.csv').read_text()
-    curve.write_text(HALF_GAIN_RECORD_CURVE)
+    curve.write_text('# gain_reference_state: pre_step\n# gain_declaration_sha256: %s\n%s' %
                      (sha, base))
     decl = _step_declaration(tmp_path)
     rc, out = _run(tmp_path / 'store', flat_step_bag, [
