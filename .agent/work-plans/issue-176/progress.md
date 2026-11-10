@@ -185,7 +185,7 @@ Dropped: digest rounding below 5e-7 dB (negligible; soften the ADR's "anything t
 - [x] derive warns when a segment's pings fed no beam — `derive_angular_response.py` (d393a98)
 - [x] Failed configure clears bs_*/gain_* (scope guard), fail-then-correct test — `cube_bathymetry_node.hpp` (c84d7ea)
 - [x] Declaration handed as the curve refused naming the flag in import_bag, batch_regen, node — `import_bag_main.cpp`, `batch_regen_main.cpp` (a52e4a9)
-- [x] \\ufeff escape instead of the raw BOM — `derive_angular_response.py`, vectors (df9bcff)
+- [x] \ufeff escape instead of the raw BOM — `derive_angular_response.py`, vectors (df9bcff)
 - [x] ACCUMULATION_VERSION 3 (+ test) — `derive_angular_response.py` (0b7d261)
 - [x] Node operator wording (parameter prefix, runtime-set rejection) — `cube_bathymetry_node.hpp` (c84d7ea)
 - [x] README, ADR-0007 addendum, plan.md in sync — (553857d)
