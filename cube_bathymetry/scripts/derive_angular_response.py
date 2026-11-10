@@ -846,6 +846,7 @@ def load_gain_declaration(path):
         if abs(offset) > GAIN_MAX_ABS_OFFSET_DB:
             raise fail(i, 'offset_db %s is beyond +-%d dB (a typo?)'
                        % (f[3], GAIN_MAX_ABS_OFFSET_DB))
+        offset = float(_gain_offset_text(offset))   # apply what the digest hashes: 6 decimals
         if f[4] not in GAIN_PROVENANCE:
             raise fail(i, "provenance '%s' must be settings_file, measured or "
                        'operator_reported' % f[4][:200])

@@ -3128,6 +3128,33 @@ def test_shared_vectors_offset_grammar_and_rounding(tmp_path, case):
                     % case['text'])
     decl = dar.load_gain_declaration(str(path))
     assert decl.canonical_form().splitlines()[-1].split(',')[2] == case['canonical_offset']
+    # what is applied is what the digest hashes
+    assert decl.segments[0].offset_db == float(case['canonical_offset'])
+    assert math.copysign(1.0, decl.segments[0].offset_db) == math.copysign(
+        1.0, float(case['canonical_offset']) or 1.0)
+
+
+@pytest.mark.parametrize('text', ['0.0000004', '-0.0000004', '-0', '-0.0', '-0e5'])
+def test_zero_like_offsets_apply_as_positive_zero_and_report_without_plus_minus(tmp_path, text):
+    """An offset that rounds to zero applies as +0.0, like the digest says, in the report too."""
+    path = tmp_path / 'g.csv'
+    path.write_text(GAIN_HEADER + 'a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,%s,measured,n\n'
+                    % text)
+    decl = dar.load_gain_declaration(str(path))
+    offset = decl.segments[0].offset_db
+    assert offset == 0.0 and math.copysign(1.0, offset) > 0
+    tracker = dar.GainTracker(decl)
+    assert tracker.offset(decl.segments[0].start_ns) == 0.0
+    report = '\n'.join(dar.gain_report_lines(tracker.summary()))
+    assert '+-' not in report and '+0.000 dB' in report
+
+
+def test_small_negative_offset_applies_rounded(tmp_path):
+    """-0.4000004 applies as -0.4 (the 6-decimal canonical value), not the raw double."""
+    path = tmp_path / 'g.csv'
+    path.write_text(GAIN_HEADER + 'a,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,-0.4000004,'
+                    'measured,n\n')
+    assert dar.load_gain_declaration(str(path)).segments[0].offset_db == -0.4
 
 
 @pytest.mark.parametrize('text', _gain_vectors()['offset_rejects'])

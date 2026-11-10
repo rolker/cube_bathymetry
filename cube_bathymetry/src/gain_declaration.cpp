@@ -536,7 +536,13 @@ GainDeclaration loadGainDeclaration(
           line_no, "offset_db " + f[3] + " is beyond +-" +
           std::to_string(static_cast<int>(kMaxAbsOffsetDb)) + " dB (a typo?)");
       }
-      s.offset_db = v;
+      // The offset applied is the value the digest hashes: the canonical
+      // 6-decimal text, parsed back (so 0.0000004 and -0 both apply as 0).
+      double canonical = 0.0;
+      if (!parseDecimal(offsetText(v), canonical)) {
+        return fail(line_no, "offset_db '" + clip(f[3]) + "' has no canonical form");
+      }
+      s.offset_db = canonical;
     }
     if (f[4] != "settings_file" && f[4] != "measured" && f[4] != "operator_reported") {
       return fail(
@@ -646,7 +652,10 @@ std::string GainStateResolver::report() const
      << declaration_->reference_state << "', " << declaration_->segments.size()
      << " segment(s); " << counts_.pings << " ping(s) seen\n";
   for (const GainSegment & s : declaration_->segments) {
-    const std::string offset = (s.offset_db < 0.0 ? "" : "+") + fixedText(s.offset_db, 3);
+    std::string offset = fixedText(s.offset_db, 3);
+    if (offset[0] != '-') {
+      offset = "+" + offset;
+    }
     os << "  " << s.id << " [" << utcText(s.start_ns) << ", " << utcText(s.end_ns) << ") "
        << offset << " dB (" << s.provenance << "): " << counts_.by_segment.at(s.id)
        << " pings\n";

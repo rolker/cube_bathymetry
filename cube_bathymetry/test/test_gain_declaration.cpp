@@ -396,6 +396,11 @@ TEST(GainDeclaration, OffsetGrammarAndCanonicalRounding)
       std::to_string(d.segments[0].start_ns) + "," + std::to_string(d.segments[0].end_ns) + "," +
       c.at("canonical_offset").get<std::string>() + "\n";
     EXPECT_EQ(d.canonicalForm(), expected) << text;
+    // What is applied is what the digest hashes, with no negative zero.
+    const double applied = std::strtod(c.at("canonical_offset").get<std::string>().c_str(),
+        nullptr);
+    EXPECT_EQ(d.segments[0].offset_db, applied) << text;
+    EXPECT_EQ(std::signbit(d.segments[0].offset_db), applied < 0.0) << text;
   }
   for (const auto & text : doc.at("offset_rejects")) {
     GainDeclaration d;
@@ -403,6 +408,30 @@ TEST(GainDeclaration, OffsetGrammarAndCanonicalRounding)
     EXPECT_NE(error, "") << "offset '" << text.get<std::string>() << "' was accepted";
     EXPECT_FALSE(d.loaded());
   }
+}
+
+TEST(GainDeclaration, AppliedOffsetIsTheCanonicalSixDecimalValue)
+{
+  // 0.0000004 and -0 share the digest of 0, so they must apply as 0 too, and
+  // the report must not print "+-" for a zero that carries a sign.
+  for (const char * text : {"0.0000004", "-0.0000004", "-0", "-0.0", "-0e5"}) {
+    GainDeclaration d;
+    ASSERT_EQ(tryLoad("zero", offsetFile(text), d), "") << text;
+    const double offset = d.segments[0].offset_db;
+    EXPECT_EQ(offset, 0.0) << text;
+    EXPECT_FALSE(std::signbit(offset)) << text;
+    GainStateResolver resolver(&d);
+    EXPECT_EQ(resolver.apply(d.segments[0].start_ns), 0.0) << text;
+    const std::string report = resolver.report();
+    EXPECT_EQ(report.find("+-"), std::string::npos) << report;
+    EXPECT_NE(report.find("+0.000 dB"), std::string::npos) << report;
+  }
+  GainDeclaration d;
+  ASSERT_EQ(tryLoad("round", offsetFile("-0.4000004"), d), "");
+  EXPECT_EQ(d.segments[0].offset_db, -0.4);
+  GainStateResolver resolver(&d);
+  resolver.apply(d.segments[0].start_ns);
+  EXPECT_EQ(resolver.report().find("+-"), std::string::npos);
 }
 
 TEST(GainDeclaration, NonUtf8BytesAreRefusedLikeThePythonLoader)
