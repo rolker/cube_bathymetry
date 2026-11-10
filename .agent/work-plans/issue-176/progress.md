@@ -215,3 +215,19 @@ Dropped: digest rounding below 5e-7 dB (negligible; soften the ADR's "anything t
 
 ### Full suite
 `test.sh cube_bathymetry`: 1679 tests, 0 errors, 0 failures, 102 skipped. 90e4ccc overwrote one unrelated curve test by mistake; restored in c58df6d.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-10 09:21 -05:00
+**By**: Claude Code Agent (Claude Fable 5.2)
+**Verdict**: approved
+
+**Branch**: feature/issue-176 at `7d1c385`
+**Mode**: pre-push
+**Depth**: Light (reason: round 3, check of the round-2 fix delta 262b9a0..c3370d7; one fresh-context Claude pass, Lens A; lint via the suite's cpplint/uncrustify/flake8 tests)
+**Must-fix**: 0 | **Suggestions**: 2
+**Round**: 3 | **Ship**: recommended — no must-fix; both suggestions closed before this entry (90e4ccc, 62ae9bb); full suite 1679 tests, 0 errors, 0 failures, 102 skipped
+
+### Findings
+- [x] (suggestion, Lens A + lead) A curve with a malformed gain-state record degraded to an EMPTY-curve warning and ran uncorrected; now a hard error in import_bag, batch_regen and the node (90e4ccc, c58df6d) — `cube_bathymetry/src/import_bag_main.cpp`, `cube_bathymetry/src/batch_regen_main.cpp`, `cube_bathymetry/src/cube_bathymetry_node.hpp`
+- [x] (suggestion, Lens A) Resolver report printed offsets at 3 decimals while 6 are applied (-0.0004 read as -0.000); now the canonical 6-decimal text in both tools (62ae9bb) — `cube_bathymetry/src/gain_declaration.cpp`
