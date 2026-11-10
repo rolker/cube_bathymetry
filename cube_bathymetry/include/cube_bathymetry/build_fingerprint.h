@@ -27,9 +27,12 @@
 #include <set>
 #include <string>
 
+#include "cube_bathymetry/gain_declaration.h"
+
 /// @file
-/// @brief The store's build fingerprint sidecar (ADR-0003), schema version 2 --
-///        the **tiling** part only (cube_bathymetry#143).
+/// @brief The store's build fingerprint sidecar (ADR-0003), schema version 3 --
+///        the **tiling** part (cube_bathymetry#143), the backscatter correction
+///        (#172) and the gain-state declaration (#176).
 ///
 /// ADR-0003 specifies `build_fingerprint.json` beside `registry.json` as the
 /// record of what a store was built from, so an incremental regen can tell
@@ -39,7 +42,7 @@
 ///
 /// ```json
 /// {
-///   "schema_version": 2,
+///   "schema_version": 3,
 ///   "tiling": {
 ///     "mode": "fixed" | "depth_adaptive",
 ///     "cell_size_m": 0.906,            // fixed mode only, else null
@@ -91,6 +94,27 @@
 /// its correction, so the kind differs from `table` and a staleness check
 /// can never take such a store for a corrected one. import_bag exits 4 then.
 ///
+/// `gain_declaration` (cube_bathymetry#176; schema 3) records the operator-written
+/// gain-state declaration the backscatter intensities were shifted by before any
+/// correction, beside `backscatter_correction`:
+///
+/// ```json
+///   "gain_declaration": {
+///     "reference_state": "<the declaration's reference-state label>",
+///     "sha256": "<hex of the declaration's CANONICAL form>",
+///     "source": "<file path>"                      // informational
+///   }                                              // or null: no declaration
+/// ```
+///
+/// The digest is of the canonical form (format version, reference state, each
+/// segment's start, end and offset -- `GainDeclaration::canonicalForm`), not of
+/// the file bytes, so editing a note or a comment does not stale a store.
+/// `isStale` compares `reference_state` and `sha256` (not `source`), and
+/// present against null is stale. A zero-segment declaration is present, so it
+/// differs from no declaration: that store is in a named reference state.
+/// Schema 3 is also why every store built before #176 reads stale: the gain
+/// state it was built in is unknowable.
+///
 /// `isStale` compares mode, kind, sha256, fallback and min_pings (not the
 /// source path: the same table under another name is the same correction).
 /// A fingerprint without the key (written before #172) is stale against one
@@ -99,14 +123,14 @@
 /// **This is still a partial implementation of ADR-0003.** The other keys
 /// (`tool_version`, the bag list and hashes, `reference_store`) and
 /// `batch_regen --incremental`'s consumer are not implemented here; adding
-/// them is additive within schema 2.
+/// them is additive within schema 3.
 
 namespace cube
 {
 
   struct BuildFingerprint
   {
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
     static constexpr const char * kFilename = "build_fingerprint.json";
 
     enum class Mode { Fixed, DepthAdaptive };
@@ -154,6 +178,20 @@ namespace cube
       bool operator != (const BackscatterCorrection & other) const {return !(*this == other);}
     };
 
+  /// The gain-state declaration a build applied (cube_bathymetry#176).
+    struct GainDeclarationRecord
+    {
+      std::string reference_state;
+    /// Digest of the declaration's canonical form (`gainDeclarationSha256`).
+      std::string sha256;
+    /// Where it was read from; informational, never compared.
+      std::string source;
+
+    /// Equal when the correction is the same: reference state and digest.
+      bool operator == (const GainDeclarationRecord & other) const;
+      bool operator != (const GainDeclarationRecord & other) const {return !(*this == other);}
+    };
+
     int schema_version = kSchemaVersion;
     Mode mode = Mode::Fixed;
   /// Fixed mode: the requested cell size the single sheet was built with.
@@ -166,6 +204,9 @@ namespace cube
   /// The backscatter correction, when the writer recorded one (import_bag
   /// always does since #172); nullopt for a file written before.
     std::optional < BackscatterCorrection > backscatter_correction;
+  /// The gain-state declaration the build applied; nullopt for a build with
+  /// none (written as null) and for any file of an older schema.
+    std::optional < GainDeclarationRecord > gain_declaration;
 
   /// @brief Whether a store built as @p previous must be fully regenerated
   ///        before tiles from a build with this fingerprint can join it: the
@@ -177,7 +218,7 @@ namespace cube
     std::string toJson() const;
 
   /// @throws std::runtime_error on malformed JSON or a missing key; a schema
-  ///         version other than 2 is returned as-is with `schema_version` set
+  ///         version other than 3 is returned as-is with `schema_version` set
   ///         so the caller can treat it as stale rather than unreadable.
     static BuildFingerprint fromJson(const std::string & json);
 
@@ -216,6 +257,12 @@ namespace cube
 
 /// @brief SHA-256 of @p text as lowercase hex.
   std::string sha256Text(const std::string & text);
+
+/// @brief SHA-256 of a gain declaration's canonical form (cube_bathymetry#176):
+///        the identity the fingerprint, the derive tool's table headers and
+///        the import-time consistency check compare. See
+///        `GainDeclaration::canonicalForm` for what is and is not in it.
+  std::string gainDeclarationSha256(const GainDeclaration & declaration);
 
 }  // namespace cube
 

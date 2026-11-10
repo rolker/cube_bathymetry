@@ -25,6 +25,8 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/backscatter_table.h"
 
@@ -118,6 +120,55 @@ TEST(AngularResponseCurve, ParsesTier2Header)
   ASSERT_EQ(loaded.points.size(), 2u);
   EXPECT_FLOAT_EQ(loaded.points[0].first, 1.0f);
   EXPECT_FLOAT_EQ(loaded.points[1].second, -1.0f);
+}
+
+// cube_bathymetry#176: a curve derived under a gain declaration records its
+// digest and reference state; the import compares them with the declaration
+// it is given. A curve without them (every curve before #176) reads empty.
+TEST(AngularResponseCurve, ParsesGainDeclarationHeader)
+{
+  const std::string text =
+    "# tl_removed: false\n"
+    "# gain_reference_state: pre_step\n"
+    "# gain_declaration_sha256: abc123\n"
+    "# gain_segment: gain_step [a, b) offset_db=23.000000 provenance=measured pings=2 beams=4\n"
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n"
+    "1.0,-30.000,100,+0.000\n"
+    "3.0,-31.000,100,-1.000\n";
+  const AngularResponseCurve curve = parseAngularResponseCurve(text);
+  EXPECT_EQ(curve.points.size(), 2u);
+  EXPECT_EQ(curve.gain_reference_state, "pre_step");
+  EXPECT_EQ(curve.gain_declaration_sha256, "abc123");
+  const AngularResponseCurve plain = parseAngularResponseCurve(
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n1.0,-30.000,100,+0.000\n");
+  EXPECT_TRUE(plain.gain_reference_state.empty());
+  EXPECT_TRUE(plain.gain_declaration_sha256.empty());
+}
+
+// The record is both lines or neither, each once and with a value; anything
+// else is refused as an empty curve that says why (#176 round 2).
+TEST(AngularResponseCurve, MalformedGainRecordIsRefusedWithAReason)
+{
+  const std::string rows =
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n1.0,-30.0,100,+0.000\n";
+  const std::string sha = "# gain_declaration_sha256: abc123\n";
+  const std::string state = "# gain_reference_state: pre_step\n";
+  const std::vector<std::pair<std::string, std::string>> bad = {
+    {"sha_only", sha + rows},
+    {"state_only", state + rows},
+    {"empty_sha", "# gain_declaration_sha256:\n" + state + rows},
+    {"empty_state", sha + "# gain_reference_state:  \n" + rows},
+    {"duplicate_sha", sha + sha + state + rows},
+    {"duplicate_state", sha + state + state + rows},
+  };
+  for (const auto & [name, text] : bad) {
+    const AngularResponseCurve curve = parseAngularResponseCurve(text);
+    EXPECT_TRUE(curve.points.empty()) << name;
+    EXPECT_NE(curve.header_error.find("gain-state record"), std::string::npos) << name;
+  }
+  const AngularResponseCurve good = parseAngularResponseCurve(sha + state + rows);
+  EXPECT_EQ(good.points.size(), 1u);
+  EXPECT_TRUE(good.header_error.empty());
 }
 
 // Absence of the TL header -> tier-1 defaults (tl_removed=false, absorption=0),

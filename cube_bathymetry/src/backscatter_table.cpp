@@ -677,6 +677,8 @@ BackscatterTable loadBackscatterTable(
         summaries.emplace_back(line_no, value);
       } else if (!header.count(key)) {
         header[key] = value;
+      } else if (key == "gain_declaration_sha256" || key == "gain_reference_state") {
+        return fail(line_no, "'# " + key + ":' given twice");
       }
       continue;
     }
@@ -727,6 +729,22 @@ BackscatterTable loadBackscatterTable(
   }
   if (header.count("source_bags")) {
     table.source_bags = header["source_bags"];
+  }
+  // The gain-state record is both lines or neither, each with a value: one
+  // without the other (or an empty one) would read as "no record" or as half
+  // a record, and either passes the declaration check wrongly (#176).
+  if (header.count("gain_declaration_sha256") != header.count("gain_reference_state")) {
+    return fail(
+      line_no, "'# gain_declaration_sha256:' and '# gain_reference_state:' must be given "
+      "together (a gain-state record is both or neither)");
+  }
+  if (header.count("gain_declaration_sha256")) {
+    table.gain_declaration_sha256 = header["gain_declaration_sha256"];
+    table.gain_reference_state = header["gain_reference_state"];
+    if (table.gain_declaration_sha256.empty() || table.gain_reference_state.empty()) {
+      return fail(
+        line_no, "'# gain_declaration_sha256:' / '# gain_reference_state:' must not be empty");
+    }
   }
   // The declared range-term groups (cube#172 review): the writer omits the
   // rows of a group it did not fit (its zero term), so the rows alone cannot

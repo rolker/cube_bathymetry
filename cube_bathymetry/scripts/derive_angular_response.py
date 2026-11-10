@@ -63,6 +63,21 @@ input bag, so a per-site curve can be traced to that site's data. All header
 lines are ``# key: value`` comments; the C++ loader reads only ``tl_removed``
 and ``absorption_db_per_m`` and ignores the rest.
 
+Gain-state declaration (cube_bathymetry#176): a sonar's receiver gain can step
+without the sonar recording it, and a curve or table fitted across the step is
+fitted over two gain states. With ``--gain-declaration FILE`` (a
+``gain-state-declaration v1`` file, see the README) each ping's declared offset
+-- the dB ADDED to the reported level to reach the declaration's reference
+state, so a segment that reads 23 dB low is ``+23.0`` -- is added to its
+intensities BEFORE binning (single curve and ``--by-mode``, and before the
+tier-2 TL add-back), so one curve or table comes out in the reference state
+from data on both sides of the step. The header then records
+``gain_reference_state`` and ``gain_declaration_sha256`` (the digest of the
+declaration's canonical form), which ``import_bag`` and ``batch_regen`` compare
+with the declaration they are given and refuse a mismatch, and per-segment ping
+and beam counts. A ping in no segment is at the reference; the run prints the
+count, and warns about a declared segment no ping fell in.
+
 Site box (cube_bathymetry#170): with ``--box LATMIN LONMIN LATMAX LONMAX``
 (degrees, WGS84) only pings whose sensor position lies inside the box are
 binned, so a per-site curve can be derived from bags that mix survey and
@@ -148,6 +163,7 @@ import functools
 import heapq
 import math
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -602,6 +618,383 @@ class PingLocator:
         return position, None
 
 
+# ---------------------------------------------------------------------------
+# Gain-state declaration (cube_bathymetry#176)
+#
+# A sonar's receiver gain can step without the sonar recording it. The operator
+# declares the steps in a ``gain-state-declaration v1`` file (see the README):
+# a reference state plus half-open UTC segments with an additive dB offset (the
+# value ADDED to the reported level to reach the reference state). The
+# C++ loader (gain_declaration.cpp) implements the same format and the same
+# checks; test/data/gain_declaration_vectors.json pins both.
+# ---------------------------------------------------------------------------
+
+GAIN_FORMAT_LINE = '# format: gain-state-declaration v1'
+GAIN_FORMAT_PREFIX = '# format: gain-state-declaration'
+GAIN_COLUMNS = 'segment,start_utc,end_utc,offset_db,provenance,provenance_note'
+GAIN_PROVENANCE = ('settings_file', 'measured', 'operator_reported')
+GAIN_MAX_ABS_OFFSET_DB = 60.0
+GAIN_MAX_BYTES = 64 * 1024
+GAIN_IDENTIFIER = re.compile(r'^[A-Za-z0-9_.-]+$')
+GAIN_UTC = re.compile(r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$',
+                      re.ASCII)
+GAIN_DECIMAL = re.compile(r'[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?', re.ASCII)
+
+
+def parse_utc_ns(text):
+    """Return ``YYYY-MM-DDTHH:MM:SS[.f{1,9}]Z`` as integer ns since the epoch, else None."""
+    import calendar
+    m = GAIN_UTC.match(text)
+    if m is None:
+        return None
+    year, month, day, hour, minute, second = (int(g) for g in m.groups()[:6])
+    if not (1970 <= year <= 2200 and 1 <= month <= 12 and hour <= 23 and minute <= 59
+            and second <= 59):
+        return None
+    if not 1 <= day <= calendar.monthrange(year, month)[1]:
+        return None
+    frac = int((m.group(7) or '').ljust(9, '0') or 0)
+    days = calendar.timegm((year, month, day, 0, 0, 0)) // 86400
+    return (((days * 24 + hour) * 60 + minute) * 60 + second) * 1000000000 + frac
+
+
+def _gain_offset_text(offset_db):
+    """Return ``offset_db`` as ``%.6f``, negative zero as zero (the digest's spelling)."""
+    text = '%.6f' % offset_db
+    return '0.000000' if text == '-0.000000' else text
+
+
+class GainSegment(collections.namedtuple(
+        'GainSegment', 'id start_ns end_ns offset_db provenance note')):
+    """One declared deviation from the reference gain state, ``[start_ns, end_ns)``."""
+
+    __slots__ = ()
+
+
+class GainDeclaration:
+    """A loaded declaration: a reference state label and sorted, non-overlapping segments."""
+
+    def __init__(self, path, reference_state, segments, sonar='', warnings=()):
+        """Create it; ``segments`` must already be sorted and checked."""
+        self.path = path
+        self.reference_state = reference_state
+        self.sonar = sonar
+        self.segments = list(segments)
+        self.warnings = list(warnings)
+
+    def segment_at(self, stamp_ns_value):
+        """Return the segment containing the stamp (half-open), or None: at the reference."""
+        import bisect
+        i = bisect.bisect_right([s.start_ns for s in self.segments], stamp_ns_value)
+        if i == 0:
+            return None
+        seg = self.segments[i - 1]
+        return seg if stamp_ns_value < seg.end_ns else None
+
+    def offset_db_at(self, stamp_ns_value):
+        """Return the dB to ADD to a ping reported at the stamp (0 outside every segment)."""
+        seg = self.segment_at(stamp_ns_value)
+        return seg.offset_db if seg is not None else 0.0
+
+    def canonical_form(self):
+        """
+        Return the text the digest is taken of (GainDeclaration::canonicalForm in C++).
+
+        The format version, the reference state and each segment's start_ns,
+        end_ns and offset_db (``%.6f``) in sorted order. Ids, provenance, notes,
+        comments, whitespace and field order are not in it.
+        """
+        lines = ['gain-state-declaration v1', 'reference_state=%s' % self.reference_state]
+        lines += ['%d,%d,%s' % (s.start_ns, s.end_ns, _gain_offset_text(s.offset_db))
+                  for s in self.segments]
+        return '\n'.join(lines) + '\n'
+
+    def sha256(self):
+        """Return the SHA-256 (lowercase hex) of the canonical form."""
+        import hashlib
+        return hashlib.sha256(self.canonical_form().encode('utf-8')).hexdigest()
+
+
+def load_gain_declaration(path):
+    """
+    Load a ``gain-state-declaration v1`` file; ValueError (``path:line: why``) on any problem.
+
+    Whole or nothing, with the same rules as the C++ loader: the format line first,
+    one ``# reference_state:`` label, UTC stamps with an explicit exclusive end,
+    no overlap, ids unique, a finite offset within +-60 dB, a provenance of
+    settings_file, measured or operator_reported and a non-empty note, no quoting
+    and no comma inside a field. Zero segments is legal (a warning).
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        raise ValueError('%s: cannot open (no such file)' % path)
+    except OSError as e:
+        raise ValueError('%s: cannot open (%s)' % (path, e))
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError('%s: not a regular file (a declaration is read from a file, never a '
+                         'FIFO, device or directory)' % path)
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read(GAIN_MAX_BYTES + 1)
+    except OSError as e:
+        raise ValueError('%s: cannot open (%s)' % (path, e))
+    if len(raw) > GAIN_MAX_BYTES:
+        raise ValueError('%s: more than %d bytes, more than a declaration can be'
+                         % (path, GAIN_MAX_BYTES))
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError as e:
+        raise ValueError('%s: not UTF-8 (%s)' % (path, e))
+    if text.startswith('\ufeff'):
+        text = text[1:]
+
+    def fail(line_no, why):
+        return ValueError('%s:%d: %s' % (path, line_no, why))
+
+    lines = [(i, ln.rstrip('\r\n')) for i, ln in enumerate(text.split('\n'), 1)]
+    lines = [(i, ln.rstrip('\r')) for i, ln in lines]
+    first = next(((i, ln.strip(' \t')) for i, ln in lines if ln.strip(' \t')), None)
+    if first is None:
+        raise fail(len(lines), 'empty file, not a gain-state declaration')
+    if first[1] != GAIN_FORMAT_LINE:
+        if first[1].startswith(GAIN_FORMAT_PREFIX):
+            raise fail(first[0], "unsupported declaration format '%s' (this loader reads '%s')"
+                       % (first[1][:200], GAIN_FORMAT_LINE))
+        raise fail(first[0], "not a gain-state declaration (first line must be '%s')"
+                   % GAIN_FORMAT_LINE)
+
+    reference = None
+    sonar = ''
+    rows = None
+    last = first[0]
+    for i, ln in lines:
+        if i <= first[0]:
+            continue
+        last = i
+        if rows is not None:
+            if ln.startswith('#'):
+                key = ln[1:].strip(' \t').partition(':')[0].strip(' \t') if ':' in ln else ''
+                if key in ('format', 'reference_state'):
+                    raise fail(i, "a '# %s:' line after the column line (header keys come "
+                               'before it)' % key)
+            elif ln:
+                rows.append((i, ln))
+            continue
+        if not ln:
+            continue
+        if ln.startswith('#'):
+            body = ln[1:].strip(' \t')
+            if ':' not in body:
+                continue
+            key, _, value = body.partition(':')
+            key, value = key.strip(' \t'), value.strip(' \t')
+            if key == 'format':
+                raise fail(i, "a second '# format:' line")
+            if key == 'reference_state':
+                if reference is not None:
+                    raise fail(i, "'# reference_state:' given twice")
+                if not GAIN_IDENTIFIER.match(value):
+                    raise fail(i, "'# reference_state:' must be a non-empty label of "
+                               "[A-Za-z0-9_.-], got '%s'" % value[:200])
+                reference = value
+            elif key == 'sonar':
+                sonar = value
+            continue
+        if ln != GAIN_COLUMNS:
+            raise fail(i, "expected the column line '%s'" % GAIN_COLUMNS)
+        rows = []
+    if reference is None:
+        raise fail(last, "header lacks '# reference_state:'")
+    if rows is None:
+        raise fail(last, 'no column line')
+
+    segments = []
+    ids = set()
+    for i, ln in rows:
+        if '"' in ln:
+            raise fail(i, 'a quote character: fields are never quoted')
+        f = [c.strip(' \t') for c in ln.split(',')]
+        if len(f) != 6:
+            raise fail(i, 'expected 6 fields, got %d (a field may not contain a comma)'
+                       % len(f))
+        seg_id = f[0]
+        if not GAIN_IDENTIFIER.match(seg_id):
+            raise fail(i, "segment id '%s' must be non-empty [A-Za-z0-9_.-]" % seg_id[:200])
+        if seg_id in ids:
+            raise fail(i, "duplicate segment id '%s'" % seg_id)
+        ids.add(seg_id)
+        start = parse_utc_ns(f[1])
+        if start is None:
+            raise fail(i, "start_utc '%s' is not a UTC stamp YYYY-MM-DDTHH:MM:SS[.fff]Z"
+                       % f[1][:200])
+        end = parse_utc_ns(f[2])
+        if end is None:
+            raise fail(i, "end_utc '%s' is not a UTC stamp YYYY-MM-DDTHH:MM:SS[.fff]Z"
+                       % f[2][:200])
+        if not start < end:
+            raise fail(i, 'start_utc must be before end_utc (the interval is [start, end))')
+        offset = float('nan')
+        if GAIN_DECIMAL.fullmatch(f[3]):
+            offset = float(f[3])
+            mantissa = re.split('[eE]', f[3])[0]
+            if (offset == 0.0 and any(c in '123456789' for c in mantissa)) or (
+                    0.0 < abs(offset) < sys.float_info.min):
+                offset = float('nan')     # underflow or subnormal: refused, as the C++ loader does
+        if not math.isfinite(offset):
+            raise fail(i, "offset_db '%s' is not a finite number" % f[3][:200])
+        if abs(offset) > GAIN_MAX_ABS_OFFSET_DB:
+            raise fail(i, 'offset_db %s is beyond +-%d dB (a typo?)'
+                       % (f[3], GAIN_MAX_ABS_OFFSET_DB))
+        offset = float(_gain_offset_text(offset))   # apply what the digest hashes: 6 decimals
+        if f[4] not in GAIN_PROVENANCE:
+            raise fail(i, "provenance '%s' must be settings_file, measured or "
+                       'operator_reported' % f[4][:200])
+        if not f[5]:
+            raise fail(i, 'provenance_note is mandatory: say how the offset was obtained')
+        segments.append(GainSegment(seg_id, start, end, offset, f[4], f[5]))
+
+    segments.sort(key=lambda s: s.start_ns)
+    for a, b in zip(segments, segments[1:]):
+        if a.end_ns > b.start_ns:
+            raise ValueError("%s: segments '%s' and '%s' overlap (touching is fine, "
+                             'overlapping is not)' % (path, a.id, b.id))
+    warnings = []
+    if not segments:
+        warnings.append("declares only the reference state '%s' and no segment: every ping "
+                        'is taken to be at the reference' % reference)
+    return GainDeclaration(path, reference, segments, sonar, warnings)
+
+
+class GainTracker:
+    """Apply a declaration ping by ping and count what it did (GainStateResolver in C++)."""
+
+    def __init__(self, declaration):
+        """Start counting against ``declaration``."""
+        self.declaration = declaration
+        self.pings = 0
+        self.undeclared = 0
+        self.by_segment = {s.id: 0 for s in declaration.segments}
+        self.beams = {s.id: 0 for s in declaration.segments}
+
+    def offset(self, ping_ns):
+        """Return the dB to add to the ping stamped ``ping_ns`` and count the ping."""
+        self.pings += 1
+        seg = self.declaration.segment_at(ping_ns)
+        if seg is None:
+            self.undeclared += 1
+            return 0.0
+        self.by_segment[seg.id] += 1
+        return seg.offset_db
+
+    def note_beams(self, ping_ns, n_beams):
+        """Count ``n_beams`` usable beams of a ping against its segment."""
+        seg = self.declaration.segment_at(ping_ns)
+        if seg is not None:
+            self.beams[seg.id] += n_beams
+
+    def state(self):
+        """
+        Return the counters as plain data (the accumulation cache payload).
+
+        Per segment BY POSITION (the sorted order), not by id: the cache identity is the
+        canonical digest, which excludes ids, so a cache may be refitted under a declaration
+        whose segments were renamed or whose ids were swapped; the intervals are identical
+        in the same order, and the counts belong to the interval.
+        """
+        return {'pings': self.pings, 'undeclared': self.undeclared,
+                'segments': [[self.by_segment[s.id], self.beams[s.id]]
+                             for s in self.declaration.segments]}
+
+    def restore(self, state):
+        """Set the counters from ``state`` (see ``state``), onto the current ids by position."""
+        segments = self.declaration.segments
+        if len(state['segments']) != len(segments):
+            raise ValueError('the cached gain counters have %d segments, the declaration %d'
+                             % (len(state['segments']), len(segments)))
+        self.pings = state['pings']
+        self.undeclared = state['undeclared']
+        for seg, (pings, beams) in zip(segments, state['segments']):
+            self.by_segment[seg.id] = pings
+            self.beams[seg.id] = beams
+
+    def summary(self):
+        """Return what the table header and the run report print, as plain data."""
+        d = self.declaration
+        return {'reference_state': d.reference_state, 'sha256': d.sha256(), 'source': d.path,
+                'pings': self.pings, 'undeclared_pings': self.undeclared,
+                'segments': [{'id': s.id, 'start_ns': s.start_ns, 'end_ns': s.end_ns,
+                              'offset_db': s.offset_db, 'provenance': s.provenance,
+                              'pings': self.by_segment[s.id], 'beams': self.beams[s.id]}
+                             for s in d.segments]}
+
+
+def utc_text(ns):
+    """Return integer ns since the epoch as ``YYYY-MM-DDTHH:MM:SS[.f]Z``."""
+    import datetime
+    t = datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=ns // 1000000000)
+    text = t.strftime('%Y-%m-%dT%H:%M:%S')
+    frac = ns % 1000000000
+    if frac:
+        text += ('.%09d' % frac).rstrip('0')
+    return text + 'Z'
+
+
+def gain_segment_lines(summary):
+    """Return the ``# gain_segment:`` / ``# gain_undeclared:`` provenance lines of a summary."""
+    lines = ['# gain_segment: %s [%s, %s) offset_db=%s provenance=%s pings=%d beams=%d'
+             % (s['id'], utc_text(s['start_ns']), utc_text(s['end_ns']),
+                _gain_offset_text(s['offset_db']), s['provenance'], s['pings'], s['beams'])
+             for s in summary['segments']]
+    lines.append('# gain_undeclared: %d pings at the reference state'
+                 % summary['undeclared_pings'])
+    return lines
+
+
+def gain_header_lines(summary):
+    """Return the header lines a derivation under a declaration writes (curve and table)."""
+    return (['# gain_reference_state: %s' % summary['reference_state'],
+             '# gain_declaration_sha256: %s' % summary['sha256'],
+             '# gain_declaration_source: %s' % summary['source'],
+             '# gain_sign: offset_db was ADDED to the reported level of each ping before '
+             'fitting, so the result is in the reference state'] + gain_segment_lines(summary))
+
+
+def gain_report_lines(summary):
+    """Return the human run report of a summary (the same counts import_bag prints)."""
+    out = ["gain-state declaration %s: reference state '%s', sha256 %s; %d ping(s) seen"
+           % (summary['source'], summary['reference_state'], summary['sha256'],
+              summary['pings'])]
+    for s in summary['segments']:
+        offset = _gain_offset_text(s['offset_db'])
+        out.append('  %s [%s, %s) %s dB (%s): %d pings, %d beams'
+                   % (s['id'], utc_text(s['start_ns']), utc_text(s['end_ns']),
+                      offset if offset.startswith('-') else '+' + offset,
+                      s['provenance'], s['pings'], s['beams']))
+    out.append('  undeclared (at reference): %d pings' % summary['undeclared_pings'])
+    return out
+
+
+def gain_empty_segment_warnings(summary, box=False):
+    """
+    Return one warning per declared segment that no ping fell in (a mistyped stamp).
+
+    A segment that pings fell in but no beam of which entered the fit is warned about too.
+    The counts are of the pings this run used. With ``--box`` the pings outside the box never
+    reach the counters, so a segment covering only transit is not evidence of a mistyped
+    stamp: the warning says the counts are box-filtered instead.
+    """
+    note = (' (counts cover only pings inside --box; this may just be transit)' if box
+            else ': check its stamps')
+    out = ["warning: gain segment '%s' is declared but no ping fell in it%s" % (s['id'], note)
+           for s in summary['segments'] if s['pings'] == 0]
+    out += ["warning: gain segment '%s': %d ping(s) fell in it but no beam of them entered the "
+            'fit (no SonarInfo or no usable beams there), so it shaped nothing'
+            % (s['id'], s['pings'])
+            for s in summary['segments'] if s['pings'] > 0 and s.get('beams', 1) == 0]
+    return out
+
+
 class PingRecord:
     """
     The fields of a SonarDetections ping that bin_ping reads, and nothing else.
@@ -613,7 +1006,7 @@ class PingRecord:
     """
 
     __slots__ = ('intensities', 'rx_angles', 'two_way_travel_times',
-                 'sound_speed', 'frequency', 'flags')
+                 'sound_speed', 'frequency', 'flags', 'stamp_ns')
 
     def __init__(self, msg):
         """Copy the binning fields of a SonarDetections ``msg``."""
@@ -622,6 +1015,7 @@ class PingRecord:
         self.two_way_travel_times = msg.two_way_travel_times
         self.sound_speed = msg.ping_info.sound_speed
         self.frequency = msg.ping_info.frequency
+        self.stamp_ns = stamp_ns(msg.header.stamp)   # the gain declaration's clock (#176)
         flags = getattr(msg, 'flags', None)
         self.flags = (None if flags is None
                       else bytes(getattr(f, 'flag', 0) for f in flags))
@@ -718,6 +1112,15 @@ def parse_args(argv):
                         "it, e.g. a path-averaged value from the site's casts. "
                         'Requires --remove-tl; excludes --salinity, --ph and '
                         '--depth-m')
+    p.add_argument('--gain-declaration', default=None, metavar='FILE',
+                   help='gain-state declaration (first line "# format: gain-state-declaration '
+                        'v1", cube_bathymetry#176): a reference gain state plus the half-open '
+                        'UTC segments where the receiver gain deviated from it, each with an '
+                        'additive dB offset (reported + offset = reference level). The '
+                        'offset of each ping is added to its intensities BEFORE binning, so one '
+                        'curve or table comes out in the reference state; the header records '
+                        'the digest of the declaration, which import_bag and batch_regen compare '
+                        'with the declaration they are given')
     p.add_argument('--box', type=float, nargs=4, default=None,
                    metavar=('LATMIN', 'LONMIN', 'LATMAX', 'LONMAX'),
                    help="keep only pings whose sensor position (from the bag's "
@@ -1085,7 +1488,7 @@ def corrupt_report(corrupt):
 
 
 def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
-               box=None, box_stats=None, corrupt=None):
+               box=None, box_stats=None, corrupt=None, gain=None):
     """
     Accumulate per-bin sums on `topic` over every bag into `bins`.
 
@@ -1100,6 +1503,10 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
       median frequency -- a single pass over the bags.
 
     `freqs` collects each ping's ``ping_info.frequency`` (Hz) for the median.
+
+    `gain` (a GainTracker, cube_bathymetry#176) adds each ping's declared offset
+    to its intensities BEFORE binning (and before the tier-2 TL add-back), so
+    the curve comes out in the declaration's reference state.
 
     Every bag's topics are checked from its metadata before any bag is read.
     Without `box` the bags are opened and read one after another, each closed
@@ -1143,7 +1550,10 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
             % (topic, ', '.join(sorted(set().union(*type_maps))) or 'none'))
 
     def add_ping(ping):
-        bin_ping(ping, bin_width_deg, remove_tl, bins, freqs)
+        offset_db = gain.offset(ping.stamp_ns) if gain is not None else 0.0
+        used = bin_ping(ping, bin_width_deg, remove_tl, bins, freqs, offset_db)
+        if gain is not None:
+            gain.note_beams(ping.stamp_ns, used)
 
     n_msgs = 0
     if box is None:
@@ -1220,8 +1630,13 @@ def accumulate(bag_paths, topic, bin_width_deg, remove_tl, bins, freqs,
     return n_msgs
 
 
-def bin_ping(ping, bin_width_deg, remove_tl, bins, freqs):
-    """Add one ping's beams (a PingRecord) to `bins` (see accumulate)."""
+def bin_ping(ping, bin_width_deg, remove_tl, bins, freqs, offset_db=0.0):
+    """
+    Add one ping's beams (a PingRecord) to `bins` (see accumulate); return how many were used.
+
+    `offset_db` (the ping's declared gain offset, cube_bathymetry#176) is added to
+    each beam's intensity first.
+    """
     intensities = ping.intensities
     rx_angles = ping.rx_angles
     twtt = ping.two_way_travel_times
@@ -1231,10 +1646,12 @@ def bin_ping(ping, bin_width_deg, remove_tl, bins, freqs):
         freqs.append(freq)  # only needed for the tier-2 absorption alpha
     flags = ping.flags   # one flag value per beam, or None
     count = min(len(intensities), len(rx_angles))
+    used = 0
     for i in range(count):
         db = intensities[i]
         if not math.isfinite(db):
             continue
+        db += offset_db
         # Skip beams flagged bad (flag != 0) when flags are present and aligned.
         if flags is not None and i < len(flags) and flags[i] != 0:
             continue
@@ -1266,6 +1683,8 @@ def bin_ping(ping, bin_width_deg, remove_tl, bins, freqs):
         slot[0] += adjusted
         slot[1] += range_m
         slot[2] += 1
+        used += 1
+    return used
 
 
 def bag_basenames(bag_paths):
@@ -1926,9 +2345,12 @@ class ModeAccumulator:
         return self.n.reshape(shape), self.s.reshape(shape), self.ss.reshape(shape)
 
 
-def ping_beams(ping, bin_width_deg, n_half):
+def ping_beams(ping, bin_width_deg, n_half, offset_db=0.0):
     """
     Return ``(abs_bin, side, cell, y)`` arrays of a ping's usable beams.
+
+    ``offset_db`` (the ping's declared gain offset, cube_bathymetry#176) is added
+    to ``y``: the fit sees reference-state levels.
 
     Usable: finite intensity and angle, positive finite slant range
     ``R = twtt * c / 2``, not flagged bad, ``|theta| < 90`` deg and
@@ -1950,7 +2372,7 @@ def ping_beams(ping, bin_width_deg, n_half):
         ok[:len(flags)] &= flags == 0
     if not ok.any():
         return None
-    y, ang, rng = y[ok], ang[ok], rng[ok]
+    y, ang, rng = y[ok] + offset_db, ang[ok], rng[ok]
     deg = np.degrees(ang)
     # |theta| < 90 explicitly, BEFORE the bin cast: the last bin reaches past
     # 90 when the bin width does not divide 90, a beam at or beyond 90 deg is
@@ -2017,8 +2439,15 @@ class ModeTableBuilder:
     def __init__(self, bin_width_deg=2.0,
                  specular_exclusion_deg=DEFAULT_SPECULAR_EXCLUSION_DEG,
                  window_sec=DEFAULT_ADJACENCY_WINDOW_SEC,
-                 range_angle_edges_deg=DEFAULT_RANGE_ANGLE_EDGES_DEG):
-        """Create an empty builder (ValueError on an edge list that leaves a group empty)."""
+                 range_angle_edges_deg=DEFAULT_RANGE_ANGLE_EDGES_DEG, gain=None):
+        """
+        Create an empty builder (ValueError on an edge list that leaves a group empty).
+
+        ``gain`` is a GainDeclaration (cube_bathymetry#176): each ping's offset is
+        added to its intensities before binning, so the table is in the
+        declaration's reference state.
+        """
+        self.gain = GainTracker(gain) if gain is not None else None
         self.bin_width_deg = bin_width_deg
         self.n_half = int(math.ceil(90.0 / bin_width_deg - 1e-9))
         self.specular_exclusion_deg = specular_exclusion_deg
@@ -2057,6 +2486,7 @@ class ModeTableBuilder:
     def add_ping(self, ping_ns, ping):
         """Attribute a ping (a PingRecord) to its mode and accumulate it."""
         import numpy as np
+        offset_db = self.gain.offset(ping_ns) if self.gain is not None else 0.0
         entry = self.history.at(ping_ns)
         if entry is None:
             self.pings_without_info += 1
@@ -2071,11 +2501,13 @@ class ModeTableBuilder:
         acc.declared[declared] += 1
         summary = OffsetSummary(self.n_half, RANGE_CELL_COUNT, len(self.groups))
         summary.pings = 1
-        beams = ping_beams(ping, self.bin_width_deg, self.n_half)
+        beams = ping_beams(ping, self.bin_width_deg, self.n_half, offset_db)
         if beams is None:
             self.pings_without_beams += 1
         else:
             abs_bin, side, cell, y = beams
+            if self.gain is not None:
+                self.gain.note_beams(ping_ns, len(y))
             signed = abs_bin + side * self.n_half
             acc.add(signed * RANGE_CELL_COUNT + cell, y)
             ns = abs_bin >= self.first_nonspecular_bin
@@ -2129,13 +2561,21 @@ class ModeTableBuilder:
                 'discarded': dict(self.tracker.discarded),
                 'pings_without_info': self.pings_without_info,
                 'pings_without_beams': self.pings_without_beams,
-                'sonar_models': dict(self.sonar_models)}
+                'sonar_models': dict(self.sonar_models),
+                'gain': self.gain.state() if self.gain is not None else None}
 
     @classmethod
-    def from_state(cls, state):
-        """Rebuild a builder from to_state output (ready for finish, not for more pings)."""
+    def from_state(cls, state, gain=None):
+        """
+        Rebuild a builder from to_state output (ready for finish, not for more pings).
+
+        ``gain`` is the declaration the state was accumulated under (the cache
+        identity has already matched it).
+        """
         b = cls(state['bin_width_deg'], state['specular_exclusion_deg'], state['window_sec'],
-                state['range_angle_edges_deg'])
+                state['range_angle_edges_deg'], gain=gain)
+        if b.gain is not None:
+            b.gain.restore(state['gain'])
         b.history.stamps = list(state['history']['stamps'])
         b.history.entries = [tuple(e) for e in state['history']['entries']]
         for key, m in state['modes'].items():
@@ -2834,6 +3274,7 @@ def derive_mode_table(builder, reference_mode, range_ref_m, misfit_threshold_db,
             'pings_without_beams': builder.pings_without_beams,
             'sonar_info_count': len(builder.history),
             'sonar_models': dict(builder.sonar_models),
+            'gain': builder.gain.summary() if builder.gain is not None else None,
             'warnings': warnings}
 
 
@@ -2880,6 +3321,10 @@ def mode_table_lines(table, source_bags, box=None):
              '(var_db2 and db_relative_to_nadir on range rows, the angle bounds on angle '
              'rows) are empty; x is written with 10 significant digits'
              % MIN_WRITTEN_VARIANCE_DB2]
+    if table.get('gain') is not None:
+        # Written only under a declaration (cube_bathymetry#176): import_bag compares the
+        # digest and the reference state with the declaration it is given.
+        lines += gain_header_lines(table['gain'])
     if box is not None:
         lines.append('# box: %s' % ' '.join('%.9g' % v for v in box))
     lines.append('# source_bags: %s' % ','.join(source_bags))
@@ -2937,6 +3382,8 @@ def mode_report_lines(table):
     out = ['reference mode %s (%s); R0 = %.2f m (%s)'
            % (table['reference_mode'], table['reference_source'], table['range_ref_m'],
               table['range_ref_source'])]
+    if table.get('gain') is not None:
+        out += gain_report_lines(table['gain'])
     out.append('%-34s %9s %11s %8s %15s %8s %9s  %s'
                % ('mode', 'pings', 'beams', 'med_R_m', 'offset_dB(se)', 'misfit',
                   'scalar_mf', 'range term'))
@@ -3106,7 +3553,7 @@ ACCUMULATION_CACHE_FORMAT = 'derive-accumulation-cache v1'
 # Bump when the accumulation changes (ping_beams filters, the cell grid, the
 # mode key, OffsetSummary, ModeAccumulator): a cache made by older code must
 # not be refitted as if it were current.
-ACCUMULATION_VERSION = 1
+ACCUMULATION_VERSION = 3   # 3: the gain counters are per segment position, not id (#176)
 
 
 def bag_identity(bag_path):
@@ -3132,8 +3579,14 @@ def bag_identity(bag_path):
     return [real, files]
 
 
-def accumulation_cache_identity(args, source_bags):
-    """Return the settings an accumulation cache must have been made with to be reused."""
+def accumulation_cache_identity(args, source_bags, gain=None):
+    """
+    Return the settings an accumulation cache must have been made with to be reused.
+
+    ``gain`` (a GainDeclaration or None) is part of it: a cache accumulated without a
+    declaration is never refitted with one (or the other way round), because the
+    statistics already hold the shifted, or unshifted, levels (cube_bathymetry#176).
+    """
     return {'format': ACCUMULATION_CACHE_FORMAT, 'version': ACCUMULATION_VERSION,
             'cell_grid': [RANGE_CELL_LOG10_MIN, RANGE_CELL_DECADES, RANGE_CELL_COUNT],
             'source_bags': list(source_bags),
@@ -3143,7 +3596,9 @@ def accumulation_cache_identity(args, source_bags):
             'bin_width_deg': args.bin_width_deg,
             'specular_exclusion_deg': args.specular_exclusion_deg,
             'adjacency_window_s': args.adjacency_window_s,
-            'range_angle_edges': list(args.range_angle_edges)}
+            'range_angle_edges': list(args.range_angle_edges),
+            'gain_declaration': (None if gain is None
+                                 else [gain.reference_state, gain.sha256()])}
 
 
 def check_cache_trust(path, fd):
@@ -3172,7 +3627,7 @@ def check_cache_trust(path, fd):
                          'have written it' % path)
 
 
-def load_accumulation_cache(path, identity):
+def load_accumulation_cache(path, identity, gain=None):
     """
     Return ``(builder, n_msgs, box_stats, corrupt)`` from write_accumulation_cache's file.
 
@@ -3208,7 +3663,7 @@ def load_accumulation_cache(path, identity):
         raise SystemExit('error: --accumulation-cache %s was made with different %s; '
                          'delete it to re-accumulate' % (path, ', '.join(mismatch)))
     try:
-        builder = ModeTableBuilder.from_state(data['state'])
+        builder = ModeTableBuilder.from_state(data['state'], gain=gain)
         n_msgs = int(data['n_msgs'])
         box_stats = data.get('box_stats')
         corrupt = collections.Counter(data.get('corrupt') or {})
@@ -3247,18 +3702,18 @@ def write_accumulation_cache(path, builder, n_msgs, identity, box_stats, corrupt
                 pass
 
 
-def main_by_mode(args, source_bags):
+def main_by_mode(args, source_bags, gain=None):
     """Run --by-mode: read the bags (or the cache), fit, write the table and diagnostics."""
     import json
 
-    identity = accumulation_cache_identity(args, source_bags)
+    identity = accumulation_cache_identity(args, source_bags, gain)
     cache = args.accumulation_cache
     if cache is not None and os.path.exists(cache):
-        builder, n_msgs, box_stats, corrupt = load_accumulation_cache(cache, identity)
+        builder, n_msgs, box_stats, corrupt = load_accumulation_cache(cache, identity, gain)
         print('loaded the accumulated statistics from %s (bag pass skipped)' % cache)
     else:
         builder = ModeTableBuilder(args.bin_width_deg, args.specular_exclusion_deg,
-                                   args.adjacency_window_s, args.range_angle_edges)
+                                   args.adjacency_window_s, args.range_angle_edges, gain=gain)
         box_stats = new_box_stats() if args.box is not None else None
         corrupt = collections.Counter()
         n_msgs = accumulate_by_mode(args.bag, args.topic, args.sonar_info_topic, builder,
@@ -3295,6 +3750,9 @@ def main_by_mode(args, source_bags):
                            args.range_node_spacing_decades)
     for warning in table['warnings']:
         print(warning, file=sys.stderr)
+    for warning in (gain_empty_segment_warnings(table['gain'], args.box is not None)
+                    if table['gain'] else []):
+        print(warning, file=sys.stderr)
     write_text_atomically(args.output, ''.join(
         line + '\n' for line in mode_table_lines(table, source_bags, args.box)))
     if args.diagnostics_out:
@@ -3316,8 +3774,19 @@ def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     source_bags = bag_basenames(args.bag)  # refuse a bad name before reading
     check_distinct_bags(args.bag)
+    gain = None
+    if args.gain_declaration is not None:
+        try:
+            gain = load_gain_declaration(args.gain_declaration)
+        except ValueError as e:
+            raise SystemExit('error: --gain-declaration could not be loaded: %s' % e)
+        print("gain-state declaration %s: reference state '%s', %d segment(s), sha256 %s"
+              % (gain.path, gain.reference_state, len(gain.segments), gain.sha256()))
+        for warning in gain.warnings:
+            print('warning: --gain-declaration %s: %s' % (gain.path, warning), file=sys.stderr)
     if args.by_mode:
-        return main_by_mode(args, source_bags)
+        return main_by_mode(args, source_bags, gain)
+    tracker = GainTracker(gain) if gain is not None else None
 
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags
     freqs = []     # per-ping ping_info.frequency (Hz)
@@ -3325,7 +3794,7 @@ def main(argv=None):
     corrupt = collections.Counter()   # topic -> messages that would not deserialize
     n_msgs = accumulate(
         args.bag, args.topic, args.bin_width_deg, args.remove_tl, bins, freqs,
-        box=args.box, box_stats=box_stats, corrupt=corrupt)
+        box=args.box, box_stats=box_stats, corrupt=corrupt, gain=tracker)
     warning = corrupt_report(corrupt)
     if warning is not None:
         print(warning, file=sys.stderr)
@@ -3368,6 +3837,13 @@ def main(argv=None):
     else:
         header = build_header(False, source_bags, box=args.box)
 
+    if tracker is not None:
+        summary = tracker.summary()
+        header += gain_header_lines(summary)
+        for line in gain_report_lines(summary):
+            print(line)
+        for warning in gain_empty_segment_warnings(summary, args.box is not None):
+            print(warning, file=sys.stderr)
     n_rows = write_csv(
         bins, args.bin_width_deg, args.output, args.remove_tl, alpha, header)
     print('read %d pings across %d bag(s) on %s; wrote %d-bin curve to %s'

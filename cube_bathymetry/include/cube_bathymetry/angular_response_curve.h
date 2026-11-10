@@ -52,6 +52,16 @@ namespace cube
     std::vector < std::pair < float, float >> points;
     bool tl_removed = false;
     float absorption_db_per_m = 0.0f;
+  /// The gain-state declaration the curve was fitted under (cube_bathymetry
+  /// #176), from `# gain_declaration_sha256:` / `# gain_reference_state:`;
+  /// both empty for a curve fitted without one (and for every curve written
+  /// before #176). Compared with the declaration an import is given.
+    std::string gain_declaration_sha256;
+    std::string gain_reference_state;
+  /// Why the file was refused although it parsed (a malformed gain-state
+  /// record: one line without the other, an empty value, or a repeated
+  /// line); `points` is empty then. Empty when there is nothing to report.
+    std::string header_error;
   };
 
 /// Load an empirical angular-response curve from a CSV file matching the seed at

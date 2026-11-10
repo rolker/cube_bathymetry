@@ -50,7 +50,9 @@
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "cube_bathymetry/build_fingerprint.h"
 #include "cube_bathymetry/coverage_refresh.h"
+#include "cube_bathymetry/gain_declaration.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/grid_projection.h"
 #include "geometry_msgs/msg/point_stamped.hpp"
@@ -108,6 +110,16 @@ public:
   rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
   on_configure(const rclcpp_lifecycle::State & state)
   {
+    // A configure that fails (or throws) returns to UNCONFIGURED without
+    // on_cleanup, so whatever it had already filled in of the backscatter and
+    // gain-state members must not be left behind for a reader to mistake for a
+    // configured node (cube_bathymetry#176).
+    bool configured = false;
+    const ScopeExit clear_on_failure([this, &configured] {
+        if (!configured) {
+          clearBackscatterAndGainState();
+        }
+      });
     map_frame_ = declareOnce<std::string>("map_frame", "map");
 
     cell_size_ = declareOnce<double>("cell_size", 1.0);
@@ -208,6 +220,12 @@ public:
           bs_curve_file.c_str(), problem.c_str());
         return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
       }
+      if (cube::isGainDeclaration(bs_curve_file)) {
+        RCLCPP_ERROR(get_logger(),
+          "backscatter_curve_file='%s' is a gain-state declaration, not a curve or table "
+          "(backscatter_gain_declaration takes the declaration)", bs_curve_file.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
     }
     const bool bs_file_is_table = bs_mode != cube::BackscatterAngleCorrection::None &&
       !bs_curve_file.empty() && cube::isAngularResponseTable(bs_curve_file);
@@ -244,10 +262,50 @@ public:
           warning.c_str());
       }
     }
+    // Operator-declared receiver gain states (cube_bathymetry#176): read at
+    // configure ONLY (no hot reload: a mid-run edit would split one store
+    // across two declarations undetected; reconfigure is the explicit act).
+    // The node writes no fingerprint, so a node resuming from a store built
+    // under a different declaration is not detected.
+    gain_declaration_ = cube::GainDeclaration();
+    gain_resolver_.reset();
+    const std::string gain_file =
+      declareOnce<std::string>("backscatter_gain_declaration", "");
+    if (!gain_file.empty()) {
+      std::string error;
+      if (!cube::isGainDeclaration(gain_file) && cube::isAngularResponseTable(gain_file)) {
+        RCLCPP_ERROR(get_logger(),
+          "backscatter_gain_declaration='%s' is a per-pulse-mode table, not a gain-state "
+          "declaration (backscatter_curve_file takes the table)", gain_file.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
+      gain_declaration_ = cube::loadGainDeclaration(gain_file, error);
+      if (!error.empty()) {
+        RCLCPP_ERROR(get_logger(),
+          "backscatter_gain_declaration could not be loaded: %s", error.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
+      gain_resolver_ = std::make_unique<cube::GainStateResolver>(&gain_declaration_);
+      RCLCPP_INFO(get_logger(),
+        "Gain-state declaration %s: reference state '%s', %zu segment(s); each ping in a "
+        "segment has its offset added to the raw intensity before any correction",
+        gain_file.c_str(), gain_declaration_.reference_state.c_str(),
+        gain_declaration_.segments.size());
+      for (const std::string & warning : gain_declaration_.warnings) {
+        RCLCPP_WARN(get_logger(), "backscatter_gain_declaration='%s': %s", gain_file.c_str(),
+          warning.c_str());
+      }
+    }
     if (bs_mode != cube::BackscatterAngleCorrection::None &&
       !bs_curve_file.empty() && !bs_file_is_table)
     {
       bs_curve = cube::loadAngularResponseCurveWithHeader(bs_curve_file);
+      if (!bs_curve.header_error.empty()) {
+        // Not the warn-and-run-uncorrected path: see cube_bathymetry#176.
+        RCLCPP_ERROR(get_logger(), "backscatter_curve_file: '%s': %s", bs_curve_file.c_str(),
+          bs_curve.header_error.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
       bs_curve_applied_ = !bs_curve.points.empty();
       if (!bs_curve_applied_) {
         // Loud in EVERY mode (not just empirical): an explicit file also
@@ -288,6 +346,42 @@ public:
       }
     }
     bs_applied_curve_ = bs_curve;  // kept for mid-run change comparison (#102)
+
+    // The curve or table the node applies must have been fitted under the
+    // declaration it is run with, or neither (cube_bathymetry#176, decision 8:
+    // the live node is the path that runs on the boat). A curve fitted in the
+    // reference state and applied to un-shifted post-step clouds is wrong by
+    // the step, and one fitted across the step is invalid.
+    {
+      const cube::GainDeclaration * declared = gain_resolver_ ? &gain_declaration_ : nullptr;
+      const std::string declared_sha =
+        declared ? cube::gainDeclarationSha256(gain_declaration_) : std::string();
+      const bool curve_from_sonar_info =
+        declared && bs_mode != cube::BackscatterAngleCorrection::None && !bs_explicit_file_;
+      std::string problem;
+      if (bs_file_is_table) {
+        problem = cube::gainRecordProblem(
+          "backscatter_curve_file table " + bs_curve_file,
+          bs_table_.gain_declaration_sha256, bs_table_.gain_reference_state, declared,
+          declared_sha);
+      } else if (bs_curve_applied_ && bs_explicit_file_) {
+        problem = cube::gainRecordProblem(
+          "backscatter_curve_file " + bs_curve_file, bs_curve.gain_declaration_sha256,
+          bs_curve.gain_reference_state, declared, declared_sha);
+      } else if (curve_from_sonar_info) {
+        // No explicit file: any curve this mode adopts arrives with SonarInfo.
+        // (An explicit file that failed to load already warned above, and
+        // SonarInfo is ignored then.)
+        RCLCPP_WARN(get_logger(),
+          "backscatter_gain_declaration is set but any angular-response curve will come from "
+          "SonarInfo, which records no gain state: its gain state is UNKNOWN. Set "
+          "backscatter_curve_file to a curve derived with this declaration.");
+      }
+      if (!problem.empty()) {
+        RCLCPP_ERROR(get_logger(), "backscatter_gain_declaration: %s", problem.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
+    }
 
     // Long-duration bounding (#70, ADR-0001). Declared BEFORE the draft prime so
     // the prime can be trimmed to the same budget -- otherwise loadIntoSheet
@@ -645,6 +739,7 @@ public:
       std::bind(&CubeBathymetry::resetService, this, std::placeholders::_1,
       std::placeholders::_2));
 
+    configured = true;
     return rclcpp_lifecycle::LifecycleNode::on_configure(state);
   }
 
@@ -834,6 +929,33 @@ private:
     return fallback;
   }
 
+  /// Runs a callable when it goes out of scope (return, throw alike).
+  class ScopeExit
+  {
+public:
+    explicit ScopeExit(std::function<void()> f)
+    : f_(std::move(f)) {}
+    ScopeExit(const ScopeExit &) = delete;
+    ScopeExit & operator=(const ScopeExit &) = delete;
+    ~ScopeExit() {f_();}
+
+private:
+    std::function<void()> f_;
+  };
+
+  /// Forget the backscatter table/curve and the gain-state declaration that a
+  /// configure had loaded: the failure path of on_configure, and the end of
+  /// releaseConfiguredEntities.
+  void clearBackscatterAndGainState()
+  {
+    bs_table_ = cube::BackscatterTable();
+    bs_resolver_.reset();
+    bs_curve_applied_ = false;
+    bs_applied_curve_ = cube::AngularResponseCurve();
+    gain_resolver_.reset();
+    gain_declaration_ = cube::GainDeclaration();
+  }
+
   /// Release everything on_configure and on_activate created, so nothing of the
   /// old configuration can run afterwards. Shared by on_cleanup (after its final
   /// flush has succeeded) and on_shutdown (which cannot refuse). Safe to call
@@ -877,6 +999,13 @@ private:
       bs_resolver_.reset();
     }
     bs_table_ = cube::BackscatterTable();
+    if (gain_resolver_) {
+      RCLCPP_INFO(get_logger(),
+        "Gain-state counts since configure (they span any ~/reset):\n%s",
+        gain_resolver_->report().c_str());
+      gain_resolver_.reset();
+    }
+    gain_declaration_ = cube::GainDeclaration();
     // Everything on_configure creates is released here, so a reconfigure builds
     // the node from scratch (#164) and no callback of the old configuration can
     // run against the replaced sheet. The ping/request callbacks are state-gated
@@ -966,6 +1095,23 @@ private:
   cube::BackscatterModeFallback bs_fallback_ = cube::BackscatterModeFallback::Identity;
   uint64_t bs_min_pings_ = 0;
   std::unique_ptr<cube::BackscatterModeResolver> bs_resolver_;
+  // Operator-declared receiver gain states (cube#176), loaded at configure.
+  // The resolver points at the declaration, so both live as long as a
+  // configuration and survive ~/reset (buildSession does not touch them).
+  cube::GainDeclaration gain_declaration_;
+  std::unique_ptr<cube::GainStateResolver> gain_resolver_;
+
+  /// Add the declared gain offset of the cloud at @p stamp_ns to the raw
+  /// intensity of every sounding (cube#176), for a cloud of any pulse mode,
+  /// with or without a table: it is a receiver calibration. An empty cloud is
+  /// no ping and is not counted. Runs BEFORE stampCloudMode.
+  void shiftCloudGain(int64_t stamp_ns, std::vector<cube::GeoSounding> & soundings)
+  {
+    if (!gain_resolver_ || soundings.empty()) {
+      return;
+    }
+    cube::shiftSoundings(soundings, gain_resolver_->apply(stamp_ns));
+  }
 
   /// The correction index the per-mode resolver gives a cloud at @p stamp_ns
   /// with @p frequency_hz (the `frequency` field), or unresolved without a
@@ -1026,6 +1172,18 @@ private:
       bs_resolver_->countBeam(
         correction_idx, s.sounding.intensity, s.sounding.beam_angle, s.sounding.slant_range);
     }
+  }
+  /// Everything that touches a cloud's raw intensity before it is recorded:
+  /// the declared receiver gain state first (cube#176), then the pulse-mode
+  /// resolution (cube#172: one key per cloud, stamped on every sounding so the
+  /// record-time correction picks the entry). The gain shift is independent of
+  /// the table: a ping of an unresolved mode, or a run with no table, is still
+  /// shifted.
+  void prepareCloudBackscatter(
+    int64_t stamp_ns, float cloud_frequency, std::vector<cube::GeoSounding> & soundings)
+  {
+    shiftCloudGain(stamp_ns, soundings);
+    stampCloudMode(stamp_ns, cloud_frequency, soundings);
   }
   static constexpr int64_t kUnresolvedWarnIntervalNs = 60LL * 1000000000LL;
   /// When the unresolved-cloud warning last fired in this configuration
@@ -1337,6 +1495,18 @@ private:
     bool touched = false;
 
     for (const auto & parameter : parameters) {
+      if (parameter.get_name() == "backscatter_gain_declaration" &&
+        get_current_state().id() != lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED)
+      {
+        // Read at configure only (cube_bathymetry#176): accepting a runtime
+        // set would be silently ignored until the next configure.
+        result.successful = false;
+        result.reason =
+          "backscatter_gain_declaration is read at configure only and cannot be changed "
+          "while the node is configured: clean it up, set the parameter, and configure "
+          "again (or set it in the launch file)";
+        return result;
+      }
       if (parameter.get_name() == "subwindow_refresh_interval") {
         const double value = parameter.as_double();
         if (!std::isfinite(value) || value < 0.0) {
@@ -2784,9 +2954,7 @@ private:
       return;
     }
 
-    // Pulse-mode resolution (cube#172): one key per cloud (one ping), stamped
-    // on every sounding so the record-time correction picks the entry.
-    stampCloudMode(
+    prepareCloudBackscatter(
       static_cast<int64_t>(msg->header.stamp.sec) * 1000000000LL +
       static_cast<int64_t>(msg->header.stamp.nanosec), cloud_frequency, soundings);
 

@@ -76,6 +76,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rosbag2_transport/reader_writer_factory.hpp"
 #include "cube_bathymetry/backscatter_mode.h"
+#include "cube_bathymetry/gain_declaration.h"
 #include "cube_bathymetry/sonar_info_curve.h"
 #include "marine_interfaces/msg/sonar_info.hpp"
 #include "marine_interfaces/msg/sonar_visualization_tile.hpp"
@@ -211,6 +212,18 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "  --backscatter-mode-min-pings <N>: with a table, treat an entry derived "
     "from fewer than N pings as absent (the fallback applies); default 0 keeps every "
     "entry, however rare the mode (cube#172).\n";
+  std::cout << "  --backscatter-gain-declaration <file>: an operator-written gain-state "
+    "declaration (first line '# format: gain-state-declaration v1', cube#176): a "
+    "reference gain state plus the half-open UTC segments where the sonar's receiver "
+    "gain deviated from it, each with an additive dB offset (reported + offset = "
+    "reference level). Every ping in a segment has the offset added to its raw "
+    "intensity BEFORE the mode table or curve, whatever its pulse mode and even with "
+    "no table or --backscatter-correction none; a ping in no segment is at the "
+    "reference. A --backscatter-curve (curve or table) must have been derived with "
+    "the same declaration (derive_angular_response.py --gain-declaration), else the "
+    "run is refused; a curve or table that records a declaration is refused when none "
+    "is given. Per-segment ping counts are printed after the pass, and the "
+    "declaration is recorded in the build fingerprint.\n";
   std::cout << "  --tile-size-report <csv>: measure the live coverage stream's "
     "per-message size instead of guessing it (cube_bathymetry#112). Every "
     "--tile-report-interval seconds of BAG time, each dirty tile is quantized "
@@ -1002,6 +1015,12 @@ bool resolveBackscatterCorrection(
                 << "\n";
       return false;
     }
+    if (cube::isGainDeclaration(backscatter_curve_file)) {
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file
+                << "' is a gain-state declaration, not a curve or table "
+        "(--backscatter-gain-declaration takes the declaration)\n";
+      return false;
+    }
     if (cube::isAngularResponseTable(backscatter_curve_file)) {
       // A per-pulse-mode table (cube#172): one entry per mode, selected per
       // ping from the SonarInfo stream. Read whole or refused -- a table that
@@ -1056,6 +1075,14 @@ bool resolveBackscatterCorrection(
     std::string curve_bytes;
     backscatter_curve =
       cube::loadAngularResponseCurveWithHeader(backscatter_curve_file, &curve_bytes);
+    if (!backscatter_curve.header_error.empty()) {
+      // A half-edited gain-state record on an otherwise valid curve is an
+      // error, not a degraded run: running uncorrected is the silent failure
+      // the gain check exists to prevent (cube_bathymetry#176).
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "': "
+                << backscatter_curve.header_error << "\n";
+      return false;
+    }
     if (backscatter_curve.points.empty()) {
       // Loud in EVERY mode: the explicit file also suppresses the SonarInfo
       // pre-pass (it stays the operator's chosen source), so a failed load
@@ -1194,6 +1221,108 @@ void setupBackscatter(
   }
 }
 
+/// The gain-state declaration inputs (cube#176). Neither copyable nor
+/// movable: the resolver points at `declaration`.
+struct GainSetup
+{
+  GainSetup() = default;
+  GainSetup(const GainSetup &) = delete;
+  GainSetup & operator=(const GainSetup &) = delete;
+  GainSetup(GainSetup &&) = delete;
+  GainSetup & operator=(GainSetup &&) = delete;
+
+  cube::GainDeclaration declaration;
+  /// Canonical digest of the declaration (empty when none was given).
+  std::string sha256;
+  /// Null without a declaration.
+  std::unique_ptr<cube::GainStateResolver> resolver;
+  /// What the fingerprint records (reference state, digest, source); nullopt
+  /// without a declaration.
+  std::optional<cube::BuildFingerprint::GainDeclarationRecord> record;
+};
+
+/// Load the declaration (when given) BEFORE any bag is read and check it
+/// against the curve or table the run applies (cube#176 decision 8): both
+/// must record the same declaration, or neither. Returns false on a load
+/// error or an inconsistency (the caller exits via usage()).
+bool setupGainDeclaration(
+  GainSetup & out, const std::string & declaration_file,
+  const BackscatterSetup & backscatter, const std::string & backscatter_curve_file)
+{
+  if (!declaration_file.empty()) {
+    if (!cube::isGainDeclaration(declaration_file) &&
+      cube::isAngularResponseTable(declaration_file))
+    {
+      std::cerr << "error: --backscatter-gain-declaration '" << declaration_file
+                << "' is a per-pulse-mode table, not a gain-state declaration "
+        "(--backscatter-curve takes the table)\n";
+      return false;
+    }
+    std::string error;
+    out.declaration = cube::loadGainDeclaration(declaration_file, error);
+    if (!error.empty()) {
+      std::cerr << "error: --backscatter-gain-declaration could not be loaded: " << error
+                << "\n";
+      return false;
+    }
+    out.sha256 = cube::gainDeclarationSha256(out.declaration);
+    out.resolver = std::make_unique<cube::GainStateResolver>(&out.declaration);
+    out.record = cube::BuildFingerprint::GainDeclarationRecord{
+      out.declaration.reference_state, out.sha256, declaration_file};
+    std::cout << "Gain-state declaration " << declaration_file << ": reference state '"
+              << out.declaration.reference_state << "', " << out.declaration.segments.size()
+              << " segment(s), sha256 " << out.sha256 << std::endl;
+    for (const std::string & warning : out.declaration.warnings) {
+      std::cerr << "warning: --backscatter-gain-declaration " << declaration_file << ": "
+                << warning << "\n";
+    }
+  }
+  const cube::GainDeclaration * declaration = out.resolver ? &out.declaration : nullptr;
+  const auto & p = backscatter.provenance;
+  std::string problem;
+  if (p.kind == "table") {
+    problem = cube::gainRecordProblem(
+      "--backscatter-curve table " + backscatter_curve_file,
+      backscatter.table.gain_declaration_sha256, backscatter.table.gain_reference_state,
+      declaration, out.sha256);
+  } else if (p.kind == "curve" && p.source.rfind("sonar_info:", 0) != 0) {
+    problem = cube::gainRecordProblem(
+      "--backscatter-curve " + backscatter_curve_file,
+      backscatter.curve.gain_declaration_sha256, backscatter.curve.gain_reference_state,
+      declaration, out.sha256);
+  } else if (p.kind == "curve" && declaration) {
+    std::cerr << "warning: --backscatter-gain-declaration is given but the angular-response "
+      "curve comes from the bag's SonarInfo (" << p.source << "), which records no gain "
+      "state: its gain state is UNKNOWN. Pass an explicit --backscatter-curve derived with "
+      "this declaration.\n";
+  }
+  if (!problem.empty()) {
+    std::cerr << "error: " << problem << "\n";
+    return false;
+  }
+  return true;
+}
+
+/// setupGainDeclaration, exiting via usage() on failure (keeps main() short).
+void setupGainOrUsage(
+  GainSetup & out, const std::string & declaration_file, const BackscatterSetup & backscatter,
+  const std::string & backscatter_curve_file)
+{
+  if (!setupGainDeclaration(out, declaration_file, backscatter, backscatter_curve_file)) {
+    usage();
+  }
+}
+
+/// Shift one ping's soundings by its declared offset, counting the ping
+/// (a no-op without a declaration).
+void applyGainState(
+  GainSetup & gain, std::vector<cube::GeoSounding> & soundings, int64_t ping_ns)
+{
+  if (gain.resolver) {
+    cube::shiftSoundings(soundings, gain.resolver->apply(ping_ns));
+  }
+}
+
 /// After the pass (cube#172 review): print the mode-resolution report, and when
 /// a table was loaded but NOT ONE ping resolved to a table entry, say so as an
 /// error naming the likely causes and record the fingerprint kind as
@@ -1201,8 +1330,11 @@ void setupBackscatter(
 /// Returns true in that case. What that means for THIS run's outputs (exit 4,
 /// or a preflight that wrote no store, or a store the finish step could not
 /// complete) is only known after the finish step: withTableResolution says it.
-bool reportModeResolution(BackscatterSetup & backscatter)
+bool reportModeResolution(BackscatterSetup & backscatter, const GainSetup & gain)
 {
+  if (gain.resolver) {
+    std::cout << gain.resolver->report();
+  }
   if (!backscatter.resolver) {
     return false;
   }
@@ -1661,10 +1793,14 @@ bool writeFingerprint(
   const std::string & store_dir, cube::BuildFingerprint::Mode mode, double cell_size_m,
   const cube::Parameters & parameters, const std::string & iho_order,
   const cube::LevelPlanPolicy * policy, const std::set<uint8_t> & levels_used,
-  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction)
+  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction,
+  const std::optional<cube::BuildFingerprint::GainDeclarationRecord> & gain_declaration)
 {
   cube::BuildFingerprint f;
   f.mode = mode;
+  // The declared receiver gain states the intensities were shifted by before
+  // any correction (cube#176): reference state and canonical digest.
+  f.gain_declaration = gain_declaration;
   // What corrected the backscatter layer (cube#172): mode, curve/table hash,
   // fallback and ping floor, so a store built under another table is stale.
   f.backscatter_correction = backscatter_correction;
@@ -1779,7 +1915,8 @@ int cube_fixed_level_finish(
   std::optional<TileSizeReporter> & tile_reporter,
   const std::string & tile_size_report_path, double tile_refresh_interval_s,
   int tile_refresh_tiles_per_cycle, double phase_secs,
-  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction)
+  const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction,
+  const std::optional<cube::BuildFingerprint::GainDeclarationRecord> & gain_declaration)
 {
   std::cout << "Building store tiles..." << std::endl;
 
@@ -1810,12 +1947,14 @@ int cube_fixed_level_finish(
   reportPersisted(
     accumulator, store_dir, bs_store_dir, evicted_count,
     resident_before_final, phase_secs);
-  // Build fingerprint (ADR-0003 schema 2: tiling, cube#143, and the backscatter
-  // correction, cube#172): a fixed-level store records its mode, the requested
-  // cell size, the capture policy and how its backscatter was corrected.
+  // Build fingerprint (ADR-0003 schema 3: tiling, cube#143, the backscatter
+  // correction, cube#172, and the gain-state declaration, cube#176): a
+  // fixed-level store records its mode, the requested cell size, the capture
+  // policy and how its backscatter was corrected.
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::Fixed, resolution, geo_map_sheet.parameters(),
-    iho_order, nullptr, {geo_map_sheet.gridLevel().level()}, backscatter_correction);
+    iho_order, nullptr, {geo_map_sheet.gridLevel().level()}, backscatter_correction,
+    gain_declaration);
 
   // Exit codes rank by what is wrong with the DATA: 1 says the store may be
   // incomplete, so a failed diagnostic CSV must not borrow it -- that run's
@@ -1850,6 +1989,7 @@ int cube_depth_adaptive_finish(
   const cube::BackscatterTable & backscatter_table,
   cube::BackscatterModeFallback backscatter_mode_fallback,
   const cube::BuildFingerprint::BackscatterCorrection & backscatter_correction,
+  const std::optional<cube::BuildFingerprint::GainDeclarationRecord> & gain_declaration,
   const marine_bathymetry_store::StoreMetadata & store_metadata,
   const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, double recon_secs)
 {
@@ -2150,7 +2290,7 @@ int cube_depth_adaptive_finish(
   const bool fingerprinted = writeFingerprint(
     store_dir, cube::BuildFingerprint::Mode::DepthAdaptive, 0.0,
     accumulator.sheetAt(*plan->levels().begin()).parameters(), iho_order, &effective_policy,
-    plan->levels(), backscatter_correction);
+    plan->levels(), backscatter_correction, gain_declaration);
   if (!fingerprinted) {
     return 2;
   }
@@ -2201,7 +2341,7 @@ int main(int argc, char * argv[])
   // a valid curve in the bag's SonarInfo enables it; none in the bag =
   // identity, exactly the old default for pre-SonarInfo bags.
   std::string backscatter_correction_str = "auto";
-  std::string backscatter_curve_file;
+  std::string backscatter_curve_file, gain_declaration_file;  // gain: cube#176, empty = none
   std::string sonar_info_topic;  // default: derived from detections_topic
   // Per-pulse-mode table (cube#172): what an unresolved ping gets, and the
   // ping floor under which a table entry is treated as absent.
@@ -2317,6 +2457,8 @@ int main(int argc, char * argv[])
       backscatter_correction_str = next_value("--backscatter-correction");
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
+    } else if (*arg == "--backscatter-gain-declaration") {
+      gain_declaration_file = next_value("--backscatter-gain-declaration");
     } else if (*arg == "--sonar-info-topic") {
       sonar_info_topic = next_value("--sonar-info-topic");
     } else if (*arg == "--backscatter-mode-fallback") {
@@ -2477,6 +2619,8 @@ int main(int argc, char * argv[])
     sonar_info_topic, detections_topic, bagfile_names, backscatter_mode_fallback_str,
     backscatter_mode_min_pings);
   cube::BackscatterModeResolver * mode_resolver = backscatter.resolver.get();
+  GainSetup gain;
+  setupGainOrUsage(gain, gain_declaration_file, backscatter, backscatter_curve_file);
   const std::string & effective_sonar_info_topic = backscatter.sonar_info_topic;
 
   // Main-pass read filter (cube#107): restrict each reader to the topics the
@@ -2683,6 +2827,10 @@ int main(int argc, char * argv[])
         // cell size and the soundings' own TPU.
         std::vector<cube::GeoSounding> soundings =
           georeferencePing(projection, transform);
+        // Receiver gain state (cube#176): the declared offset goes on the raw
+        // intensity FIRST, for every ping of every mode, resolved or not -- it
+        // is a receiver calibration, not part of the mode table.
+        applyGainState(gain, soundings, ping_ns);
         if (mode_resolver) {
           // One pulse mode per ping (cube#172): the latest SonarInfo at or
           // before the ping stamp plus the ping's own frequency.
@@ -2832,7 +2980,7 @@ int main(int argc, char * argv[])
   std::cout << "\ndone." << std::endl;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
   cube::report_projection_summary(proj_totals, std::cout, std::cerr);
-  const bool table_unresolved = reportModeResolution(backscatter);
+  const bool table_unresolved = reportModeResolution(backscatter, gain);
 
   if (recon) {
     return withTableResolution(cube_depth_adaptive_finish(
@@ -2840,12 +2988,13 @@ int main(int argc, char * argv[])
       reference_store_dir, bs_store_dir, max_resident_tiles, iho_order,
       capture_spacing_scale, capture_spacing_scale_given, backscatter.mode,
       backscatter.curve, backscatter.table, backscatter.fallback, backscatter.provenance,
-      store_metadata, bs_metadata, projection_secs), table_unresolved, !level_plan_out.empty());
+      gain.record, store_metadata, bs_metadata, projection_secs), table_unresolved,
+      !level_plan_out.empty());
   }
 
   return withTableResolution(cube_fixed_level_finish(
     accumulator, geo_map_sheet, store_dir, bs_store_dir, resolution, iho_order,
     store_metadata, bs_metadata, tile_reporter, tile_size_report_path,
     tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs(),
-    backscatter.provenance), table_unresolved, false);
+    backscatter.provenance, gain.record), table_unresolved, false);
 }

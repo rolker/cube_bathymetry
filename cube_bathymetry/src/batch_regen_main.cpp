@@ -55,6 +55,8 @@
 
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/batch_regen.h"
+#include "cube_bathymetry/build_fingerprint.h"
+#include "cube_bathymetry/gain_declaration.h"
 #include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/projection_summary.h"
 #include "cube_bathymetry/geo_map_sheet.h"
@@ -127,6 +129,16 @@
     "the estimator remove per-beam 2-way TL 40*log10(R)+2*alpha*R (cube#87). A "
     "per-pulse-mode TABLE (angular-response-table v1, cube#172) is refused here: "
     "it needs the SonarInfo stream, which only import_bag reads\n";
+  std::cout << "  --backscatter-gain-declaration <file>: an operator-written gain-state "
+    "declaration (first line '# format: gain-state-declaration v1', cube#176), as for "
+    "import_bag: every ping in a declared segment has the segment's additive dB offset "
+    "added to its raw intensity (reported + offset = reference level), with or without "
+    "a curve; a ping in no segment is at the reference. A --backscatter-curve must have "
+    "been derived with the same declaration (derive_angular_response.py "
+    "--gain-declaration), and a curve that records a declaration is refused when none is "
+    "given. A per-pulse-mode table is still not supported here (no SonarInfo source), so "
+    "table + declaration parity with import_bag is not available. Per-segment ping "
+    "counts are printed after the pass.\n";
   std::cout << "  --index-db <path>: DRY-RUN dirty-tile query (cube#111, ADR-0002). "
     "Given the marine_survey_index sidecar (survey_index.db) and the bags treated "
     "as newly-added, prints the store-level (L10) tiles a tile-scoped rebuild would "
@@ -628,6 +640,186 @@ int dirtyTileDryRun(
 }
 
 
+/// The gain-state declaration inputs (cube#176), filled in place: the
+/// resolver points at `declaration`.
+struct GainSetup
+{
+  GainSetup() = default;
+  GainSetup(const GainSetup &) = delete;
+  GainSetup & operator=(const GainSetup &) = delete;
+  GainSetup(GainSetup &&) = delete;
+  GainSetup & operator=(GainSetup &&) = delete;
+
+  cube::GainDeclaration declaration;
+  /// Canonical digest of the declaration (empty when none was given).
+  std::string sha256;
+  std::unique_ptr<cube::GainStateResolver> resolver;
+};
+
+/// What is wrong with the file given as --backscatter-curve before either
+/// loader reads it, or empty: not a regular file, or a gain-state declaration
+/// handed to the wrong flag.
+std::string curveFileProblem(const std::string & path)
+{
+  const std::string problem = cube::explicitBackscatterFileProblem(path);
+  if (!problem.empty()) {
+    return problem;
+  }
+  if (cube::isGainDeclaration(path)) {
+    return "is a gain-state declaration, not a curve "
+           "(--backscatter-gain-declaration takes the declaration)";
+  }
+  return "";
+}
+
+/// Load the single curve; a malformed gain-state record is an error (usage()),
+/// not an empty curve that runs uncorrected (cube_bathymetry#176).
+cube::AngularResponseCurve loadCurveOrUsage(const std::string & path)
+{
+  cube::AngularResponseCurve curve = cube::loadAngularResponseCurveWithHeader(path);
+  if (!curve.header_error.empty()) {
+    std::cerr << "error: --backscatter-curve '" << path << "': " << curve.header_error << "\n";
+    usage();
+  }
+  return curve;
+}
+
+/// Load the declaration (when given) before any bag opens and check it
+/// against the single curve the run applies (cube#176 decision 8). The curve
+/// is checked only when it is applied: --backscatter-correction empirical with
+/// an explicit file. Returns false on a load error or an inconsistency.
+bool setupGainDeclaration(
+  GainSetup & out, const std::string & declaration_file,
+  cube::BackscatterAngleCorrection backscatter_mode,
+  const cube::AngularResponseCurve & curve, const std::string & curve_file)
+{
+  if (!declaration_file.empty()) {
+    if (!cube::isGainDeclaration(declaration_file) &&
+      cube::isAngularResponseTable(declaration_file))
+    {
+      std::cerr << "error: --backscatter-gain-declaration '" << declaration_file
+                << "' is a per-pulse-mode table, not a gain-state declaration\n";
+      return false;
+    }
+    std::string error;
+    out.declaration = cube::loadGainDeclaration(declaration_file, error);
+    if (!error.empty()) {
+      std::cerr << "error: --backscatter-gain-declaration could not be loaded: " << error
+                << "\n";
+      return false;
+    }
+    out.sha256 = cube::gainDeclarationSha256(out.declaration);
+    out.resolver = std::make_unique<cube::GainStateResolver>(&out.declaration);
+    std::cout << "Gain-state declaration " << declaration_file << ": reference state '"
+              << out.declaration.reference_state << "', " << out.declaration.segments.size()
+              << " segment(s), sha256 " << out.sha256 << std::endl;
+    for (const std::string & warning : out.declaration.warnings) {
+      std::cerr << "warning: --backscatter-gain-declaration " << declaration_file << ": "
+                << warning << "\n";
+    }
+  }
+  if (backscatter_mode != cube::BackscatterAngleCorrection::Empirical || curve_file.empty()) {
+    return true;
+  }
+  const std::string problem = cube::gainRecordProblem(
+    "--backscatter-curve " + curve_file, curve.gain_declaration_sha256,
+    curve.gain_reference_state, out.resolver ? &out.declaration : nullptr, out.sha256);
+  if (!problem.empty()) {
+    std::cerr << "error: " << problem << "\n";
+    return false;
+  }
+  return true;
+}
+
+/// Whether the store in @p store_dir (the `-o` store ONLY: `--reference-store`
+/// seeds the predicted depth surface and never carries backscatter) was built
+/// under the gain state this run applies (cube#176, ADR-0003). batch_regen
+/// writes no fingerprint, so this is a read-only check; it refuses what would
+/// leave tiles in two gain states inside one store:
+///
+///   declaration given | `-o` fingerprint                 | outcome
+///   present           | same reference state and digest  | proceed
+///   present           | different                        | refuse, both named
+///   present           | `gain_declaration: null`         | refuse (built uncorrected)
+///   present           | older schema (pre-#176)          | refuse (gain state unknowable)
+///   present           | no fingerprint file              | proceed, warning
+///   none              | records a declaration            | refuse (tiles would be rebuilt
+///                     |                                  | uncorrected in a corrected store)
+///   none              | null, older schema, no file      | proceed
+///
+/// A fingerprint that exists but cannot be read is refused either way: the gain
+/// state it records cannot be told. Returns the reason, or "" to proceed.
+std::string gainFingerprintProblem(const std::string & store_dir, const GainSetup & gain)
+{
+  std::optional<cube::BuildFingerprint> fp;
+  try {
+    fp = cube::BuildFingerprint::read(store_dir);
+  } catch (const std::exception & e) {
+    return "the build fingerprint in " + store_dir + " cannot be read (" + e.what() +
+           "), so the gain state the store was built in cannot be told; repair or remove it "
+           "(a full rebuild is then the only exact option)";
+  }
+  const bool current = fp && fp->schema_version == cube::BuildFingerprint::kSchemaVersion;
+  if (!gain.resolver) {
+    if (current && fp->gain_declaration) {
+      return "the store in " + store_dir + " was built under gain-state declaration '" +
+             fp->gain_declaration->reference_state + "' (sha256 " + fp->gain_declaration->sha256 +
+             "), but no --backscatter-gain-declaration was given: regenerating would rebuild "
+             "tiles uncorrected inside a corrected store. Pass the same declaration";
+    }
+    return "";
+  }
+  if (!fp) {
+    std::cerr << "warning: " << store_dir << " has no build fingerprint, so the gain state it "
+      "was built in cannot be checked against --backscatter-gain-declaration\n";
+    return "";
+  }
+  if (!current) {
+    return "the store in " + store_dir + " has a build fingerprint of schema " +
+           std::to_string(fp->schema_version) + " (older than the gain-state declaration, "
+           "cube_bathymetry#176): the gain state it was built in is unknowable, and the "
+           "declaration would put the tiles rebuilt here in " + gain.declaration.reference_state +
+           ". Rebuild the whole store with import_bag";
+  }
+  if (!fp->gain_declaration) {
+    return "the store in " + store_dir + " was built with no gain-state declaration (its "
+           "fingerprint records none), but --backscatter-gain-declaration " +
+           gain.declaration.path + " was given: the tiles rebuilt here would be in reference "
+           "state '" + gain.declaration.reference_state + "', the rest of the store not";
+  }
+  if (fp->gain_declaration->sha256 != gain.sha256 ||
+    fp->gain_declaration->reference_state != gain.declaration.reference_state)
+  {
+    return "the store in " + store_dir + " was built under gain-state declaration '" +
+           fp->gain_declaration->reference_state + "' (sha256 " + fp->gain_declaration->sha256 +
+           "), but " + gain.declaration.path + " is reference state '" +
+           gain.declaration.reference_state + "' (sha256 " + gain.sha256 +
+           "): they are different corrections";
+  }
+  return "";
+}
+
+/// setupGainDeclaration plus the `-o` fingerprint check, exiting via usage() on
+/// failure (keeps main() short).
+void setupGainOrUsage(
+  GainSetup & out, const std::string & declaration_file, const std::string & store_dir,
+  cube::BackscatterAngleCorrection backscatter_mode,
+  const cube::AngularResponseCurve & curve, const std::string & curve_file)
+{
+  if (backscatter_mode == cube::BackscatterAngleCorrection::None && !curve_file.empty()) {
+    std::cout << "--backscatter-correction none: any --backscatter-curve file is ignored "
+      "(add --backscatter-correction empirical to apply it)." << std::endl;
+  }
+  if (!setupGainDeclaration(out, declaration_file, backscatter_mode, curve, curve_file)) {
+    usage();
+  }
+  const std::string problem = gainFingerprintProblem(store_dir, out);
+  if (!problem.empty()) {
+    std::cerr << "error: " << problem << "\n";
+    usage();
+  }
+}
+
 int main(int argc, char * argv[])
 {
   std::vector<std::string> arguments(argv + 1, argv + argc);
@@ -649,7 +841,7 @@ int main(int argc, char * argv[])
   int ping_count_limit = 0;
   // Backscatter angular-response correction (cube#81). Default none = identity.
   std::string backscatter_correction_str = "none";
-  std::string backscatter_curve_file;
+  std::string backscatter_curve_file, gain_declaration_file;  // gain: cube#176, empty = none
   // Depth-adaptive rebuild from a level plan (cube#143); empty = fixed level.
   std::string level_plan_path;
   float capture_spacing_scale = 0.71f;
@@ -734,6 +926,8 @@ int main(int argc, char * argv[])
       backscatter_correction_str = next_value("--backscatter-correction");
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
+    } else if (*arg == "--backscatter-gain-declaration") {
+      gain_declaration_file = next_value("--backscatter-gain-declaration");
     } else if (*arg == "--level-plan") {
       level_plan_path = next_value("--level-plan");
     } else if (*arg == "--capture-spacing-scale") {
@@ -847,7 +1041,7 @@ int main(int argc, char * argv[])
     cube::parseBackscatterAngleCorrection(backscatter_correction_str, requested_mode) &&
     requested_mode == cube::BackscatterAngleCorrection::Empirical)
   {
-    const std::string problem = cube::explicitBackscatterFileProblem(backscatter_curve_file);
+    const std::string problem = curveFileProblem(backscatter_curve_file);
     if (!problem.empty()) {
       std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "' " << problem
                 << "\n";
@@ -944,7 +1138,7 @@ int main(int argc, char * argv[])
         "apply one -- rebuild with import_bag, or pass a single-curve CSV\n";
       usage();
     }
-    backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
+    backscatter_curve = loadCurveOrUsage(backscatter_curve_file);
   }
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
     backscatter_curve.points.empty())
@@ -966,6 +1160,9 @@ int main(int argc, char * argv[])
     }
     std::cout << std::endl;
   }
+  GainSetup gain;
+  setupGainOrUsage(gain, gain_declaration_file, store_dir, backscatter_mode, backscatter_curve,
+    backscatter_curve_file);
   geo_map_sheet.setBackscatterCorrection(
     backscatter_mode, backscatter_curve.points,
     backscatter_curve.tl_removed, backscatter_curve.absorption_db_per_m);
@@ -1151,6 +1348,10 @@ int main(int argc, char * argv[])
           gs.sounding.slant_range = s.slant_range;
           soundings.push_back(gs);
         }
+        // Receiver gain state (cube#176): the declared offset goes on the raw
+        // intensity before it is bucketed, as in import_bag, so the gather
+        // needs nothing and a regen never rebuilds tiles uncorrected.
+        if (gain.resolver) {cube::shiftSoundings(soundings, gain.resolver->apply(ping_ns));}
         // Scatter this ping's soundings to their per-tile buckets on disk (cube#96).
         // Nothing accumulates in RAM here; the gather (finalize) builds each tile.
         regen.addBatch(soundings);
@@ -1267,6 +1468,7 @@ int main(int argc, char * argv[])
   std::cout << "\ndone." << std::endl;
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
   cube::report_projection_summary(proj_totals, std::cout, std::cerr);
+  if (gain.resolver) {std::cout << gain.resolver->report();}
 
   std::cout << "Gathering per-tile buckets (exact rebuild)..." << std::endl;
 

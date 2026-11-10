@@ -222,3 +222,70 @@ and keeps schema version 2 (additive).
 `tool_version` as specified reads `package.xml`'s
 `<version>`, which is `0.0.0` and has never been bumped, so that key would be
 inert until a versioning practice exists — a follow-up, not this amendment.
+
+## Amendment 2026-11-09 — schema version 3: `gain_declaration` ([cube_bathymetry#176](https://github.com/rolker/cube_bathymetry/issues/176))
+
+A sonar's receiver gain can step without the sonar recording it, and the
+operator declares the steps in a `gain-state-declaration v1` file (ADR-0007,
+gain-state addendum). Backscatter intensities are shifted by the declared
+offset before any correction, so the declaration decides the backscatter
+layer's values the way the curve or table does and belongs in the fingerprint.
+
+```json
+"gain_declaration": {
+  "reference_state": "<the declaration's reference-state label>",
+  "sha256": "<hex of the declaration's CANONICAL form>",
+  "source": "<file path>"
+}
+```
+
+or `null` (no declaration), written beside `tiling` and `backscatter_correction`.
+`schema_version` goes 2 → 3, so **every store built before #176 reads stale**:
+the gain state it was built in is unknowable, and a store built across a step
+without a declaration is exactly the store this amendment exists to flag.
+`fromJson` already returns a non-current schema as readable-but-stale without
+interpreting its fields, so no migration code is needed ("regenerate is the
+migration").
+
+- **What the digest hashes.** The canonical form of the declaration, not the
+  file bytes: the format version, the reference state, and each segment's
+  `start_ns`, `end_ns` and `offset_db` (`%.6f`, negative zero as zero) in
+  sorted order. Ids, provenance, notes, `# sonar:`, comments, whitespace and
+  field order are excluded, so rewording a note does not make every store and
+  every derived table stale; anything that changes the correction does. The
+  comparison is strict equality: there is no "the declaration still covers the
+  data" reasoning. Both the C++ and the Python loader compute it and
+  `test/data/gain_declaration_vectors.json` pins the canonical text and the
+  digest for both.
+- **`isStale`** compares `reference_state` and `sha256`, not `source`, and
+  treats present against absent as different. A zero-segment declaration is
+  present (it names a reference state), so a store imported with one is stale
+  against one imported with none; that is intended: it is in a named
+  reference state.
+- **The derive tool's tables and curves carry the same two values**
+  (`# gain_reference_state:`, `# gain_declaration_sha256:`), and `import_bag`
+  and `batch_regen_bag` refuse a curve or table whose record differs from the
+  declaration they are given. That check is not a staleness check on a store; it
+  is the same identity applied to the correction's input.
+- **`batch_regen_bag` still writes no fingerprint.** It reads the `-o` store's
+  (never `--reference-store`'s, which only seeds the predicted depth surface)
+  and refuses what would leave tiles in two gain states in one store: a
+  declaration against a store built under another one, under none, or under an
+  older schema; or no declaration against a store built under one. A missing
+  fingerprint file, or an older schema with no declaration given, proceeds.
+  Writing a fingerprint from `batch_regen` stays the follow-up it was.
+- **The live node writes no fingerprint**, so a node started with a different
+  declaration than the one that built the store it resumes from or primes from
+  is not detected. Not a double application (the sums hold already-shifted
+  intensities), but an unguarded mixing; the README says so.
+
+### Staleness rules, schema 3
+
+| Condition | Action |
+|---|---|
+| `schema_version` != 3 | Full regen |
+| one has a `gain_declaration` and the other has none | Full regen |
+| `gain_declaration.reference_state` or `.sha256` differs | Full regen |
+| `gain_declaration.source` differs | No effect |
+
+All the schema-2 rules above stand with `schema_version` read as 3.
