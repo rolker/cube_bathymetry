@@ -80,7 +80,8 @@ Decisions this plan adds (flag any you disagree with):
     `start_ns`, `end_ns`, `offset_db` (`%.6f`) in sorted order. Notes, ids, `sonar`, comments, whitespace and field
     order are excluded, so editing a note does not stale every store and table; strict equality otherwise (no
     "covers the data" reasoning). Both the C++ and Python loaders compute it; the shared vectors pin the digest. The
-    loader still returns the raw bytes, but the fingerprint and headers carry the canonical digest.
+    loader still returns the raw bytes, but the fingerprint and headers carry the canonical digest. The offset the
+    tools APPLY is the same canonical 6-decimal value (`-0` as `0`), not the unrounded literal (review round 2).
 13. **Operator answers 2026-11-09 to the review questions:** package README documents the option/parameter now
     (`.agents/README.md` does not exist; creating that guide is its own follow-up issue, not filed here);
     `batch_regen` checks the fingerprint only and writes none; a pre-#176 table with a declaration is refused
@@ -114,6 +115,8 @@ Rules (each one a rejecting load error naming file, line and reason):
 - `offset_db` finite; `|offset_db| <= 60` (a typo guard); `0.0` allowed (an explicit "reference here" segment).
 - `segment` ids unique, `[A-Za-z0-9_.-]+`. `provenance` one of the three words; `provenance_note` non-empty.
 - Zero segments is legal (declares only the reference state) and loads with a warning.
+- A second `# format:` or `# reference_state:` line after the column line is refused in both loaders (a plain comment
+  there stays legal); the shared vectors pin it (review round 2).
 - The loader returns the bytes it parsed and the canonical digest (decision 12), so the fingerprint records exactly
   what was applied.
 
@@ -191,6 +194,12 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   resuming/priming from a store built under a different declaration is NOT detected (README + ADR addendum say so). Report is logged at deactivate/cleanup with the mode report; a ping in a +offset segment logs nothing
   per ping. The file is read at configure; a gain change that happens mid-run is entered by editing the file and
   reconfiguring (configure only, no hot reload; stated in the README).
+  Pre-push review rounds 1-2 added to the node: a configure-time `gainRecordProblem` check of the single curve
+  (`bs_curve_applied_ && bs_explicit_file_`) or the table against the declaration (skipped under
+  `backscatter_angle_correction=none`; a SonarInfo curve, i.e. no explicit file in any correcting mode, only
+  warns because it records no gain state), refusals of a table handed as the declaration and of a declaration
+  handed as `backscatter_curve_file`, rejection of a runtime `ros2 param set backscatter_gain_declaration` while
+  configured, and a scope guard that clears the backscatter and gain members on every FAILURE exit.
 - Implementation notes (commit 2): the shared curve/table check is `gainRecordProblem` in `gain_declaration.{h,cpp}`
   (decision 8; the digest comes from `gainDeclarationSha256` in `build_fingerprint.h`, so the core library needs no
   OpenSSL); `AngularResponseCurve` and `BackscatterTable` gained `gain_declaration_sha256` / `gain_reference_state`
@@ -208,7 +217,12 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   it, documenting why the sign is pinned), `test_declaration_without_table_shifts` (declaration only, no curve; and with `--backscatter-correction none`: the 23 dB seam disappears), `test_stamp_equal_to_start_ns_is_shifted` (a ping stamped exactly at a segment's `start_ns`, through the real import_bag path, is shifted; one 1 ns earlier is not), `test_single_curve_without_gain_header_refused`, `test_auto_with_declaration_warns`, `test_declaration_report_counts` (report lists per-segment and undeclared
   counts; a segment stamped a day late reads `0 pings` and warns), `test_table_without_declaration_hash_refused`,
   `test_hash_mismatch_refused`. `batch_regen` cases (`test_batch_regen.cpp` or a pytest, whichever has the CLI harness): bit-exact parity with `import_bag` on the same bag for the `none` and single-curve paths only, declaration on both; one test per row of the outcome table above (`FingerprintDeclarationMatrix_*`); `--reference-store` with a differing fingerprint does not refuse; a per-mode table is still refused. Node: `test_node.cpp` /
-  `test_node_lifecycle.cpp` cases `GainDeclarationShiftsCloudIntensityWithoutTable` (no table, no resolver) and `GainDeclarationShiftsCloudIntensityAndSurvivesReset`.
+  `test_node_lifecycle.cpp` cases `GainDeclarationShiftsCloudIntensityWithoutTable` (no table, no resolver) and `GainDeclarationShiftsCloudIntensityAndSurvivesReset`; after review, lifecycle cases for the configure-time check
+  on a table (`ATableFittedUnder{The,Another}Declaration*`, `APre176Table*`, `ADeclaredTableWithNoDeclaration*`) and on a single curve
+  (`ACurveFittedUnderTheDeclarationConfigures`, `...AnotherDeclarationFailsConfigure`, `ACurveWithNoGainRecord...`, `ADeclaredCurveWithNoDeclaration...`),
+  the swapped-file refusals (`ATableHandedAsTheDeclaration...`, `ADeclarationHandedAsTheCurve...`), the SonarInfo-curve warning
+  (`TheSonarInfoCurveWarningCoversEveryCorrectingModeAndOnlyWhenTrue`), the runtime-set rejection, and the failed-configure clean-up
+  (`AFailedConfigureLeavesNoBackscatterOrGainStateAndCanBeCorrected`, `AFailedConfigureAfterTheDeclarationLoadedClearsIt`).
 
 **Commit 3: derive tool consumes it (+ tests)**
 
@@ -228,7 +242,7 @@ Four atomic commits, in this order, on `feature/issue-176` (the plan itself is c
   per-ping offsets are added in `ping_beams` / `bin_ping` (`offset_db` argument); a `GainTracker` mirrors the C++
   resolver and counts pings and beams per segment; the headers also carry `# gain_declaration_source:`, `# gain_sign:`,
   one `# gain_segment:` line per segment and `# gain_undeclared:`; `ACCUMULATION_VERSION` goes 1 -> 2 (the cache payload
-  holds the tracker counters) and the cache identity carries `[reference_state, digest]`. The two end-to-end tests
+  holds the tracker counters), then 2 -> 3 when the counters were keyed by segment position instead of id (review round 1) and the cache identity carries `[reference_state, digest]`. The two end-to-end tests
   (derive across the step with the declaration, import with it; and the same table refused without it) live in
   `test_import_bag_mode_table.py`, where both tools meet.
 - Make sure the C++ table loader tolerates the new `#` header lines (it ignores unknown `# key:` lines today per the

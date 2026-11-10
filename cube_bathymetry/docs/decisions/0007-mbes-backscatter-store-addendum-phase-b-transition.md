@@ -321,7 +321,8 @@ source is rolker/marine_tools#97 and is not built here.
 1. **The operator declares the gain states.** A `gain-state-declaration v1`
    file names a reference gain state (a free label) and lists the deviations
    from it as half-open UTC intervals `[start, end)` with an additive offset in
-   dB, a mandatory provenance (`settings_file`, `measured`,
+   dB (the value applied is the canonical 6-decimal one the digest hashes), a
+   mandatory provenance (`settings_file`, `measured`,
    `operator_reported`) and a mandatory note. The offset is the value ADDED to
    the reported level to reach the reference state: a segment that read 23 dB
    low is `+23.0`. Overlap is an error; a ping in no segment is AT the
@@ -362,8 +363,13 @@ source is rolker/marine_tools#97 and is not built here.
    one that records none while a declaration is supplied (a pre-#176 file
    carries none, and a zero-segment declaration is the escape hatch for a season
    that never crossed a step), and one that records a declaration while none is
-   supplied. The `SonarInfo`-delivered curve (`auto`) has no header: a
-   declaration with `auto` warns that the curve's gain state is unknown. A
+   supplied. The record is both lines or neither, each once and non-empty, in
+   the curve and table loaders alike. The `SonarInfo`-delivered curve (`auto`)
+   has no header: a declaration with `auto` warns that the curve's gain state
+   is unknown. The live node runs the same check at configure against its
+   single curve or table (skipped under `none`), refuses a table or curve
+   handed as the declaration and a declaration handed as the curve, and only
+   warns, in every correcting mode, when the curve will come from `SonarInfo`. A
    source-side gain declaration (marine_tools#97) would be one more input on the
    same timeline — the loaders expose `offsetDbAt(stamp)` and nothing else, so
    such a term composes by sum — and, per the #172 addendum, would be checked
@@ -379,7 +385,9 @@ table (no `SonarInfo` source), so table + declaration parity with `import_bag`
 waits for it to read `SonarInfo`; its supported paths (`none`, a single curve)
 are bit-exact with `import_bag`. The live node reads the declaration at
 `configure` only (no hot reload: a mid-run edit would split one store across
-two declarations undetected), and writes no fingerprint, so a node resuming
+two declarations undetected; a runtime set while configured is rejected), checks
+it against its curve or table at configure (a failed configure leaves no gain
+state behind), and writes no fingerprint, so a node resuming
 from a store built under another declaration is not detected. The Appledore
 declaration file itself is campaign configuration, not part of this repository.
 

@@ -1211,7 +1211,10 @@ Each rule below is a rejecting load error that names the file, the line and
 the reason; the declaration is read whole or not at all:
 
 - `# format:` is the first non-blank line and the version is exactly `v1`;
-  `# reference_state:` appears once, non-empty, `[A-Za-z0-9_.-]+`.
+  `# reference_state:` appears once, non-empty, `[A-Za-z0-9_.-]+`. A second
+  `# format:` or `# reference_state:` line anywhere after the column line is
+  refused too (it would otherwise read as a comment and a conflicting label
+  would load); any other comment after the column line is fine.
 - Timestamps are `YYYY-MM-DDTHH:MM:SS[.fff...]Z`, UTC only (a numeric offset
   or a missing `Z` is refused), to nanoseconds. `end_utc` is explicit and
   exclusive, so "the end of 2026-08-28" is written `2026-08-29T00:00:00Z`;
@@ -1222,7 +1225,9 @@ the reason; the declaration is read whole or not at all:
   `inf`/`nan`, no separators; a literal that overflows, underflows or is
   subnormal is refused), finite, and at most 60 dB in magnitude (a typo guard).
   Both loaders parse and format locale-independently, and the canonical form
-  writes it `%.6f` with `-0.000000` as `0.000000`; `0.0`
+  writes it `%.6f` with `-0.000000` as `0.000000`. **The offset the tools
+  apply is that same 6-decimal value**, not the unrounded literal, so
+  `0.0000004` and `-0` apply as `0` exactly as they hash; `0.0`
   is allowed, an explicit "reference here". Segment ids are unique,
   `[A-Za-z0-9_.-]+`.
 - `provenance` is one of `settings_file`, `measured`, `operator_reported` and
@@ -1251,7 +1256,7 @@ record format changes. Four consumers read it:
 |---|---|---|
 | `import_bag` | `--backscatter-gain-declaration <file>` | loaded before any bag is read; the per-segment counts print after the pass; recorded in the build fingerprint |
 | `batch_regen_bag` | `--backscatter-gain-declaration <file>` | same shift at the same point, so a regen never rebuilds tiles uncorrected inside a corrected store; bit-exact with `import_bag` on the `none` and single-curve paths. It still refuses a per-mode table (no SonarInfo source), so **table + declaration parity with `import_bag` is not available** until it reads SonarInfo |
-| `cube_bathymetry_node` | parameter `backscatter_gain_declaration` (string, default empty) | read at `configure` only: a mid-run edit would split one store across two declarations undetected, so reconfigure is the explicit act and a runtime `ros2 param set` while configured is rejected. The curve or table the node applies (`backscatter_curve_file`) is checked against it exactly as `import_bag` does: a mismatch, a pre-#176 file with a declaration, a file fitted under a declaration with none set, or a per-mode table handed as the declaration fails the configure. It survives `~/reset`, and its counts are logged at cleanup. A load error fails the configure. The live node writes no fingerprint, so a node resuming from a store built under another declaration is **not** detected |
+| `cube_bathymetry_node` | parameter `backscatter_gain_declaration` (string, default empty) | read at `configure` only: a mid-run edit would split one store across two declarations undetected, so reconfigure is the explicit act and a runtime `ros2 param set` while configured is rejected (clean the node up, set it, configure again). The curve or table the node applies (`backscatter_curve_file`, a single curve or a per-mode table) is checked against it at configure exactly as `import_bag` does: a mismatch, a pre-#176 file with a declaration, a file fitted under a declaration with none set, a per-mode table handed as the declaration, or a declaration handed as `backscatter_curve_file` fails the configure; the check is skipped under `backscatter_angle_correction=none`, where no curve is applied. A curve that arrives by `SonarInfo` (no explicit file, any correcting mode) records no gain state, so it is only **warned** about, never refused. A failed configure leaves no table, resolver or declaration behind. It survives `~/reset`, and its counts are logged at cleanup. A load error fails the configure. The live node writes no fingerprint, so a node resuming from a store built under another declaration is **not** detected |
 | `derive_angular_response.py` | `--gain-declaration <file>` (single curve and `--by-mode`) | each ping's offset is added to its intensities before binning, so one curve or table comes out in the reference state from data on both sides of the step |
 
 **The per-segment counts are per-tool diagnostics, each counting the pings that
@@ -1260,7 +1265,9 @@ reached the shift after georeferencing (a ping with no earth transform is
 dropped first), the node counts non-empty clouds, and the derive tool counts the
 pings it used: with `--box` a ping outside the box is not counted, so a segment
 that covers only transit reads 0 pings there, and the derive tool says that
-instead of calling the stamps wrong. The `0 pings` warning is therefore a
+instead of calling the stamps wrong. The derive tool also warns about a segment
+whose pings fed no beam into the fit (no `SonarInfo`, or no usable beams there),
+which would otherwise read as healthy because its ping count is above zero. The `0 pings` warning is therefore a
 prompt to look, decisive only for a run over the whole bag.
 
 **A curve or table must be fitted under the declaration it is applied with.**
@@ -1272,11 +1279,17 @@ ping count) into the per-mode table and the single-curve CSV when it is given a
 declaration. `import_bag` and `batch_regen` refuse, before any message is read, a
 curve or table whose recorded digest or reference state differs from the
 declaration supplied, one that records none while a declaration is supplied,
-and one that records a declaration while none is supplied. Files written before
+and one that records a declaration while none is supplied. The record is both
+lines or neither, each once and with a value: a file with one of
+`# gain_declaration_sha256:` / `# gain_reference_state:` without the other, an
+empty one, or a repeated one is refused by the curve and table loaders (a
+curve then loads as an empty curve and says why). A declaration handed to
+`--backscatter-curve` (and the converse) is refused naming the flag. Files written before
 #176 carry no keys, so with a declaration they are refused and with none they
 load as before. The `auto` curve (`SonarInfo`-delivered, `import_bag`) has no
 header: a declaration with `auto` prints a loud warning that the curve's gain
-state is unknown. **Per-mode tables derived across a step (candidate D inputs)
+state is unknown (the node warns the same for every correcting mode that has no
+explicit curve file). **Per-mode tables derived across a step (candidate D inputs)
 must be re-derived with `--gain-declaration`.** A season that never crossed a
 step re-derives with, or imports with, a zero-segment declaration; that still
 changes the fingerprint through the reference label, which is intended: that
