@@ -22,3 +22,20 @@ issue: 173
 - [ ] Watch: dependency "cube#172 part B must land first" is satisfied (#172 and #176 are on jazzy); the issue text can be refreshed.
 - [ ] Watch: issue and design note use the name `DepthSampler`; the implemented API is `marine_backscatter::seabed::SeabedHeightSampler` (up-positive heights, `SourceId`, per-axis spans, `FallbackReason`). The plan uses the real names.
 - [ ] Watch: no ADR; record the design as an addendum to the ADR-0007 addendum set (the design is still evolving).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-11-10 12:29 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+
+**Plan**: `.agent/work-plans/issue-173/plan.md` at `823fb4e`
+**Branch**: feature/issue-173 at `823fb4e` (local only, not pushed, no PR)
+**Phases**: single issue; two PRs recommended (commit groups A-D, then E-F)
+
+### Open questions
+- [ ] uma#304 must be reviewed, pushed and merged before groups E-F (local branch feature/issue-304, 10 commits, no /review-code yet)
+- [ ] Derive tool angle source: C++ beam ledger versus Python re-implementation
+- [ ] Fallback definition: earth-frame angle from vertical versus sonar-frame |rx_angle|
+- [ ] Live node v1: flat-normal earth-frame (L1) versus staying on beam angle; running-surface slope deferred
+- [ ] batch_regen_bag with incidence: refuse versus support
+- [ ] Include --slope-surface (skip pass one) now; stencil floor default; one PR or two; default basis stays beam until Appledore comparison
