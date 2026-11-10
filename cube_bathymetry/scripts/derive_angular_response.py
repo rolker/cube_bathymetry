@@ -746,7 +746,7 @@ def load_gain_declaration(path):
         text = raw.decode('utf-8')
     except UnicodeDecodeError as e:
         raise ValueError('%s: not UTF-8 (%s)' % (path, e))
-    if text.startswith('﻿'):
+    if text.startswith('\ufeff'):
         text = text[1:]
 
     def fail(line_no, why):

@@ -3079,7 +3079,7 @@ def test_canonical_digest_ignores_notes_ids_and_order(tmp_path):
     a = write_gain_declaration(
         tmp_path / 'a.csv', [('x', 0, 10**9, 5.0), ('y', 2 * 10**9, 3 * 10**9, -0.0)])
     b = tmp_path / 'b.csv'
-    b.write_text('﻿# format: gain-state-declaration v1\r\n# sonar: other\r\n'
+    b.write_text('\ufeff# format: gain-state-declaration v1\r\n# sonar: other\r\n'
                  '# reference_state: pre_step\r\n'
                  'segment,start_utc,end_utc,offset_db,provenance,provenance_note\r\n'
                  'q,1970-01-01T00:00:02Z,1970-01-01T00:00:03Z,0,settings_file,n\r\n'

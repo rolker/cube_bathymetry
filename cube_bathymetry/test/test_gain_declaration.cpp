@@ -422,7 +422,8 @@ TEST(GainDeclaration, NonUtf8BytesAreRefusedLikeThePythonLoader)
 
 TEST(GainDeclaration, FileFramingVariantsHaveTheSameCanonicalForm)
 {
-  for (const auto & c : vectors().at("canonical_files")) {
+  const auto doc = vectors();
+  for (const auto & c : doc.at("canonical_files")) {
     GainDeclaration d;
     const std::string name = c.at("name");
     ASSERT_EQ(tryLoad(name, c.at("text"), d), "") << name;

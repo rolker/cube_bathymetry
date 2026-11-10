@@ -323,7 +323,7 @@
   },
   {
    "name": "bom",
-   "text": "﻿# format: gain-state-declaration v1\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n",
+   "text": "\ufeff# format: gain-state-declaration v1\n# reference_state: r\nsegment,start_utc,end_utc,offset_db,provenance,provenance_note\na,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,5.0,measured,n\n",
    "canonical": "gain-state-declaration v1\nreference_state=r\n1767225600000000000,1767312000000000000,5.000000\n"
   },
   {
