@@ -672,10 +672,16 @@ std::string curveFileProblem(const std::string & path)
   return "";
 }
 
-/// " (reason)" when the curve was refused for a malformed header, else "".
-std::string headerErrorNote(const cube::AngularResponseCurve & curve)
+/// Load the single curve; a malformed gain-state record is an error (usage()),
+/// not an empty curve that runs uncorrected (cube_bathymetry#176).
+cube::AngularResponseCurve loadCurveOrUsage(const std::string & path)
 {
-  return curve.header_error.empty() ? "" : " (" + curve.header_error + ")";
+  cube::AngularResponseCurve curve = cube::loadAngularResponseCurveWithHeader(path);
+  if (!curve.header_error.empty()) {
+    std::cerr << "error: --backscatter-curve '" << path << "': " << curve.header_error << "\n";
+    usage();
+  }
+  return curve;
 }
 
 /// Load the declaration (when given) before any bag opens and check it
@@ -1132,7 +1138,7 @@ int main(int argc, char * argv[])
         "apply one -- rebuild with import_bag, or pass a single-curve CSV\n";
       usage();
     }
-    backscatter_curve = cube::loadAngularResponseCurveWithHeader(backscatter_curve_file);
+    backscatter_curve = loadCurveOrUsage(backscatter_curve_file);
   }
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
     backscatter_curve.points.empty())
@@ -1140,8 +1146,7 @@ int main(int argc, char * argv[])
     // Loud, not silent: enabled but no curve loaded -> correction is a no-op.
     std::cerr << "warning: --backscatter-correction empirical but no curve was "
       "loaded from --backscatter-curve '" << backscatter_curve_file
-              << "'" << headerErrorNote(backscatter_curve)
-              << " -- the correction is ENABLED but a NO-OP (intensity emitted "
+              << "' -- the correction is ENABLED but a NO-OP (intensity emitted "
       "uncorrected). Provide a valid curve CSV.\n";
   } else if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical) {
     std::cout << "Backscatter angular-response correction: empirical, "

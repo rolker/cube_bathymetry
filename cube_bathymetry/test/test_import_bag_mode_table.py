@@ -477,7 +477,7 @@ def test_single_curve_with_matching_gain_header_accepted(tmp_path, flat_step_bag
     sha = _canonical_sha('pre_step', [('gain_step', STEP_START_NS, STEP_END_NS, GAIN_STEP_DB)])
     curve = tmp_path / 'curve.csv'
     base = (HERE / 'data' / 'derived_curve_tier2_seawater.csv').read_text()
-    curve.write_text('# gain_reference_state: pre_step\n# gain_declaration_sha256: %s\n%s' %
+    curve.write_text(HALF_GAIN_RECORD_CURVE)
                      (sha, base))
     decl = _step_declaration(tmp_path)
     rc, out = _run(tmp_path / 'store', flat_step_bag, [
@@ -564,6 +564,24 @@ def test_declaration_that_is_not_one_is_refused(tmp_path, mode_bag, table):
         '--backscatter-gain-declaration', str(table)])
     assert rc != 0, out
     assert 'is a per-pulse-mode table' in out, out
+
+
+HALF_GAIN_RECORD_CURVE = (
+    '# gain_reference_state: pre_step\n'
+    'abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n'
+    '1.0,-30.000,100,+0.000\n'
+    '3.0,-31.000,100,-1.000\n')
+
+
+def test_curve_with_half_a_gain_record_is_an_error_not_an_empty_curve(tmp_path, flat_step_bag):
+    curve = tmp_path / 'half.csv'
+    curve.write_text(HALF_GAIN_RECORD_CURVE)
+    rc, out = _run(tmp_path / 'store', flat_step_bag, [
+        '--backscatter-correction', 'empirical', '--backscatter-curve', str(curve)])
+    assert rc != 0, out
+    assert 'error: --backscatter-curve' in out and 'half.csv' in out, out
+    assert 'gain-state record is malformed' in out and 'EMPTY curve' not in out, out
+    assert not (tmp_path / 'store' / 'build_fingerprint.json').exists()
 
 
 def test_declaration_handed_as_the_curve_is_refused_naming_the_flag(tmp_path, flat_step_bag):

@@ -2363,3 +2363,29 @@ TEST_F(NodeLifecycle, AFailedConfigureAfterTheDeclarationLoadedClearsIt)
   EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
   EXPECT_FALSE(CubeBathymetryTestAccess::hasGainResolver(*node));
 }
+
+// A half-written gain record on an otherwise valid curve fails the configure
+// (it must not degrade to the warn-and-run-uncorrected empty-curve path);
+// fixing the file lets the same node configure.
+TEST_F(NodeLifecycle, ACurveWithHalfAGainRecordFailsConfigureAndConfiguresOnceFixed)
+{
+  const std::string rows =
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n1.0,-30.000,100,+0.000\n";
+  const TempFile half("halfgain", "# gain_reference_state: pre_step\n" + rows);
+  const std::string path = half.string();
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({
+    rclcpp::Parameter("backscatter_angle_correction", std::string("empirical")),
+    rclcpp::Parameter("backscatter_curve_file", path)}));
+  EXPECT_NE(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_TRUE(log.contains("backscatter_curve_file: ")) << log.all();
+  EXPECT_TRUE(log.contains("gain-state record is malformed")) << log.all();
+  EXPECT_FALSE(log.contains("yielded an EMPTY curve")) << log.all();
+  {
+    std::ofstream out(path);
+    out << rows;   // no gain record at all: a plain curve, valid with no declaration
+  }
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+  EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}

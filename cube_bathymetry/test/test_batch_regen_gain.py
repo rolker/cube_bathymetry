@@ -170,6 +170,27 @@ def test_a_per_mode_table_is_still_refused(tmp_path, flat_step_bag):
     assert 'per-pulse-mode table' in out, out
 
 
+HALF_GAIN_RECORD_CURVE = (
+    '# gain_reference_state: pre_step\n'
+    'abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n'
+    '1.0,-30.000,100,+0.000\n'
+    '3.0,-31.000,100,-1.000\n')
+
+
+def test_curve_with_half_a_gain_record_is_an_error_not_an_empty_curve(tmp_path, flat_step_bag):
+    curve = tmp_path / 'half.csv'
+    curve.write_text(HALF_GAIN_RECORD_CURVE)
+    rc, out = _regen(tmp_path / 'store', flat_step_bag, [
+        '--backscatter-correction', 'empirical', '--backscatter-curve', str(curve)])
+    assert rc != 0, out
+    assert 'error: --backscatter-curve' in out and 'half.csv' in out, out
+    assert 'gain-state record is malformed' in out and 'NO-OP' not in out, out
+    # under correction none the curve is not loaded: the existing notice, no error
+    rc, out = _regen(tmp_path / 'store2', flat_step_bag, [
+        '--backscatter-correction', 'none', '--backscatter-curve', str(curve)])
+    assert 'gain-state record is malformed' not in out, out
+
+
 def test_declaration_handed_as_the_curve_is_refused_naming_the_flag(tmp_path, flat_step_bag):
     decl = ib._step_declaration(tmp_path)
     rc, out = _regen(tmp_path / 'store', flat_step_bag, [

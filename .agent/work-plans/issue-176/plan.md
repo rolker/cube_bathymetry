@@ -117,6 +117,9 @@ Rules (each one a rejecting load error naming file, line and reason):
 - Zero segments is legal (declares only the reference state) and loads with a warning.
 - A second `# format:` or `# reference_state:` line after the column line is refused in both loaders (a plain comment
   there stays legal); the shared vectors pin it (review round 2).
+- The gain-state record of a curve or table is both `# gain_*` lines or neither, each once and non-empty; a
+  malformed record is refused as an error (import_bag, batch_regen when it applies the curve, node configure
+  FAILURE), not degraded to the empty-curve warning (coordinator follow-up, review round 2).
 - The loader returns the bytes it parsed and the canonical digest (decision 12), so the fingerprint records exactly
   what was applied.
 

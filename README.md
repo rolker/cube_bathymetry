@@ -1282,8 +1282,10 @@ declaration supplied, one that records none while a declaration is supplied,
 and one that records a declaration while none is supplied. The record is both
 lines or neither, each once and with a value: a file with one of
 `# gain_declaration_sha256:` / `# gain_reference_state:` without the other, an
-empty one, or a repeated one is refused by the curve and table loaders (a
-curve then loads as an empty curve and says why). A declaration handed to
+empty one, or a repeated one is refused by the curve and table loaders, and
+`import_bag`, `batch_regen_bag` (when it applies the curve) and the node fail
+with an error naming the file and the reason, never degrading to an uncorrected
+run (the plain missing or unparseable curve file still only warns). A declaration handed to
 `--backscatter-curve` (and the converse) is refused naming the flag. Files written before
 #176 carry no keys, so with a declaration they are refused and with none they
 load as before. The `auto` curve (`SonarInfo`-delivered, `import_bag`) has no

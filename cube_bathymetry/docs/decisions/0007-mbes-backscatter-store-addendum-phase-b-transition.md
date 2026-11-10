@@ -364,7 +364,9 @@ source is rolker/marine_tools#97 and is not built here.
    carries none, and a zero-segment declaration is the escape hatch for a season
    that never crossed a step), and one that records a declaration while none is
    supplied. The record is both lines or neither, each once and non-empty, in
-   the curve and table loaders alike. The `SonarInfo`-delivered curve (`auto`)
+   the curve and table loaders alike; a malformed record is an error in all three
+   tools (the node fails its configure), refused, not degraded to an uncorrected
+   run. The `SonarInfo`-delivered curve (`auto`)
    has no header: a declaration with `auto` warns that the curve's gain state
    is unknown. The live node runs the same check at configure against its
    single curve or table (skipped under `none`), refuses a table or curve

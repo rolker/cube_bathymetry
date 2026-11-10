@@ -1075,15 +1075,20 @@ bool resolveBackscatterCorrection(
     std::string curve_bytes;
     backscatter_curve =
       cube::loadAngularResponseCurveWithHeader(backscatter_curve_file, &curve_bytes);
+    if (!backscatter_curve.header_error.empty()) {
+      // A half-edited gain-state record on an otherwise valid curve is an
+      // error, not a degraded run: running uncorrected is the silent failure
+      // the gain check exists to prevent (cube_bathymetry#176).
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "': "
+                << backscatter_curve.header_error << "\n";
+      return false;
+    }
     if (backscatter_curve.points.empty()) {
       // Loud in EVERY mode: the explicit file also suppresses the SonarInfo
       // pre-pass (it stays the operator's chosen source), so a failed load
       // must never vanish silently (#102 r1).
-      const std::string headerReason =
-        backscatter_curve.header_error.empty() ? "" : ": " + backscatter_curve.header_error;
       std::cerr << "warning: --backscatter-curve '" << backscatter_curve_file
-                << "' yielded an EMPTY curve (missing/unparseable" << headerReason
-                << ") -- no "
+                << "' yielded an EMPTY curve (missing/unparseable) -- no "
         "correction from it, and the bag's SonarInfo curves stay IGNORED "
         "because an explicit file was given. Fix or drop the flag.\n";
     } else {

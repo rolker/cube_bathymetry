@@ -300,6 +300,12 @@ public:
       !bs_curve_file.empty() && !bs_file_is_table)
     {
       bs_curve = cube::loadAngularResponseCurveWithHeader(bs_curve_file);
+      if (!bs_curve.header_error.empty()) {
+        // Not the warn-and-run-uncorrected path: see cube_bathymetry#176.
+        RCLCPP_ERROR(get_logger(), "backscatter_curve_file: '%s': %s", bs_curve_file.c_str(),
+          bs_curve.header_error.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
       bs_curve_applied_ = !bs_curve.points.empty();
       if (!bs_curve_applied_) {
         // Loud in EVERY mode (not just empirical): an explicit file also
@@ -307,10 +313,9 @@ public:
         // source), so a failed load must never vanish silently (#102 r1).
         RCLCPP_WARN(get_logger(),
           "backscatter_curve_file='%s' yielded an EMPTY curve (missing/"
-          "unparseable%s%s) -- no correction from it, and published SonarInfo "
+          "unparseable) -- no correction from it, and published SonarInfo "
           "curves stay IGNORED because an explicit file was configured. "
-          "Fix or clear the parameter.", bs_curve_file.c_str(),
-          bs_curve.header_error.empty() ? "" : ": ", bs_curve.header_error.c_str());
+          "Fix or clear the parameter.", bs_curve_file.c_str());
       }
     }
     if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.points.empty() &&
