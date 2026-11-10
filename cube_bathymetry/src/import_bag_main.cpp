@@ -1015,6 +1015,12 @@ bool resolveBackscatterCorrection(
                 << "\n";
       return false;
     }
+    if (cube::isGainDeclaration(backscatter_curve_file)) {
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file
+                << "' is a gain-state declaration, not a curve or table "
+        "(--backscatter-gain-declaration takes the declaration)\n";
+      return false;
+    }
     if (cube::isAngularResponseTable(backscatter_curve_file)) {
       // A per-pulse-mode table (cube#172): one entry per mode, selected per
       // ping from the SonarInfo stream. Read whole or refused -- a table that

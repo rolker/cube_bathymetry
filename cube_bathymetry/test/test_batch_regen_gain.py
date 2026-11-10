@@ -170,6 +170,16 @@ def test_a_per_mode_table_is_still_refused(tmp_path, flat_step_bag):
     assert 'per-pulse-mode table' in out, out
 
 
+def test_declaration_handed_as_the_curve_is_refused_naming_the_flag(tmp_path, flat_step_bag):
+    decl = ib._step_declaration(tmp_path)
+    rc, out = _regen(tmp_path / 'store', flat_step_bag, [
+        '--backscatter-correction', 'empirical', '--backscatter-curve', str(decl),
+        '--backscatter-gain-declaration', str(decl)])
+    assert rc != 0, out
+    assert 'is a gain-state declaration, not a curve' in out, out
+    assert '--backscatter-gain-declaration takes the declaration' in out, out
+
+
 def test_a_bad_declaration_is_refused_before_any_bag_is_read(tmp_path, flat_step_bag):
     bad = tmp_path / 'bad.csv'
     bad.write_text('# format: gain-state-declaration v1\n# reference_state: r\n'

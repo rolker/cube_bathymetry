@@ -1019,6 +1019,12 @@ int main(int argc, char * argv[])
                 << "\n";
       usage();
     }
+    if (cube::isGainDeclaration(backscatter_curve_file)) {
+      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file
+                << "' is a gain-state declaration, not a curve "
+        "(--backscatter-gain-declaration takes the declaration)\n";
+      usage();
+    }
   }
 
   std::cout << "Detections topic: " << detections_topic

@@ -566,6 +566,17 @@ def test_declaration_that_is_not_one_is_refused(tmp_path, mode_bag, table):
     assert 'is a per-pulse-mode table' in out, out
 
 
+def test_declaration_handed_as_the_curve_is_refused_naming_the_flag(tmp_path, flat_step_bag):
+    decl = _step_declaration(tmp_path)
+    rc, out = _run(tmp_path / 'store', flat_step_bag, [
+        '--backscatter-correction', 'empirical', '--backscatter-curve', str(decl),
+        '--backscatter-gain-declaration', str(decl)])
+    assert rc != 0, out
+    assert "--backscatter-curve" in out and 'is a gain-state declaration' in out, out
+    assert '--backscatter-gain-declaration takes the declaration' in out, out
+    assert not (tmp_path / 'store' / 'build_fingerprint.json').exists()
+
+
 def test_derived_table_under_the_declaration_imports_end_to_end(tmp_path, step_bag):
     """
     The whole chain: derive across the step with the declaration, import with it.

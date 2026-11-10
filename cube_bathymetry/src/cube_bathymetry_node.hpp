@@ -220,6 +220,12 @@ public:
       RCLCPP_WARN(get_logger(),
         "backscatter_mode_fallback / backscatter_mode_min_pings apply only to a "
         "per-pulse-mode table, and backscatter_curve_file is not one (or the correction "
+      if (cube::isGainDeclaration(bs_curve_file)) {
+        RCLCPP_ERROR(get_logger(),
+          "backscatter_curve_file='%s' is a gain-state declaration, not a curve or table "
+          "(backscatter_gain_declaration takes the declaration)", bs_curve_file.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
         "is none): they are ignored.");
     }
     if (bs_file_is_table) {
