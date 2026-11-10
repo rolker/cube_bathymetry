@@ -258,6 +258,8 @@ AngularResponseCurve parseAngularResponseCurve(const std::string & text)
   std::istringstream in(text);
 
   std::string line;
+  int sha_lines = 0;
+  int state_lines = 0;
   while (std::getline(in, line)) {
     // Skip blank lines and comments -- but first mine comments for the optional
     // self-describing TL header (cube_bathymetry#87).
@@ -273,8 +275,10 @@ AngularResponseCurve parseAngularResponseCurve(const std::string & text)
           }
           result.tl_removed = (lower == "true" || lower == "1");
         } else if (matchHeaderComment(line, "gain_declaration_sha256", value)) {
+          ++sha_lines;
           result.gain_declaration_sha256 = value;
         } else if (matchHeaderComment(line, "gain_reference_state", value)) {
+          ++state_lines;
           result.gain_reference_state = value;
         } else if (matchHeaderComment(line, "absorption_db_per_m", value)) {
           try {
@@ -322,6 +326,21 @@ AngularResponseCurve parseAngularResponseCurve(const std::string & text)
       // Header row or malformed numeric -- skip.
       continue;
     }
+  }
+
+  // The gain-state record is both lines or neither, each once and non-empty
+  // (cube_bathymetry#176): half a record would read as "no record" or as a
+  // record that cannot match, and a repeated line is ambiguous. Refused as an
+  // empty curve with the reason, like any other unusable file.
+  if (sha_lines != state_lines || sha_lines > 1 ||
+    (sha_lines == 1 && (result.gain_declaration_sha256.empty() ||
+    result.gain_reference_state.empty())))
+  {
+    result = AngularResponseCurve();
+    result.header_error =
+      "its gain-state record is malformed: '# gain_declaration_sha256:' and "
+      "'# gain_reference_state:' must each be given exactly once, together, with a value";
+    return result;
   }
 
   // Ensure ascending order by angle so the interpolation can assume monotonic

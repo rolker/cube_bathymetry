@@ -31,6 +31,7 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -429,6 +430,36 @@ TEST(BackscatterTable, GainHeaderLinesAreReadAndTheRestIgnored)
   EXPECT_TRUE(plain.gain_reference_state.empty());
   EXPECT_TRUE(plain.gain_declaration_sha256.empty());
   std::filesystem::remove(plain_path);
+}
+
+TEST(BackscatterTable, MalformedGainRecordIsRefused)
+{
+  const std::string sha =
+    "# gain_declaration_sha256: 428912fc9f3f157a1ed1843c8c2e3b7b3004649adb3958cab1e84e6776895ac8\n";
+  const std::string state = "# gain_reference_state: pre_step\n";
+  const std::string head =
+    "# format: angular-response-table v1\n# reference_mode: FMU_1000us_24000Hz_500kHz\n"
+    "# range_ref_m: 10\n";
+  const std::string columns =
+    "mode,term,x,angle_lo_deg,angle_hi_deg,value_db,n,var_db2,db_relative_to_nadir,se_db,"
+    "offset_db_vs_ref,offset_se_db,offset_anchored,declared_tvg_model,"
+    "declared_tvg_absorption_db_per_km\n";
+  const std::vector<std::tuple<std::string, std::string, std::string>> bad = {
+    {"sha_only", sha, "together"},
+    {"state_only", state, "together"},
+    {"empty_sha", "# gain_declaration_sha256:\n" + state, "must not be empty"},
+    {"empty_state", sha + "# gain_reference_state:\n", "must not be empty"},
+    {"duplicate_sha", sha + sha + state, "given twice"},
+    {"duplicate_state", sha + state + state, "given twice"},
+  };
+  for (const auto & [name, gain, expected] : bad) {
+    const auto path = writeTemp("bad_gain_" + name, head + gain + columns + kGoodRows);
+    std::string error;
+    const auto table = loadBackscatterTable(path, error);
+    EXPECT_NE(error.find(expected), std::string::npos) << name << ": " << error;
+    EXPECT_TRUE(table.entries.empty()) << name;
+    std::filesystem::remove(path);
+  }
 }
 
 TEST(BackscatterTable, AMinimalTableLoads)

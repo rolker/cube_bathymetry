@@ -291,9 +291,10 @@ public:
         // source), so a failed load must never vanish silently (#102 r1).
         RCLCPP_WARN(get_logger(),
           "backscatter_curve_file='%s' yielded an EMPTY curve (missing/"
-          "unparseable) -- no correction from it, and published SonarInfo "
+          "unparseable%s%s) -- no correction from it, and published SonarInfo "
           "curves stay IGNORED because an explicit file was configured. "
-          "Fix or clear the parameter.", bs_curve_file.c_str());
+          "Fix or clear the parameter.", bs_curve_file.c_str(),
+          bs_curve.header_error.empty() ? "" : ": ", bs_curve.header_error.c_str());
       }
     }
     if (bs_mode == cube::BackscatterAngleCorrection::Empirical && bs_curve.points.empty() &&

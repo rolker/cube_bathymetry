@@ -58,6 +58,10 @@ namespace cube
   /// before #176). Compared with the declaration an import is given.
     std::string gain_declaration_sha256;
     std::string gain_reference_state;
+  /// Why the file was refused although it parsed (a malformed gain-state
+  /// record: one line without the other, an empty value, or a repeated
+  /// line); `points` is empty then. Empty when there is nothing to report.
+    std::string header_error;
   };
 
 /// Load an empirical angular-response curve from a CSV file matching the seed at

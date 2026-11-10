@@ -1074,7 +1074,10 @@ bool resolveBackscatterCorrection(
       // pre-pass (it stays the operator's chosen source), so a failed load
       // must never vanish silently (#102 r1).
       std::cerr << "warning: --backscatter-curve '" << backscatter_curve_file
-                << "' yielded an EMPTY curve (missing/unparseable) -- no "
+                << "' yielded an EMPTY curve (missing/unparseable"
+                << (backscatter_curve.header_error.empty() ? "" :
+        ": " + backscatter_curve.header_error)
+                << ") -- no "
         "correction from it, and the bag's SonarInfo curves stay IGNORED "
         "because an explicit file was given. Fix or drop the flag.\n";
     } else {

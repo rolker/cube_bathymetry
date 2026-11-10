@@ -1117,8 +1117,10 @@ int main(int argc, char * argv[])
   {
     // Loud, not silent: enabled but no curve loaded -> correction is a no-op.
     std::cerr << "warning: --backscatter-correction empirical but no curve was "
-      "loaded from --backscatter-curve '" << backscatter_curve_file
-              << "' -- the correction is ENABLED but a NO-OP (intensity emitted "
+      "loaded from --backscatter-curve '" << backscatter_curve_file << "'"
+              << (backscatter_curve.header_error.empty() ? "" :
+      " (" + backscatter_curve.header_error + ")")
+              << " -- the correction is ENABLED but a NO-OP (intensity emitted "
       "uncorrected). Provide a valid curve CSV.\n";
   } else if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical) {
     std::cout << "Backscatter angular-response correction: empirical, "

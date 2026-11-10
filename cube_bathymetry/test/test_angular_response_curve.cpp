@@ -25,6 +25,8 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/backscatter_table.h"
 
@@ -141,6 +143,32 @@ TEST(AngularResponseCurve, ParsesGainDeclarationHeader)
     "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n1.0,-30.000,100,+0.000\n");
   EXPECT_TRUE(plain.gain_reference_state.empty());
   EXPECT_TRUE(plain.gain_declaration_sha256.empty());
+}
+
+// The record is both lines or neither, each once and with a value; anything
+// else is refused as an empty curve that says why (#176 round 2).
+TEST(AngularResponseCurve, MalformedGainRecordIsRefusedWithAReason)
+{
+  const std::string rows =
+    "abs_angle_deg_center,mean_bs_db,n,db_relative_to_nadir\n1.0,-30.0,100,+0.000\n";
+  const std::string sha = "# gain_declaration_sha256: abc123\n";
+  const std::string state = "# gain_reference_state: pre_step\n";
+  const std::vector<std::pair<std::string, std::string>> bad = {
+    {"sha_only", sha + rows},
+    {"state_only", state + rows},
+    {"empty_sha", "# gain_declaration_sha256:\n" + state + rows},
+    {"empty_state", sha + "# gain_reference_state:  \n" + rows},
+    {"duplicate_sha", sha + sha + state + rows},
+    {"duplicate_state", sha + state + state + rows},
+  };
+  for (const auto & [name, text] : bad) {
+    const AngularResponseCurve curve = parseAngularResponseCurve(text);
+    EXPECT_TRUE(curve.points.empty()) << name;
+    EXPECT_NE(curve.header_error.find("gain-state record"), std::string::npos) << name;
+  }
+  const AngularResponseCurve good = parseAngularResponseCurve(sha + state + rows);
+  EXPECT_EQ(good.points.size(), 1u);
+  EXPECT_TRUE(good.header_error.empty());
 }
 
 // Absence of the TL header -> tier-1 defaults (tl_removed=false, absorption=0),
