@@ -149,18 +149,52 @@ Dropped: digest rounding below 5e-7 dB (negligible; soften the ADR's "anything t
 **Round**: 2 | **Ship**: continue — 4 must-fixes (3 in round 1), all mechanical with an obvious correction; fix, then a Light check of the delta rather than another full round
 
 ### Findings
-- [ ] (must-fix, Codex) Range-for over `vectors().at("canonical_files")` iterates a reference into a destroyed temporary (UB under C++17); hold `vectors()` in a local — `cube_bathymetry/test/test_gain_declaration.cpp:425`
-- [ ] (must-fix, Codex) A second `# reference_state:` / `# format:` line after the column line is skipped as a comment, so a conflicting label loads silently; refuse reserved header keys anywhere after the first, in BOTH loaders, with shared rejection vectors — `cube_bathymetry/src/gain_declaration.cpp:473`, `cube_bathymetry/scripts/derive_angular_response.py`
-- [ ] (must-fix, Lens B) The node's single-curve branch of the configure-time gain check (`bs_curve_applied_ && bs_explicit_file_`) and the Auto warning have no lifecycle test; deleting the branch leaves the suite green. Add configure-FAILURE tests for a single-curve CSV that records another sha, records none with a declaration set, and records one with none set — `cube_bathymetry/src/cube_bathymetry_node.hpp:343`, `cube_bathymetry/test/test_node_lifecycle.cpp`
-- [ ] (must-fix, Lens B) Warning "any angular-response curve will come from SonarInfo" is false when `backscatter_curve_file` is set but empty/unparseable (SonarInfo is then ignored); gate on `!bs_explicit_file_` — `cube_bathymetry/src/cube_bathymetry_node.hpp:347`
-- [ ] (suggestion, Lens B) Same warning should cover every mode that adopts a SonarInfo curve (`bs_mode != None && !bs_explicit_file_`), not only Auto — `cube_bathymetry/src/cube_bathymetry_node.hpp:347`
-- [ ] (suggestion, Codex + Lens A) The digest rounds offsets to 6 decimals but the applied value is the unrounded double (0 and 0.0000004 share a digest, differ in effect; `-0` prints `+-0.000 dB` in the resolver report). Apply the canonical 6-decimal value in both loaders (normalising -0 to 0) and test the report text with a negative-zero offset — `cube_bathymetry/src/gain_declaration.cpp:222,633`
-- [ ] (suggestion, Gemini) Curve and table loaders accept one of `# gain_declaration_sha256:` / `# gain_reference_state:` without the other, an empty value, or (curve) a duplicate key; require both-or-neither, non-empty, once — `cube_bathymetry/src/angular_response_curve.cpp:275`, `cube_bathymetry/src/backscatter_table.cpp:731`
-- [ ] (suggestion, Gemini) derive: a segment whose pings all lacked SonarInfo or usable beams has pings>0, beams==0 and suppresses the empty-segment warning; warn when no BEAM from a segment entered the fit — `cube_bathymetry/scripts/derive_angular_response.py:981`
-- [ ] (suggestion, Gemini + Lens A) A FAILURE return from on_configure leaves `bs_*` (gain-check failure) or `gain_*` (later failures) populated in UNCONFIGURED; clear both on every FAILURE exit (scope guard) and add a fail → correct the parameter → configure succeeds test — `cube_bathymetry/src/cube_bathymetry_node.hpp:353`
-- [ ] (suggestion, Gemini) No guard for a gain declaration handed to `--backscatter-curve` / `backscatter_curve_file` (the converse swap is refused); name the swapped flag in import_bag, batch_regen and the node — `cube_bathymetry/src/import_bag_main.cpp:1239`
-- [ ] (suggestion, Gemini) Raw invisible U+FEFF literal in source and vectors; use the `\ufeff` escape — `cube_bathymetry/scripts/derive_angular_response.py:749`, `cube_bathymetry/test/data/gain_declaration_vectors.json`
-- [ ] (suggestion, Lens A + Lens B) `ACCUMULATION_VERSION` not bumped although the cached gain payload changed shape; bump to 3 — `cube_bathymetry/scripts/derive_angular_response.py:3542`
-- [ ] (suggestion, Lens B) Node-side operator wording: prefix `gainRecordProblem` text with the parameter to set (`backscatter_gain_declaration`), and reword the runtime-set rejection ("set it while unconfigured" only applies after a cleanup) — `cube_bathymetry/src/cube_bathymetry_node.hpp:338,1445`
-- [ ] (suggestion, Lens B) Docs/plan sync: README row should say the node check is skipped under `backscatter_angle_correction=none` and only warns for a SonarInfo curve; ADR-0007 addendum "Not done here" and plan.md Commit-2 node bullet + test list should name the configure-time check, the table-as-declaration refusal, the runtime-set rejection and the new lifecycle tests — `README.md:1254`, `cube_bathymetry/docs/decisions/0007-*.md:380`, `.agent/work-plans/issue-176/plan.md:187`
-- [ ] (suggestion, Lens B) New lifecycle tests leak temp files (one never removed, the rest only on the passing path); use a RAII remover — `cube_bathymetry/test/test_node_lifecycle.cpp:2054`
+- [x] (must-fix, Codex) Range-for over `vectors().at("canonical_files")` iterates a reference into a destroyed temporary (UB under C++17); hold `vectors()` in a local — `cube_bathymetry/test/test_gain_declaration.cpp:425`
+- [x] (must-fix, Codex) A second `# reference_state:` / `# format:` line after the column line is skipped as a comment, so a conflicting label loads silently; refuse reserved header keys anywhere after the first, in BOTH loaders, with shared rejection vectors — `cube_bathymetry/src/gain_declaration.cpp:473`, `cube_bathymetry/scripts/derive_angular_response.py`
+- [x] (must-fix, Lens B) The node's single-curve branch of the configure-time gain check (`bs_curve_applied_ && bs_explicit_file_`) and the Auto warning have no lifecycle test; deleting the branch leaves the suite green. Add configure-FAILURE tests for a single-curve CSV that records another sha, records none with a declaration set, and records one with none set — `cube_bathymetry/src/cube_bathymetry_node.hpp:343`, `cube_bathymetry/test/test_node_lifecycle.cpp`
+- [x] (must-fix, Lens B) Warning "any angular-response curve will come from SonarInfo" is false when `backscatter_curve_file` is set but empty/unparseable (SonarInfo is then ignored); gate on `!bs_explicit_file_` — `cube_bathymetry/src/cube_bathymetry_node.hpp:347`
+- [x] (suggestion, Lens B) Same warning should cover every mode that adopts a SonarInfo curve (`bs_mode != None && !bs_explicit_file_`), not only Auto — `cube_bathymetry/src/cube_bathymetry_node.hpp:347`
+- [x] (suggestion, Codex + Lens A) The digest rounds offsets to 6 decimals but the applied value is the unrounded double (0 and 0.0000004 share a digest, differ in effect; `-0` prints `+-0.000 dB` in the resolver report). Apply the canonical 6-decimal value in both loaders (normalising -0 to 0) and test the report text with a negative-zero offset — `cube_bathymetry/src/gain_declaration.cpp:222,633`
+- [x] (suggestion, Gemini) Curve and table loaders accept one of `# gain_declaration_sha256:` / `# gain_reference_state:` without the other, an empty value, or (curve) a duplicate key; require both-or-neither, non-empty, once — `cube_bathymetry/src/angular_response_curve.cpp:275`, `cube_bathymetry/src/backscatter_table.cpp:731`
+- [x] (suggestion, Gemini) derive: a segment whose pings all lacked SonarInfo or usable beams has pings>0, beams==0 and suppresses the empty-segment warning; warn when no BEAM from a segment entered the fit — `cube_bathymetry/scripts/derive_angular_response.py:981`
+- [x] (suggestion, Gemini + Lens A) A FAILURE return from on_configure leaves `bs_*` (gain-check failure) or `gain_*` (later failures) populated in UNCONFIGURED; clear both on every FAILURE exit (scope guard) and add a fail → correct the parameter → configure succeeds test — `cube_bathymetry/src/cube_bathymetry_node.hpp:353`
+- [x] (suggestion, Gemini) No guard for a gain declaration handed to `--backscatter-curve` / `backscatter_curve_file` (the converse swap is refused); name the swapped flag in import_bag, batch_regen and the node — `cube_bathymetry/src/import_bag_main.cpp:1239`
+- [x] (suggestion, Gemini) Raw invisible U+FEFF literal in source and vectors; use the `\ufeff` escape — `cube_bathymetry/scripts/derive_angular_response.py:749`, `cube_bathymetry/test/data/gain_declaration_vectors.json`
+- [x] (suggestion, Lens A + Lens B) `ACCUMULATION_VERSION` not bumped although the cached gain payload changed shape; bump to 3 — `cube_bathymetry/scripts/derive_angular_response.py:3542`
+- [x] (suggestion, Lens B) Node-side operator wording: prefix `gainRecordProblem` text with the parameter to set (`backscatter_gain_declaration`), and reword the runtime-set rejection ("set it while unconfigured" only applies after a cleanup) — `cube_bathymetry/src/cube_bathymetry_node.hpp:338,1445`
+- [x] (suggestion, Lens B) Docs/plan sync: README row should say the node check is skipped under `backscatter_angle_correction=none` and only warns for a SonarInfo curve; ADR-0007 addendum "Not done here" and plan.md Commit-2 node bullet + test list should name the configure-time check, the table-as-declaration refusal, the runtime-set rejection and the new lifecycle tests — `README.md:1254`, `cube_bathymetry/docs/decisions/0007-*.md:380`, `.agent/work-plans/issue-176/plan.md:187`
+- [x] (suggestion, Lens B) New lifecycle tests leak temp files (one never removed, the rest only on the passing path); use a RAII remover — `cube_bathymetry/test/test_node_lifecycle.cpp:2054`
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-10 09:02 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+
+**Branch**: feature/issue-176 at `c3370d7`
+**Addressed**: Local Review (Pre-Push), round 2, 2026-11-10 08:27 -05:00 (at `e898f8a`)
+**Commits**: df9bcff f36e7b4 41930b8 0b7d261 d393a98 df36aa7 a52e4a9 c84d7ea 553857d c3370d7
+
+### Actions
+- [x] Range-for over a temporary in the canonical_files test — `test_gain_declaration.cpp` (df9bcff)
+- [x] Reserved header key after the column line refused in both loaders, shared vectors — `gain_declaration.cpp`, `derive_angular_response.py` (f36e7b4)
+- [x] Lifecycle tests for the single-curve branch of the configure-time gain check — `test_node_lifecycle.cpp` (c84d7ea)
+- [x] SonarInfo warning gated on `!bs_explicit_file_` — `cube_bathymetry_node.hpp` (c84d7ea)
+- [x] SonarInfo warning covers every correcting mode — `cube_bathymetry_node.hpp` (c84d7ea)
+- [x] Applied offset is the canonical 6-decimal value, -0 as 0, both loaders; report has no "+-" — `gain_declaration.cpp`, `derive_angular_response.py` (41930b8)
+- [x] Curve and table loaders: gain record both-or-neither, non-empty, once (curve refusal carries a reason in `header_error`) — `angular_response_curve.cpp`, `backscatter_table.cpp` (df36aa7)
+- [x] derive warns when a segment's pings fed no beam — `derive_angular_response.py` (d393a98)
+- [x] Failed configure clears bs_*/gain_* (scope guard), fail-then-correct test — `cube_bathymetry_node.hpp` (c84d7ea)
+- [x] Declaration handed as the curve refused naming the flag in import_bag, batch_regen, node — `import_bag_main.cpp`, `batch_regen_main.cpp` (a52e4a9)
+- [x] \\ufeff escape instead of the raw BOM — `derive_angular_response.py`, vectors (df9bcff)
+- [x] ACCUMULATION_VERSION 3 (+ test) — `derive_angular_response.py` (0b7d261)
+- [x] Node operator wording (parameter prefix, runtime-set rejection) — `cube_bathymetry_node.hpp` (c84d7ea)
+- [x] README, ADR-0007 addendum, plan.md in sync — (553857d)
+- [x] RAII remover for the lifecycle tests' temp files — `test_node_lifecycle.cpp` (c84d7ea)
+
+### Full suite
+`sensors_ws/test.sh cube_bathymetry`: 1675 tests, 0 errors, 0 failures, 102 skipped (baseline 1650 / 102). The first full run caught lint the pre-commit hooks do not run (cpplint fn size on batch_regen main(), cpplint/uncrustify brace and wrap, flake8 quotes); fixed in c3370d7.
+
+### For the reviewer
+- No existing fixture digest changed.
+- The curve loader has no error channel, so a malformed gain record is refused as an empty curve with the reason in the new `AngularResponseCurve::header_error`, which the three callers append to their existing "EMPTY curve" warning.
+- The two helper functions in batch_regen_main.cpp (`curveFileProblem`, `headerErrorNote`) exist to keep main() under cpplint's 500-line limit.
