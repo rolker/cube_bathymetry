@@ -10,13 +10,42 @@ This work is "Part of rolker/unh_marine_autonomy#304". No PR for it may close #3
 
 Today every M3 beam is corrected by an angle read straight off the ping: the sonar-frame `rx_angle` (`Sounding::beam_angle`), used as `|beam_angle|` by the per-pulse-mode table (cube#172) and the single curve, then the gain-state shift (cube#176) before both. On a sloping seabed the angle the seabed sees (incidence against the local normal) differs from it by up to the slope, so upslope and downslope passes over the same ground come out at different levels. The Appledore August 2026 M3 map, after the gain-step fix, still has a bright line under the vessel track, some across-swath ribbing and no slope term. **This plan does not claim slope explains the nadir line**; a separate investigation owns that. It does make the slope term measurable, and the ledger below (step 7) reports incidence beside beam angle so that investigation can use it.
 
-### State of the geometry module (uma#304), as found 2026-11-10
+### State of the geometry module (uma#304), updated 2026-11-10
 
-- Branch `feature/issue-304` of `unh_marine_autonomy`, worktree `/home/roland/project11/layers/worktrees/issue-unh_marine_autonomy-304`, head `65345f82`, **10 commits, local only: not pushed, no PR**. Based on `d9122f8f`; `jazzy` has moved 50 commits (`git merge-tree` against local `jazzy` reports no conflicts).
-- Lifecycle done: plan authored, plan reviewed (5 must-fixes folded), implemented. **`/review-code` pre-push, the push and the PR are not done.** The 318-test result (`marine_backscatter` 122, `marine_sidescan_mosaic` 196, 0 failures, 37 cppcheck skips) is the branch's own record, not re-run here.
-- It is the first slice only ("Part of #304"): `marine_backscatter::seabed::` with `SeabedHeightSampler` (`heightAt(lat, lon)` returning height up-positive WGS84, per-axis cell spans, a `SourceId` and a status), `metresPerDegree`, `seabedNormal(sampler, lat, lon, NormalOptions)` (central differences, default stencil 3 native cells floored at one, flat fallback with a `FallbackReason`: missing sample, incomplete stencil, layer/level/tile seam, no cell size, bad step, bad position), `incidenceAngle(beam_dir, normal)` (raw acos, may exceed 90 deg, invalid result flagged not thrown), `grazingAngle`, `beamFromAzimuthDepression`, `enuFromNed`; and the store-backed `BathyDem` moved down from `marine_sidescan_mosaic` and made a `SeabedHeightSampler` (strict stencil, never reads `overviews/`). Footprint area, ray-march shadow and the slope-aware `grazingQuality` overload are not in it.
-- Consequences for this issue: **cube#173 can build on it as is** (it matches what the design needs: generic, no store/ROS types in the header, own-survey layer list as a caller argument, flat fallback with reasons). It must first be reviewed (`/review-code` pre-push), merged up to current `jazzy`, pushed, PR'd and merged. Until then nothing here can compile against it from `layers/main`.
-- Known behaviour to design around: a stencil straddling a GGGS tile boundary falls back to flat even in one layer (about 1.5% of area at the default step, operator-accepted in uma#304); a sampler is not thread-safe (one per thread); exceptions propagate (a corrupt tile aborts, never silently flat).
+The module is **merged**: `rolker/unh_marine_autonomy` PR #413 (jazzy `dd737cd7`), package `marine_backscatter`, namespace `marine_backscatter::seabed`. This replaces the earlier note that it was a local, unpushed branch. What the design uses (read from the merged headers and README):
+
+- `SeabedHeightSampler::heightAt(lat, lon)` returning a `HeightSample` (status, height, per-axis cell spans, `SourceId`). **Heights are WGS84 ellipsoidal, up-positive.** `BathyDem` (the store-backed sampler, `marine_backscatter/bathy_dem.hpp`) reads band 0 of the store's value tiles as exactly that, and the CUBE `processed` layer stores `Sounding::depth`, which is an ellipsoidal height up-positive, so no negation is needed for a depth store written by `import_bag`; a test pins the sign with a tilted store. A sampler over a positive-down grid (CUBE depths in metres) would have to negate.
+- `seabedNormal(sampler, lat, lon, NormalOptions)`: central differences; `step_m` overrides the default stencil of 3 native cells (floored at one cell); a flat fallback returns `{0,0,1}` with `from_surface = false` and a `FallbackReason` (`missing_sample`, `stencil_incomplete`, `layer_seam`, `no_cell_size`, `bad_step`, `bad_position`). **The caller counts.** Sampler faults (a corrupt tile) throw and propagate; they are never turned into a flat normal.
+- `incidenceAngle(beam_dir, normal)`: `beam_dir` is a unit ENU vector from the sensor toward the seabed; angles in radians; the result is returned raw (above pi/2 means back-facing); a non-unit or non-finite vector gives `valid = false`.
+- `BathyDem` source identity is (layer, level), so a stencil across a GGGS tile boundary inside one layer and level gives a real normal (the earlier "falls back flat at a tile seam" note is superseded); a different layer or level inside the stencil is `layer_seam`.
+- A sampler is not thread-safe. One normal costs 5 height lookups that can touch several ~15 MB tiles, so `cache_tiles` is sized above its default of 8.
+- Helpers `enuFromNed` and `beamFromAzimuthDepression` exist; this design builds the beam vector from the ENU offset it already has, so it does not need them.
+- Not in the module (and not used here): footprint area, ray-march shadow, slope-aware `grazingQuality`.
+
+Consequence: cube#173 builds on it directly; `marine_backscatter` becomes a direct dependency (`package.xml`, `CMakeLists.txt`).
+
+## Decisions
+
+Decided 2026-11-10 (the operator's answers to the Open Questions at the end of this plan):
+
+1. The uma#304 geometry module comes first: done (merged, see above).
+2. The derive tool gets its angle from the import's per-beam output (the beam ledger), not from a Python re-implementation.
+3. The fallback angle, where there is no surface, is the earth-frame angle from vertical (it includes vessel attitude), not the sonar-frame `|rx_angle|`.
+4. Live node, first version: earth-frame angle with a flat normal, with `no_surface` counted. A running own surface is deferred.
+5. `batch_regen_bag` refuses incidence-angle runs.
+6. `--slope-surface <store>` is included: it reuses an existing depth store and skips pass one.
+7. Slope stencil: 3 cells with a minimum baseline in metres (default 4 m).
+8. Two PRs, split after commit group D.
+9. Existing beam-angle tables stay valid for beam-angle runs and are refused for incidence runs, and the reverse.
+10. The default angle basis stays `beam` until an Appledore upslope/downslope comparison shows the correction helps.
+11. The 4 m default is **provisional**: the pass-one depth uncertainty is to be measured on real data before the value is fixed. It stays a parameter, README and this plan mark it provisional, and it is not presented as validated.
+
+Scope of PR 1, as implemented: the split in decision 8 was written when the geometry module was unmerged, which is why groups A to D were "no behaviour change in any default run". With the module merged, PR 1 carries A to E (the angle definition, the sampler adapter, the two-pass `import_bag`, `--slope-surface`, the fallback counters and report, the `angle_basis` markers and fingerprint field, the live-node option and the `batch_regen_bag` refusal), because A to D alone has nothing that can be run or tested end to end. PR 2 carries group F (beam ledger writer, derive tool changes, the workflow that depends on them). The README and ADR text in PR 1 states that incidence tables cannot be derived yet.
+
+### Corrections made while syncing the plan with the merged module (before implementation)
+
+- Section 3: the angle is selected when a sounding enters `Node::update`, so the median queue's `DepthAndUncertainty` keeps its layout (no new trailing float). Nothing downstream of the node changes.
+- Section 1: the tile-seam note is superseded (see above); `beam_index` is only needed by the ledger and moves to PR 2.
 
 ## Approach
 
@@ -26,9 +55,9 @@ One **angle definition**, shared by the importer, the live node and the derive t
 
 ### 1. The angle, and where slope comes from
 
-- **Beam vector.** `georeferencePing` already computes, per sounding, `local = enu.toLocal(sounding_ecef)`: the earth-frame ENU offset of the touchdown from the sensor origin. That vector, normalised, is the beam direction (straight-ray, the SSP tracer stays as it is, per the issue). Carry it on `Sounding` as `beam_dir_enu` (three floats, NaN = absent) and a `uint16 beam_index` (the index in the ping's detection arrays; the projector range-filters, so the index is otherwise lost). It uses attitude and the sonar mounting, which `rx_angle` alone lacks, and it needs no `rx_angle` sign convention for the incidence itself. The `sounding.h:152` sign check is still done as a test (below) because the derive tool's port/starboard fold uses the sign.
+- **Beam vector.** `georeferencePing` already computes, per sounding, `local = enu.toLocal(sounding_ecef)`: the earth-frame ENU offset of the touchdown from the sensor origin. That vector, normalised, is the beam direction (straight-ray, the SSP tracer stays as it is, per the issue). Carry it on `Sounding` as `beam_dir_enu` (three floats, NaN = absent). (A `uint16 beam_index`, the index in the ping's detection arrays, is only needed by the ledger and is added in PR 2.) It uses attitude and the sonar mounting, which `rx_angle` alone lacks, and it needs no `rx_angle` sign convention for the incidence itself. The `sounding.h:152` sign check is still done as a test (below) because the derive tool's port/starboard fold uses the sign.
 - **Which surface.** The **finished own-survey `processed` layer** of the pass-one bathymetry store, read with `marine_backscatter::BathyDem(store, {"processed"})` (and `draft` if present, mirroring uma#304's own-survey rule). Never `reference`, `chart`, `overviews/`, never the store being written by pass two. Where pass one has no survey cell (prior-only, edge of survey) the sample is `kNoData`, the normal falls back to flat and the beam is **counted, never slope-corrected** (issue acceptance).
-- **Resolution and noise.** The surface is the CUBE node grid (cell size = `--resolution`). `seabedNormal` is a central difference over a stencil half-width `s`; its noise is about `sigma_h / (sqrt(2) s)` per axis (for a surface uncertainty of 3 cm: 0.4 deg at `s = 3 m`, 1.6 deg at `s = 0.75 m`). So the default is the module's auto step (3 native cells) **with a floor in metres**: `--slope-min-scale-m` (default 4 m, decision 7). The scale is a run parameter, recorded in the fingerprint and the table header, and the pass report prints the stencil actually used, the clamp count, and a histogram of slope in degrees so a too-fine or too-coarse scale shows. Real relief shorter than twice `s` is smoothed away; at the M3's footprint (about 1 deg beams) that is the intended trade. Beams whose incidence comes out at or beyond 90 deg (back-facing) are handed to the existing "beam at or beyond 90 deg" fallback (`identity` or `exclude`) and counted under their own reason, not clamped into range.
+- **Resolution and noise.** The surface is the CUBE node grid (cell size = `--resolution`). `seabedNormal` is a central difference over a stencil half-width `s`; its noise is about `sigma_h / (sqrt(2) s)` per axis (for a surface uncertainty of 3 cm: 0.4 deg at `s = 3 m`, 1.6 deg at `s = 0.75 m`). So the default is the module's auto step (3 native cells) **with a floor in metres**: `--slope-min-scale-m` (default 4 m, decision 7; **provisional**, decision 11: the pass-one depth uncertainty has not been measured on real data, so the 3 cm below is an assumption, and the value is a parameter to be revisited once it is). The scale is a run parameter, recorded in the fingerprint and the table header, and the pass report prints the stencil actually used, the clamp count, and a histogram of slope in degrees so a too-fine or too-coarse scale shows. Real relief shorter than twice `s` is smoothed away; at the M3's footprint (about 1 deg beams) that is the intended trade. Beams whose incidence comes out at or beyond 90 deg (back-facing) are handed to the existing "beam at or beyond 90 deg" fallback (`identity` or `exclude`) and counted under their own reason, not clamped into range.
 - **Datum.** Only height differences enter the normal, so the pass-one store's ellipsoidal heights need no conversion; the sampler returns up-positive heights (the cube store is already ellipsoidal, up-positive in `BathyDem`'s terms; a test pins the sign with a tilted store).
 
 ### 2. Two-pass mechanics in `import_bag`
@@ -37,7 +66,7 @@ Reuse the depth-adaptive recon's spill and replay, not a new mechanism (operator
 
 Flag: `--backscatter-angle-basis beam|incidence` (default `beam`, decision 10). With `incidence` and a fixed-level run:
 
-1. **Pass one.** The normal per-ping loop (project, georeference, gain shift, mode index stamp) feeds `accumulator.addBatch` into `-o` with backscatter **off** (no `--bs-store` write, no correction), and every sounding is also written to a `SoundingSpill` in `--scratch-dir` (default beside `-o`; `SpilledSounding` gains the three beam-vector floats and `beam_index`). Pass one needs no table, so it is independent of the table that pass two applies. At the end the accumulator finalises; the `processed` layer is the surface.
+1. **Pass one.** The normal per-ping loop (project, georeference, gain shift, mode index stamp) feeds `accumulator.addBatch` into `-o` with backscatter **off** (no `--bs-store` write, no correction), and every sounding is also written to a `SoundingSpill` in `--scratch-dir` (default beside `-o`; `SpilledSounding` gains the three beam-vector floats). Pass one needs no table, so it is independent of the table that pass two applies. At the end the accumulator finalises; the `processed` layer is the surface.
 2. **Pass two.** Fresh `ImportAccumulator` and sheet, the same Parameters, same reference/chart priors, **depth output into a scratch bathymetry dir, not `-o`** (a pass-two accumulator pointed at the pass-one store would warm-start from its `processed` tiles and no longer reproduce pass one) and backscatter into `--bs-store`. Replay `forEachSpilled` front to back; for each ping's soundings call `stampIncidence(soundings, sampler, options, counters)` (new `slope_incidence.h/.cpp`, the only place that touches the module) which sets `Sounding::incidence_angle` and counts fallbacks per reason; then `addBatch`. Depth estimation is deterministic, so pass two's depth must equal pass one's: the run compares the two bathymetry stores' tile sets and values at the end and fails loudly on a mismatch (a free integrity check and the guard against a spill that lost a record; the replay count check from the recon already guards truncation). The scratch depth store is deleted after the compare.
 3. **Surface supplied instead** (decision 6): `--slope-surface <bathy store dir>` skips pass one and the spill, reads the supplied store and runs the normal single per-ping loop with `stampIncidence` inline. Used to re-run with a new table without repeating pass one, and to reuse a surface from another run. Its identity in the fingerprint is the store's `registry.json` SHA-256 plus tile count and a digest of the sorted tile file names and sizes (a store whose tiles changed under the same registry must read stale); the internal two-pass case records `"self"`, and its inputs are already the fingerprint's other keys.
 4. `--depth-adaptive` with `incidence`: refused with a message (it already refuses `--bs-store`; same reason, single-level backscatter store, uma#383).
@@ -45,7 +74,7 @@ Flag: `--backscatter-angle-basis beam|incidence` (default `beam`, decision 10). 
 
 ### 3. The estimator side
 
-`Sounding::incidence_angle` (float, radians, NaN = none) rides the median queue as a new trailing float of `DepthAndUncertainty` (the layout note there allows appends at the end; every raster read uses `sizeof`), into `Node::update` and `Hypothesis::recordBeam`. A new `Parameters::backscatter_angle_basis` selects which angle `correctBeamIntensity` is given: `beam` (today's `beam_angle`, byte-identical output, the default) or `incidence` (`incidence_angle`; a NaN one is "no vector": the beam goes to the existing fallback policy, counted). `correctBeamIntensity` itself does not change; only the angle argument does, so the table loader, `correctWithTable` and the range/offset terms are untouched. The recon spill and `batch_regen`'s `ScatterRecord` carry the new field(s).
+`Sounding::incidence_angle` (float, radians, NaN = none) is stamped on the sounding by the importer (or the live node). A new `Parameters::backscatter_angle_basis` selects which angle `Node::update(const Sounding &)` hands on as the beam angle: `beam` (today's `beam_angle`, byte-identical output, the default) or `incidence` (`incidence_angle`; a NaN one is "no vector": the beam goes to the existing fallback policy). The selection happens at the node's door, so the median queue (`DepthAndUncertainty`), `Hypothesis::recordBeam` and `correctBeamIntensity`'s signature are unchanged and persistence is untouched. One guard is added in `correctBeamIntensity`'s legacy single-curve path, active for the incidence basis only: an angle at or beyond 90 deg is not looked up (the curve would clamp it to its edge value); the per-mode table path already rejects it as `beam angle at or beyond 90 deg`. The recon spill carries the new vector and angle; `batch_regen`'s `ScatterRecord` does not (it refuses `incidence`).
 
 ### 4. Angle basis in tables, loaders, fingerprint (consistency, existing tables)
 
@@ -103,14 +132,13 @@ A new section in the ADR-0007 addendum file, **"Incidence-angle addendum (cube#1
 | S3 | cube#173 group E (`stampIncidence` plus the sampler) after S1 merges, built against the merged core layer (`make build` in core then sensors) | S1 merged |
 | S4 | open the cube PR(s) | S3 green, `ci-local` full-scope attestation (ADR-0018) |
 
-Commit groups (atomic, each green on its own): **A** `Sounding` fields (`beam_dir_enu`, `beam_index`, `incidence_angle`), `DepthAndUncertainty` append, spill and `ScatterRecord` fields, with the `beam` path byte-identical; **B** `Parameters::backscatter_angle_basis`, `Node`/`Hypothesis` angle selection, header marker in loaders; **C** fingerprint keys, `isStale`, refusals (table basis, `batch_regen`, `--depth-adaptive`); **D** `SoundingSpill` extraction from `ReconCollector`, beam-vector computation shared by `georeferencePing` and the node, sign check; **E** `slope_incidence` plus `package.xml`/`CMakeLists.txt` direct dependency on `marine_backscatter`, the two-pass driver, `--slope-surface`, depth-equality compare, report; **F** ledger writer, derive changes, workflow docs, the ADR addendum. The PR can be split after D (A to D, no behaviour change in any default run) and E to F, decision 8.
+Commit groups (atomic, each green on its own): **A** `Sounding` fields (`beam_dir_enu`, `incidence_angle`; `beam_index` moves to PR 2 with the ledger), spill fields, with the `beam` path byte-identical; **B** `Parameters::backscatter_angle_basis`, `Node`/`Hypothesis` angle selection, header marker in loaders; **C** fingerprint keys, `isStale`, refusals (table basis, `batch_regen`, `--depth-adaptive`); **D** `SoundingSpill` extraction from `ReconCollector`, beam-vector computation shared by `georeferencePing` and the node, sign check; **E** `slope_incidence` plus `package.xml`/`CMakeLists.txt` direct dependency on `marine_backscatter`, the two-pass driver, `--slope-surface`, depth-equality compare, report; **F** ledger writer, derive changes, workflow docs, the ADR addendum. Decision 8 splits the work in two PRs; as implemented PR 1 is A to E and PR 2 is F (see Decisions).
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
-| `cube_bathymetry/include/cube_bathymetry/sounding.h`, `common.h` | `beam_dir_enu`, `beam_index`, `incidence_angle`; `DepthAndUncertainty` trailing `incidence`; sign-check comment resolved |
-| `cube_bathymetry/src/error_model.cpp`, `detections_projector.cpp` | stamp `beam_index` on each sounding |
+| `cube_bathymetry/include/cube_bathymetry/sounding.h`, `common.h` | `beam_dir_enu`, `incidence_angle`; sign-check comment resolved (`DepthAndUncertainty` unchanged) |
 | `cube_bathymetry/src/import_bag_main.cpp` | `georeferencePing` keeps the ENU vector; flags; two-pass driver; `--slope-surface`; pass report; `--beam-ledger-out`; refusals |
 | `cube_bathymetry/include/cube_bathymetry/slope_incidence.h`, `src/slope_incidence.cpp` | new: `stampIncidence`, counters, options, the only user of `marine_backscatter::seabed` |
 | `cube_bathymetry/include/cube_bathymetry/recon.h`, `src/recon.cpp` | extract `SoundingSpill`; `SpilledSounding` gains the vector and index |
@@ -154,7 +182,7 @@ Commit groups (atomic, each green on its own): **A** `Sounding` fields (`beam_di
 | Correction angle (stored M3 values change) | Re-import of existing stores; fingerprint staleness | Yes (fingerprint, refusal of mismatched tables); the re-import itself is operator work |
 | Angle basis of fitted tables | `derive_angular_response.py`, loaders, header | Yes (steps 4, 7) |
 | `Parameters` / CLI flags / node parameters | README parameter tables | Yes |
-| `DepthAndUncertainty`, spill records | Eviction spill, recon spill, `batch_regen` | Yes (A, D); `ScatterRecord` deliberately not (refused) |
+| Spill records | Recon spill, `batch_regen` | Yes (A, D); `ScatterRecord` deliberately not (refused); the median queue and eviction spill are unchanged |
 | ADR-0003 key list | ADR text | Yes |
 | uma `marine_backscatter` dependency | `package.xml`, CMake find, layer build order (core below sensors) | Yes |
 
@@ -164,6 +192,8 @@ Commit groups (atomic, each green on its own): **A** `Sounding` fields (`beam_di
 - **Agent-instruction candidates** (proposals only): a pitfall for the repo guide, once one exists: "a table is only valid on the angle basis it was fitted on; check `# angle_basis` before reusing one". The repo has no `.agents/README.md` yet (gap noted, not part of this work).
 
 ## Open Questions
+
+All eleven were answered on 2026-11-10; see the Decisions section above. The original wording is kept for the record.
 
 1. uma#304 sequencing: review, push and merge it first, with cube groups A to D developed meanwhile (recommended), or hold cube work entirely?
 2. Source of truth for the angle in the derive tool: C++ ledger (recommended) versus a Python re-implementation.
