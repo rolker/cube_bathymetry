@@ -198,3 +198,20 @@ Dropped: digest rounding below 5e-7 dB (negligible; soften the ADR's "anything t
 - No existing fixture digest changed.
 - The curve loader has no error channel, so a malformed gain record is refused as an empty curve with the reason in the new `AngularResponseCurve::header_error`, which the three callers append to their existing "EMPTY curve" warning.
 - The two helper functions in batch_regen_main.cpp (`curveFileProblem`, `headerErrorNote`) exist to keep main() under cpplint's 500-line limit.
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-10 09:21 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+
+**Branch**: feature/issue-176 at `62ae9bb`
+**Addressed**: coordinator follow-ups after Local Review (Pre-Push) round 2
+**Commits**: 90e4ccc c58df6d 62ae9bb
+
+### Actions
+- [x] A malformed gain-state record on a curve (`header_error`) is a hard error in import_bag, batch_regen (empirical only) and the node configure (FAILURE, `backscatter_curve_file:` prefix); plain missing/unparseable still warns — 90e4ccc
+- [x] Tests per tool, node fail-fix-configure; README, ADR-0007 addendum and plan.md say refused, not degraded — 90e4ccc
+- [x] Resolver report prints offsets as canonical 6-decimal text in C++ and Python, -0.0004 tested — 62ae9bb
+
+### Full suite
+`test.sh cube_bathymetry`: 1679 tests, 0 errors, 0 failures, 102 skipped. 90e4ccc overwrote one unrelated curve test by mistake; restored in c58df6d.
