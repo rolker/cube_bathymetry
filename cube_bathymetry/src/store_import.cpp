@@ -608,6 +608,7 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
   }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
+    ++spill_failures_;
     return;
   }
   uint32_t magic = 0;
@@ -615,6 +616,7 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
   in.read(reinterpret_cast<char *>(&magic), sizeof(magic));
   in.read(reinterpret_cast<char *>(&ncells), sizeof(ncells));
   if (!in || magic != kSpillMagic) {
+    ++spill_failures_;
     return;
   }
   for (uint32_t c = 0; c < ncells; ++c) {
@@ -627,6 +629,7 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
     in.read(reinterpret_cast<char *>(&w.mean), sizeof(w.mean));
     in.read(reinterpret_cast<char *>(&w.m2), sizeof(w.m2));
     if (!in) {
+      ++spill_failures_;
       return;  // truncated record -> stop (what was restored already stands)
     }
     sheet_.setSettledIntensityWelfordAt(gggs::CellIndex(index, row, col), w);
@@ -1286,6 +1289,7 @@ void ImportAccumulator::addBatch(
     // falls in a failed tile (a sounding can also spread into neighbour tiles, so
     // this is a conservative floor, not an exact cell tally -- see
     // GeoMapSheet::gridIndexForSounding).
+    reload_failures_ += reload_failed.size();
     const std::set<gggs::GridIndex> failed_set(
       reload_failed.begin(), reload_failed.end());
     std::size_t dropped_soundings = 0;
@@ -1305,6 +1309,16 @@ void ImportAccumulator::addBatch(
   }
 
   evictColdTiles();
+}
+
+std::string ImportAccumulator::integrityProblem() const
+{
+  if (reload_failures_ == 0 && spill_failures_ == 0) {
+    return "";
+  }
+  return std::to_string(reload_failures_) + " tile reload/seed failure(s) (their soundings were "
+         "dropped) and " + std::to_string(spill_failures_) + " unreadable intensity spill(s) "
+         "(their earlier beams were not restored): the tiles hold a partial population";
 }
 
 void ImportAccumulator::finalize(

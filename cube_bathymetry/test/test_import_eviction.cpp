@@ -365,6 +365,32 @@ TEST(ImportEviction, ScratchDirCleanedUpAfterFinalize)
   std::filesystem::remove_all(root);
 }
 
+// cube_bathymetry#173: a clean eviction and reload reports no integrity problem; a
+// damaged intensity spill does, so the slope run (whose tiles are a derived
+// product) can refuse to publish a tile built from a partial population.
+TEST(ImportEviction, DamagedSpillIsReportedAsAnIntegrityProblem)
+{
+  const std::string root = makeTempDir("integrity");
+  GeoMapSheet sheet(kCellSize);
+  ImportAccumulator accumulator(
+    sheet, makeConfig(root + "/store", root + "/bs", /*budget=*/3));
+  for (int i = 0; i < 8; ++i) {
+    accumulator.addBatch(surveyCell(43.0 + 0.02 * i, -70.0, 10.0f + i, 30.0f + i));
+  }
+  accumulator.addBatch(surveyCell(43.0, -70.0, 10.0f, 30.0f));  // revisit: a clean reload
+  EXPECT_TRUE(accumulator.integrityProblem().empty()) << accumulator.integrityProblem();
+
+  // Damage every spill, then revisit another evicted tile.
+  ASSERT_FALSE(accumulator.scratchDir().empty());
+  for (const auto & entry : std::filesystem::directory_iterator(accumulator.scratchDir())) {
+    std::filesystem::resize_file(entry.path(), 3);
+  }
+  accumulator.addBatch(surveyCell(43.02, -70.0, 11.0f, 31.0f));
+  EXPECT_FALSE(accumulator.integrityProblem().empty());
+  EXPECT_NE(accumulator.integrityProblem().find("partial population"), std::string::npos);
+  std::filesystem::remove_all(root);
+}
+
 // Lossless guarantee: if a cold tile's persist FAILS, it must NOT be dropped
 // (that would lose unsaved data). Force the failure by planting a regular file
 // where the layer directory must be created, then survey past the budget.

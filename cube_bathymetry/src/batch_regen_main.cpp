@@ -366,7 +366,20 @@ std::string jsonEscape(const std::string & s)
 /// them. Only the slope run of import_bag writes there.
 bool slopeStoreRefused(const std::string & bs_store_dir)
 {
-  if (bs_store_dir.empty() || !cube::hasDerivedTilesRecord(bs_store_dir)) {
+  if (bs_store_dir.empty()) {
+    return false;
+  }
+  // Hold the store lock (non-blocking) for the life of the process, taken before
+  // the derived_tiles.json check, so a slope run and this run cannot start on
+  // the same empty store: the second to ask is refused at once.
+  static std::unique_ptr<cube::StoreLock> held_lock;
+  std::string lock_error;
+  held_lock = cube::StoreLock::acquire(bs_store_dir, lock_error);
+  if (!held_lock) {
+    std::cerr << "error: --bs-store " << bs_store_dir << ": " << lock_error << "\n";
+    return true;
+  }
+  if (!cube::hasDerivedTilesRecord(bs_store_dir)) {
     return false;
   }
   std::cerr << "error: --bs-store " << bs_store_dir << " holds derived_tiles.json: it is a "

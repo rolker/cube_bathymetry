@@ -83,7 +83,9 @@ namespace cube
   std::string slopeCorrectionProblem(const std::string & kind, const std::string & source);
 
 /// The surface layers a slope run reads from @p surface_dir: `processed`, and
-/// `draft` when that directory exists (the own-survey rule of uma#304). Never
+/// `draft`, each when its directory holds at least one tile (the own-survey rule
+/// of uma#304; an empty directory is not a layer, or creating one would change a
+/// store's recorded inputs). Never
 /// `reference`, `chart` or `overviews/`. Empty when neither exists.
   std::vector < std::string > slopeSurfaceLayers(const std::string & surface_dir);
 
@@ -142,6 +144,10 @@ public:
       std::vector < GeoSounding > &soundings, std::size_t bag_index, const GeoMapSheet & sheet,
       std::string & error);
 
+  /// Record the pings the run dropped for want of an earth transform (the
+  /// ordinary run's tolerance); written to every tile entry of the publish.
+    void setDroppedGeoreferencing(uint64_t pings) {dropped_georef_ = pings;}
+
   /// Tiles the run has reached so far.
     std::size_t tilesReached() const {return reached_.size();}
   /// The bags (by index into @ref SlopeRunConfig::bags) attributed to @p tile.
@@ -168,6 +174,7 @@ private:
     std::string recovery_text_;
     std::string leftover_text_;
     IncidenceCounters counters_;
+    uint64_t dropped_georef_ = 0;
     double max_influence_m_ = 0.0;
     double surface_pad_m_ = 0.0;
     std::map < gggs::GridIndex, std::set < std::size_t >> reached_;

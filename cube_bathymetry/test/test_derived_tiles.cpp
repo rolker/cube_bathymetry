@@ -96,6 +96,7 @@ StoreInputs sampleInputs()
   in.gain_declaration_sha256 = shaB();
   in.gain_reference_state = "pre_step";
   in.level = 14;
+  in.reference_store = "sha256:" + shaB();
   return in;
 }
 
@@ -105,6 +106,7 @@ TileRecord sampleTile(const std::string & bag)
   t.contributors = {{bag, shaA()}};
   t.depth_tiles = {{"processed/14_9_8.tif", shaB()}};
   t.stencil_margin_m = 12.5;
+  t.dropped_georef_pings = 3;
   t.written = "2026-11-12T12:00:00Z";
   t.code_version = kDerivedTilesCodeVersion;
   return t;
@@ -197,6 +199,10 @@ TEST(DerivedTiles, TheLoaderIsStrict)
         j["tiles"]["14_9_8.tif"]["depth_tiles"][0]["path"] = "/etc/x";
       },
       "relative path"},
+    {"dropped_type", [](json & j) {j["tiles"]["14_9_8.tif"]["dropped_georef_pings"] = -1;},
+      "non-negative integer"},
+    {"reference_form", [](json & j) {j["inputs"]["reference_store"] = "abc";},
+      "inputs.reference_store"},
     {"margin_negative", [](json & j) {j["tiles"]["14_9_8.tif"]["stencil_margin_m"] = -1.0;},
       "must not be negative"},
     {"publish_name", [](json & j) {
@@ -276,6 +282,9 @@ TEST(DerivedTiles, TheStoreInputsNameTheirFirstDifference)
   b = a;
   b.slope_baseline_deg = 5.0000001;
   EXPECT_NE(a.difference(b).find("5.0000001"), std::string::npos);
+  b = a;
+  b.reference_store.clear();
+  EXPECT_NE(a.difference(b).find("reference (prior) store"), std::string::npos);
   b = a;
   b.level = 13;
   EXPECT_NE(a.difference(b).find("store level"), std::string::npos);
@@ -430,6 +439,46 @@ TEST(SurfaceTileIndex, SelectsByExtentAndHashesContent)
   fs::remove_all(root);
 }
 
+// Path-independent identity of a prior store: the same content in another place is the
+// same prior; any change to a reference or chart tile is another.
+TEST(ReferenceStoreDigest, DependsOnContentNotOnPlace)
+{
+  EXPECT_EQ(referenceStoreDigest(""), "");
+  const std::string a = freshDir("ref_a");
+  const std::string b = freshDir("ref_b");
+  for (const std::string & root : {a, b}) {
+    writeFile(fs::path(root) / "reference" / "10_1_2.tif", "reference tile");
+    writeFile(fs::path(root) / "chart" / "8_1_1.tif", "chart tile");
+    writeFile(fs::path(root) / "processed" / "10_1_2.tif", "not part of the prior");
+    writeFile(fs::path(root) / "registry.json", "{}");
+  }
+  const std::string digest = referenceStoreDigest(a);
+  EXPECT_EQ(digest.rfind("sha256:", 0), 0u);
+  EXPECT_EQ(referenceStoreDigest(b), digest);
+  writeFile(fs::path(b) / "processed" / "10_1_2.tif", "survey changed");
+  EXPECT_EQ(referenceStoreDigest(b), digest) << "only reference and chart tiles count";
+  writeFile(fs::path(b) / "reference" / "10_1_2.tif", "reference tile, edited");
+  EXPECT_NE(referenceStoreDigest(b), digest);
+  fs::remove_all(a);
+  fs::remove_all(b);
+}
+
+TEST(SurfaceTileIndex, EagerHashingCatchesATileChangedDuringTheRun)
+{
+  const std::string root = freshDir("eager");
+  const gggs::GridIndex tile = gggs::Level(14).gridIndex(43.0, -70.6);
+  writeFile(fs::path(root) / "processed" / tileName(tile), "as first read");
+  SurfaceTileIndex index(root, {"processed"}, /*eager=*/true);
+  EXPECT_EQ(index.hashedCount(), 1u);
+  EXPECT_TRUE(index.verifyUnchanged().empty());
+  writeFile(fs::path(root) / "processed" / tileName(tile), "rewritten meanwhile");
+  const std::string problem = index.verifyUnchanged();
+  EXPECT_NE(problem.find("changed while the run was reading it"), std::string::npos) << problem;
+  fs::remove(fs::path(root) / "processed" / tileName(tile));
+  EXPECT_NE(index.verifyUnchanged().find("can no longer be read"), std::string::npos);
+  fs::remove_all(root);
+}
+
 // ---- lock -----------------------------------------------------------------
 
 TEST(StoreLock, ASecondRunIsRefusedAtOnce)
@@ -440,7 +489,7 @@ TEST(StoreLock, ASecondRunIsRefusedAtOnce)
   ASSERT_TRUE(first) << error;
   auto second = StoreLock::acquire(dir, error);
   EXPECT_FALSE(second);
-  EXPECT_NE(error.find("another slope run holds"), std::string::npos) << error;
+  EXPECT_NE(error.find("another run (an import or a slope run) holds"), std::string::npos) << error;
   first.reset();
   auto third = StoreLock::acquire(dir, error);
   EXPECT_TRUE(third) << error;

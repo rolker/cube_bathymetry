@@ -99,7 +99,17 @@ std::vector<std::string> slopeSurfaceLayers(const std::string & surface_dir)
   std::vector<std::string> layers;
   std::error_code ec;
   for (const char * layer : {"processed", "draft"}) {
-    if (fs::is_directory(fs::path(surface_dir) / layer, ec)) {
+    const fs::path dir = fs::path(surface_dir) / layer;
+    bool has_tile = false;
+    if (fs::is_directory(dir, ec)) {
+      for (const auto & entry : fs::directory_iterator(dir, ec)) {
+        if (isTileFileName(entry.path().filename().string())) {
+          has_tile = true;
+          break;
+        }
+      }
+    }
+    if (has_tile) {
       layers.push_back(layer);
     }
   }
@@ -189,8 +199,8 @@ std::unique_ptr<SlopeRun> SlopeRun::create(const SlopeRunConfig & config, std::s
   // 4. The surface.
   const std::vector<std::string> layers = splitLayers(config.inputs.slope_layers);
   if (layers.empty()) {
-    error = "--slope-surface " + config.surface_dir + " has neither a processed nor a draft layer "
-      "directory";
+    error = "--slope-surface " + config.surface_dir +
+      " has neither a processed nor a draft layer with tiles";
     return nullptr;
   }
   try {
@@ -212,7 +222,9 @@ std::unique_ptr<SlopeRun> SlopeRun::create(const SlopeRunConfig & config, std::s
     return nullptr;
   }
   try {
-    run->surface_index_ = std::make_unique<SurfaceTileIndex>(config.surface_dir, layers);
+    run->surface_index_ = std::make_unique<SurfaceTileIndex>(config.surface_dir, layers,
+                                                                                         /*eager=*/
+        true);
   } catch (const std::exception & e) {
     error = "--slope-surface " + config.surface_dir + ": " + e.what();
     return nullptr;
@@ -371,6 +383,14 @@ bool SlopeRun::publish(
       }
     }
   }
+  // The surface must be what it was when the run began reading it (hashed
+  // eagerly at create): a tile rewritten meanwhile fails the run here, before
+  // the commit point.
+  const std::string changed = surface_index_->verifyUnchanged();
+  if (!changed.empty()) {
+    error = changed + ". Nothing is published; re-run once the depth store is stable";
+    return false;
+  }
   const double margin_m = counters_.max_half_baseline_m + max_influence_m_ + surface_pad_m_;
   const std::string written = utcTimestamp();
   try {
@@ -388,6 +408,7 @@ bool SlopeRun::publish(
       }
       record.depth_tiles = surface_index_->tilesNear(*bounds, margin_m);
       record.stencil_margin_m = margin_m;
+      record.dropped_georef_pings = dropped_georef_;
       record.written = written;
       record.code_version = kDerivedTilesCodeVersion;
       manifest.tiles[name] = record;
@@ -404,11 +425,16 @@ bool SlopeRun::publish(
      << " earlier tile(s) untouched. Depth-tile margin " << margin_m << " m ("
      << surface_index_->hashedCount() << " surface tile(s) hashed of "
      << surface_index_->tileCount() << ").\n";
-  if (put.empty() && remove.empty()) {
-    os << "WARNING: no cells had finite backscatter -- nothing was published. Check that the "
-      "detections carry intensities and that the soundings fall on the slope surface.\n";
-    summary = os.str();
-    return true;
+  if (put.empty()) {
+    error = "no cell had finite backscatter, so there is no product to publish. Check that the "
+      "detections carry intensities, that the correction does not exclude every beam, and "
+      "that the soundings fall on the slope surface. Nothing was published";
+    return false;
+  }
+  if (dropped_georef_ > 0) {
+    os << "NOTE: " << dropped_georef_ << " ping(s) were dropped for want of an earth "
+      "transform (as an ordinary import tolerates); recorded in every tile entry as "
+      "dropped_georef_pings.\n";
   }
   PublishPlan plan;
   plan.store_dir = config_.bs_store_dir;

@@ -1973,6 +1973,20 @@ bool resolveSlopeRequest(
     usage();
   }
   const bool slope_run = flags.basis == cube::BackscatterAngleBasis::Incidence;
+  // An ordinary run writing a backscatter store holds the store lock (non-blocking)
+  // for the life of the process, taken BEFORE the derived_tiles.json check, so a
+  // slope run and a beam run cannot start on the same empty store: the second to
+  // ask is refused at once. (A function-static, released at exit, keeps main()
+  // within the cpplint size limit.)
+  static std::unique_ptr<cube::StoreLock> held_lock;
+  if (!slope_run && !bs_store_dir.empty()) {
+    std::string lock_error;
+    held_lock = cube::StoreLock::acquire(bs_store_dir, lock_error);
+    if (!held_lock) {
+      std::cerr << "error: --bs-store " << bs_store_dir << ": " << lock_error << "\n";
+      usage();
+    }
+  }
   if (!slope_run && !bs_store_dir.empty() && cube::hasDerivedTilesRecord(bs_store_dir)) {
     std::cerr << "error: --bs-store " << bs_store_dir << " holds derived_tiles.json: it is a "
       "slope-run store, derived per tile from its bags, and an ordinary import would blend "
@@ -1990,7 +2004,7 @@ std::unique_ptr<cube::SlopeRun> startSlopeRun(
   const SlopeFlags & flags, const std::string & bs_store_dir, const std::string & scratch_dir,
   const std::vector<std::string> & bagfile_names, const BackscatterSetup & backscatter,
   const GainSetup & gain, uint8_t level, int64_t min_pings, const std::string & iho_order,
-  float capture_spacing_scale)
+  float capture_spacing_scale, const std::string & reference_store_dir)
 {
   std::string problem = cube::slopeCorrectionProblem(
     backscatter.provenance.kind, backscatter.provenance.source);
@@ -2010,7 +2024,7 @@ std::unique_ptr<cube::SlopeRun> startSlopeRun(
   const std::vector<std::string> layers = cube::slopeSurfaceLayers(flags.surface_dir);
   if (problem.empty() && layers.empty()) {
     problem = "--slope-surface " + flags.surface_dir +
-      " has neither a processed nor a draft layer directory";
+      " has neither a processed nor a draft layer with tiles";
   }
   if (!problem.empty()) {
     std::cerr << "error: " << problem << "\n";
@@ -2040,10 +2054,20 @@ std::unique_ptr<cube::SlopeRun> startSlopeRun(
     (table.slope_baseline_deg != flags.baseline_deg ||
     table.slope_layers != config.inputs.slope_layers))
   {
-    std::cerr << "warning: the incidence table was fitted with a " << table.slope_baseline_deg
+    // A table fitted on another baseline or surface is a different angle, and a
+    // store holds one set of inputs.
+    std::cerr << "error: the incidence table was fitted with a " << table.slope_baseline_deg
               << " deg baseline on layer(s) '" << table.slope_layers << "', and this run uses "
               << flags.baseline_deg << " deg on '" << config.inputs.slope_layers
-              << "': the incidence angles it is applied to differ slightly in distribution.\n";
+              << "': pass the matching --slope-baseline-deg, or use a table fitted the way "
+      "this run is configured\n";
+    usage();
+  }
+  try {
+    config.inputs.reference_store = cube::referenceStoreDigest(reference_store_dir);
+  } catch (const std::exception & e) {
+    std::cerr << "error: --reference-store " << reference_store_dir << ": " << e.what() << "\n";
+    usage();
   }
   std::string error;
   auto run = cube::SlopeRun::create(config, error);
@@ -2065,7 +2089,8 @@ std::unique_ptr<cube::SlopeRun> startSlopeRun(
 /// failed finalize or a failed publish. Returns the process exit code.
 int slopeRunFinish(
   cube::SlopeRun & run, cube::ImportAccumulator & accumulator,
-  const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, bool table_unresolved)
+  const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, bool table_unresolved,
+  uint64_t dropped_georef)
 {
   std::cout << "The per-beam table counts above are on each beam's incidence angle, the angle "
     "applied, not the sonar-frame beam angle.\n" << run.counters().report();
@@ -2075,6 +2100,14 @@ int slopeRunFinish(
       "would pass for a corrected one. The run exits 4." << std::endl;
     return 4;
   }
+  // A reload, seed or spill-restore failure means some tile holds a partial
+  // population: a derived product built from it would look fine and be wrong.
+  const std::string integrity = accumulator.integrityProblem();
+  if (!integrity.empty()) {
+    std::cerr << "error: " << integrity << ". Nothing was published." << std::endl;
+    return 1;
+  }
+  run.setDroppedGeoreferencing(dropped_georef);
   try {
     accumulator.finalize(nullptr, bs_metadata.empty() ? nullptr : &bs_metadata);
   } catch (const std::exception & e) {
@@ -2789,14 +2822,12 @@ int importBagMain(int argc, char * argv[])
   // surface, bag identities) all come before any bag is opened. Declared before
   // the accumulator so its scratch directory outlives it and is removed last.
   std::unique_ptr<cube::SlopeRun> slope;
-  if (slope_run) {
-    slope = startSlopeRun(
+  if (slope_run && !(slope = startSlopeRun(
       slope_flags, bs_store_dir, scratch_dir, bagfile_names, backscatter, gain,
       gggs::Level::fromCellSize(static_cast<float>(resolution)).level(), backscatter_mode_min_pings,
-      iho_order, capture_spacing_scale);
-    if (!slope) {
-      return 1;
-    }
+      iho_order, capture_spacing_scale, reference_store_dir)))
+  {
+    return 1;
   }
 
   // Main-pass read filter (cube#107): restrict each reader to the topics the
@@ -3182,7 +3213,8 @@ int importBagMain(int argc, char * argv[])
   cube::report_projection_summary(proj_totals, std::cout, std::cerr);
   const bool table_unresolved = reportModeResolution(backscatter, gain);
   if (slope) {
-    return slopeRunFinish(*slope, accumulator, bs_metadata, table_unresolved);
+    return slopeRunFinish(
+      *slope, accumulator, bs_metadata, table_unresolved, proj_totals.dropped_georef);
   }
 
   if (recon) {

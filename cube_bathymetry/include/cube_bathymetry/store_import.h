@@ -513,6 +513,11 @@ public:
     std::size_t bathyTilesPersisted() const {return bathy_persisted_;}
   /// @brief Cumulative backscatter tile writes (eviction + finalize).
     std::size_t backscatterTilesPersisted() const {return bs_persisted_;}
+  /// @brief Non-empty when a reload, a seed or a spill restore failed, so that
+  ///        some tile holds a partial population (cube_bathymetry#173). The
+  ///        ordinary import warns and carries on; the slope run, whose tiles are
+  ///        a derived product, refuses to publish.
+    std::string integrityProblem() const;
   /// @brief The scratch spill directory (empty until the first eviction). Exposed
   ///        for tests that assert it is cleaned up after @ref finalize.
     const std::string & scratchDir() const {return scratch_dir_;}
@@ -563,6 +568,8 @@ private:
     std::string scratch_dir_;  // lazily created on first eviction; "" = none
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
+    std::size_t reload_failures_ = 0;
+    std::size_t spill_failures_ = 0;
   };
 
 }  // namespace cube

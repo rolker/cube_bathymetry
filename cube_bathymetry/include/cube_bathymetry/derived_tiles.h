@@ -141,6 +141,11 @@ namespace cube
     int64_t mode_min_pings = 0;
     std::string iho_order = "order1a";
     double capture_spacing_scale = 0.71;
+  /// Identity of the prior the run was gated by (`--reference-store`): empty
+  /// without one, else `sha256:<digest>` from @ref referenceStoreDigest, which is
+  /// of the content of its reference and chart tiles, so it does not depend on
+  /// where the store lives.
+    std::string reference_store;
 
     bool operator == (const StoreInputs & o) const;
   /// Empty when @p o equals this; otherwise the first difference, in words.
@@ -154,6 +159,9 @@ namespace cube
   /// Sorted by path.
     std::vector < DepthTileRecord > depth_tiles;
     double stencil_margin_m = 0.0;
+  /// Pings the run dropped for want of an earth transform (the ordinary
+  /// run's tolerance), run-wide: how complete the contributors' beams were.
+    uint64_t dropped_georef_pings = 0;
   /// UTC, `YYYY-MM-DDTHH:MM:SSZ`, from the clock.
     std::string written;
     std::string code_version;
@@ -205,6 +213,13 @@ namespace cube
     const std::string & tile_name, const TileRecord & recorded,
     const std::vector < BagIdentity > &given);
 
+/// Content digest of the prior store at @p dir for @ref StoreInputs::reference_store:
+/// SHA-256 over the sorted (relative path, content SHA-256) of every tile file in
+/// its `reference/` and `chart/` layers (the layers a run primes its blunder gate
+/// from). Empty @p dir gives the empty string.
+/// @throws std::runtime_error if a tile cannot be read.
+  std::string referenceStoreDigest(const std::string & dir);
+
 /// UTC now as `YYYY-MM-DDTHH:MM:SSZ`.
   std::string utcTimestamp();
 
@@ -231,7 +246,20 @@ namespace cube
 public:
   /// @param layers layer directory names under @p surface_root (a missing one is
   ///        skipped; the scan finds the tiles of the ones present).
-    SurfaceTileIndex(const std::string & surface_root, const std::vector < std::string > &layers);
+  /// @param eager hash every tile now, before anything is read from the
+  ///        surface, so the recorded hash is of what the run read
+  ///        (@ref verifyUnchanged then catches a change during the run).
+  ///
+  /// Known limit: the extent test does not wrap at the antimeridian, so a tile
+  /// within the margin of +-180 deg longitude is not matched to the surface tiles
+  /// on the other side.
+    SurfaceTileIndex(
+      const std::string & surface_root, const std::vector < std::string > &layers,
+      bool eager = false);
+
+  /// Re-hash every tile hashed so far; empty when all are unchanged, else a
+  /// sentence naming the first that differs (or cannot be read).
+    std::string verifyUnchanged();
 
   /// Every tile file, at any level, of the listed layers whose extent intersects
   /// @p tile grown by @p margin_m on every side, with its content hash; sorted

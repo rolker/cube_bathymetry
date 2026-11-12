@@ -1359,7 +1359,7 @@ import_bag --backscatter-angle-basis incidence --slope-surface depth_store \
 | Flag | Meaning |
 |---|---|
 | `--backscatter-angle-basis beam\|incidence` | The angle the correction is indexed by. Default `beam`: every output is exactly what it was before #173. `incidence` is the slope run |
-| `--slope-surface <bathy store>` | The finished depth store the slopes are read from: its `processed` layer, and `draft` if that directory exists. Never `reference`, `chart` or `overviews/`. Required with `incidence`, refused without it. A mistyped path, or a store with no tiles, is an error before any bag is read |
+| `--slope-surface <bathy store>` | The finished depth store the slopes are read from: its `processed` layer, and `draft`, each if it holds at least one tile. Never `reference`, `chart` or `overviews/`. Required with `incidence`, refused without it. A mistyped path, or a store with no tiles, is an error before any bag is read |
 | `--slope-baseline-deg <deg>` | The angle the differencing baseline subtends at the sonar, in (0, 30]; default 5. **Provisional**: the default has not been measured on real data |
 | `--bs-store <dir>` | Required with `incidence`: the one thing a slope run publishes |
 | `--scratch-dir <dir>` | For a slope run, the directory its unique scratch directory is made in (default: the parent of `--bs-store`). Allowed without `--depth-adaptive` only here |
@@ -1410,9 +1410,9 @@ SonarInfo), an incidence one for a second reason; the live node refuses an
 incidence table at `configure` and has no incidence mode. The legacy single
 curve has no incidence form, and a curve delivered by SonarInfo is a beam-angle
 curve: both are refused on an incidence run, including under the default
-`--backscatter-correction auto` (pass `none` or a table). The slope baseline and
-layers a table records are compared with the run's, and a difference is warned
-about, not refused.
+`--backscatter-correction auto` (pass `none` or a table). A table whose recorded slope
+baseline or layers differ from the run's is refused (a table fitted on another
+baseline is a different angle, and a store holds one set of inputs).
 
 **Order.** For each ping the beams are georeferenced, shifted by the gain
 declaration if there is one, stamped with their incidence, and only then
@@ -1433,6 +1433,12 @@ or I/O error, a failed finalize, a refusal, or exit 4. The scratch directories o
 a run that was killed are named at the start of the next run and can be deleted;
 they never block it.
 
+Every run that writes a backscatter store (an ordinary `import_bag`,
+`batch_regen_bag`, a slope run) takes a non-blocking exclusive lock on
+`<bs-store>/.slope-run.lock` for its whole life, before it looks for
+`derived_tiles.json`, so a slope run and a beam run cannot start on the same
+empty store: the second is refused at once.
+
 `--bs-store` must be empty or already a slope-run store; a beam-angle backscatter
 store is refused, and so is the reverse: an ordinary `import_bag` and
 `batch_regen_bag` refuse a store that holds `derived_tiles.json`. The store
@@ -1448,7 +1454,10 @@ tile:
 - **Store-level `inputs`**, the same for every tile: the angle basis, the baseline
   angle, the surface layers, the correction (`none` or `table:<sha256 of the
   table>`), the gain declaration's digest and reference state, the table fallback and
-  ping floor, `--iho-order`, the capture spacing scale, and the store level. A run whose inputs differ is refused before any bag is read, naming the
+  ping floor, `--iho-order`, the capture spacing scale, the identity of the `--reference-store`
+  prior (`sha256:` of the sorted content hashes of its `reference/` and `chart/`
+  tiles, so it does not depend on where the store lives; empty without one),
+  and the store level. A run whose inputs differ is refused before any bag is read, naming the
   first difference: one store holds one correction. A new table means a new
   store directory, or deleting the old one. `registry.json` is installed by the
   first publish only; later runs leave it as it is.
@@ -1458,7 +1467,12 @@ tile:
   depth tile, at any level, in the listed surface layers whose extent intersects
   the tile grown by `stencil_margin_m`, that margin (the largest half-baseline
   the run used, plus the largest sounding influence radius, plus twice the
-  coarsest surface cell), the time written and the code version.
+  coarsest surface cell), the number of pings the run dropped for want of an earth
+  transform (`dropped_georef_pings`, run-wide; an ordinary import tolerates such
+  pings too, this makes the count visible later), the time written and the code
+  version. The surface tiles are hashed before the run reads them and re-hashed
+  just before the publish: a tile that changed during the run fails the run
+  before the commit point.
 - A slope run always rebuilds every tile it touches. It **refuses to rebuild a
   tile whose recorded contributors are not all among the bags it was given**, at
   the first batch that reaches the tile and before anything is published, naming
@@ -1480,8 +1494,10 @@ run, before anything else, completes a publish that had committed from the
 pending manifest (no bags needed) or deletes the incoming directory of one that
 had not, and says which.
 
-**Exit codes of a slope run.** 0: published (or, with a warning, nothing to
-publish). 1: refused or failed; nothing was published. 4: a table was given and
+**Exit codes of a slope run.** 0: published. 1: refused or failed; nothing was
+published (this includes a run in which no cell had finite backscatter, and a
+run in which a tile reload, a seed or an intensity-spill restore failed, since
+some tile would then hold a partial population). 4: a table was given and
 no ping resolved a pulse mode; nothing was published. A bad request exits through
 `usage()`.
 
@@ -1491,7 +1507,11 @@ no ping resolved a pulse mode; nothing was published. A bad request exits throug
 build running (24 % of baselines at the floor), so on the order of half an hour
 per 60 million beams. Measure on your own data before a long run.
 
-**Limits.** Incidence tables cannot be derived with `derive_angular_response.py`
+**Limits.** The surface-tile extent test does not wrap at the antimeridian
+(longitude +-180), so a site there would miss depth tiles on the other side in
+`depth_tiles`. A refusal for missing contributors names the bags of the
+conservative reach of each batch, so near a tile edge it can name a bag that
+contributed no cell. Incidence tables cannot be derived with `derive_angular_response.py`
 yet: the per-beam ledger it needs is later work, so an incidence table is written
 by hand or by a script until then. The default baseline angle is provisional, and
 the default angle basis stays `beam` until an upslope and downslope comparison on

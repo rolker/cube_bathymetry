@@ -209,17 +209,22 @@ TEST(SlopeRunRequest, OnlyNoneOrATableCanBeAppliedOnIncidence)
   EXPECT_NE(sonar_info.find("--backscatter-correction none"), std::string::npos) << sonar_info;
 }
 
-TEST(SlopeRunRequest, TheSurfaceLayersAreTheOwnSurveyOnes)
+TEST(SlopeRunRequest, TheSurfaceLayersAreTheOwnSurveyOnesThatHoldTiles)
 {
   const std::string root = freshDir("layers");
   EXPECT_TRUE(slopeSurfaceLayers(root).empty());
   for (const char * dir : {"reference", "chart", "overviews"}) {
-    fs::create_directories(fs::path(root) / dir);
+    writeFile(fs::path(root) / dir / "10_1_1.tif", "t");
   }
   EXPECT_TRUE(slopeSurfaceLayers(root).empty());
+  // An empty directory is not a layer: creating one must not change a store's inputs.
   fs::create_directories(fs::path(root) / "draft");
+  EXPECT_TRUE(slopeSurfaceLayers(root).empty());
+  writeFile(fs::path(root) / "draft" / "readme.txt", "not a tile");
+  EXPECT_TRUE(slopeSurfaceLayers(root).empty());
+  writeFile(fs::path(root) / "draft" / "10_1_1.tif", "t");
   EXPECT_EQ(slopeSurfaceLayers(root), (std::vector<std::string>{"draft"}));
-  fs::create_directories(fs::path(root) / "processed");
+  writeFile(fs::path(root) / "processed" / "10_1_1.tif", "t");
   EXPECT_EQ(slopeSurfaceLayers(root), (std::vector<std::string>{"processed", "draft"}));
   fs::remove_all(root);
 }
@@ -277,7 +282,7 @@ TEST(SlopeRunCreate, ASecondRunOnTheStoreIsRefusedAndTheScratchIsRemoved)
     << "the default scratch root is the parent of the backscatter store";
   EXPECT_EQ(fs::path(scratch).filename().string().rfind("slope-run-", 0), 0u);
   EXPECT_FALSE(SlopeRun::create(f.config, error));
-  EXPECT_NE(error.find("another slope run holds"), std::string::npos) << error;
+  EXPECT_NE(error.find("another run (an import or a slope run) holds"), std::string::npos) << error;
   first.reset();
   EXPECT_FALSE(fs::exists(scratch)) << "removed on every exit path";
   EXPECT_TRUE(SlopeRun::create(f.config, error)) << error;
@@ -339,6 +344,7 @@ TEST(SlopeRunPrepare, ATileWhoseRecordedBagsAreNotAllGivenIsRefusedAtFirstTouch)
   EXPECT_NE(error.find("tile " + f.tile_name), std::string::npos) << error;
   EXPECT_NE(error.find("bag_gone"), std::string::npos) << error;
   EXPECT_NE(error.find("Nothing has been published"), std::string::npos) << error;
+  EXPECT_NE(error.find("conservative reach"), std::string::npos) << error;
   run.reset();
   EXPECT_EQ(snapshot(f.bs), before);
 
@@ -374,11 +380,26 @@ TEST(SlopeRunPublish, PublishesTheTilesRecordsThemAndDropsATileLeftWithNoCells)
   ASSERT_TRUE(run) << error;
   auto s = f.soundings();
   ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  // A second tile is reached and does get cells (a run with none at all fails).
+  const gggs::GridIndex fresh_tile = gggs::Level(10).gridIndex(kLat - 0.02, kLon);
+  std::vector<GeoSounding> elsewhere;
+  {
+    const auto mpd = seabed::metresPerDegree(kLat);
+    GeoSounding gs(gz4d::GeoPointLatLongDegrees(kLat - 0.02, kLon + 0.5 / mpd.east, -20.0));
+    gs.sounding.beam_dir_enu = {0.0, 0.0, -1.0};
+    gs.sounding.slant_range = 20.0f;
+    gs.sounding.vertical_error = 0.01f;
+    gs.sounding.horizontal_error = 0.01f;
+    elsewhere.push_back(gs);
+  }
+  ASSERT_TRUE(run->prepare(elsewhere, 0, f.sheet, error)) << error;
+  writeFile(fs::path(run->scratchBsDir()) / "survey" / mbs::tileFilename(fresh_tile), "fresh");
 
-  // This run reached the tile but produced no cells: no scratch tile exists.
+  // The first tile was reached but produced no cells: no scratch tile exists.
   std::string summary;
   ASSERT_TRUE(run->publish(error, summary)) << error;
   EXPECT_NE(summary.find("1 reached with no cells"), std::string::npos) << summary;
+  EXPECT_EQ(readFile(fs::path(f.bs) / "survey" / mbs::tileFilename(fresh_tile)), "fresh");
   EXPECT_FALSE(fs::exists(fs::path(f.bs) / "survey" / f.tile_name)) << "the stale tile is removed";
   EXPECT_EQ(readFile(fs::path(f.bs) / "survey" / other_name), "untouched tile");
   const auto after = DerivedTiles::load(f.bs);
@@ -417,17 +438,62 @@ TEST(SlopeRunPublish, RecordsContributorsDepthTilesAndTheMargin)
   EXPECT_TRUE(m->inputs == f.config.inputs);
 }
 
-// A run with nothing to publish says so and writes nothing.
-TEST(SlopeRunPublish, ARunWithNoCellsPublishesNothingAndWarns)
+// A run with no finite backscatter at all is a failure, not a product: it names the
+// reason and writes nothing.
+TEST(SlopeRunPublish, ARunWithNoCellsFailsAndWritesNothing)
 {
   Fixture f;
   std::string error;
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
+  auto s = f.soundings();
+  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  std::string summary;
+  EXPECT_FALSE(run->publish(error, summary));
+  EXPECT_NE(error.find("no cell had finite backscatter"), std::string::npos) << error;
+  EXPECT_NE(error.find("Nothing was published"), std::string::npos) << error;
+  EXPECT_FALSE(fs::exists(fs::path(f.bs) / DerivedTiles::kFilename));
+}
+
+// The depth tiles are hashed before the run reads them; one rewritten meanwhile
+// fails the publish before the commit point.
+TEST(SlopeRunPublish, ASurfaceTileChangedDuringTheRunFailsBeforeTheCommit)
+{
+  Fixture f;
+  std::string error;
+  auto run = SlopeRun::create(f.config, error);
+  ASSERT_TRUE(run) << error;
+  auto s = f.soundings();
+  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
+  const fs::path depth = fs::path(f.surface) / "processed" /
+    marine_bathymetry_store::tileFilename(f.tile);
+  {
+    std::ofstream(depth, std::ios::binary | std::ios::app) << "tampered";
+  }
+  const auto before = snapshot(f.bs);
+  std::string summary;
+  EXPECT_FALSE(run->publish(error, summary));
+  EXPECT_NE(error.find("changed while the run was reading it"), std::string::npos) << error;
+  EXPECT_EQ(snapshot(f.bs), before) << "nothing reached the destination";
+  EXPECT_FALSE(fs::exists(fs::path(f.bs) / DerivedTiles::kPendingFilename));
+}
+
+// How many pings the run dropped is visible in every tile entry.
+TEST(SlopeRunPublish, DroppedGeoreferencingIsRecordedInTheEntries)
+{
+  Fixture f;
+  std::string error;
+  auto run = SlopeRun::create(f.config, error);
+  ASSERT_TRUE(run) << error;
+  auto s = f.soundings();
+  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
+  run->setDroppedGeoreferencing(7);
   std::string summary;
   ASSERT_TRUE(run->publish(error, summary)) << error;
-  EXPECT_NE(summary.find("nothing was published"), std::string::npos) << summary;
-  EXPECT_FALSE(fs::exists(fs::path(f.bs) / DerivedTiles::kFilename));
+  EXPECT_NE(summary.find("7 ping(s) were dropped"), std::string::npos) << summary;
+  EXPECT_EQ(DerivedTiles::load(f.bs)->tiles.at(f.tile_name).dropped_georef_pings, 7u);
 }
 
 // The scratch store holding a tile no batch was attributed to is a bookkeeping

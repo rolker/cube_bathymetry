@@ -278,6 +278,7 @@ json inputsToJson(const StoreInputs & in)
   j["mode_min_pings"] = in.mode_min_pings;
   j["iho_order"] = in.iho_order;
   j["capture_spacing_scale"] = in.capture_spacing_scale;
+  j["reference_store"] = in.reference_store;
   return j;
 }
 
@@ -287,7 +288,7 @@ StoreInputs inputsFromJson(const json & j)
   checkKeys(
     j, where, {"angle_basis", "slope_baseline_deg", "slope_layers", "correction",
       "gain_declaration_sha256", "gain_reference_state", "level", "mode_fallback",
-      "mode_min_pings", "iho_order", "capture_spacing_scale"});
+      "mode_min_pings", "iho_order", "capture_spacing_scale", "reference_store"});
   StoreInputs in;
   in.angle_basis = getString(j, "angle_basis", where);
   if (in.angle_basis != "incidence") {
@@ -317,6 +318,12 @@ StoreInputs inputsFromJson(const json & j)
   in.mode_min_pings = j.at("mode_min_pings").get<int64_t>();
   in.iho_order = getString(j, "iho_order", where);
   in.capture_spacing_scale = getNumber(j, "capture_spacing_scale", where);
+  in.reference_store = getString(j, "reference_store", where);
+  if (!in.reference_store.empty() &&
+    !(in.reference_store.rfind("sha256:", 0) == 0 && isHexDigest(in.reference_store.substr(7))))
+  {
+    fail("inputs.reference_store must be empty or 'sha256:<digest>'");
+  }
   return in;
 }
 
@@ -340,6 +347,7 @@ json tileToJson(const TileRecord & t)
   }
   j["depth_tiles"] = depth;
   j["stencil_margin_m"] = t.stencil_margin_m;
+  j["dropped_georef_pings"] = t.dropped_georef_pings;
   j["written"] = t.written;
   j["code_version"] = t.code_version;
   return j;
@@ -348,7 +356,8 @@ json tileToJson(const TileRecord & t)
 TileRecord tileFromJson(const json & j, const std::string & where)
 {
   checkKeys(j, where,
-    {"contributors", "depth_tiles", "stencil_margin_m", "written", "code_version"});
+    {"contributors", "depth_tiles", "stencil_margin_m", "dropped_georef_pings", "written",
+      "code_version"});
   TileRecord t;
   if (!j.at("contributors").is_array()) {
     fail(where + ".contributors must be an array");
@@ -393,6 +402,10 @@ TileRecord tileFromJson(const json & j, const std::string & where)
   if (t.stencil_margin_m < 0.0) {
     fail(where + ".stencil_margin_m must not be negative");
   }
+  if (!j.at("dropped_georef_pings").is_number_unsigned()) {
+    fail(where + ".dropped_georef_pings must be a non-negative integer");
+  }
+  t.dropped_georef_pings = j.at("dropped_georef_pings").get<uint64_t>();
   t.written = getString(j, "written", where);
   t.code_version = getString(j, "code_version", where);
   return t;
@@ -492,6 +505,11 @@ std::string StoreInputs::difference(const StoreInputs & o) const
   if (capture_spacing_scale != o.capture_spacing_scale) {
     return describe("the capture spacing scale", std::to_string(capture_spacing_scale),
              std::to_string(o.capture_spacing_scale));
+  }
+  if (reference_store != o.reference_store) {
+    return describe(
+      "the reference (prior) store", reference_store.empty() ? "none" : reference_store,
+      o.reference_store.empty() ? "none" : o.reference_store);
   }
   if (level != o.level) {
     return describe("the store level", std::to_string(level), std::to_string(o.level));
@@ -625,7 +643,9 @@ std::string contributorProblem(
   }
   return "tile " + tile_name + " was built from " + std::to_string(recorded.contributors.size()) +
          " bag(s), and this run was not given: " + names + ". Rebuilding it from fewer bags "
-         "would silently drop their beams; give every bag that touched it";
+         "would silently drop their beams; give every bag that touched it. (The bags "
+         "a tile is attributed to are the conservative reach of each batch, so near a tile "
+         "edge this can name a bag that contributed no cell to the tile.)";
 }
 
 std::string utcTimestamp()
@@ -678,7 +698,7 @@ std::optional<TileBounds> tileBoundsFromName(const std::string & file_name)
 }
 
 SurfaceTileIndex::SurfaceTileIndex(
-  const std::string & surface_root, const std::vector<std::string> & layers)
+  const std::string & surface_root, const std::vector<std::string> & layers, bool eager)
 {
   for (const std::string & layer : layers) {
     const fs::path dir = fs::path(surface_root) / layer;
@@ -702,6 +722,32 @@ SurfaceTileIndex::SurfaceTileIndex(
   std::sort(
     entries_.begin(), entries_.end(),
     [](const Entry & a, const Entry & b) {return a.relative < b.relative;});
+  if (eager) {
+    for (Entry & e : entries_) {
+      e.sha256 = sha256File(e.path);
+      e.hashed = true;
+      ++hashed_;
+    }
+  }
+}
+
+std::string SurfaceTileIndex::verifyUnchanged()
+{
+  for (Entry & e : entries_) {
+    if (!e.hashed) {
+      continue;
+    }
+    std::string now;
+    try {
+      now = sha256File(e.path);
+    } catch (const std::exception & ex) {
+      return "surface tile " + e.relative + " can no longer be read (" + ex.what() + ")";
+    }
+    if (now != e.sha256) {
+      return "surface tile " + e.relative + " changed while the run was reading it";
+    }
+  }
+  return "";
 }
 
 std::vector<DepthTileRecord> SurfaceTileIndex::tilesNear(const TileBounds & tile, double margin_m)
@@ -730,6 +776,33 @@ std::vector<DepthTileRecord> SurfaceTileIndex::tilesNear(const TileBounds & tile
   return out;
 }
 
+std::string referenceStoreDigest(const std::string & dir)
+{
+  if (dir.empty()) {
+    return "";
+  }
+  std::vector<std::pair<std::string, std::string>> files;
+  std::error_code ec;
+  for (const char * layer : {"reference", "chart"}) {
+    const fs::path layer_dir = fs::path(dir) / layer;
+    if (!fs::is_directory(layer_dir, ec)) {
+      continue;
+    }
+    for (const auto & entry : fs::directory_iterator(layer_dir, ec)) {
+      const std::string name = entry.path().filename().string();
+      if (isTileFileName(name) && entry.is_regular_file(ec)) {
+        files.emplace_back(std::string(layer) + "/" + name, sha256File(entry.path().string()));
+      }
+    }
+  }
+  std::sort(files.begin(), files.end());
+  std::string listing;
+  for (const auto & [path, sha] : files) {
+    listing += path + ":" + sha + "\n";
+  }
+  return "sha256:" + sha256Text(listing);
+}
+
 // ---- lock -----------------------------------------------------------------
 
 std::unique_ptr<StoreLock> StoreLock::acquire(const std::string & store_dir, std::string & error)
@@ -751,7 +824,8 @@ std::unique_ptr<StoreLock> StoreLock::acquire(const std::string & store_dir, std
     const int err = errno;
     ::close(fd);
     error = err == EWOULDBLOCK ?
-      "another slope run holds " + path + " (it is writing this store); a second run is "
+      "another run (an import or a slope run) holds " + path +
+      " (it is writing this store); a second run is "
       "refused, not queued" :
       "cannot lock " + path + ": " + std::strerror(err);
     return nullptr;

@@ -399,7 +399,8 @@ def test_manifest_records_inputs_contributors_and_depth_hashes(world, all_run):
         'angle_basis': 'incidence', 'slope_baseline_deg': 5.0, 'slope_layers': 'processed',
         'correction': 'table:' + sha(world['table']), 'gain_declaration_sha256': '',
         'gain_reference_state': '', 'level': 10, 'mode_fallback': 'exclude',
-        'mode_min_pings': 0, 'iho_order': 'order1a', 'capture_spacing_scale': 0.71}
+        'mode_min_pings': 0, 'iho_order': 'order1a', 'capture_spacing_scale': 0.71,
+        'reference_store': ''}
     assert sorted(m['tiles']) == sorted(TILES)
     bags = sorted((bag_identity(b) for b in world['bags'].values()), key=lambda b: b['name'])
     depth = pathlib.Path(world['depth']) / 'processed'
@@ -411,6 +412,7 @@ def test_manifest_records_inputs_contributors_and_depth_hashes(world, all_run):
         assert t['depth_tiles'] == expected_depth, name
         assert t['stencil_margin_m'] > 2.0, t
         assert t['code_version'] == 'slope-run-1'
+        assert t['dropped_georef_pings'] == 0
         assert t['written'].endswith('Z') and len(t['written']) == 20
     assert m['last_publish']['written'] == sorted(TILES)
     assert m['last_publish']['removed'] == []
@@ -531,6 +533,8 @@ def test_a_run_with_other_inputs_is_refused_before_any_bag_is_read(
     extra = []
     expect = ''
     if what == 'baseline':
+        # A table fitted on 6 deg, run at 6 deg: the table matches the run, the store does not.
+        table = write_incidence_table(tmp_path / 'table6.csv', slope_baseline=6.0)
         extra, expect = ['--slope-baseline-deg', '6'], 'the slope baseline angle differs'
     elif what == 'table':
         table = write_incidence_table(tmp_path / 'other_table.csv', shift_db=1.0)
@@ -645,7 +649,7 @@ def test_a_held_lock_refuses_a_second_run_at_once(world, tmp_path):
         fcntl.flock(lock, fcntl.LOCK_EX)
         rc, out = run_import(slope_args(world['depth'], store, world['table']),
                              [world['bags'][0.0]])
-    assert rc == 1 and 'another slope run holds' in out, out
+    assert rc == 1 and 'another run (an import or a slope run) holds' in out, out
     assert 'projecting detections' not in out
 
 
@@ -765,3 +769,85 @@ def test_an_unreadable_bag_storage_leaves_no_scratch_behind(world, tmp_path):
     rc, out = run_import(slope_args(world['depth'], fresh(tmp_path), world['table']), [broken])
     assert rc != 0
     assert scratch_dirs(tmp_path) == [], out
+
+
+def test_a_table_fitted_on_another_baseline_or_layers_is_refused(world, tmp_path):
+    bag = world['side'][0.0]
+    cases = (('baseline', {'slope_baseline': 7.0}), ('layers', {'slope_layers': 'draft'}))
+    for tag, kwargs in cases:
+        table = write_incidence_table(tmp_path / ('t_%s.csv' % tag), **kwargs)
+        store = tmp_path / ('bs_%s' % tag)
+        rc, out = run_import(slope_args(world['depth'], store, table), [bag])
+        assert rc != 0, out
+        assert 'the incidence table was fitted with' in out, out
+        assert 'projecting detections' not in out
+        assert not list(store.rglob('*.tif')) if store.exists() else True
+
+
+def test_a_run_without_finite_backscatter_fails_and_publishes_nothing(world, tmp_path):
+    bag = tmp_path / 'no_intensity'
+    write_plane_bag(bag, 0.0, 3000.0, thetas=[-10.0, 0.0, 10.0],
+                    level_fn=lambda t, h: float('nan'))
+    store = tmp_path / 'bs'
+    rc, out = run_import(slope_args(world['depth'], store, world['table']), [bag])
+    assert rc == 1, out
+    assert 'no cell had finite backscatter' in out and 'Nothing was published' in out, out
+    assert not (store / 'derived_tiles.json').exists() and not list(store.rglob('*.tif'))
+    assert scratch_dirs(tmp_path) == []
+
+
+def test_an_empty_draft_directory_does_not_change_the_recorded_layers(world, tmp_path):
+    depth = tmp_path / 'depth_copy'
+    shutil.copytree(world['depth'], depth)
+    store = tmp_path / 'bs'
+    bag = world['side'][0.0]
+    rc, out = run_import(slope_args(depth, store, world['table']), [bag])
+    assert rc == 0, out
+    (depth / 'draft').mkdir()
+    rc, out = run_import(slope_args(depth, store, world['table']), [bag])
+    assert rc == 0, out
+    assert manifest(store)['inputs']['slope_layers'] == 'processed'
+
+
+def test_the_reference_store_is_part_of_the_stores_identity(world, tmp_path):
+    store = tmp_path / 'bs'
+    bag = world['side'][0.0]
+    prior_a, prior_b = tmp_path / 'prior_a', tmp_path / 'prior_b'
+    for prior, text in ((prior_a, b'prior a'), (prior_b, b'prior b')):
+        (prior / 'reference').mkdir(parents=True)
+        (prior / 'reference' / '10_1_1.tif').write_bytes(text)
+    moved = tmp_path / 'moved' / 'prior_a'
+    shutil.copytree(prior_a, moved)
+    ref = ['--reference-store', str(prior_a)]
+    rc, out = run_import(slope_args(world['depth'], store, world['table'], ref), [bag])
+    assert rc == 0, out
+    digest = manifest(store)['inputs']['reference_store']
+    assert digest.startswith('sha256:') and len(digest) == 71
+    # The same prior in another place is the same prior; another prior, or none, is refused.
+    rc, out = run_import(slope_args(world['depth'], store, world['table'],
+                                    ['--reference-store', str(moved)]), [bag])
+    assert rc == 0, out
+    for extra in (['--reference-store', str(prior_b)], []):
+        rc, out = run_import(slope_args(world['depth'], store, world['table'], extra), [bag])
+        assert rc == 1 and 'the reference (prior) store differs' in out, out
+        assert 'projecting detections' not in out
+
+
+def test_an_ordinary_import_is_refused_while_a_slope_run_holds_the_store(world, tmp_path):
+    import fcntl
+    store = tmp_path / 'bs'
+    store.mkdir()
+    with open(store / '.slope-run.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rc, out = run_import(['-o', str(tmp_path / 'o'), '--bs-store', str(store)],
+                             [world['bags'][0.0]])
+    assert rc != 0 and 'holds' in out and 'projecting detections' not in out, out
+    assert not list(tmp_path.rglob('*.tif'))
+    if BATCH_REGEN:
+        with open(store / '.slope-run.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            proc = subprocess.run(
+                [BATCH_REGEN, '-o', str(tmp_path / 'o2'), '--bs-store', str(store), '-d',
+                 helpers.TOPIC, str(world['bags'][0.0])],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        assert proc.returncode != 0 and 'holds' in proc.stdout, proc.stdout
