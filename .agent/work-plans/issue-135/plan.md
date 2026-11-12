@@ -29,6 +29,16 @@ The cube-owned writers are made safe here, which closes the loss path today:
    logging an ERROR naming the file, and keeps the rest saving normally. Operator
    action: repair or delete the named tile.
 
+## Refinements from review (pre-push)
+- A layer dir that cannot be listed fails the whole prime; the node then sets
+  `draft_saves_blocked_` (no draft save at all this session).
+- A refused tile stays dirty (`GeoMapSheet::clearDirtyGrids(saved)`): it is never
+  evicted, and cleanup refuses rather than lose it. If the operator removes the
+  damaged file, the next save writes the tile (nothing is left to erase); repairing it
+  needs a reconfigure/`~/reset` to reload.
+- Not covered here (offline tools, same fix as upstream #256): `marine_bathymetry_store::save`
+  used by the draft-clearing step in store_import.cpp and `count_grid` scratch tiles.
+
 ## Decision taken (flag for the owner)
 Refuse rather than quarantine/replace: a tile that cannot be read is left on disk
 untouched and new soundings for that tile are not persisted this session (they stay in

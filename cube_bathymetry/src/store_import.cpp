@@ -925,6 +925,9 @@ void writeFileAtomically(
   const std::function<void(const std::string & temp_path)> & write_to)
 {
   namespace fs = std::filesystem;
+  // One writer per tile file is assumed (the live node owns draft/, batch_regen
+  // owns processed/): the temp name is not unique, and a stale one from a crash is
+  // simply replaced.
   const std::string temp = path + ".partial";
   std::error_code ec;
   fs::remove(temp, ec);   // a leftover from an earlier crash
@@ -969,17 +972,29 @@ std::vector<UnreadableTile> loadStoreSkippingUnreadable(
     const fs::path layer_dir = fs::path(store_dir) / mbs::layerDirName(layer);
     std::error_code ec;
     if (!fs::is_directory(layer_dir, ec)) {
+      if (ec && ec != std::errc::no_such_file_or_directory) {
+        // Not "absent": the layer exists or may exist but cannot be examined, so
+        // nothing about it is accounted for. Fail the whole prime; the caller then
+        // refuses draft saves rather than write over tiles it never read.
+        throw std::runtime_error(
+                "cannot examine layer dir '" + layer_dir.string() + "': " + ec.message());
+      }
       continue;
     }
     std::vector<fs::path> files;
-    for (const auto & entry : fs::directory_iterator(layer_dir, ec)) {
-      if (entry.is_regular_file() && entry.path().extension() == ".tif") {
-        files.push_back(entry.path());
+    fs::directory_iterator it(layer_dir, ec);
+    for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      std::error_code entry_ec;
+      const bool regular = it->is_regular_file(entry_ec);
+      if (entry_ec) {
+        unreadable.push_back({layer, it->path().string(), entry_ec.message()});
+      } else if (regular && it->path().extension() == ".tif") {
+        files.push_back(it->path());
       }
     }
     if (ec) {
-      unreadable.push_back({layer, layer_dir.string(), "cannot list: " + ec.message()});
-      continue;
+      throw std::runtime_error(
+              "cannot list layer dir '" + layer_dir.string() + "': " + ec.message());
     }
     std::map<gggs::GridIndex, mbs::BathymetryTile> good;
     for (const auto & file : files) {

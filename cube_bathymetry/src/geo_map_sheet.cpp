@@ -260,6 +260,13 @@ void GeoMapSheet::clearDirtyGrids()
   dirty_grids_.clear();
 }
 
+void GeoMapSheet::clearDirtyGrids(const std::set<gggs::GridIndex> & saved)
+{
+  for (const auto & index : saved) {
+    dirty_grids_.erase(index);
+  }
+}
+
 std::set<gggs::GridIndex> GeoMapSheet::publishDirtyGrids() const
 {
   return publish_dirty_grids_;

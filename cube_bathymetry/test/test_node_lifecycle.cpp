@@ -214,14 +214,15 @@ namespace
 using lifecycle_msgs::msg::State;
 
 // Repeat each location so CUBE forms a hypothesis from a single survey patch.
-void addPatch(
-  const std::shared_ptr<cube::GeoMapSheet> & sheet, double depth, double lon_offset = 0.0)
+void addPatchAt(
+  const std::shared_ptr<cube::GeoMapSheet> & sheet, double depth, double lat_offset,
+  double lon_offset)
 {
   for (int rep = 0; rep < 25; ++rep) {
     for (int iy = 0; iy < 3; ++iy) {
       for (int ix = 0; ix < 3; ++ix) {
         gz4d::GeoPointLatLongDegrees ll(
-          43.07 + iy * 1.2e-5, -70.76 + lon_offset + ix * 1.6e-5, depth);
+          43.07 + lat_offset + iy * 1.2e-5, -70.76 + lon_offset + ix * 1.6e-5, depth);
         cube::GeoSounding gs(ll);
         gs.sounding.vertical_error = 0.5f;
         gs.sounding.horizontal_error = 0.1f;
@@ -229,6 +230,12 @@ void addPatch(
       }
     }
   }
+}
+
+void addPatch(
+  const std::shared_ptr<cube::GeoMapSheet> & sheet, double depth, double lon_offset = 0.0)
+{
+  addPatchAt(sheet, depth, 0.0, lon_offset);
 }
 
 // True when the sheet holds at least one finite cell.
@@ -582,24 +589,82 @@ TEST_F(NodeLifecycle, AnUnreadableTileIsNeverOverwritten)
     before.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
   }
 
+  auto read_all = [](const std::filesystem::path & f) {
+      std::ifstream in(f, std::ios::binary);
+      return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
   {
     auto node = std::make_shared<CubeBathymetry>(
       withParams({rclcpp::Parameter("draft_dir", dir.string())}));
     ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
     ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
     addPatch(node->sheet(), -13.5);
+    // A second patch ~10 km away lands in a different, healthy tile: it must save
+    // while the unreadable one is refused.
+    addPatchAt(node->sheet(), -14.5, 0.1, 0.0);
     ASSERT_FALSE(node->sheet()->dirtyGrids().empty());
     // Both the periodic path and the shutdown flush go through saveDirtyTiles.
     ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_TRUE(read_all(tile) == before)
+      << "the unreadable tile must be left exactly as found";
+    EXPECT_FALSE(std::filesystem::exists(tile.string() + ".partial"));
+    std::size_t tif_count = 0;
+    for (const auto & e : std::filesystem::directory_iterator(dir / "draft")) {
+      tif_count += e.path().extension() == ".tif" ? 1 : 0;
+    }
+    EXPECT_EQ(tif_count, 2u) << "the healthy tile must have been saved beside the refused one";
+
+    // Its unsaved soundings are kept, not dropped: cleanup refuses rather than lose them.
+    EXPECT_FALSE(node->sheet()->dirtyGrids().empty());
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_INACTIVE);
+
+    // The operator removes the damaged file: saving resumes and cleanup goes through.
+    std::filesystem::remove(tile);
     EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+    EXPECT_TRUE(std::filesystem::exists(tile)) << "the tile is written once the damaged file is gone";
   }
-  std::string after;
+  std::filesystem::remove_all(dir);
+}
+
+// The prime failed for a reason the loader cannot name per tile (the draft dir
+// cannot be listed): no tile on disk is accounted for, so NO draft save may happen.
+TEST_F(NodeLifecycle, AnUnlistableDraftDirBlocksEverySave)
+{
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "permission bits do not bind root";
+  }
+  const auto dir = makeTempDir();
   {
-    std::ifstream in(tile, std::ios::binary);
-    after.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    addPatch(node->sheet(), -12.5);
+    ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   }
-  EXPECT_TRUE(after == before) << "the unreadable tile must be left exactly as found";
-  EXPECT_FALSE(std::filesystem::exists(tile.string() + ".partial"));
+  std::filesystem::path tile;
+  for (const auto & e : std::filesystem::directory_iterator(dir / "draft")) {
+    tile = e.path();
+  }
+  ASSERT_FALSE(tile.empty());
+  const auto mtime = std::filesystem::last_write_time(tile);
+  // Readable and writable, but not listable: x without r.
+  std::filesystem::permissions(
+    dir / "draft", std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec);
+  {
+    auto node = std::make_shared<CubeBathymetry>(
+      withParams({rclcpp::Parameter("draft_dir", dir.string())}));
+    ASSERT_EQ(node->configure().id(), State::PRIMARY_STATE_INACTIVE);
+    ASSERT_EQ(node->activate().id(), State::PRIMARY_STATE_ACTIVE);
+    addPatch(node->sheet(), -13.5);
+    ASSERT_EQ(node->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
+    EXPECT_FALSE(node->sheet()->dirtyGrids().empty()) << "blocked saves keep their data";
+    EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_INACTIVE);
+  }
+  std::filesystem::permissions(dir / "draft", std::filesystem::perms::owner_all);
+  EXPECT_TRUE(std::filesystem::last_write_time(tile) == mtime)
+    << "no tile may be rewritten while the store could not be read";
   std::filesystem::remove_all(dir);
 }
 

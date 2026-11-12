@@ -464,4 +464,23 @@ TEST(Persistence, SkippingLoaderRethrowsARefusedLegacyStore)
 }
 
 
+// A layer directory that cannot be listed is not "no tiles": nothing about it is
+// accounted for, so the loader fails the whole prime (the node then refuses every
+// draft save) instead of naming the directory as one unreadable tile.
+TEST(Persistence, SkippingLoaderThrowsWhenALayerDirCannotBeListed)
+{
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "permission bits do not bind root";
+  }
+  const std::string dir = makeTempDir("skip_nolist");
+  ASSERT_FALSE(saveOnePatch(dir).empty());
+  std::filesystem::permissions(dir + "/draft", std::filesystem::perms::none);
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  EXPECT_THROW(loadStoreSkippingUnreadable(store, dir), std::exception);
+  std::filesystem::permissions(dir + "/draft", std::filesystem::perms::owner_all);
+  std::filesystem::remove_all(dir);
+}
+
+
 }  // namespace cube

@@ -2388,7 +2388,7 @@ private:
         // per-tile read error the loader could name, so no tile can be proven safe
         // to overwrite (#135). Only an existing store dir is at risk.
         std::error_code exists_ec;
-        if (std::filesystem::exists(draft_dir_, exists_ec)) {
+        if (std::filesystem::exists(draft_dir_, exists_ec) || exists_ec) {
           session.draft_saves_blocked = true;
           RCLCPP_ERROR(get_logger(),
             "Draft saves are DISABLED this session so the unloaded tiles under %s "
@@ -2800,11 +2800,16 @@ private:
 
     std::size_t written = 0;
     std::size_t refused = 0;
+    // Grids that no longer need saving. A refused tile is NOT in it: it stays dirty
+    // so trimToBudget() never evicts its unsaved soundings and cleanup refuses
+    // rather than discard them (the same contract as a failed write).
+    std::set<gggs::GridIndex> done;
     try {
       std::filesystem::create_directories(dir);
       for (const auto & index : dirty) {
         auto grid_ptr = geo_map_sheet_->gridAt(index);
         if (!grid_ptr) {
+          done.insert(index);
           continue;
         }
         // BathyCell is 2-band since uma#248 (no per-cell timestamp/source_index);
@@ -2816,22 +2821,34 @@ private:
           // No finite cells (all queued/NaN) -- nothing to write. dirty() is the
           // value-raster flag geoGridToTile sets iff it wrote a finite cell
           // (same idiom as mapSheetToTiles).
+          done.insert(index);
           continue;
         }
         const std::string name = marine_bathymetry_store::tileFilename(index);
+        if (unreadable_draft_tiles_.count(name) != 0) {
+          // The operator may have removed the damaged file since configure: with
+          // nothing on disk there is nothing to erase, so saving resumes.
+          std::error_code gone_ec;
+          if (!std::filesystem::exists(dir + "/" + name, gone_ec) && !gone_ec) {
+            unreadable_draft_tiles_.erase(name);
+          }
+        }
         if (unreadable_draft_tiles_.count(name) != 0) {
           // The file on disk holds earlier surveys this session never loaded;
           // writing the sheet over it would erase them (#135). Leave it.
           ++refused;
           RCLCPP_ERROR_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
             "Not saving draft tile " << name << ": the file on disk is unreadable "
-            "and would be overwritten with this session's soundings alone. Repair or "
-            "remove " << dir << "/" << name << " to resume saving it.");
+            "and would be overwritten with this session's soundings alone. Its unsaved "
+            "soundings are kept in memory. Remove " << dir << "/" << name <<
+            " and saving resumes at the next interval (or repair it and "
+            "reconfigure/~/reset to reload it).");
           continue;
         }
         // Crash-atomic (write beside, fsync, rename): a kill mid-save leaves the
         // previous tile intact and a concurrent reader never sees a partial one.
         cube::saveTileAtomic(tile, dir + "/" + name);
+        done.insert(index);
         ++written;
       }
     } catch (const std::exception & e) {
@@ -2843,7 +2860,7 @@ private:
       return;
     }
 
-    geo_map_sheet_->clearDirtyGrids();
+    geo_map_sheet_->clearDirtyGrids(done);
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
       "Saved " << written << " draft tile(s) to " << dir <<
       (refused ? " (" + std::to_string(refused) + " refused, unreadable on disk)" : ""));
