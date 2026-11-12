@@ -46,6 +46,12 @@ namespace
 {
 
 constexpr const char * kFormatLine = "# format: angular-response-table v1";
+/// The incidence-angle format (cube_bathymetry#173). A different first line, not
+/// an extra record under the v1 one: the loader refuses a format line it does
+/// not know, so a binary built before #173 refuses an incidence table, where an
+/// unknown `#` key under the v1 line would be skipped silently and the table
+/// applied on the beam angle.
+constexpr const char * kIncidenceFormatLine = "# format: angular-response-table v2";
 /// Any version of the format: a file whose first line starts with this is a
 /// table, and one this loader cannot read fails loudly rather than being
 /// handed to the single-curve loader (which reads it as an empty curve).
@@ -641,11 +647,12 @@ BackscatterTable loadBackscatterTable(
   if (!firstContentLine(in, line, line_no)) {
     return fail(line_no, "empty file, not an angular-response table");
   }
-  if (line != kFormatLine) {
+  const bool incidence_format = line == kIncidenceFormatLine;
+  if (line != kFormatLine && !incidence_format) {
     if (hasFormatPrefix(line)) {
       return fail(line_no, "unsupported table format '" + quotedLine(line) +
                "' (this loader reads '" +
-               kFormatLine + "')");
+               kFormatLine + "' and '" + kIncidenceFormatLine + "')");
     }
     return fail(line_no, std::string("not an angular-response table (first line must be '") +
              kFormatLine + "')");
@@ -673,11 +680,15 @@ BackscatterTable loadBackscatterTable(
       }
       const std::string key = trim(body.substr(0, colon));
       const std::string value = trim(body.substr(colon + 1));
+      const bool repeat_is_error = key == "gain_declaration_sha256" ||
+        key == "gain_reference_state" ||
+        (incidence_format &&
+        (key == "angle_basis" || key == "slope_baseline_deg" || key == "slope_layers"));
       if (key == "mode_summary") {
         summaries.emplace_back(line_no, value);
       } else if (!header.count(key)) {
         header[key] = value;
-      } else if (key == "gain_declaration_sha256" || key == "gain_reference_state") {
+      } else if (repeat_is_error) {
         return fail(line_no, "'# " + key + ":' given twice");
       }
       continue;
@@ -729,6 +740,35 @@ BackscatterTable loadBackscatterTable(
   }
   if (header.count("source_bags")) {
     table.source_bags = header["source_bags"];
+  }
+  // The angle basis (cube_bathymetry#173). A v1 table is a beam table and may
+  // not carry the incidence records (a v1 line over incidence records would be
+  // a table that says two things); a v2 table must carry all three, once.
+  const bool has_incidence_records = header.count("angle_basis") ||
+    header.count("slope_baseline_deg") || header.count("slope_layers");
+  if (incidence_format) {
+    for (const char * key : {"angle_basis", "slope_baseline_deg", "slope_layers"}) {
+      if (!header.count(key) || header[key].empty()) {
+        return fail(line_no, std::string("an incidence table (") + kIncidenceFormatLine +
+               ") needs a non-empty '# " + key + ":' record");
+      }
+    }
+    if (header["angle_basis"] != "incidence") {
+      return fail(line_no, "'# angle_basis: " + header["angle_basis"] + "' under the incidence "
+             "format line; it must read 'incidence'");
+    }
+    if (!headerNumber("slope_baseline_deg", table.slope_baseline_deg, true) ||
+      !(table.slope_baseline_deg > 0.0 && table.slope_baseline_deg <= 30.0))
+    {
+      return fail(line_no, "'# slope_baseline_deg: " + header["slope_baseline_deg"] +
+             "' must be a number in (0, 30]");
+    }
+    table.slope_layers = header["slope_layers"];
+    table.angle_basis = BackscatterAngleBasis::Incidence;
+  } else if (has_incidence_records) {
+    return fail(line_no, std::string("'# angle_basis:' / '# slope_baseline_deg:' / "
+           "'# slope_layers:' belong to the incidence format (") + kIncidenceFormatLine +
+           "), not to '" + kFormatLine + "'");
   }
   // The gain-state record is both lines or neither, each with a value: one
   // without the other (or an empty one) would read as "no record" or as half
@@ -1130,6 +1170,22 @@ double correctWithTable(
   const RangeTermGroup * group = entry->groupFor(abs_angle_deg);
   const double r = group ? group->at(std::log10(range_m / table.range_ref_m)) : 0.0;
   return raw_db - rel - r - entry->offset_db_vs_ref;
+}
+
+std::string angleBasisProblem(
+  const BackscatterTable & table, BackscatterAngleBasis run_basis, const std::string & what)
+{
+  if (table.angle_basis == run_basis) {
+    return "";
+  }
+  if (table.angle_basis == BackscatterAngleBasis::Incidence) {
+    return what + " is an incidence-angle table (" + kIncidenceFormatLine + "), fitted on the "
+           "angle against the seabed normal, and this run corrects by the sonar-frame beam "
+           "angle: applying it would put every beam in the wrong angle bin";
+  }
+  return what + " is a beam-angle table (" + kFormatLine + "), fitted on the sonar-frame "
+         "angle, and this run corrects by the incidence angle against the seabed normal: "
+         "applying it would put every beam in the wrong angle bin";
 }
 
 }  // namespace cube

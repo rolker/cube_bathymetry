@@ -1250,6 +1250,32 @@ TEST_F(NodeLifecycle, ATableWithoutABinWidthIsWarnedAboutAtConfigure)
   std::filesystem::remove(path);
 }
 
+// cube_bathymetry#173: the live node has no incidence mode, so an incidence-
+// angle table is refused at configure instead of being applied to the beam angle.
+TEST_F(NodeLifecycle, AnIncidenceTableIsRefusedAtConfigure)
+{
+  std::ifstream in(MODE_TABLE_FIXTURE_FILE);
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::string v1 = "# format: angular-response-table v1\n";
+  ASSERT_EQ(text.compare(0, v1.size(), v1), 0);
+  text.replace(
+    0, v1.size(),
+    "# format: angular-response-table v2\n# angle_basis: incidence\n"
+    "# slope_baseline_deg: 5\n# slope_layers: processed\n");
+  const std::string path = (std::filesystem::temp_directory_path() /
+    ("cube_node_incidence_" + std::to_string(::getpid()) + ".csv")).string();
+  {
+    std::ofstream(path) << text;
+  }
+  LogCapture log;
+  auto node = std::make_shared<CubeBathymetry>(
+    withParams({rclcpp::Parameter("backscatter_curve_file", path)}));
+  EXPECT_EQ(node->configure().id(), State::PRIMARY_STATE_UNCONFIGURED) << log.all();
+  EXPECT_TRUE(log.contains("is an incidence-angle table")) << log.all();
+  EXPECT_TRUE(log.contains("no incidence mode")) << log.all();
+  std::filesystem::remove(path);
+}
+
 // cube_bathymetry#172 review round 3: a reason first seen while the throttle
 // mutes the "nothing resolved" warning was marked warned anyway, so it was
 // never warned about once clouds resolved. It counts as warned only once a

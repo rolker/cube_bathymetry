@@ -905,7 +905,8 @@ bool resolveBackscatterCorrection(
   cube::BackscatterAngleCorrection & backscatter_mode,
   cube::AngularResponseCurve & backscatter_curve,
   cube::BackscatterTable & backscatter_table,
-  cube::BuildFingerprint::BackscatterCorrection & provenance)
+  cube::BuildFingerprint::BackscatterCorrection & provenance,
+  cube::BackscatterAngleBasis run_basis)
 {
   if (!cube::parseBackscatterAngleCorrection(
       backscatter_correction_str, backscatter_mode))
@@ -950,6 +951,13 @@ bool resolveBackscatterCorrection(
       if (!error.empty()) {
         std::cerr << "error: --backscatter-curve names a per-pulse-mode table that could "
           "not be loaded: " << error << "\n";
+        return false;
+      }
+      // A table is only valid on the angle basis it was fitted on (cube#173).
+      const std::string basis_problem = cube::angleBasisProblem(
+        backscatter_table, run_basis, "--backscatter-curve '" + backscatter_curve_file + "'");
+      if (!basis_problem.empty()) {
+        std::cerr << "error: " << basis_problem << "\n";
         return false;
       }
       provenance.kind = "table";
@@ -1101,11 +1109,12 @@ void setupBackscatter(
   const std::string & backscatter_correction_str, const std::string & backscatter_curve_file,
   const std::string & sonar_info_topic, const std::string & detections_topic,
   const std::vector<std::string> & bagfile_names, const std::string & fallback_str,
-  int64_t min_pings)
+  int64_t min_pings, cube::BackscatterAngleBasis run_basis)
 {
   if (!resolveBackscatterCorrection(
       backscatter_correction_str, backscatter_curve_file, sonar_info_topic,
-      detections_topic, bagfile_names, out.mode, out.curve, out.table, out.provenance))
+      detections_topic, bagfile_names, out.mode, out.curve, out.table, out.provenance,
+      run_basis))
   {
     usage();
   }
@@ -2537,7 +2546,7 @@ int main(int argc, char * argv[])
   BackscatterSetup backscatter;
   setupBackscatter(backscatter, backscatter_correction_str, backscatter_curve_file,
     sonar_info_topic, detections_topic, bagfile_names, backscatter_mode_fallback_str,
-    backscatter_mode_min_pings);
+    backscatter_mode_min_pings, cube::BackscatterAngleBasis::Beam);
   cube::BackscatterModeResolver * mode_resolver = backscatter.resolver.get();
   GainSetup gain;
   setupGainOrUsage(gain, gain_declaration_file, backscatter, backscatter_curve_file);

@@ -663,6 +663,7 @@ if(BUILD_TESTING)
   target_compile_definitions(test_mixed_level_import PRIVATE
     IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
     BATCH_REGEN_EXE="$<TARGET_FILE:batch_regen_bag>"
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv"
   )
   add_dependencies(test_mixed_level_import import_bag batch_regen_bag)
 

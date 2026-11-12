@@ -31,6 +31,8 @@
 #include <utility>
 #include <vector>
 
+#include "cube_bathymetry/angle_basis.h"
+
 /// @file
 /// @brief Per-pulse-mode backscatter table (`angular-response-table v1`,
 ///        cube_bathymetry#172) and the mode-key spec the estimator shares
@@ -229,7 +231,9 @@ namespace cube
     const RangeTermGroup * groupFor(double abs_angle_deg) const;
   };
 
-/// A loaded `angular-response-table v1`.
+/// A loaded `angular-response-table`. Version 1 is indexed by the sonar-frame
+/// beam angle; version 2 (cube_bathymetry#173) by the incidence angle against the
+/// seabed normal, and carries the slope settings it was fitted with.
   struct BackscatterTable
   {
   /// Where it was read from (reports and the fingerprint).
@@ -248,6 +252,17 @@ namespace cube
   /// before #176. Compared with the declaration an import is given.
     std::string gain_declaration_sha256;
     std::string gain_reference_state;
+  /// The angle the table was fitted on (cube_bathymetry#173): `Beam` for every
+  /// v1 table, `Incidence` for a v2 one, whose first line differs so that a
+  /// binary that predates #173 refuses it instead of applying it to the beam
+  /// angle.
+    BackscatterAngleBasis angle_basis = BackscatterAngleBasis::Beam;
+  /// Incidence tables only: `# slope_baseline_deg:`, the angle the differencing
+  /// baseline subtended at the sonar when the incidence angles were computed,
+  /// and `# slope_layers:`, the surface layers they were computed from. NaN and
+  /// empty for a beam table.
+    double slope_baseline_deg = std::numeric_limits < double > ::quiet_NaN();
+    std::string slope_layers;
   /// Entry k corresponds to `correction_idx == k + 1`.
     std::vector < ModeEntry > entries;
   /// Problems that do not refuse the table, one sentence each, for the
@@ -300,6 +315,13 @@ private:
 /// rewritten in place after the read (cube_bathymetry#172 review round 2).
   BackscatterTable loadBackscatterTable(
     const std::string & path, std::string & error, std::string * bytes = nullptr);
+
+/// Why @p table cannot be applied by a run on @p run_basis (cube_bathymetry#173
+/// decision 9), or an empty string when it can. A table is only valid on the
+/// angle basis it was fitted on, in both directions. @p what names the table in
+/// the message.
+  std::string angleBasisProblem(
+    const BackscatterTable & table, BackscatterAngleBasis run_basis, const std::string & what);
 
 /// What the estimator does with a beam the table cannot correct: a ping of
 /// a mode with no entry, an unanchored mode, a mode under the ping floor, a

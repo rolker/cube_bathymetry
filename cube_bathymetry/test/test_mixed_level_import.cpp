@@ -693,6 +693,40 @@ TEST(ImportBagCli, RefusesANonRegularOrUnreadableBackscatterCurve)
   std::filesystem::remove(fifo);
 }
 
+// An incidence-angle table (cube_bathymetry#173) is only valid on the incidence
+// basis. import_bag runs on the beam angle until the slope run, and
+// batch_regen_bag never has an incidence angle, so both must refuse it before
+// any bag is opened rather than bin every beam by the wrong angle.
+TEST(ImportBagCli, RefusesAnIncidenceTable)
+{
+  const std::string path = (std::filesystem::temp_directory_path() /
+    ("cube_cli_incidence_" + std::to_string(::getpid()) + ".csv")).string();
+  {
+    std::ifstream in(MODE_TABLE_FIXTURE_FILE);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string v1 = "# format: angular-response-table v1\n";
+    ASSERT_EQ(text.compare(0, v1.size(), v1), 0);
+    text.replace(
+      0, v1.size(),
+      "# format: angular-response-table v2\n# angle_basis: incidence\n"
+      "# slope_baseline_deg: 5\n# slope_layers: processed\n");
+    std::ofstream(path) << text;
+  }
+  const std::string flags = "--backscatter-correction empirical --backscatter-curve " + path +
+    " -o /nonexistent/store -d /t /nonexistent.bag";
+  int status = -1;
+  std::string out = runImportBag(flags, &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("is an incidence-angle table"), std::string::npos) << out;
+  EXPECT_EQ(out.find("cannot open"), std::string::npos) << "before any bag opens\n" << out;
+#ifdef BATCH_REGEN_EXE
+  out = runCommand(std::string(BATCH_REGEN_EXE) + " " + flags, &status);
+  EXPECT_NE(status, 0) << out;
+  EXPECT_NE(out.find("incidence-angle table"), std::string::npos) << out;
+#endif
+  std::filesystem::remove(path);
+}
+
 TEST(ImportBagCli, UsageDocumentsTheDepthAdaptiveFlags)
 {
   int status = -1;

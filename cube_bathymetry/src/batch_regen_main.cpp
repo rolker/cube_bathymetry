@@ -656,6 +656,21 @@ struct GainSetup
   std::unique_ptr<cube::GainStateResolver> resolver;
 };
 
+/// Refuse a per-pulse-mode table (cube#172) before any bag opens. A table needs
+/// each ping's pulse mode from the SonarInfo stream, which batch_regen does not
+/// read: accepting it would be a silent identity on every beam (same class as
+/// 'auto'). An incidence-angle table (cube#173) is refused for a second reason.
+[[noreturn]] void refuseModeTable(const std::string & file)
+{
+  std::cerr << "error: --backscatter-curve '" << file
+            << "' is a per-pulse-mode table (angular-response-table, cube#172); "
+    "batch_regen has no SonarInfo source to resolve pulse modes, so it cannot "
+    "apply one -- rebuild with import_bag, or pass a single-curve CSV. An "
+    "incidence-angle table (cube#173) is also refused for a second reason: "
+    "batch_regen has no beam vector or seabed surface to compute incidence from\n";
+  usage();
+}
+
 /// What is wrong with the file given as --backscatter-curve before either
 /// loader reads it, or empty: not a regular file, or a gain-state declaration
 /// handed to the wrong flag.
@@ -1047,6 +1062,9 @@ int main(int argc, char * argv[])
                 << "\n";
       usage();
     }
+    if (cube::isAngularResponseTable(backscatter_curve_file)) {
+      refuseModeTable(backscatter_curve_file);
+    }
   }
 
   std::cout << "Detections topic: " << detections_topic
@@ -1128,16 +1146,6 @@ int main(int argc, char * argv[])
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
     !backscatter_curve_file.empty())
   {
-    if (cube::isAngularResponseTable(backscatter_curve_file)) {
-      // A per-mode table (cube#172) needs each ping's pulse mode from the
-      // SonarInfo stream, which batch_regen does not read: accepting it
-      // would be a silent identity on every beam. Same class as 'auto'.
-      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file
-                << "' is a per-pulse-mode table (angular-response-table v1, cube#172); "
-        "batch_regen has no SonarInfo source to resolve pulse modes, so it cannot "
-        "apply one -- rebuild with import_bag, or pass a single-curve CSV\n";
-      usage();
-    }
     backscatter_curve = loadCurveOrUsage(backscatter_curve_file);
   }
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&

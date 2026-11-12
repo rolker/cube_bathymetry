@@ -247,6 +247,19 @@ public:
           "loaded: %s", error.c_str());
         return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
       }
+      // The live node corrects by the sonar-frame beam angle only (cube#173):
+      // an incidence table needs a seabed surface per beam, which the slope run
+      // of import_bag has and the node does not. Applying one here would put
+      // every beam in the wrong angle bin.
+      const std::string basis_problem = cube::angleBasisProblem(
+        bs_table_, cube::BackscatterAngleBasis::Beam,
+        "backscatter_curve_file='" + bs_curve_file + "'");
+      if (!basis_problem.empty()) {
+        RCLCPP_ERROR(get_logger(),
+          "%s. The live node has no incidence mode; build the incidence-corrected layer "
+          "offline with the slope run of import_bag.", basis_problem.c_str());
+        return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
+      }
       bs_resolver_ = std::make_unique<cube::BackscatterModeResolver>(
         &bs_table_, bs_fallback_, bs_min_pings_);
       bs_resolver_->setMismatchWarning(
