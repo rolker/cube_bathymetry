@@ -100,3 +100,20 @@ Checked against the merged `marine_backscatter` headers (dd737cd7) and the cube 
 - Which pass writes `-o`? The plan has pass one write `-o` and pass two a scratch store, which forces the equality compare and the populated-`-o` problem above. The alternative (pass one into a disposable surface store, pass two into `-o`) gives an `incidence` run the same warm-start, backscatter seeding, reference-prior and fingerprint semantics as a `beam` run and makes the compare a sanity check rather than a precondition, at the cost that the surface contains only this run's soundings. Needs an operator choice.
 - Incremental imports into an existing store under `incidence`: refuse (simplest, consistent with the "regenerate is the migration" rule) or support.
 - Is the 4 m default (decision 7/11) a half-width or the full differencing baseline? The plan treats it as half-width (8 m across).
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-11-12 08:29 -05:00
+**By**: Claude Code Agent (Claude Fable 5.2)
+
+**Plan**: `.agent/work-plans/issue-173/plan.md` revision 2 at `12682f7`
+
+### Decisions (2026-11-12, operator)
+12. Two backscatter layers: pass one is today's import unchanged; pass two is a separate run that re-reads the bags, takes slope from the finished depth layer, writes a separate slope-corrected layer and no depths.
+13. The slope-corrected layer is a derived product regenerated per tile; contributors and an input fingerprint are recorded per tile from the first PR; a tile whose recorded contributors are not all among the given bags is not rebuilt.
+14. The slope baseline is an angle (range x angle, floor of one cell either side), parameter in degrees, default provisional, distribution reported.
+
+### Plan changes
+- Approach rewritten around a slope run (no `-o`, fresh scratch stores, publish step, `derived_tiles.json`).
+- The 2026-11-10 plan review findings are mapped one by one in the plan ("How the plan review is resolved").
+- Decision 4 (live node flat-normal mode) is raised again as a question for the operator; not built in PR 1.
