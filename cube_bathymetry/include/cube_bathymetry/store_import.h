@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -312,6 +313,48 @@ namespace cube
 /// catches a real dir or a link to one, and `is_symlink` additionally catches a
 /// symlinked `survey/` whose target is missing/not-a-dir. Empty @p store_dir → false.
   bool legacySurveyDirPersists(const std::string & store_dir);
+
+/// @brief Write @p path crash-atomically: @p write_to is given a sibling temp path
+///        (`<path>.partial`) to produce the file at, which is then fsync'd and
+///        renamed over @p path, and the directory fsync'd (cube_bathymetry#135).
+///
+/// A crash, SIGKILL or power loss at any point leaves @p path either wholly the old
+/// content or wholly the new -- never a truncated file -- and a concurrent reader
+/// (a costmap `loadWindow`) never opens a half-written tile. The `.partial`
+/// extension is not `.tif`, so store scans ignore a leftover. On any failure the
+/// temp is removed, @p path is untouched and the error is rethrown
+/// (`std::runtime_error` for the fsync/rename steps).
+  void writeFileAtomically(
+    const std::string & path,
+    const std::function < void(const std::string & temp_path) > &write_to);
+
+/// @brief `marine_bathymetry_store::saveTile` made crash-atomic with
+///        @ref writeFileAtomically.
+  void saveTileAtomic(
+    const marine_bathymetry_store::BathymetryTile & tile, const std::string & path);
+
+/// @brief A tile file @ref loadStoreSkippingUnreadable could not read.
+  struct UnreadableTile
+  {
+    marine_bathymetry_store::SourceLayer layer;
+    std::string path;    ///< Full path of the damaged file.
+    std::string reason;  ///< The loader's error text.
+  };
+
+/// @brief Load @p store_dir into @p store like `marine_bathymetry_store::load()`,
+///        but one damaged tile does not cost the store its good tiles
+///        (cube_bathymetry#135).
+///
+/// Runs `load()` first. If it throws and a legacy `survey/` layer persists (the
+/// whole-store ADR-0010 D8 refusal) the error is rethrown unchanged. Any other
+/// failure falls back to loading the `processed/` and `draft/` tiles one by one,
+/// returning every file that could not be read. The caller MUST NOT write over an
+/// unreadable tile: the in-memory sheet holds none of its earlier content, so a save
+/// would replace those surveys with this session's soundings only. Empty on the
+/// normal, healthy path. Only `processed/` and `draft/` are salvaged (the layers the
+/// node primes from; `reference/` and `chart/` are write-gated in the store).
+  std::vector < UnreadableTile > loadStoreSkippingUnreadable(
+    marine_bathymetry_store::BathymetryStore & store, const std::string & store_dir);
 
 /// @brief Configuration for @ref ImportAccumulator (cube_bathymetry#92, #96).
   struct ImportAccumulatorConfig

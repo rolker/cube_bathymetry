@@ -206,6 +206,10 @@ public:
   /// @brief Clear the dirty-grid set (called after a successful save).
     void clearDirtyGrids();
 
+  /// @brief Clear only @p saved from the dirty-grid set, leaving every other grid
+  ///        dirty (a save that deliberately withheld some tiles, cube_bathymetry#135).
+    void clearDirtyGrids(const std::set < gggs::GridIndex > &saved);
+
   /// @brief Grid indices changed since the last clearPublishDirtyGrids().
   ///
   /// A SECOND dirty set, tracked alongside the save-dirty set but cleared by the

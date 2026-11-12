@@ -22,6 +22,9 @@
 
 #include "cube_bathymetry/store_import.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -30,6 +33,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -517,12 +521,10 @@ void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
     marine_bathymetry_store::layerDirName(
     marine_bathymetry_store::SourceLayer::Processed);
   std::filesystem::create_directories(layer_dir);
-  // tile_io::saveTile writes the GTiff directly to the final path and checks the
-  // flush/close result (an I/O error or full disk throws), but it is NOT crash-atomic:
-  // it does not temp-then-rename, so a crash/kill mid-write can leave a partial tile
-  // at the final path. Making that write atomic is a tracked marine_tiled_raster_store
-  // follow-up (#96 review); a batch-regen re-run reproduces the tile exactly.
-  marine_bathymetry_store::saveTile(
+  // tile_io::saveTile writes the GTiff directly to the file it is given and is not
+  // crash-atomic itself (marine_tiled_raster_store follow-up, unh_marine_autonomy#256),
+  // so write beside and rename (cube_bathymetry#135).
+  saveTileAtomic(
     tile, layer_dir + "/" + marine_bathymetry_store::tileFilename(index));
   ++bathy_persisted_;
 
@@ -589,7 +591,7 @@ void ImportAccumulator::persistBackscatterTile(const gggs::GridIndex & index)
     tile.set(entry.first.row(), entry.first.column(), entry.second);
   }
   std::filesystem::create_directories(layer_dir);
-  mbs::saveTile(tile, path);
+  writeFileAtomically(path, [&](const std::string & temp) {mbs::saveTile(tile, temp);});
   ++bs_persisted_;
 }
 
@@ -897,6 +899,132 @@ bool primePriorLayersForTile(
 }
 
 }  // namespace
+
+namespace
+{
+// fsync a path (file or directory) by opening it read-only. Throws on failure:
+// a write that cannot be made durable must not be renamed into place.
+void fsyncPath(const std::string & path)
+{
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) {
+    throw std::runtime_error(
+            "writeFileAtomically: cannot open '" + path + "' to fsync: " +
+            std::strerror(errno));
+  }
+  const int rc = ::fsync(fd);
+  const int saved_errno = errno;
+  ::close(fd);
+  if (rc != 0) {
+    throw std::runtime_error(
+            "writeFileAtomically: fsync of '" + path + "' failed: " +
+            std::strerror(saved_errno));
+  }
+}
+}  // namespace
+
+void writeFileAtomically(
+  const std::string & path,
+  const std::function<void(const std::string & temp_path)> & write_to)
+{
+  namespace fs = std::filesystem;
+  // One writer per tile file is assumed (the live node owns draft/, batch_regen
+  // owns processed/): the temp name is not unique, and a stale one from a crash is
+  // simply replaced.
+  const std::string temp = path + ".partial";
+  std::error_code ec;
+  fs::remove(temp, ec);   // a leftover from an earlier crash
+  try {
+    write_to(temp);
+    fsyncPath(temp);
+    fs::rename(temp, path);
+  } catch (...) {
+    fs::remove(temp, ec);
+    throw;
+  }
+  // The rename is only durable once the directory entry is. A failure here does
+  // not undo the (complete) new file, so it is reported but nothing is removed.
+  const fs::path parent = fs::path(path).parent_path();
+  fsyncPath(parent.empty() ? std::string(".") : parent.string());
+}
+
+void saveTileAtomic(
+  const marine_bathymetry_store::BathymetryTile & tile, const std::string & path)
+{
+  writeFileAtomically(
+    path, [&](const std::string & temp) {
+      marine_bathymetry_store::saveTile(tile, temp);
+    });
+}
+
+std::vector<UnreadableTile> loadStoreSkippingUnreadable(
+  marine_bathymetry_store::BathymetryStore & store, const std::string & store_dir)
+{
+  namespace fs = std::filesystem;
+  namespace mbs = marine_bathymetry_store;
+  try {
+    mbs::load(store, store_dir);
+    return {};
+  } catch (const std::exception &) {
+    if (legacySurveyDirPersists(store_dir)) {
+      throw;
+    }
+  }
+  std::vector<UnreadableTile> unreadable;
+  for (const mbs::SourceLayer layer : {mbs::SourceLayer::Processed, mbs::SourceLayer::Draft}) {
+    const fs::path layer_dir = fs::path(store_dir) / mbs::layerDirName(layer);
+    std::error_code ec;
+    if (!fs::is_directory(layer_dir, ec)) {
+      if (ec && ec != std::errc::no_such_file_or_directory) {
+        // Not "absent": the layer exists or may exist but cannot be examined, so
+        // nothing about it is accounted for. Fail the whole prime; the caller then
+        // refuses draft saves rather than write over tiles it never read.
+        throw std::runtime_error(
+                "cannot examine layer dir '" + layer_dir.string() + "': " + ec.message());
+      }
+      continue;
+    }
+    std::vector<fs::path> files;
+    fs::directory_iterator it(layer_dir, ec);
+    for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      std::error_code entry_ec;
+      const bool regular = it->is_regular_file(entry_ec);
+      if (entry_ec) {
+        unreadable.push_back({layer, it->path().string(), entry_ec.message()});
+      } else if (regular && it->path().extension() == ".tif") {
+        files.push_back(it->path());
+      }
+    }
+    if (ec) {
+      throw std::runtime_error(
+              "cannot list layer dir '" + layer_dir.string() + "': " + ec.message());
+    }
+    std::map<gggs::GridIndex, mbs::BathymetryTile> good;
+    for (const auto & file : files) {
+      const std::string stem = file.stem().string();
+      const auto ends_with = [&](const std::string & suffix) {
+          return stem.size() > suffix.size() &&
+                 stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+      // Dropped pre-#248 companion rasters are not value tiles.
+      if (ends_with("_time") || ends_with("_source")) {
+        continue;
+      }
+      try {
+        const uint8_t level = mbs::levelFromTileFilename(file.filename().string());
+        mbs::BathymetryTile tile = mbs::loadTile(file.string(), gggs::Level(level));
+        const gggs::GridIndex index = tile.index();
+        good.emplace(index, std::move(tile));
+      } catch (const std::exception & e) {
+        unreadable.push_back({layer, file.string(), e.what()});
+      }
+    }
+    if (!good.empty()) {
+      store.importTiles(layer, std::move(good));
+    }
+  }
+  return unreadable;
+}
 
 bool legacySurveyDirPersists(const std::string & store_dir)
 {
