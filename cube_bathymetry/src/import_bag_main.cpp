@@ -38,6 +38,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -244,6 +245,11 @@ bool loadCurveFromBagSonarInfo(
     "from (its processed layer, and draft if present; never reference, chart or "
     "overviews). A beam with no surface cell is stamped with the angle from vertical and "
     "counted per reason, never slope-corrected.\n";
+  std::cout << "  --beam-ledger-out <file>: (slope run only) write the incidence angle each "
+    "beam was given, per ping and beam index, to this file (format in beam_ledger.h), "
+    "atomically and only when the run completes. "
+    "derive_angular_response.py --angle-basis incidence --beam-ledger <file> fits an "
+    "incidence table on exactly these angles.\n";
   std::cout << "  --slope-baseline-deg <deg>: the angle the differencing baseline subtends at "
     "the sonar, so it grows with range: full baseline = slant range x angle, floored at one "
     "native cell either side. In (0, 30], default 5. PROVISIONAL until measured on real "
@@ -1940,10 +1946,34 @@ struct SlopeFlags
 {
   std::string basis_text = "beam";
   std::string surface_dir;
+  std::string beam_ledger_out;
+  std::string detections_topic;
   double baseline_deg = cube::kDefaultSlopeBaselineDeg;
   bool baseline_given = false;
   cube::BackscatterAngleBasis basis = cube::BackscatterAngleBasis::Beam;
 };
+
+/// Take one of the slope-run flags (cube_bathymetry#173) off the command line:
+/// true when @p flag was one, with its value read through @p next_value. (Lives
+/// outside main() to keep it within the cpplint function-size limit.)
+bool takeSlopeFlag(
+  const std::string & flag, SlopeFlags & flags,
+  const std::function<const std::string &(const char *)> & next_value)
+{
+  if (flag == "--backscatter-angle-basis") {
+    flags.basis_text = next_value("--backscatter-angle-basis");
+  } else if (flag == "--slope-surface") {
+    flags.surface_dir = next_value("--slope-surface");
+  } else if (flag == "--beam-ledger-out") {
+    flags.beam_ledger_out = next_value("--beam-ledger-out");
+  } else if (flag == "--slope-baseline-deg") {
+    flags.baseline_deg = parse_double("--slope-baseline-deg", next_value("--slope-baseline-deg"));
+    flags.baseline_given = true;
+  } else {
+    return false;
+  }
+  return true;
+}
 
 /// Parse the angle basis and check the request: which flags a slope run needs
 /// and refuses (exits via usage() on a problem). Also refuses an ordinary run
@@ -1963,6 +1993,7 @@ bool resolveSlopeRequest(
   request.store_dir = store_dir;
   request.bs_store_dir = bs_store_dir;
   request.surface_dir = flags.surface_dir;
+  request.beam_ledger_out = flags.beam_ledger_out;
   request.baseline_given = flags.baseline_given;
   request.baseline_deg = flags.baseline_deg;
   request.depth_adaptive = depth_adaptive;
@@ -2033,6 +2064,8 @@ std::unique_ptr<cube::SlopeRun> startSlopeRun(
   config.surface_dir = flags.surface_dir;
   config.bs_store_dir = bs_store_dir;
   config.scratch_root = scratch_dir;
+  config.beam_ledger_path = flags.beam_ledger_out;
+  config.detections_topic = flags.detections_topic;
   config.baseline_deg = flags.baseline_deg;
   for (const std::string & layer : layers) {
     config.inputs.slope_layers += (config.inputs.slope_layers.empty() ? "" : ",") + layer;
@@ -2638,14 +2671,8 @@ int importBagMain(int argc, char * argv[])
       iho_order = next_value("--iho-order");
     } else if (*arg == "--backscatter-correction") {
       backscatter_correction_str = next_value("--backscatter-correction");
-    } else if (*arg == "--backscatter-angle-basis") {
-      slope_flags.basis_text = next_value("--backscatter-angle-basis");
-    } else if (*arg == "--slope-surface") {
-      slope_flags.surface_dir = next_value("--slope-surface");
-    } else if (*arg == "--slope-baseline-deg") {
-      slope_flags.baseline_deg =
-        parse_double("--slope-baseline-deg", next_value("--slope-baseline-deg"));
-      slope_flags.baseline_given = true;
+    } else if (takeSlopeFlag(*arg, slope_flags, next_value)) {
+      // consumed by the slope-run flags
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
     } else if (*arg == "--backscatter-gain-declaration") {
@@ -2779,6 +2806,7 @@ int importBagMain(int argc, char * argv[])
     }
   }
 
+  slope_flags.detections_topic = detections_topic;
   const bool slope_run = resolveSlopeRequest(
     slope_flags, store_dir, bs_store_dir, depth_adaptive, ping_count_limit);
   if ((store_dir.empty() && !slope_run) || detections_topic.empty() || bagfile_names.empty()) {
@@ -3046,7 +3074,7 @@ int importBagMain(int argc, char * argv[])
         // Slope run (cube#173): incidence is stamped BEFORE the table accounting
         // below, so every per-beam count describes the angle that is applied.
         std::string refusal;
-        if (slope && !slope->prepare(soundings, bag_index, geo_map_sheet, refusal)) {
+        if (slope && !slope->prepare(soundings, bag_index, ping_ns, geo_map_sheet, refusal)) {
           fatal_error = refusal;
           return;
         }

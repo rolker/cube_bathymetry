@@ -158,6 +158,28 @@ TEST_F(DetectionsProjectorTest, BeamGeometryAndFiniteTpu)
   EXPECT_EQ(result.diagnostics.total, 1u);
 }
 
+// The beam index is the position in the ping's detection arrays, so it survives
+// the range gate dropping beams (cube_bathymetry#173: the beam ledger is keyed by it).
+TEST_F(DetectionsProjectorTest, BeamIndexSurvivesTheRangeGate)
+{
+  params_.minimum_range = 10.0;
+  params_.maximum_range = 20.0;
+  DetectionsProjector projector(params_);
+  tf2::BufferCore buffer;
+  fillAttitudeBuffer(buffer, params_);
+  marine_acoustic_msgs::msg::SonarDetections det;
+  det.header.stamp = pingStamp();
+  det.header.frame_id = "sonar";
+  det.ping_info.sound_speed = 1500.0f;
+  det.tx_angles = {0.0f, 0.0f, 0.0f, 0.0f};
+  det.rx_angles = {0.0f, 0.0f, 0.0f, 0.0f};
+  det.two_way_travel_times = {0.002f, 0.02f, 0.04f, 0.021f};  // 1.5, 15, 30, 15.75 m
+  const auto result = projector.project(det, buffer, 0.0f);
+  ASSERT_EQ(result.soundings.size(), 2u);
+  EXPECT_EQ(result.soundings[0].beam_index, 1u);
+  EXPECT_EQ(result.soundings[1].beam_index, 3u);
+}
+
 // Intensity passthrough: present -> carried; absent -> NaN.
 TEST_F(DetectionsProjectorTest, IntensityPassthrough)
 {

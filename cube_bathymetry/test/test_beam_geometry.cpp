@@ -205,6 +205,18 @@ TEST(BeamGeometry, EarthFrameBeamVectorLandsOnTheStarboardSideOfTheHeading)
   }
 }
 
+// The beam index rides through the georeferencing.
+TEST(BeamGeometry, BeamIndexSurvivesGeoreferencing)
+{
+  const auto result = project({0.1f, 0.2f, 0.3f});
+  const auto soundings = georeferencePing(result, earthToSonar(43.0, -70.6, 0.0));
+  ASSERT_EQ(soundings.size(), 3u);
+  for (std::size_t i = 0; i < 3; ++i) {
+    EXPECT_EQ(soundings[i].sounding.beam_index, i);
+  }
+  EXPECT_EQ(Sounding(10.0f).beam_index, Sounding::kNoBeamIndex);
+}
+
 // A sounding nobody stamped carries no vector and no incidence.
 TEST(BeamGeometry, DefaultSoundingHasNoBeamVectorOrIncidence)
 {

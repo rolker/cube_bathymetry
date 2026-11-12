@@ -142,6 +142,17 @@ measured range term replaces the modelled add-back. The estimator does not read
 the table yet (cube_bathymetry#172 PR 2); the current single-curve loaders read
 it as an empty curve.
 
+Incidence tables (cube_bathymetry#173): ``--by-mode --angle-basis incidence
+--beam-ledger <file>[,<file>...]`` bins each beam by the incidence angle a slope run
+of ``import_bag`` gave it (the ledger written by ``--beam-ledger-out``), never by an
+angle computed here, keeping the sign of ``rx_angles`` as the port/starboard side. A
+beam absent from the ledger, or without a seabed surface (the ledger marks those),
+is left out and counted. It writes ``# format: angular-response-table v2`` with the
+three records (``angle_basis``, ``slope_baseline_deg``, ``slope_layers``) the
+importer checks. The ledger must have been made from the bags given (name and
+``metadata.yaml`` hash) and under the same gain declaration, or the run is refused.
+Without ``--angle-basis`` the tool behaves as before.
+
 Usage:
     derive_angular_response.py <bag> [<bag> ...] -t <topic> -o <out.csv>
     derive_angular_response.py <bag> ... -t <topic> -o <out.csv> \\
@@ -160,11 +171,14 @@ import argparse
 import collections
 import errno
 import functools
+import hashlib
 import heapq
+import json
 import math
 import os
 import re
 import stat
+import struct
 import sys
 import tempfile
 
@@ -995,6 +1009,184 @@ def gain_empty_segment_warnings(summary, box=False):
     return out
 
 
+BEAM_LEDGER_MAGIC = b'CUBELDG1'
+BEAM_LEDGER_FORMAT = 'beam-ledger v1'
+LEDGER_NO_INCIDENCE = -32768
+LEDGER_SOURCE_SURFACE = 0   # the incidence is against the seabed normal
+MODE_TABLE_FORMAT_INCIDENCE = 'angular-response-table v2'
+
+
+class BeamLedger:
+    """
+    A beam ledger written by ``import_bag --beam-ledger-out`` (cube_bathymetry#173).
+
+    ``pings`` maps ``(bag name, ping stamp ns)`` to ``(beam index, incidence in
+    degrees, source code)`` arrays; the format is documented in beam_ledger.h.
+    ValueError on anything that is not a complete ledger.
+    """
+
+    def __init__(self, path):
+        """Read and validate the ledger at ``path``."""
+        import numpy as np
+        with open(path, 'rb') as f:
+            data = f.read()
+        self.path = path
+        self.sha256 = hashlib.sha256(data).hexdigest()
+        if len(data) < 12 or data[:8] != BEAM_LEDGER_MAGIC:
+            raise ValueError('%s is not a beam ledger (bad magic)' % path)
+        header_len = struct.unpack_from('<I', data, 8)[0]
+        if 12 + header_len > len(data):
+            raise ValueError('%s: truncated header' % path)
+        try:
+            self.header = json.loads(data[12:12 + header_len].decode('utf-8'))
+        except ValueError as e:
+            raise ValueError('%s: header is not JSON (%s)' % (path, e))
+        if not isinstance(self.header, dict):
+            raise ValueError('%s: the header is not a JSON object' % path)
+        if self.header.get('format') != BEAM_LEDGER_FORMAT:
+            raise ValueError('%s: unsupported ledger format %r (this tool reads %r)'
+                             % (path, self.header.get('format'), BEAM_LEDGER_FORMAT))
+        self.inputs = self.header.get('inputs')
+        self.bags = self.header.get('bags')
+        if not isinstance(self.inputs, dict) or not isinstance(self.bags, list):
+            raise ValueError('%s: the header lacks inputs or bags' % path)
+        for key in ('slope_baseline_deg', 'slope_layers'):
+            if key not in self.inputs:
+                raise ValueError('%s: the header inputs lack %s' % (path, key))
+        for b in self.bags:
+            if not (isinstance(b, dict) and isinstance(b.get('name'), str)
+                    and isinstance(b.get('metadata_sha256'), str)):
+                raise ValueError('%s: a bags entry needs a name and a metadata_sha256' % path)
+        self.bag_names = [b['name'] for b in self.bags]
+        if len(set(self.bag_names)) != len(self.bag_names):
+            raise ValueError('%s: the header lists a bag name twice' % path)
+        self.detections_topic = self.header.get('detections_topic')
+        beam = np.dtype([('i', '<u2'), ('c', '<i2'), ('s', 'u1')])
+        self.pings = {}
+        pos = 12 + header_len
+        while pos < len(data):
+            if pos + 12 > len(data):
+                raise ValueError('%s: truncated ping record' % path)
+            stamp, bag, count = struct.unpack_from('<qHH', data, pos)
+            pos += 12
+            end = pos + beam.itemsize * count
+            if end > len(data) or bag >= len(self.bag_names):
+                raise ValueError('%s: truncated or inconsistent ping record' % path)
+            arr = np.frombuffer(data, dtype=beam, count=count, offset=pos)
+            pos = end
+            deg = arr['c'].astype(np.float64) * 0.01
+            deg[arr['c'] == LEDGER_NO_INCIDENCE] = float('nan')
+            key = (self.bag_names[bag], stamp)
+            if key in self.pings:
+                raise ValueError('%s: ping %s/%d is listed twice' % (path, key[0], key[1]))
+            self.pings[key] = (arr['i'].copy(), deg, arr['s'].copy())
+
+
+def bag_metadata_sha256(bag_path):
+    """Return the SHA-256 of the bag directory's metadata.yaml, or None."""
+    meta = os.path.join(bag_path, 'metadata.yaml')
+    try:
+        with open(meta, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+class IncidenceSource:
+    """
+    The beam ledgers of a derivation, checked against the bags and the gain declaration.
+
+    ``lookup`` gives a ping's per-beam incidence; the counters feed the run report.
+    """
+
+    def __init__(self, ledgers):
+        """Merge ``ledgers``; ValueError when they disagree on how the angle was made."""
+        self.ledgers = ledgers
+        first = ledgers[0].inputs
+        for other in ledgers[1:]:
+            for key in ('slope_baseline_deg', 'slope_layers', 'level'):
+                if other.inputs.get(key) != first.get(key):
+                    raise ValueError(
+                        'the ledgers %s and %s disagree on %s (%r vs %r): their angles were '
+                        'not made the same way' % (ledgers[0].path, other.path, key,
+                                                   first.get(key), other.inputs.get(key)))
+        self.baseline_deg = first.get('slope_baseline_deg')
+        self.layers = first.get('slope_layers')
+        self.pings = {}
+        for ledger in ledgers:
+            for key, value in ledger.pings.items():
+                if key in self.pings:
+                    raise ValueError('ping %s/%d is in two ledgers (%s)' % (key[0], key[1],
+                                                                            ledger.path))
+                self.pings[key] = value
+        self.pings_missing = 0
+        self.beams_surface = 0
+        self.beams_no_surface = 0
+        self.beams_not_in_ledger = 0
+        self.beams_filtered = 0
+        self.diff_sum = collections.defaultdict(float)
+        self.diff_n = collections.Counter()
+
+    def check(self, bag_paths, bag_names, gain, topic=None):
+        """Refuse a ledger made from other bags or under another gain declaration."""
+        want_sha = gain.sha256() if gain is not None else ''
+        for ledger in self.ledgers:
+            got = ledger.inputs.get('gain_declaration_sha256', '')
+            if got != want_sha:
+                raise ValueError(
+                    'ledger %s was made %s but this derivation uses %s: the incidence angles '
+                    'are the same, but the levels binned with them would be shifted '
+                    'differently from the import (cube_bathymetry#176)'
+                    % (ledger.path,
+                       'under gain declaration ' + got if got else 'with no gain declaration',
+                       'gain declaration ' + want_sha if want_sha else 'none'))
+        for ledger in self.ledgers:
+            if topic is not None and ledger.detections_topic not in (None, topic):
+                raise ValueError(
+                    'ledger %s was made on the detections topic %r but this derivation reads '
+                    '%r: another sonar of the same bags would be given the wrong angles'
+                    % (ledger.path, ledger.detections_topic, topic))
+        known = {}
+        for ledger in self.ledgers:
+            for b in ledger.bags:
+                if known.setdefault(b['name'], b['metadata_sha256']) != b['metadata_sha256']:
+                    raise ValueError('the ledgers disagree on bag %r (different metadata.yaml '
+                                     'hashes): they were made from different bags' % b['name'])
+        for path, name in zip(bag_paths, bag_names):
+            if name not in known:
+                raise ValueError('bag %r is not in the ledger(s) %s: its pings would all be '
+                                 'dropped; derive from the bags the ledger covers'
+                                 % (name, ', '.join(x.path for x in self.ledgers)))
+            sha = bag_metadata_sha256(path)
+            if sha is None:
+                raise ValueError('bag %r has no readable metadata.yaml, so it cannot be '
+                                 'checked against the ledger (give the bag directory)' % name)
+            if sha != known[name]:
+                raise ValueError('bag %r differs from the one the ledger was made from '
+                                 '(metadata.yaml hash %s vs %s)' % (name, sha, known[name]))
+
+    def lookup(self, bag_name, stamp_ns):
+        """Return the ping's ``(index, degrees, source)`` arrays, or None."""
+        return self.pings.get((bag_name, stamp_ns))
+
+    def report_lines(self):
+        """Return the report: beams with a surface, without, not listed, mean shift per bin."""
+        total = self.beams_surface + self.beams_no_surface + self.beams_not_in_ledger
+        total += self.beams_filtered
+        lines = ['incidence from %d ledger(s) (slope baseline %s deg, layers %s): %d beam(s) '
+                 'with a seabed surface (%.1f%% of those seen), %d without one (left out), '
+                 '%d not in the ledger (left out), %d with a back-facing angle or outside the '
+                 'range and bin limits (left out), %d ping(s) not in the ledger (left out)'
+                 % (len(self.ledgers), self.baseline_deg, self.layers, self.beams_surface,
+                    100.0 * self.beams_surface / total if total else 0.0,
+                    self.beams_no_surface, self.beams_not_in_ledger, self.beams_filtered,
+                    self.pings_missing)]
+        if self.diff_n:
+            lines.append('mean incidence minus |rx_angle| per angle bin (deg): ' + ' '.join(
+                '%d:%+.1f' % (b, self.diff_sum[b] / self.diff_n[b]) for b in sorted(self.diff_n)))
+        return lines
+
+
 class PingRecord:
     """
     The fields of a SonarDetections ping that bin_ping reads, and nothing else.
@@ -1006,7 +1198,7 @@ class PingRecord:
     """
 
     __slots__ = ('intensities', 'rx_angles', 'two_way_travel_times',
-                 'sound_speed', 'frequency', 'flags', 'stamp_ns')
+                 'sound_speed', 'frequency', 'flags', 'stamp_ns', 'incidence', 'source')
 
     def __init__(self, msg):
         """Copy the binning fields of a SonarDetections ``msg``."""
@@ -1016,6 +1208,8 @@ class PingRecord:
         self.sound_speed = msg.ping_info.sound_speed
         self.frequency = msg.ping_info.frequency
         self.stamp_ns = stamp_ns(msg.header.stamp)   # the gain declaration's clock (#176)
+        self.incidence = None    # (beam index, incidence deg, source) arrays, #173
+        self.source = None       # the IncidenceSource that supplied them
         flags = getattr(msg, 'flags', None)
         self.flags = (None if flags is None
                       else bytes(getattr(f, 'flag', 0) for f in flags))
@@ -1174,6 +1368,15 @@ def parse_args(argv):
                            '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[0],
                            '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[1],
                            '%g' % DEFAULT_RANGE_ANGLE_EDGES_DEG[1]))
+    m.add_argument('--angle-basis', choices=('beam', 'incidence'), default='beam',
+                   help="'beam' (default): bin by |rx_angles| as always. 'incidence' "
+                        '(cube_bathymetry#173): bin by the incidence angle a slope run of '
+                        'import_bag gave each beam, read from --beam-ledger; writes an '
+                        'angular-response-table v2 (needs --by-mode)')
+    m.add_argument('--beam-ledger', default=None, metavar='FILE[,FILE...]',
+                   help='beam ledger(s) written by import_bag --beam-ledger-out, covering '
+                        'the bags given (required with, and only for, --angle-basis '
+                        'incidence)')
     m.add_argument('--diagnostics-out', default=None,
                    help='also write every fit and offset diagnostic as JSON here')
     m.add_argument('--accumulation-cache', default=None,
@@ -1260,6 +1463,10 @@ def check_by_mode_args(p, args):
     if not args.by_mode:
         given = [flag for flag, name in BY_MODE_ONLY_FLAGS
                  if getattr(args, name) is not None]
+        if args.angle_basis != 'beam':
+            given.append('--angle-basis incidence')
+        if args.beam_ledger is not None:
+            given.append('--beam-ledger')
         if given:
             p.error('%s only appl%s with --by-mode'
                     % (', '.join(given), 'ies' if len(given) == 1 else 'y'))
@@ -1268,6 +1475,16 @@ def check_by_mode_args(p, args):
         p.error('--by-mode is refused with --remove-tl: a per-mode table carries '
                 'its own measured range term, which replaces the modelled '
                 '40*log10(R) + 2*alpha*R add-back (cube_bathymetry#172)')
+    if args.angle_basis == 'incidence':
+        if args.beam_ledger is None:
+            p.error('--angle-basis incidence needs --beam-ledger')
+        if args.accumulation_cache is not None:
+            p.error('--accumulation-cache is not supported with --angle-basis incidence')
+        args.beam_ledger_paths = [x for x in args.beam_ledger.split(',') if x]
+        if not args.beam_ledger_paths:
+            p.error('--beam-ledger names no file')
+    elif args.beam_ledger is not None:
+        p.error('--beam-ledger needs --angle-basis incidence')
     if args.sonar_info_topic is None:
         args.sonar_info_topic = default_sonar_info_topic(args.topic)
     if args.sonar_info_topic == args.topic:
@@ -2355,6 +2572,10 @@ def ping_beams(ping, bin_width_deg, n_half, offset_db=0.0):
     Usable: finite intensity and angle, positive finite slant range
     ``R = twtt * c / 2``, not flagged bad, ``|theta| < 90`` deg and
     ``0.1 m <= R < 10 km``. None when the ping has none.
+
+    With a beam ledger attached to the ping (``ping.incidence``, cube_bathymetry#173)
+    ``theta`` is the ledger's incidence, signed like ``rx_angles``; a beam the ledger
+    lacks or marks as having no seabed surface is not usable.
     """
     import numpy as np
     count = min(len(ping.intensities), len(ping.rx_angles),
@@ -2372,25 +2593,71 @@ def ping_beams(ping, bin_width_deg, n_half, offset_db=0.0):
         ok[:len(flags)] &= flags == 0
     if not ok.any():
         return None
+    shift_deg = None
+    # getattr: callers (and tests) build ping stand-ins without the ledger fields.
+    if getattr(ping, 'incidence', None) is not None:
+        # The angle is the ledger's, with the sign of rx_angles as the side. A beam the
+        # ledger lacks, or that has no seabed surface, is left out and counted (the
+        # importer gives such a beam the vertical angle, which is not slope-corrected).
+        index, inc_deg, source = ping.incidence
+        stats = ping.source
+        inc = np.full(count, np.nan)
+        src = np.full(count, 255, dtype=np.uint8)
+        if len(index) and int(index.max()) >= count:
+            # The strongest sign of a ledger that is not this bag's.
+            raise SystemExit(
+                'error: the ledger lists beam index %d of a ping with %d beams: it was not '
+                'made from these detections' % (int(index.max()), count))
+        inc[index] = inc_deg
+        src[index] = source
+        in_ledger = src != 255
+        stats.beams_not_in_ledger += int((ok & ~in_ledger).sum())
+        surface = in_ledger & (src == LEDGER_SOURCE_SURFACE) & np.isfinite(inc)
+        stats.beams_no_surface += int((ok & in_ledger & ~surface).sum())
+        ok = ok & surface
+        if not ok.any():
+            return None
+        shift_deg = (inc - np.abs(np.degrees(ang)))[ok]
+        # The side is carried explicitly: a port beam of incidence 0 must stay port
+        # (a signed zero would read as starboard).
+        port = (ang < 0.0)[ok]
+        ang = np.where(ang >= 0.0, 1.0, -1.0) * np.radians(inc)
     y, ang, rng = y[ok] + offset_db, ang[ok], rng[ok]
     deg = np.degrees(ang)
+    n_before = len(deg)
     # |theta| < 90 explicitly, BEFORE the bin cast: the last bin reaches past
     # 90 when the bin width does not divide 90, a beam at or beyond 90 deg is
     # not a seabed return, and a huge finite angle would overflow the cast.
     in_range = np.abs(deg) < 90.0
     if not in_range.all():
         if not in_range.any():
+            if shift_deg is not None:
+                stats.beams_filtered += n_before
             return None
         y, rng, deg = y[in_range], rng[in_range], deg[in_range]
+        if shift_deg is not None:
+            shift_deg, port = shift_deg[in_range], port[in_range]
     abs_bin = np.floor(np.abs(deg) / bin_width_deg).astype(np.int64)
     cell = np.floor((np.log10(rng) - RANGE_CELL_LOG10_MIN)
                     / RANGE_CELL_DECADES).astype(np.int64)
     keep = (abs_bin >= 0) & (abs_bin < n_half) & (cell >= 0) & (cell < RANGE_CELL_COUNT)
     if not keep.all():
         if not keep.any():
+            if shift_deg is not None:
+                stats.beams_filtered += n_before
             return None
         abs_bin, cell, y, deg = abs_bin[keep], cell[keep], y[keep], deg[keep]
+        if shift_deg is not None:
+            shift_deg, port = shift_deg[keep], port[keep]
     side = (deg >= 0.0).astype(np.int64)
+    if shift_deg is not None:
+        side = (~port).astype(np.int64)
+        stats.beams_surface += len(abs_bin)
+        stats.beams_filtered += n_before - len(abs_bin)
+        for b in np.unique(abs_bin):
+            sel = abs_bin == b
+            stats.diff_sum[int(b)] += float(shift_deg[sel].sum())
+            stats.diff_n[int(b)] += int(sel.sum())
     return abs_bin, side, cell, y
 
 
@@ -3285,9 +3552,16 @@ def _fmt(value, spec):
     return spec % value
 
 
-def mode_table_lines(table, source_bags, box=None):
-    """Return the lines (without newlines) of the per-mode table CSV."""
-    lines = ['# format: %s' % MODE_TABLE_FORMAT,
+def mode_table_lines(table, source_bags, box=None, incidence=None):
+    """
+    Return the lines (without newlines) of the per-mode table CSV.
+
+    ``incidence`` (an IncidenceSource) makes it an incidence table: the v2 format line
+    and the three records the importer requires (cube_bathymetry#173).
+    """
+    table_format = (MODE_TABLE_FORMAT_INCIDENCE if incidence is not None
+                    else MODE_TABLE_FORMAT)
+    lines = ['# format: %s' % table_format,
              '# Per-mode empirical backscatter table (derive_angular_response.py '
              '--by-mode, cube_bathymetry#172)',
              '# key_spec: canonical_mode_key in derive_angular_response.py; '
@@ -3321,6 +3595,12 @@ def mode_table_lines(table, source_bags, box=None):
              '(var_db2 and db_relative_to_nadir on range rows, the angle bounds on angle '
              'rows) are empty; x is written with 10 significant digits'
              % MIN_WRITTEN_VARIANCE_DB2]
+    if incidence is not None:
+        lines.insert(1, '# angle_basis: incidence')
+        lines.insert(2, '# slope_baseline_deg: %s' % incidence.baseline_deg)
+        lines.insert(3, '# slope_layers: %s' % incidence.layers)
+        lines.append('# angle_source: beam ledger(s) %s'
+                     % ','.join(x.sha256 for x in incidence.ledgers))
     if table.get('gain') is not None:
         # Written only under a declaration (cube_bathymetry#176): import_bag compares the
         # digest and the reference state with the declaration it is given.
@@ -3443,7 +3723,7 @@ def _jsonable(value):
 
 
 def accumulate_by_mode(bag_paths, topic, info_topic, builder, box=None,
-                       box_stats=None, corrupt=None):
+                       box_stats=None, corrupt=None, incidence=None):
     """
     Read detections + SonarInfo (+ TF with ``box``) in ONE time-ordered pass into ``builder``.
 
@@ -3453,6 +3733,9 @@ def accumulate_by_mode(bag_paths, topic, info_topic, builder, box=None,
     is SONAR_INFO_GUARD_SEC past the time it was recorded; with ``box`` it is
     attributed when PingLocator releases it (after the TF guard) and only if it
     lies inside the box. Returns the number of detections messages read.
+
+    ``incidence`` (an IncidenceSource, cube_bathymetry#173) swaps each ping's beam
+    angles for the ledger's; a ping the ledger lacks is dropped and counted.
     """
     from rosidl_runtime_py.utilities import get_message
 
@@ -3467,6 +3750,7 @@ def accumulate_by_mode(bag_paths, topic, info_topic, builder, box=None,
         raise SystemExit("error: --by-mode needs the SonarInfo topic '%s' and no bag has "
                          'it; pass --sonar-info-topic (have: %s)'
                          % (info_topic, ', '.join(sorted(set().union(*type_maps)))))
+    bag_names = bag_basenames(bag_paths)
     sources, tf_topics, msg_types = [], [], []
     for path, (type_map, start_ns) in zip(bag_paths, metas):
         kinds = {}
@@ -3530,7 +3814,16 @@ def accumulate_by_mode(bag_paths, topic, info_topic, builder, box=None,
             n_msgs += 1
             ping_ns = stamp_ns(msg.header.stamp)
             record = PingRecord(msg)
-            if locator is not None:
+            if incidence is not None:
+                found = incidence.lookup(bag_names[i], ping_ns)
+                if found is None:
+                    incidence.pings_missing += 1
+                    record = None
+                else:
+                    record.incidence, record.source = found, incidence
+            if record is None:
+                pass
+            elif locator is not None:
                 reason = locator.push(ping_ns, msg.header.frame_id, (ping_ns, record))
                 if reason is not None:
                     box_stats[reason] += 1
@@ -3702,7 +3995,7 @@ def write_accumulation_cache(path, builder, n_msgs, identity, box_stats, corrupt
                 pass
 
 
-def main_by_mode(args, source_bags, gain=None):
+def main_by_mode(args, source_bags, gain=None, incidence=None):
     """Run --by-mode: read the bags (or the cache), fit, write the table and diagnostics."""
     import json
 
@@ -3717,7 +4010,8 @@ def main_by_mode(args, source_bags, gain=None):
         box_stats = new_box_stats() if args.box is not None else None
         corrupt = collections.Counter()
         n_msgs = accumulate_by_mode(args.bag, args.topic, args.sonar_info_topic, builder,
-                                    box=args.box, box_stats=box_stats, corrupt=corrupt)
+                                    box=args.box, box_stats=box_stats, corrupt=corrupt,
+                                    incidence=incidence)
         usable = box_stats is None or box_stats['kept'] > 0
         if usable and len(builder.history) == 0:
             # The corrupt-message report is often the reason: print it first.
@@ -3746,6 +4040,12 @@ def main_by_mode(args, source_bags, gain=None):
             print(warning, file=sys.stderr)
         if box_stats['kept'] == 0:
             raise SystemExit('error: no pings inside --box; nothing to derive')
+    if incidence is not None and (n_msgs == 0 or incidence.pings_missing * 2 > n_msgs):
+        for line in incidence.report_lines():
+            print(line)
+        raise SystemExit('error: the ledger lacks %d of the %d pings read: it was not made '
+                         'from these bags and topic; no table written'
+                         % (incidence.pings_missing, n_msgs))
     table = builder.finish(args.reference_mode, args.range_ref_m, args.misfit_threshold_db,
                            args.range_node_spacing_decades)
     for warning in table['warnings']:
@@ -3754,7 +4054,7 @@ def main_by_mode(args, source_bags, gain=None):
                     if table['gain'] else []):
         print(warning, file=sys.stderr)
     write_text_atomically(args.output, ''.join(
-        line + '\n' for line in mode_table_lines(table, source_bags, args.box)))
+        line + '\n' for line in mode_table_lines(table, source_bags, args.box, incidence)))
     if args.diagnostics_out:
         diag = dict(table)
         diag['source_bags'] = source_bags
@@ -3762,6 +4062,9 @@ def main_by_mode(args, source_bags, gain=None):
         diag['detections_read'] = n_msgs
         write_text_atomically(args.diagnostics_out,
                               json.dumps(_jsonable(diag), indent=1, sort_keys=True) + '\n')
+    if incidence is not None:
+        for line in incidence.report_lines():
+            print(line)
     for line in mode_report_lines(table):
         print(line)
     print('read %d pings across %d bag(s) on %s; wrote a %d-mode table to %s'
@@ -3784,8 +4087,15 @@ def main(argv=None):
               % (gain.path, gain.reference_state, len(gain.segments), gain.sha256()))
         for warning in gain.warnings:
             print('warning: --gain-declaration %s: %s' % (gain.path, warning), file=sys.stderr)
+    incidence = None
+    if args.angle_basis == 'incidence':
+        try:
+            incidence = IncidenceSource([BeamLedger(path) for path in args.beam_ledger_paths])
+            incidence.check(args.bag, source_bags, gain, args.topic)
+        except (ValueError, OSError) as e:
+            raise SystemExit('error: --beam-ledger: %s' % e)
     if args.by_mode:
-        return main_by_mode(args, source_bags, gain)
+        return main_by_mode(args, source_bags, gain, incidence)
     tracker = GainTracker(gain) if gain is not None else None
 
     bins = {}      # bin_index -> [sum_adjusted, sum_R, count], merged across bags

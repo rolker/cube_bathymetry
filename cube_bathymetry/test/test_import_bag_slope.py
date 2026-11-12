@@ -851,3 +851,283 @@ def test_an_ordinary_import_is_refused_while_a_slope_run_holds_the_store(world, 
                  helpers.TOPIC, str(world['bags'][0.0])],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert proc.returncode != 0 and 'holds' in proc.stdout, proc.stdout
+
+
+# ---------------------------------------------------------------------------------------
+# The beam ledger and the incidence fit (second part of #173)
+# ---------------------------------------------------------------------------------------
+
+GOLDEN_LEDGER = HERE / 'data' / 'beam_ledger_v1.bin'
+
+
+def test_the_python_reader_reads_the_golden_ledger_of_the_cpp_writer():
+    ledger = helpers.dar.BeamLedger(str(GOLDEN_LEDGER))
+    assert ledger.header['format'] == 'beam-ledger v1'
+    assert ledger.inputs['slope_baseline_deg'] == 5.0
+    assert ledger.inputs['slope_layers'] == 'processed'
+    assert ledger.bag_names == ['bag_a', 'bag_b']
+    assert ledger.bags[1]['metadata_sha256'] == 'b' * 64
+    index, deg, source = ledger.pings[('bag_a', 1000000000123)]
+    assert list(index) == [0, 3, 7, 9]
+    assert deg[0] == pytest.approx(25.12) and deg[1] == pytest.approx(-12.34)
+    assert deg[2] == pytest.approx(45.0) and deg[3] != deg[3]       # NaN: no incidence
+    assert list(source) == [0, 0, 3, 7]
+    assert len(ledger.pings[('bag_b', 1000100000000)][0]) == 0
+    index, deg, source = ledger.pings[('bag_b', -5)]
+    assert list(index) == [65534] and deg[0] == pytest.approx(180.0) and list(source) == [1]
+    assert ledger.sha256 == hashlib.sha256(GOLDEN_LEDGER.read_bytes()).hexdigest()
+
+
+def test_the_python_reader_refuses_what_is_not_a_ledger(tmp_path):
+    bad = tmp_path / 'bad.bin'
+    bad.write_bytes(b'not a ledger')
+    with pytest.raises(ValueError, match='bad magic'):
+        helpers.dar.BeamLedger(str(bad))
+    cut = tmp_path / 'cut.bin'
+    cut.write_bytes(GOLDEN_LEDGER.read_bytes()[:-2])
+    with pytest.raises(ValueError, match='truncated'):
+        helpers.dar.BeamLedger(str(cut))
+
+
+@pytest.fixture(scope='module')
+def ledger_run(world):
+    """Run a slope run with no correction over the four full-fan bags, writing a beam ledger."""
+    store = world['root'] / 'ledger_store'
+    ledger = world['root'] / 'ledger.bin'
+    rc, out = run_import(slope_args(world['depth'], store, None,
+                                    ['--beam-ledger-out', str(ledger)]),
+                         list(world['bags'].values()))
+    assert rc == 0, out
+    return {'store': store, 'ledger': ledger, 'out': out}
+
+
+def test_the_ledger_holds_the_incidence_the_run_applied(world, ledger_run):
+    assert 'beam ledger' in ledger_run['out']
+    ledger = helpers.dar.BeamLedger(str(ledger_run['ledger']))
+    assert ledger.inputs['slope_layers'] == 'processed' and ledger.inputs['correction'] == 'none'
+    assert ledger.bag_names == [pathlib.Path(b).name for b in world['bags'].values()]
+    assert len(ledger.pings) == 800        # 4 bags x 200 pings
+    errors, surface, total = [], 0, 0
+    for (bag, _stamp), (index, deg, source) in ledger.pings.items():
+        heading = float(bag.split('_')[1])
+        assert list(index) == sorted(index)
+        for i, d, src in zip(index, deg, source):
+            total += 1
+            if src == 0:
+                surface += 1
+                errors.append(abs(d - PLANE.incidence_deg(FAN[i], heading)))
+    assert total > 140000 and surface > 0.9 * total, (surface, total)
+    assert sorted(errors)[len(errors) // 2] < 0.3, sorted(errors)[len(errors) // 2]
+
+
+def test_the_ledger_is_made_by_a_completed_run_only(world, tmp_path):
+    bags = list(world['bags'].values())
+    ledger = tmp_path / 'ledger.bin'
+    store = tmp_path / 'bs'
+    rc, out = run_import(slope_args(world['depth'], store, world['table'],
+                                    ['--beam-ledger-out', str(ledger)]), bags)
+    assert rc == 0, out
+    first = ledger.read_bytes()
+    ledger.unlink()
+    # A refused run (a subset of the bags) writes none.
+    rc, out = run_import(slope_args(world['depth'], store, world['table'],
+                                    ['--beam-ledger-out', str(ledger)]), bags[:2])
+    assert rc != 0 and not ledger.exists() and not list(tmp_path.glob('ledger.bin.partial*'))
+    # Neither does a run with no finite backscatter.
+    empty_bag = tmp_path / 'no_intensity'
+    write_plane_bag(empty_bag, 0.0, 3000.0, thetas=[-10.0, 0.0, 10.0],
+                    level_fn=lambda t, h: float('nan'))
+    rc, out = run_import(slope_args(world['depth'], tmp_path / 'bs2', world['table'],
+                                    ['--beam-ledger-out', str(ledger)]), [empty_bag])
+    assert rc == 1 and not ledger.exists()
+    assert first[:8] == b'CUBELDG1'
+
+
+def test_the_beam_ledger_flag_is_for_the_slope_run_and_checked_early(world, tmp_path):
+    rc, out = run_import(['-o', str(tmp_path / 'o'), '--beam-ledger-out', str(tmp_path / 'l.bin')],
+                         [world['bags'][0.0]])
+    assert rc != 0 and '--beam-ledger-out needs' in out, out
+    rc, out = run_import(slope_args(world['depth'], fresh(tmp_path), world['table'],
+                                    ['--beam-ledger-out', '/nonexistent_dir_for_ledger/l.bin']),
+                         [world['bags'][0.0]])
+    assert rc == 1 and 'cannot create the beam ledger' in out, out
+    assert 'projecting detections' not in out
+
+
+def derive(bags, ledger, out, *extra):
+    argv = [str(b) for b in bags] + [
+        '-t', helpers.TOPIC, '-o', str(out), '--by-mode', '--sonar-info-topic',
+        helpers.INFO_TOPIC, '--angle-basis', 'incidence', '--beam-ledger', str(ledger)]
+    return helpers.dar.main(argv + list(extra))
+
+
+def angle_rows(table):
+    rows = {}
+    for line in pathlib.Path(table).read_text().splitlines():
+        parts = line.split(',')
+        if len(parts) > 8 and parts[1] == 'angle':
+            rows[float(parts[2])] = (float(parts[5]), int(parts[6]), parts[8])
+    return rows
+
+
+def test_deriving_on_the_ledger_recovers_the_response_and_closes_the_loop(
+        world, ledger_run, tmp_path, capsys):
+    bags = list(world['bags'].values())
+    table = tmp_path / 'derived_incidence_table.csv'
+    assert derive(bags, ledger_run['ledger'], table) == 0
+    out = capsys.readouterr().out
+    assert 'with a seabed surface' in out and 'mean incidence minus |rx_angle|' in out, out
+    text = table.read_text()
+    lines = text.splitlines()
+    assert lines[0] == '# format: angular-response-table v2'
+    assert lines[1:4] == ['# angle_basis: incidence', '# slope_baseline_deg: 5.0',
+                          '# slope_layers: processed']
+    assert '# angle_source: beam ledger(s) %s' % sha(ledger_run['ledger']) in text
+    rows = angle_rows(table)
+    # The angle term is the synthetic response: -0.2 dB per degree of incidence.
+    centres = sorted(c for c, (_v, n, _r) in rows.items() if 8 <= c <= 58 and n > 200)
+    assert len(centres) > 15, centres
+    slope = (rows[centres[-1]][0] - rows[centres[0]][0]) / (centres[-1] - centres[0])
+    assert slope == pytest.approx(DB_PER_DEG, abs=0.02), slope
+    # Applied by a slope run, the table puts every beam back on one level.
+    store = tmp_path / 'corrected'
+    rc, out = run_import(slope_args(world['depth'], store, table),
+                         [world['side'][0.0], world['side'][180.0]])
+    assert rc == 0, out
+    values = list(cell_means(store).values())
+    # ... on the level the table measured at its nadir-most bin (the reference of
+    # db_relative_to_nadir); the bins that are well populated also sit on the true response.
+    nadir_centre = min(rows)
+    assert abs(median(values) - rows[nadir_centre][0]) < 0.1, (median(values), nadir_centre)
+    for centre in centres:
+        truth = LEVEL_A + DB_PER_DEG * centre
+        assert abs(rows[centre][0] - truth) < 0.15, (centre, rows[centre][0], truth)
+    spread = [v for v in values if abs(v - median(values)) < 3.0]
+    assert len(spread) > 0.85 * len(values)
+
+
+def test_a_ledger_that_does_not_match_the_derivation_is_refused(world, ledger_run, tmp_path):
+    bags = list(world['bags'].values())
+    table = tmp_path / 't.csv'
+    declaration = HERE / 'data' / 'gain_declaration_v1.csv'
+    with pytest.raises(SystemExit, match='gain declaration'):
+        derive(bags, ledger_run['ledger'], table, '--gain-declaration', str(declaration))
+    with pytest.raises(SystemExit, match='not in the ledger'):
+        derive([world['side'][0.0]], ledger_run['ledger'], table)
+    # A different bag under the same name.
+    twin = tmp_path / 'twin' / bags[0].name
+    shutil.copytree(bags[0], twin)
+    (twin / 'metadata.yaml').write_text((twin / 'metadata.yaml').read_text() + '\n# edited\n')
+    with pytest.raises(SystemExit, match='differs from the one the ledger was made from'):
+        derive([twin] + bags[1:], ledger_run['ledger'], table)
+    assert not table.exists()
+
+
+def test_the_incidence_flags_are_checked(world, ledger_run, tmp_path, capsys):
+    bag = str(world['bags'][0.0])
+    base = [bag, '-t', helpers.TOPIC, '-o', str(tmp_path / 't.csv')]
+    for argv, text in (
+            (base + ['--by-mode', '--angle-basis', 'incidence'], 'needs --beam-ledger'),
+            (base + ['--by-mode', '--beam-ledger', str(ledger_run['ledger'])],
+             'needs --angle-basis incidence'),
+            (base + ['--angle-basis', 'incidence', '--beam-ledger', str(ledger_run['ledger'])],
+             'only appl'),
+            (base + ['--by-mode', '--angle-basis', 'incidence', '--beam-ledger',
+                     str(ledger_run['ledger']), '--accumulation-cache', str(tmp_path / 'c')],
+             'not supported with --angle-basis incidence')):
+        with pytest.raises(SystemExit):
+            helpers.dar.main(argv)
+        assert text in capsys.readouterr().err, argv
+    with pytest.raises(SystemExit, match='bad magic'):
+        junk = tmp_path / 'junk.bin'
+        junk.write_bytes(b'x' * 20)
+        derive([bag], junk, tmp_path / 't2.csv')
+
+
+def test_without_angle_basis_the_tool_behaves_as_before(world, tmp_path):
+    table = tmp_path / 'beam_table.csv'
+    argv = [str(world['side'][0.0]), '-t', helpers.TOPIC, '-o', str(table), '--by-mode',
+            '--sonar-info-topic', helpers.INFO_TOPIC]
+    assert helpers.dar.main(argv) == 0
+    assert table.read_text().startswith('# format: angular-response-table v1\n')
+    assert 'angle_basis' not in table.read_text()
+
+
+def test_a_port_beam_of_zero_incidence_stays_on_the_port_side():
+    import numpy as np
+
+    class Ping:
+        intensities = [-20.0, -21.0]
+        rx_angles = [-0.3, 0.3]
+        two_way_travel_times = [0.04, 0.04]
+        sound_speed = 1500.0
+        flags = None
+        source = helpers.dar.IncidenceSource.__new__(helpers.dar.IncidenceSource)
+
+    stats = Ping.source
+    stats.beams_surface = stats.beams_no_surface = stats.beams_not_in_ledger = 0
+    stats.beams_filtered = 0
+    stats.diff_sum = __import__('collections').defaultdict(float)
+    stats.diff_n = __import__('collections').Counter()
+    ping = Ping()
+    ping.incidence = (np.array([0, 1], dtype=np.uint16), np.array([0.0, 0.0]),
+                      np.array([0, 0], dtype=np.uint8))
+    abs_bin, side, cell, y = helpers.dar.ping_beams(ping, 2.0, 45)
+    assert list(side) == [0, 1], 'port beam of incidence 0 must stay on the port side'
+    assert list(abs_bin) == [0, 0]
+    assert stats.beams_surface == 2
+
+
+def test_a_malformed_ledger_header_is_a_value_error(tmp_path):
+    import struct
+    for header in (b'[]', b'null', b'{"format": "beam-ledger v1"}',
+                   b'{"format": "beam-ledger v1", "inputs": {}, "bags": []}',
+                   b'{"format": "beam-ledger v1", "inputs": {"slope_baseline_deg": 5, '
+                   b'"slope_layers": "p"}, "bags": [{"name": "a"}]}',
+                   b'{"format": "beam-ledger v1", "inputs": {"slope_baseline_deg": 5, '
+                   b'"slope_layers": "p"}, "bags": [{"name": "a", "metadata_sha256": "x"}, '
+                   b'{"name": "a", "metadata_sha256": "y"}]}'):
+        path = tmp_path / 'm.bin'
+        path.write_bytes(b'CUBELDG1' + struct.pack('<I', len(header)) + header)
+        with pytest.raises(ValueError):
+            helpers.dar.BeamLedger(str(path))
+
+
+def test_conflicting_ledgers_topic_and_unrelated_ledgers_are_refused(
+        world, ledger_run, tmp_path):
+    bags = list(world['bags'].values())
+    table = tmp_path / 't.csv'
+    # Another detections topic of the same bags.
+    with pytest.raises(SystemExit, match='detections topic'):
+        argv = [str(b) for b in bags] + ['-t', '/other/detections', '-o', str(table),
+                                         '--by-mode', '--sonar-info-topic', helpers.INFO_TOPIC,
+                                         '--angle-basis', 'incidence', '--beam-ledger',
+                                         str(ledger_run['ledger'])]
+        helpers.dar.main(argv)
+    # Two ledgers that name one bag with different hashes.
+    a = helpers.dar.BeamLedger(str(ledger_run['ledger']))
+    b = helpers.dar.BeamLedger(str(ledger_run['ledger']))
+    b.pings = {}
+    b.bags = [dict(x, metadata_sha256='0' * 64) for x in b.bags]
+    b.path = 'second'
+    source = helpers.dar.IncidenceSource([a, b])
+    with pytest.raises(ValueError, match='disagree on bag'):
+        source.check(bags, [p.name for p in bags], None, helpers.TOPIC)
+
+
+def test_a_ledger_that_matches_almost_nothing_writes_no_table(world, ledger_run, tmp_path):
+    # The side bag carries pings the full-fan ledger never saw (other stamps).
+    table = tmp_path / 't.csv'
+    other = tmp_path / 'ledger_other.bin'
+    rc, out = run_import(slope_args(world['depth'], tmp_path / 'bs', None,
+                                    ['--beam-ledger-out', str(other)]), [world['side'][0.0]])
+    assert rc == 0, out
+    # Pretend the ledger is for the pass_000 bag: same name, different stamps.
+    blob = other.read_bytes().replace(b'side_000', b'pass_000')
+    blob = blob.replace(sha(world['side'][0.0] / 'metadata.yaml').encode(),
+                        sha(world['bags'][0.0] / 'metadata.yaml').encode())
+    fake = tmp_path / 'fake.bin'
+    fake.write_bytes(blob)
+    with pytest.raises(SystemExit, match='lacks'):
+        derive([world['bags'][0.0]], fake, table)
+    assert not table.exists()

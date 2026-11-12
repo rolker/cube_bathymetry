@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
 
 #include "cube_bathymetry/backscatter_table.h"
 #include "cube_bathymetry/common.h"
@@ -36,6 +37,12 @@ namespace cube
 
   struct Sounding
   {
+  /// `beam_index` of a sounding that did not come from a detections array, or
+  /// whose index does not fit.
+    static constexpr uint16_t kNoBeamIndex = 0xFFFF;
+  /// `incidence_source` before `stampIncidence` has seen the sounding.
+    static constexpr uint8_t kIncidenceUnstamped = 255;
+
     explicit Sounding(float depth)
     : depth(depth)
   {
@@ -94,6 +101,12 @@ namespace cube
     // node-output GeoCoder correction reconstructs the grazing angle from. Left
     // NaN when the source omits rx_angles for this beam.
     beam_angle = rx_angle;
+    // Index of this beam in the ping's detection arrays (cube_bathymetry#173):
+    // the projector drops beams by range, so a position in the surviving list is
+    // not the index. The beam ledger of a slope run is keyed by it.
+    if(i < kNoBeamIndex) {
+        beam_index = static_cast < uint16_t > (i);
+    }
     }
 
   /// Depth relative to the sea surface. Positive is up above sea surface
@@ -190,6 +203,17 @@ namespace cube
   /// purpose: near nadir an angle taken from a float vector is good to only
   /// ~0.03 deg.
     std::array < double, 3 > beam_dir_enu {std::nan(""), std::nan(""), std::nan("")};
+
+  /// Index in the ping's detection arrays (cube_bathymetry#173); kNoBeamIndex
+  /// when unknown.
+    uint16_t beam_index = kNoBeamIndex;
+
+  /// How @ref incidence_angle was obtained, stamped with it: 0 = against the
+  /// seabed normal of the slope surface; 1 to 6 = the vertical was used, the
+  /// number being marine_backscatter's FallbackReason (missing sample, stencil
+  /// incomplete, layer seam, no cell size, bad step, bad position); 7 = the beam
+  /// had no vector; 8 = the angle was invalid. kIncidenceUnstamped otherwise.
+    uint8_t incidence_source = kIncidenceUnstamped;
 
   /// Angle between @ref beam_dir_enu and the seabed normal, radians in [0, pi]
   /// (above pi/2 means the beam hit a back-facing slope), stamped by the slope

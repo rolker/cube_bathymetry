@@ -142,6 +142,7 @@ void stampIncidence(
     const auto & v = s.beam_dir_enu;
     if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])) {
       ++counters.no_beam_vector;
+      s.incidence_source = 7;
       continue;
     }
     // Half of slant_range x angle. A beam with no usable range asks for the
@@ -163,6 +164,7 @@ void stampIncidence(
       seabed::Enu{v[0], v[1], v[2]}, normal.normal);
     if (!angle.valid) {
       ++counters.invalid_angle;
+      s.incidence_source = 8;
       continue;
     }
     // Counted only once the beam really got an angle, so the parts add up to
@@ -174,6 +176,10 @@ void stampIncidence(
       const std::size_t reason = static_cast<std::size_t>(normal.reason);
       ++counters.fallback[reason < IncidenceCounters::kReasonCount ? reason : 1];
     }
+    s.incidence_source = normal.from_surface ? 0 :
+      static_cast<uint8_t>(std::min<std::size_t>(
+        std::max<std::size_t>(static_cast<std::size_t>(normal.reason), 1),
+        IncidenceCounters::kReasonCount - 1));
     if (angle.rad >= M_PI / 2.0) {
       ++counters.back_facing;
     }

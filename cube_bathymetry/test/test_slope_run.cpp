@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "cube_bathymetry/build_fingerprint.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/slope_run.h"
 #include "marine_autonomy/gggs.h"
@@ -163,6 +164,17 @@ TEST(SlopeRunRequest, TheBeamBasisRefusesTheSlopeOnlyFlags)
   r.surface_dir.clear();
   r.baseline_given = true;
   EXPECT_NE(slopeRunRequestProblem(r).find("--slope-baseline-deg needs"), std::string::npos);
+}
+
+TEST(SlopeRunRequest, TheBeamLedgerIsForTheSlopeRunOnly)
+{
+  SlopeRunRequest r;
+  r.beam_ledger_out = "/tmp/ledger.bin";
+  EXPECT_NE(slopeRunRequestProblem(r).find("--beam-ledger-out needs"), std::string::npos);
+  r.basis = BackscatterAngleBasis::Incidence;
+  r.surface_dir = "/surface";
+  r.bs_store_dir = "/bs";
+  EXPECT_TRUE(slopeRunRequestProblem(r).empty());
 }
 
 TEST(SlopeRunRequest, TheIncidenceBasisNeedsItsStoresAndRefusesTheRest)
@@ -310,10 +322,10 @@ TEST(SlopeRunPrepare, AttributesTheBagToTheTilesAndStampsIncidence)
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   auto a = f.soundings();
-  ASSERT_TRUE(run->prepare(a, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(a, 0, 100, f.sheet, error)) << error;
   EXPECT_NEAR(a[0].sounding.incidence_angle, 0.0, 1e-6) << "a flat surface and a nadir beam";
   auto b = f.soundings(1.0);
-  ASSERT_TRUE(run->prepare(b, 1, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(b, 1, 100, f.sheet, error)) << error;
   const auto * contributors = run->contributorsOf(f.tile);
   ASSERT_NE(contributors, nullptr);
   EXPECT_EQ(*contributors, (std::set<std::size_t>{0, 1}));
@@ -340,7 +352,7 @@ TEST(SlopeRunPrepare, ATileWhoseRecordedBagsAreNotAllGivenIsRefusedAtFirstTouch)
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   auto s = f.soundings();
-  EXPECT_FALSE(run->prepare(s, 0, f.sheet, error));
+  EXPECT_FALSE(run->prepare(s, 0, 100, f.sheet, error));
   EXPECT_NE(error.find("tile " + f.tile_name), std::string::npos) << error;
   EXPECT_NE(error.find("bag_gone"), std::string::npos) << error;
   EXPECT_NE(error.find("Nothing has been published"), std::string::npos) << error;
@@ -354,7 +366,7 @@ TEST(SlopeRunPrepare, ATileWhoseRecordedBagsAreNotAllGivenIsRefusedAtFirstTouch)
   run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   s = f.soundings();
-  EXPECT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  EXPECT_TRUE(run->prepare(s, 0, 100, f.sheet, error)) << error;
 }
 
 TEST(SlopeRunPublish, PublishesTheTilesRecordsThemAndDropsATileLeftWithNoCells)
@@ -379,7 +391,7 @@ TEST(SlopeRunPublish, PublishesTheTilesRecordsThemAndDropsATileLeftWithNoCells)
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   auto s = f.soundings();
-  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(s, 0, 100, f.sheet, error)) << error;
   // A second tile is reached and does get cells (a run with none at all fails).
   const gggs::GridIndex fresh_tile = gggs::Level(10).gridIndex(kLat - 0.02, kLon);
   std::vector<GeoSounding> elsewhere;
@@ -392,7 +404,7 @@ TEST(SlopeRunPublish, PublishesTheTilesRecordsThemAndDropsATileLeftWithNoCells)
     gs.sounding.horizontal_error = 0.01f;
     elsewhere.push_back(gs);
   }
-  ASSERT_TRUE(run->prepare(elsewhere, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(elsewhere, 0, 100, f.sheet, error)) << error;
   writeFile(fs::path(run->scratchBsDir()) / "survey" / mbs::tileFilename(fresh_tile), "fresh");
 
   // The first tile was reached but produced no cells: no scratch tile exists.
@@ -418,8 +430,8 @@ TEST(SlopeRunPublish, RecordsContributorsDepthTilesAndTheMargin)
   ASSERT_TRUE(run) << error;
   auto a = f.soundings();
   auto b = f.soundings(1.0);
-  ASSERT_TRUE(run->prepare(a, 1, f.sheet, error)) << error;
-  ASSERT_TRUE(run->prepare(b, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(a, 1, 100, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(b, 0, 100, f.sheet, error)) << error;
   writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
   writeFile(fs::path(run->scratchBsDir()) / "registry.json", "{\"platform\": \"p\"}");
   std::string summary;
@@ -438,6 +450,135 @@ TEST(SlopeRunPublish, RecordsContributorsDepthTilesAndTheMargin)
   EXPECT_TRUE(m->inputs == f.config.inputs);
 }
 
+// The beam ledger: made only by a run that publishes, keyed by the beam index, and
+// removed again if the publish fails after it was made.
+TEST(SlopeRunLedger, IsWrittenByACompletedRunOnly)
+{
+  Fixture f;
+  f.config.beam_ledger_path = f.root + "/ledger.bin";
+  std::string error;
+  {
+    auto run = SlopeRun::create(f.config, error);
+    ASSERT_TRUE(run) << error;
+    auto s = f.soundings();
+    for (std::size_t i = 0; i < s.size(); ++i) {
+      s[i].sounding.beam_index = static_cast<uint16_t>(10 + i);
+    }
+    ASSERT_TRUE(run->prepare(s, 1, 4242, f.sheet, error)) << error;
+    EXPECT_FALSE(fs::exists(f.config.beam_ledger_path));
+    // No cells: the publish fails and no ledger appears.
+    std::string summary;
+    EXPECT_FALSE(run->publish(error, summary));
+  }
+  EXPECT_FALSE(fs::exists(f.config.beam_ledger_path));
+  EXPECT_FALSE(fs::exists(f.config.beam_ledger_path + ".partial"));
+
+  {
+    auto run = SlopeRun::create(f.config, error);
+    ASSERT_TRUE(run) << error;
+    auto s = f.soundings();
+    for (std::size_t i = 0; i < s.size(); ++i) {
+      s[i].sounding.beam_index = static_cast<uint16_t>(10 + i);
+    }
+    ASSERT_TRUE(run->prepare(s, 1, 4242, f.sheet, error)) << error;
+    writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
+    std::string summary;
+    ASSERT_TRUE(run->publish(error, summary)) << error;
+    EXPECT_NE(summary.find("beam ledger"), std::string::npos) << summary;
+  }
+  const BeamLedger ledger = readBeamLedger(f.config.beam_ledger_path);
+  ASSERT_EQ(ledger.pings.size(), 1u);
+  EXPECT_EQ(ledger.pings[0].stamp_ns, 4242);
+  EXPECT_EQ(ledger.pings[0].bag_index, 1u);
+  ASSERT_EQ(ledger.pings[0].beams.size(), 5u);
+  EXPECT_EQ(ledger.pings[0].beams[2].beam_index, 12u);
+  EXPECT_EQ(ledger.pings[0].beams[2].source, 0) << "against the surface normal";
+  EXPECT_EQ(ledger.pings[0].beams[2].incidence_centideg, 0) << "nadir beam on a flat surface";
+}
+
+// A publish that fails BEFORE its commit point leaves the earlier ledger (that of the
+// store which is still current) untouched, and writes no new one.
+TEST(SlopeRunLedger, ThePreviousLedgerSurvivesAPublishThatFailsBeforeTheCommit)
+{
+  Fixture f;
+  f.config.beam_ledger_path = f.root + "/ledger.bin";
+  writeFile(f.config.beam_ledger_path, "the ledger of the current store");
+  std::string error;
+  auto run = SlopeRun::create(f.config, error);
+  ASSERT_TRUE(run) << error;
+  auto s = f.soundings();
+  ASSERT_TRUE(run->prepare(s, 0, 1, f.sheet, error)) << error;
+  writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
+  const PublishFailpoint crash = [](const std::string & point) {
+      if (point == "incoming-copied") {
+        throw std::runtime_error("injected crash");
+      }
+    };
+  std::string summary;
+  EXPECT_FALSE(run->publish(error, summary, crash));
+  EXPECT_EQ(readFile(f.config.beam_ledger_path), "the ledger of the current store");
+  run.reset();
+  EXPECT_EQ(readFile(f.config.beam_ledger_path), "the ledger of the current store");
+}
+
+// A failure AFTER the commit point is completed by the next run, so the ledger that
+// matches it goes in now, and the manifest records its hash.
+TEST(SlopeRunLedger, ThePublishedLedgerIsRecordedAndSurvivesAFailureAfterTheCommit)
+{
+  Fixture f;
+  f.config.beam_ledger_path = f.root + "/ledger.bin";
+  std::string error;
+  auto run = SlopeRun::create(f.config, error);
+  ASSERT_TRUE(run) << error;
+  auto s = f.soundings();
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    s[i].sounding.beam_index = static_cast<uint16_t>(i);
+  }
+  ASSERT_TRUE(run->prepare(s, 0, 1, f.sheet, error)) << error;
+  writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
+  const PublishFailpoint crash = [](const std::string & point) {
+      if (point == "pending-written") {
+        throw std::runtime_error("injected crash");
+      }
+    };
+  std::string summary;
+  EXPECT_FALSE(run->publish(error, summary, crash));
+  ASSERT_TRUE(fs::exists(f.config.beam_ledger_path));
+  run.reset();
+  f.config.beam_ledger_path.clear();
+  auto next = SlopeRun::create(f.config, error);
+  ASSERT_TRUE(next) << error;
+  const auto manifest = DerivedTiles::load(f.bs);
+  ASSERT_TRUE(manifest && manifest->last_publish);
+  EXPECT_EQ(manifest->last_publish->ledger_sha256, sha256File(f.root + "/ledger.bin"));
+}
+
+TEST(SlopeRunLedger, TwoMessagesOfOneStampInOneBagAreRefused)
+{
+  Fixture f;
+  f.config.beam_ledger_path = f.root + "/ledger.bin";
+  std::string error;
+  auto run = SlopeRun::create(f.config, error);
+  ASSERT_TRUE(run) << error;
+  auto a = f.soundings();
+  ASSERT_TRUE(run->prepare(a, 0, 77, f.sheet, error)) << error;
+  auto b = f.soundings();
+  EXPECT_FALSE(run->prepare(b, 0, 77, f.sheet, error));
+  EXPECT_NE(error.find("share the stamp 77"), std::string::npos) << error;
+  // The same stamp in another bag is a different ping.
+  auto c = f.soundings();
+  EXPECT_TRUE(run->prepare(c, 1, 77, f.sheet, error)) << error;
+}
+
+TEST(SlopeRunLedger, AnUnwritableLedgerPathRefusesTheRunAtOnce)
+{
+  Fixture f;
+  f.config.beam_ledger_path = "/nonexistent_dir_for_ledger/ledger.bin";
+  std::string error;
+  EXPECT_FALSE(SlopeRun::create(f.config, error));
+  EXPECT_NE(error.find("cannot create the beam ledger"), std::string::npos) << error;
+}
+
 // A run with no finite backscatter at all is a failure, not a product: it names the
 // reason and writes nothing.
 TEST(SlopeRunPublish, ARunWithNoCellsFailsAndWritesNothing)
@@ -447,7 +588,7 @@ TEST(SlopeRunPublish, ARunWithNoCellsFailsAndWritesNothing)
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   auto s = f.soundings();
-  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(s, 0, 100, f.sheet, error)) << error;
   std::string summary;
   EXPECT_FALSE(run->publish(error, summary));
   EXPECT_NE(error.find("no cell had finite backscatter"), std::string::npos) << error;
@@ -464,7 +605,7 @@ TEST(SlopeRunPublish, ASurfaceTileChangedDuringTheRunFailsBeforeTheCommit)
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   auto s = f.soundings();
-  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(s, 0, 100, f.sheet, error)) << error;
   writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
   const fs::path depth = fs::path(f.surface) / "processed" /
     marine_bathymetry_store::tileFilename(f.tile);
@@ -487,7 +628,7 @@ TEST(SlopeRunPublish, DroppedGeoreferencingIsRecordedInTheEntries)
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   auto s = f.soundings();
-  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(s, 0, 100, f.sheet, error)) << error;
   writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
   run->setDroppedGeoreferencing(7);
   std::string summary;
@@ -505,7 +646,7 @@ TEST(SlopeRunPublish, AScratchTileNoBatchReachedStopsThePublish)
   auto run = SlopeRun::create(f.config, error);
   ASSERT_TRUE(run) << error;
   auto s = f.soundings();
-  ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+  ASSERT_TRUE(run->prepare(s, 0, 100, f.sheet, error)) << error;
   writeFile(fs::path(run->scratchBsDir()) / "survey" / "10_1_1.tif", "stray");
   std::string summary;
   EXPECT_FALSE(run->publish(error, summary));
@@ -523,7 +664,7 @@ TEST(SlopeRunPublish, AnInterruptedPublishIsRolledForwardByTheNextRun)
     auto run = SlopeRun::create(f.config, error);
     ASSERT_TRUE(run) << error;
     auto s = f.soundings();
-    ASSERT_TRUE(run->prepare(s, 0, f.sheet, error)) << error;
+    ASSERT_TRUE(run->prepare(s, 0, 100, f.sheet, error)) << error;
     writeFile(fs::path(run->scratchBsDir()) / "survey" / f.tile_name, "new tile");
     std::string summary;
     const PublishFailpoint crash = [](const std::string & point) {

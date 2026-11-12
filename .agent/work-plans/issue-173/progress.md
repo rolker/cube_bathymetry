@@ -208,8 +208,8 @@ Sources: two Claude adversarial passes (lens A and B), Gemini and Codex (local r
 - [x] (suggestion) registry.json overwritten by every publish; unrecorded tile deleted; put/delete overlap; counters not adding up; NaN guards; baseline text precision; "never committed" text for an empty incoming dir — fixed
 - [ ] (suggestion) accumulator reload/restore failures do not block a slope publish (Codex) — `store_import.cpp`
 - [ ] (suggestion) depth tiles are hashed at publish time, not at first read (both lenses) — `slope_run.cpp`
-- [ ] (suggestion) a run with no finite backscatter, or with dropped georeferencing, exits 0 with a warning — `slope_run.cpp`
-- [ ] (suggestion) a table's recorded baseline/layers only warn on mismatch — `import_bag_main.cpp`
+- [x] (suggestion) a run with no finite backscatter, or with dropped georeferencing, exits 0 with a warning — `slope_run.cpp` (fixed in a06fed1, merged with PR 179: no cells exits 1 and publishes nothing; dropped georeferencing keeps the ordinary run's tolerance and is counted in the report and recorded per tile as `dropped_georef_pings`, as instructed then)
+- [x] (suggestion) a table's recorded baseline/layers only warn on mismatch — `import_bag_main.cpp` (fixed in a06fed1, merged with PR 179: refused, naming both values)
 - [ ] (suggestion) --reference-store is not recorded in the store inputs — `import_bag_main.cpp`
 - [ ] (suggestion) longitude intersection in SurfaceTileIndex does not wrap at the antimeridian — `derived_tiles.cpp`
 - [ ] (suggestion) beam importers do not take the store lock while checking for derived_tiles.json — `import_bag_main.cpp`
@@ -237,3 +237,30 @@ Sources: two Claude adversarial passes (lens A and B), Gemini and Codex (local r
 - [ ] (suggestion) eager hashing covers every surface tile, so an unrelated tile rewritten mid-run fails the publish (stricter than needed) — `slope_run.cpp`
 - [ ] (suggestion) two beam runs into one store are now serialized (documented in the README)
 - [ ] (suggestion) manifests written by earlier builds of this branch no longer load (new required keys)
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-12 14:42 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+**Verdict**: approved
+
+**Branch**: feature/issue-173-incidence-fit
+**Mode**: pre-push (PR 2: beam index, ledger, incidence fit)
+**Depth**: Deep (reason: new file format, publish ordering, stale-data checks)
+**Must-fix**: 0 open | **Suggestions**: 3 open
+**Round**: 1 | **Ship**: recommended — every must-fix and every silent-failure or stale-data finding was fixed in place
+
+Sources: two Claude adversarial passes (derive tool; C++ ledger and publish), Gemini and Codex (local review not run, --no-local).
+
+### Findings
+- [x] (must-fix) a failed publish deleted the ledger of the store that was still current — fixed: sealed before the publish, put in place after (or right after a commit-point failure); hash in the manifest
+- [x] (must-fix) a crash between the ledger rename and the commit left a ledger beside an unpublished store — fixed by the same ordering
+- [x] (must-fix) a port beam of incidence 0 was binned starboard — fixed (side carried explicitly)
+- [x] (must-fix) a malformed ledger header could raise a non-ValueError — fixed, with tests
+- [x] (must-fix) conflicting bag identities across ledgers accepted — refused
+- [x] (must-fix) a ledger of another detections topic of the same bags passed every check — topic recorded and checked
+- [x] (must-fix) two writers could share a temporary file — per-process name
+- [x] (suggestion) unreadable metadata.yaml skipped the bag check; a beam index beyond the ping was dropped silently; a ledger matching almost nothing still wrote a table; beams counted under the wrong heading; silent narrowing of beam count and bag index; two messages with one stamp; little-endian assumption; fallback source code 0 — fixed
+- [ ] (suggestion) the Python reader holds every ping of a ledger in memory (a few hundred bytes per ping) — `derive_angular_response.py`
+- [ ] (suggestion) a crash after the manifest publish but before the ledger rename leaves the previous ledger; the manifest's ledger_sha256 would show it, but no tool compares them yet — `slope_run.cpp`
+- [ ] (suggestion) .agents/README.md does not exist; the parameter documentation is in the package README — repository

@@ -50,6 +50,9 @@ std::string slopeRunRequestProblem(const SlopeRunRequest & r)
     if (r.baseline_given) {
       return "--slope-baseline-deg needs --backscatter-angle-basis incidence (the slope run)";
     }
+    if (!r.beam_ledger_out.empty()) {
+      return "--beam-ledger-out needs --backscatter-angle-basis incidence (the slope run)";
+    }
     return "";
   }
   if (r.surface_dir.empty()) {
@@ -196,6 +199,13 @@ std::unique_ptr<SlopeRun> SlopeRun::create(const SlopeRunConfig & config, std::s
       return nullptr;
     }
   }
+  if (!config.beam_ledger_path.empty()) {
+    run->ledger_ = BeamLedgerWriter::open(
+      config.beam_ledger_path, config.inputs, config.bags, config.detections_topic, error);
+    if (!run->ledger_) {
+      return nullptr;
+    }
+  }
   // 4. The surface.
   const std::vector<std::string> layers = splitLayers(config.inputs.slope_layers);
   if (layers.empty()) {
@@ -291,14 +301,41 @@ const std::set<std::size_t> * SlopeRun::contributorsOf(const gggs::GridIndex & t
 }
 
 bool SlopeRun::prepare(
-  std::vector<GeoSounding> & soundings, std::size_t bag_index, const GeoMapSheet & sheet,
-  std::string & error)
+  std::vector<GeoSounding> & soundings, std::size_t bag_index, int64_t ping_ns,
+  const GeoMapSheet & sheet, std::string & error)
 {
   try {
     stampIncidence(soundings, *surface_, options_, counters_);
   } catch (const std::exception & e) {
     error = std::string("the slope surface could not be read: ") + e.what();
     return false;
+  }
+  if (ledger_) {
+    std::vector<LedgerBeam> beams;
+    beams.reserve(soundings.size());
+    for (const GeoSounding & gs : soundings) {
+      const Sounding & snd = gs.sounding;
+      if (snd.beam_index != Sounding::kNoBeamIndex) {
+        beams.push_back({snd.beam_index, ledgerIncidence(snd.incidence_angle),
+            snd.incidence_source});
+      }
+    }
+    // The ledger is keyed by (bag, stamp) and its bag index is 16 bits.
+    if (bag_index > 0xFFFF ||
+      !ledger_keys_.insert({static_cast<uint16_t>(bag_index), ping_ns}).second)
+    {
+      error = bag_index > 0xFFFF ?
+        "more than 65535 bags do not fit the beam ledger" :
+        "two detections messages of one bag share the stamp " + std::to_string(ping_ns) +
+        ", so the beam ledger cannot tell their beams apart";
+      return false;
+    }
+    try {
+      ledger_->addPing(ping_ns, static_cast<uint16_t>(bag_index), beams);
+    } catch (const std::exception & e) {
+      error = e.what();
+      return false;
+    }
   }
   for (const GeoSounding & s : soundings) {
     const double radius = sheet.parameters().influenceRadius(s.sounding);
@@ -451,15 +488,54 @@ bool SlopeRun::publish(
     plan.registry_source = registry.string();
   }
   plan.manifest = manifest;
+  // The ledger is sealed (fsync'd, still under its temporary name) before the
+  // publish, and put in place only once the publish has committed: a failed or
+  // crashed run never replaces the ledger of the store that is still current.
+  try {
+    if (ledger_) {
+      plan.ledger_sha256 = ledger_->seal();
+    }
+  } catch (const std::exception & e) {
+    error = std::string("the beam ledger could not be written: ") + e.what() +
+      ". Nothing was published";
+    return false;
+  }
+  bool publish_failed = false;
+  std::string publish_error;
   try {
     publishDerived(plan, failpoint);
   } catch (const std::exception & e) {
-    error = std::string("the publish failed: ") + e.what() + ". The next slope run on " +
+    publish_failed = true;
+    publish_error = e.what();
+  }
+  if (ledger_) {
+    // After the commit point the next run completes the publish, so the ledger
+    // that matches it goes in now; before it nothing was published and the
+    // sealed file is simply dropped with the writer.
+    std::error_code pending_ec;
+    const bool committed = !publish_failed ||
+      fs::exists(fs::path(config_.bs_store_dir) / DerivedTiles::kPendingFilename, pending_ec);
+    if (committed) {
+      try {
+        ledger_->commit();
+      } catch (const std::exception & e) {
+        error = std::string("the store was published but the beam ledger could not be "
+            "put in place: ") + e.what();
+        return false;
+      }
+    }
+  }
+  if (publish_failed) {
+    error = std::string("the publish failed: ") + publish_error + ". The next slope run on " +
       config_.bs_store_dir + " completes it (if it had committed) or cleans it up.";
     return false;
   }
   os << "Published " << put.size() << " backscatter tile(s) to " << config_.bs_store_dir
      << " (derived_tiles.json updated).\n";
+  if (ledger_) {
+    os << "Wrote the beam ledger " << config_.beam_ledger_path << " (" << ledger_->pings()
+       << " ping(s)).\n";
+  }
   summary = os.str();
   return true;
 }

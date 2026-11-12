@@ -177,6 +177,9 @@ namespace cube
     std::vector < std::string > removed;
   /// Whether `registry.json` was installed.
     bool registry = false;
+  /// SHA-256 of the beam ledger this publish was made with (empty = none), so a
+  /// ledger found beside the store can be told from one of another run.
+    std::string ledger_sha256;
   };
 
   struct DerivedTiles
@@ -219,6 +222,16 @@ namespace cube
 /// from). Empty @p dir gives the empty string.
 /// @throws std::runtime_error if a tile cannot be read.
   std::string referenceStoreDigest(const std::string & dir);
+
+/// fsync the file at @p path. @throws std::runtime_error.
+  void fsyncFile(const std::string & path);
+/// fsync the directory at @p path so a rename in it survives power loss (a
+/// filesystem with no directory fsync is tolerated). @throws std::runtime_error.
+  void fsyncDirectory(const std::string & path);
+
+/// The store-level inputs as compact JSON text (the `inputs` object of
+/// derived_tiles.json), for the beam ledger header.
+  std::string storeInputsJson(const StoreInputs & inputs);
 
 /// UTC now as `YYYY-MM-DDTHH:MM:SSZ`.
   std::string utcTimestamp();
@@ -342,6 +355,8 @@ private:
     std::vector < std::string > delete_tiles;
   /// The scratch `registry.json` to install at the store root, or empty.
     std::string registry_source;
+  /// SHA-256 of the sealed beam ledger written with this run, or empty.
+    std::string ledger_sha256;
   /// The complete manifest after the publish; `last_publish` is filled in here.
     DerivedTiles manifest;
   };
