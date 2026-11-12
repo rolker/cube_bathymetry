@@ -194,7 +194,10 @@ install(TARGETS cube_bathymetry_slope_incidence EXPORT export_${PROJECT_NAME}
 # The record of what a slope-corrected backscatter store was derived from, and
 # its crash-safe publish (#173). Its own target: it needs the SHA-256 of the
 # level-plan library and the JSON library, and nothing of the estimator.
-add_library(cube_bathymetry_derived_tiles src/derived_tiles.cpp)
+add_library(cube_bathymetry_derived_tiles
+  src/derived_tiles.cpp
+  src/beam_ledger.cpp   # per-beam incidence ledger of a slope run (#173)
+)
 target_include_directories(cube_bathymetry_derived_tiles PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -644,6 +647,12 @@ if(BUILD_TESTING)
     cube_bathymetry_slope_run
     marine_bathymetry_store::marine_bathymetry_store
   )
+
+  # The beam ledger file: round trip, golden bytes shared with the Python reader (#173).
+  ament_add_gtest(test_beam_ledger test/test_beam_ledger.cpp)
+  target_link_libraries(test_beam_ledger cube_bathymetry_derived_tiles)
+  target_compile_definitions(test_beam_ledger PRIVATE
+    BEAM_LEDGER_GOLDEN_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/beam_ledger_v1.bin")
 
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)

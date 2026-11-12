@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "cube_bathymetry/angle_basis.h"
+#include "cube_bathymetry/beam_ledger.h"
 #include "cube_bathymetry/derived_tiles.h"
 #include "cube_bathymetry/geo_map_sheet.h"
 #include "cube_bathymetry/geo_sounding.h"
@@ -65,6 +66,7 @@ namespace cube
     double baseline_deg = kDefaultSlopeBaselineDeg;
     bool depth_adaptive = false;
     int ping_limit = 0;  ///< `-l`
+    std::string beam_ledger_out;  ///< `--beam-ledger-out`
   };
 
 /// Empty when the combination is valid, else the first problem, naming the flag.
@@ -96,6 +98,9 @@ namespace cube
   /// Where the unique scratch directory is made; empty = the parent of the
   /// backscatter store.
     std::string scratch_root;
+  /// Where to write the beam ledger (empty = none): a file made only by a run
+  /// that completes.
+    std::string beam_ledger_path;
     double baseline_deg = kDefaultSlopeBaselineDeg;
   /// The store-level inputs of this run (basis, baseline, layers, correction,
   /// gain declaration, level).
@@ -141,7 +146,8 @@ public:
   /// all among the bags given: the first-touch refusal, before anything is
   /// published).
     bool prepare(
-      std::vector < GeoSounding > &soundings, std::size_t bag_index, const GeoMapSheet & sheet,
+      std::vector < GeoSounding > &soundings, std::size_t bag_index, int64_t ping_ns,
+      const GeoMapSheet & sheet,
       std::string & error);
 
   /// Record the pings the run dropped for want of an earth transform (the
@@ -167,6 +173,7 @@ private:
     SlopeRunConfig config_;
     SlopeOptions options_;
     std::unique_ptr < StoreLock > lock_;
+    std::unique_ptr < BeamLedgerWriter > ledger_;
     std::optional < DerivedTiles > previous_;
     std::unique_ptr < marine_backscatter::seabed::SeabedHeightSampler > surface_;
     std::unique_ptr < SurfaceTileIndex > surface_index_;

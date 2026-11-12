@@ -69,7 +69,7 @@ constexpr const char * kRegistryName = "registry.json";
 }
 
 /// fsync a file by path (opened read-only: fsync works on any descriptor).
-void fsyncFile(const std::string & path)
+void fsyncFileImpl(const std::string & path)
 {
   const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) {
@@ -87,7 +87,7 @@ void fsyncFile(const std::string & path)
 /// fsync a directory so a rename in it survives power loss. A filesystem with
 /// no directory fsync (EINVAL/ENOTSUP) is not a failed publish: the rename is
 /// still atomic, only its durability is unproven.
-void fsyncDirectory(const std::string & path)
+void fsyncDirectoryImpl(const std::string & path)
 {
   const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (fd < 0) {
@@ -414,6 +414,14 @@ TileRecord tileFromJson(const json & j, const std::string & where)
 }  // namespace
 
 // ---- bag identity ---------------------------------------------------------
+
+void fsyncFile(const std::string & path) {fsyncFileImpl(path);}
+void fsyncDirectory(const std::string & path) {fsyncDirectoryImpl(path);}
+
+std::string storeInputsJson(const StoreInputs & inputs)
+{
+  return inputsToJson(inputs).dump();
+}
 
 std::string normalizedBagName(const std::string & path)
 {

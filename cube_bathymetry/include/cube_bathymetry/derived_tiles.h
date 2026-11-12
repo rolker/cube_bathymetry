@@ -220,6 +220,16 @@ namespace cube
 /// @throws std::runtime_error if a tile cannot be read.
   std::string referenceStoreDigest(const std::string & dir);
 
+/// fsync the file at @p path. @throws std::runtime_error.
+  void fsyncFile(const std::string & path);
+/// fsync the directory at @p path so a rename in it survives power loss (a
+/// filesystem with no directory fsync is tolerated). @throws std::runtime_error.
+  void fsyncDirectory(const std::string & path);
+
+/// The store-level inputs as compact JSON text (the `inputs` object of
+/// derived_tiles.json), for the beam ledger header.
+  std::string storeInputsJson(const StoreInputs & inputs);
+
 /// UTC now as `YYYY-MM-DDTHH:MM:SSZ`.
   std::string utcTimestamp();
 
