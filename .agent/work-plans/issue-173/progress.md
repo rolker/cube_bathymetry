@@ -155,3 +155,33 @@ Revision 2, checked against the source and the merged `marine_backscatter` heade
 - Mixed corrections in one slope store: refuse (recommended, mirrors #176) or allow with the per-tile record only.
 - Whether a `--backscatter-correction none` ledger run may publish into a store at all (its tiles are uncorrected), or writes only the ledger.
 - The "Question for the operator" on decision 4 (live node) is still open.
+
+## Implementation
+**Status**: complete (groups A0 to G; review and ci-local follow)
+**When**: 2026-11-12 10:05 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+
+**Plan**: `.agent/work-plans/issue-173/plan.md` revision 3, with its "Implementation record (PR 1)" section
+**Branch**: feature/issue-173 (local only, not pushed, no PR)
+
+Commit groups, each built and run against the whole package suite before it was committed:
+
+- A0 georeferencePing moved into the library, verbatim.
+- A `Sounding::beam_dir_enu` and `incidence_angle`; `test_beam_geometry` pins the sign of `rx_angle` through rotated transforms at four headings in both hemispheres.
+- B `Parameters::backscatter_angle_basis` and its selection in `Node::insert`.
+- C the v2 incidence table and the basis refusals in `import_bag`, `batch_regen_bag` and the node.
+- D `slope_incidence` (closed-form planes, fallbacks counted, the baseline against the probes the sampler saw, the aspect-independence with its negative control) and the sampler benchmark: about 32 us per beam over a 2 x 2 tile processed store, under load.
+- E `derived_tiles`: the strict manifest, bag identity, depth-tile hashing, the lock, publish and recovery, with a crash injected at every point.
+- F the slope run in `import_bag` (`slope_run` library, scratch, bag index on messages, contributors, early refusals, publish), `test_slope_run` and the end-to-end `test_import_bag_slope.py`.
+- G README and ADR text.
+
+The beam basis is byte-identical to a build of the plan commit (depth store, backscatter store and `build_fingerprint.json`) for `none`, a beam table and `--max-resident-tiles 1`.
+
+Whole package suite after F: 52 of 52 ctest entries pass (the baseline was 1694 tests in 46 entries, none failing).
+
+### Deviations from the plan
+Listed in the plan's "Implementation record (PR 1)": the slope-run library split, the table-accounting test as an end-to-end one, batch_regen's table refusal moved before the bag opens, the warning on a table's recorded baseline and layers, the `last_publish` key, the stencil margin definition, and the eviction tolerance.
+
+### Open
+- [ ] Action needed: `/review-code` (pre-push, `--no-local`) and a full-scope `ci_local.sh` attestation on the final head.
+- [ ] Operator: the live-node question (decision 4) is unchanged by this work and stays open.
