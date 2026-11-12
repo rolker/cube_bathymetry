@@ -747,7 +747,7 @@ records the correction (mode, curve/table SHA-256, fallback, floor) and the
 gain-state declaration (reference state and canonical digest, #176). A table
 that does not load is an error (`import_bag`) or a failed configure (node),
 never a silent identity; `batch_regen_bag` refuses a table, since it reads no
-SonarInfo. A table that loads but corrects NOTHING — not one ping resolved to
+SonarInfo (an incidence table, #173, is refused for a second reason). A table that loads but corrects NOTHING — not one ping resolved to
 an entry, the usual causes being a wrong `--sonar-info-topic`, no SonarInfo in
 the bags, or clouds without `frequency` — is loud too: `import_bag` prints an
 error with the reason counts, still writes the store and the fingerprint but
@@ -1329,6 +1329,172 @@ A fingerprint that exists but cannot be read is refused either way.
 Re-importing Appledore with the new tooling is an operator step after the
 merge: write the declaration (campaign configuration), re-derive the per-mode
 table with `--gain-declaration`, and re-run `import_bag` with both.
+
+### Slope-aware incidence correction (`--backscatter-angle-basis incidence`, #173)
+
+Everything above corrects a beam by the sonar-frame receive angle `|rx_angle|`.
+On a sloping seabed the angle the seabed sees, the incidence against its local
+normal, differs from that by up to the slope, so an upslope and a downslope pass
+over the same ground come out at different levels. The slope run puts the
+correction on the incidence angle. It makes the slope term measurable; it does
+not claim that slope explains any particular artefact in a mosaic.
+
+**Two layers, never mixed.** The ordinary import is unchanged and always exists:
+it writes the depths and the beam-angle backscatter layer (corrected for
+everything except slope). The slope run is a separate run that re-reads the
+bags, takes the slope from the finished depth store and publishes only a
+slope-corrected backscatter store of its own. It writes no depths, and it can be
+re-run on its own. (Decisions 12 to 14 of the work plan; ADR-0007 incidence
+addendum.)
+
+```bash
+# 1. the ordinary import: depths and the beam-angle layer, as always
+import_bag -o depth_store --bs-store beam_bs -d <detections_topic> <bag> [<bag> ...]
+# 2. the slope run: a separate backscatter store, slopes read from depth_store
+import_bag --backscatter-angle-basis incidence --slope-surface depth_store \
+  --bs-store slope_bs --backscatter-correction empirical \
+  --backscatter-curve incidence_table.csv -d <detections_topic> <bag> [<bag> ...]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--backscatter-angle-basis beam\|incidence` | The angle the correction is indexed by. Default `beam`: every output is exactly what it was before #173. `incidence` is the slope run |
+| `--slope-surface <bathy store>` | The finished depth store the slopes are read from: its `processed` layer, and `draft` if that directory exists. Never `reference`, `chart` or `overviews/`. Required with `incidence`, refused without it. A mistyped path, or a store with no tiles, is an error before any bag is read |
+| `--slope-baseline-deg <deg>` | The angle the differencing baseline subtends at the sonar, in (0, 30]; default 5. **Provisional**: the default has not been measured on real data |
+| `--bs-store <dir>` | Required with `incidence`: the one thing a slope run publishes |
+| `--scratch-dir <dir>` | For a slope run, the directory its unique scratch directory is made in (default: the parent of `--bs-store`). Allowed without `--depth-adaptive` only here |
+
+A slope run refuses `-o` (it writes no depths), `--depth-adaptive` (it is
+fixed-level, like the ordinary import it follows) and `-l` (a ping limit would
+publish tiles built from incomplete contributors), and `--slope-baseline-deg`
+outside (0, 30]. `--slope-surface` and `--slope-baseline-deg` without
+`--backscatter-angle-basis incidence` are refused too. Two bags with the same
+directory name, or one bag given twice, are refused (contributor identity is the
+name).
+
+**The angle.** `incidence = acos(dot(-beam, normal))`. The beam is the unit
+vector from the sensor to the touchdown in the local east-north-up frame, a
+straight ray (the projector traces no refraction), built from the same offset
+the georeferencing computes, so it carries the vessel attitude and the sonar
+mounting. The normal is the seabed normal at the touchdown from
+`marine_backscatter::seabed::seabedNormal` over the `--slope-surface` store
+(central differences; only height differences enter, so a datum offset cancels),
+or the vertical where the surface has no usable stencil. A beam stamped with the
+vertical normal carries the earth-frame angle from vertical, which includes the
+vessel's attitude. It is counted per reason (missing cell, incomplete stencil at a
+survey edge, a layer or level seam inside the stencil, ...), and is never
+reported as slope-corrected. An incidence at or beyond 90 deg (the back of a
+slope) is stamped as it is and goes to the table's "at or beyond 90 deg"
+fallback; it is counted under its own line.
+
+**The baseline** is an angle, so it grows with range: the full baseline is
+`slant range x --slope-baseline-deg`, the probes sit at plus and minus half of it,
+and the module floors that half at one native cell of the surface. The pass
+report gives the percentiles of the full baseline actually used, the fraction of
+beams at the floor, and a histogram of the surface slope in degrees. In shallow
+water the floor decides: on a 0.9 m grid the floor, 1.8 m across, is about 10 deg
+at 10 m of range, so there a finer depth level improves the slope and a wider
+angle does not.
+
+**The correction** is `none` (`--backscatter-correction none`), or a per-mode
+**incidence table**. An incidence table has its own first line,
+`# format: angular-response-table v2`, plus three records, each required exactly
+once: `# angle_basis: incidence`, `# slope_baseline_deg: <deg>` (in (0, 30]) and
+`# slope_layers: <layers>`. Everything else is the v1 table. A binary built
+before #173 refuses it (it does not know the format line) instead of applying it
+to the beam angle; a v1 table may not carry the records. A table is only valid on
+the basis it was fitted on, in both directions: `import_bag` refuses an
+incidence table on a beam run and a beam table on an incidence run, naming the
+table and the basis. `batch_regen_bag` refuses every per-mode table (it reads no
+SonarInfo), an incidence one for a second reason; the live node refuses an
+incidence table at `configure` and has no incidence mode. The legacy single
+curve has no incidence form, and a curve delivered by SonarInfo is a beam-angle
+curve: both are refused on an incidence run, including under the default
+`--backscatter-correction auto` (pass `none` or a table). The slope baseline and
+layers a table records are compared with the run's, and a difference is warned
+about, not refused.
+
+**Order.** For each ping the beams are georeferenced, shifted by the gain
+declaration if there is one, stamped with their incidence, and only then
+counted against the table, so "at or beyond 90 deg", "beyond the outermost bin"
+and the correctable counts describe the angle that is applied (a test fails if
+the stamping moves after the accounting). Exit 4 (a table was given and no ping
+resolved a pulse mode) is taken from the resolver report.
+
+**What a slope run leaves, and how it is published.** The run estimates in
+memory into a fresh scratch depth store and a fresh scratch backscatter store
+inside one scratch directory (`slope-run-XXXXXX`, unique to the run, removed on
+every exit path; the per-tile intensity spill lands there too). Fresh stores mean
+no warm start from any earlier tile. The in-memory depth exists only to
+attribute beams to hypotheses; the depths are the ordinary import's and are not
+compared (the two estimates can differ slightly where the ordinary run
+warm-started from earlier tiles). Nothing reaches `--bs-store` after a fatal read
+or I/O error, a failed finalize, a refusal, or exit 4. The scratch directories of
+a run that was killed are named at the start of the next run and can be deleted;
+they never block it.
+
+`--bs-store` must be empty or already a slope-run store; a beam-angle backscatter
+store is refused, and so is the reverse: an ordinary `import_bag` and
+`batch_regen_bag` refuse a store that holds `derived_tiles.json`. The store
+carries `derived_tiles.json` instead of a `build_fingerprint.json` (ADR-0003
+amendment note): the run writes no fingerprint, and the fingerprint of an
+ordinary run is unchanged byte for byte.
+
+`derived_tiles.json` records what the slope-corrected layer was derived from, so
+that it can be told stale (a tool that compares it with the present depth store
+is later work). The slope-corrected layer is a derived product regenerated per
+tile:
+
+- **Store-level `inputs`**, the same for every tile: the angle basis, the baseline
+  angle, the surface layers, the correction (`none` or `table:<sha256 of the
+  table>`), the gain declaration's digest and reference state, and the store
+  level. A run whose inputs differ is refused before any bag is read, naming the
+  first difference: one store holds one correction. A new table means a new
+  store directory, or deleting the old one.
+- **Per tile**: the contributing bags (directory name and the SHA-256 of the
+  bag's `metadata.yaml`, so a copy of a bag on another disk is the same bag and
+  two different bags of one name are told apart), the content SHA-256 of every
+  depth tile, at any level, in the listed surface layers whose extent intersects
+  the tile grown by `stencil_margin_m`, that margin (the largest half-baseline
+  the run used, plus the largest sounding influence radius, plus twice the
+  coarsest surface cell), the time written and the code version.
+- A slope run always rebuilds every tile it touches. It **refuses to rebuild a
+  tile whose recorded contributors are not all among the bags it was given**, at
+  the first batch that reaches the tile and before anything is published, naming
+  the tile and the missing bags. A run that adds a bag succeeds when it is given
+  all the recorded ones. A bag is attributed to every tile its batch can reach (the
+  bounding box of the soundings grown by their influence radius), so at tile
+  edges this can over-attribute, which costs at most an extra refusal and never a
+  missed contributor.
+- A tile the run reached but left with no cells is deleted from the store and its
+  entry dropped, since its old content is stale.
+
+The publish is crash-safe and takes an exclusive `flock` on
+`<bs-store>/.slope-run.lock` for the whole run (a second run is refused at once,
+not queued). It copies the tiles to `<bs-store>/survey/.incoming-<run>/` and
+fsyncs them, writes the new manifest as `derived_tiles.json.pending` (**its
+existence is the commit point**), renames the tiles over their final names and
+deletes the stale ones, then renames the manifest into place. The next slope
+run, before anything else, completes a publish that had committed from the
+pending manifest (no bags needed) or deletes the incoming directory of one that
+had not, and says which.
+
+**Exit codes of a slope run.** 0: published (or, with a warning, nothing to
+publish). 1: refused or failed; nothing was published. 4: a table was given and
+no ping resolved a pulse mode; nothing was published. A bad request exits through
+`usage()`.
+
+**Cost.** The sampler is the expensive part: one normal is five height lookups.
+`test_slope_incidence` measures it over a 2 x 2 tile processed store through
+`BathyDem`: about 32 us per beam on the development workstation with another
+build running (24 % of baselines at the floor), so on the order of half an hour
+per 60 million beams. Measure on your own data before a long run.
+
+**Limits.** Incidence tables cannot be derived with `derive_angular_response.py`
+yet: the per-beam ledger it needs is later work, so an incidence table is written
+by hand or by a script until then. The default baseline angle is provisional, and
+the default angle basis stays `beam` until an upslope and downslope comparison on
+real data shows the correction helps.
 
 ## Live prior-gate prime (`prior_store_dir`)
 
