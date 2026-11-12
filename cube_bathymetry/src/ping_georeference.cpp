@@ -99,6 +99,7 @@ std::vector<GeoSounding> georeferencePing(
     // Per-beam slant range R = twtt*c/2 (set in the Sounding detections
     // ctor) for the tier-2 TL correction (cube#87).
     gs.sounding.slant_range = s.slant_range;
+    gs.sounding.beam_index = s.beam_index;
     // The sonar-frame position, carried through so the depth-adaptive recon
     // can read the WATER DEPTH UNDER THE TRANSDUCER off `z` (cube#143): the
     // georeferenced `depth` above is a WGS84 ellipsoidal height (uma ADR-0002

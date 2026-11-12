@@ -269,6 +269,29 @@ TEST(SlopeIncidence, FallbacksStampTheAngleFromVerticalAndCountTheReason)
   EXPECT_GT(std::abs(soundings[0].sounding.incidence_angle - 25.0 * kRad), 0.05);
 }
 
+// Every beam says how its angle was obtained: the beam ledger records it.
+TEST(SlopeIncidence, EachBeamIsStampedWithHowItsAngleWasObtained)
+{
+  PlaneSampler sampler(20.0, 0.0);
+  sampler.no_data = [](double east, double) {return east > 5.0;};
+  sampler.other_source = [](double, double north) {return north > 8.0;};
+  GeoSounding bare(gz4d::GeoPointLatLongDegrees(kLat0, kLon0, -15.0));
+  GeoSounding bad = beamAt(10.0, 0.0, 20.0);
+  bad.sounding.beam_dir_enu = {0.0, 0.0, -1.2};
+  std::vector<GeoSounding> soundings = {
+    beamAt(25.0, 10.0, 25.0, 0.0, 0.0), beamAt(25.0, 10.0, 25.0, 20.0, 0.0),
+    beamAt(25.0, 10.0, 25.0, 0.0, 8.0), bare, bad};
+  EXPECT_EQ(soundings[0].sounding.incidence_source, Sounding::kIncidenceUnstamped);
+  IncidenceCounters counters;
+  stampIncidence(soundings, sampler, SlopeOptions{}, counters);
+  using R = seabed::FallbackReason;
+  EXPECT_EQ(soundings[0].sounding.incidence_source, 0);
+  EXPECT_EQ(soundings[1].sounding.incidence_source, static_cast<uint8_t>(R::kMissingSample));
+  EXPECT_EQ(soundings[2].sounding.incidence_source, static_cast<uint8_t>(R::kLayerSeam));
+  EXPECT_EQ(soundings[3].sounding.incidence_source, 7);
+  EXPECT_EQ(soundings[4].sounding.incidence_source, 8);
+}
+
 // The baseline follows range x angle: half of it either side, floored at one
 // native cell, and the counters say how often the floor decided.
 TEST(SlopeIncidence, TheBaselineScalesWithRangeAndIsFlooredAtOneCell)
