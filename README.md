@@ -1437,7 +1437,10 @@ Every run that writes a backscatter store (an ordinary `import_bag`,
 `batch_regen_bag`, a slope run) takes a non-blocking exclusive lock on
 `<bs-store>/.slope-run.lock` for its whole life, before it looks for
 `derived_tiles.json`, so a slope run and a beam run cannot start on the same
-empty store: the second is refused at once.
+empty store: the second is refused at once. Two beam runs into one store are
+serialized the same way (the second is refused), and a `batch_regen_bag` dry
+run (`--index-db`) takes no lock. The reference-store digest is taken when the
+run starts and is not re-checked at the end.
 
 `--bs-store` must be empty or already a slope-run store; a beam-angle backscatter
 store is refused, and so is the reverse: an ordinary `import_bag` and

@@ -788,7 +788,11 @@ std::string referenceStoreDigest(const std::string & dir)
     if (!fs::is_directory(layer_dir, ec)) {
       continue;
     }
-    for (const auto & entry : fs::directory_iterator(layer_dir, ec)) {
+    fs::directory_iterator it(layer_dir, ec);
+    if (ec) {
+      fail("cannot read " + layer_dir.string() + ": " + ec.message());
+    }
+    for (const auto & entry : it) {
       const std::string name = entry.path().filename().string();
       if (isTileFileName(name) && entry.is_regular_file(ec)) {
         files.emplace_back(std::string(layer) + "/" + name, sha256File(entry.path().string()));

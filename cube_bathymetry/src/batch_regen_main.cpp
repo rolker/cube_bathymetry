@@ -364,6 +364,7 @@ std::string jsonEscape(const std::string & s)
 /// (cube#173): it holds derived_tiles.json, its tiles are derived per tile from
 /// their bags on the incidence angle, and a beam-angle regen would blend into
 /// them. Only the slope run of import_bag writes there.
+/// (A dry run, --index-db, writes nothing: the caller passes an empty directory.)
 bool slopeStoreRefused(const std::string & bs_store_dir)
 {
   if (bs_store_dir.empty()) {
@@ -1031,7 +1032,9 @@ int main(int argc, char * argv[])
   const std::shared_ptr<const cube::LevelPlan> level_plan = loadLevelPlan(
     level_plan_path, bs_store_dir, capture_spacing_scale, capture_spacing_scale_given,
     &level_plan_failed);
-  if (level_plan_failed || slopeStoreRefused(bs_store_dir)) {
+  if (level_plan_failed ||
+    slopeStoreRefused(index_db_path.empty() ? bs_store_dir : std::string()))
+  {
     return 1;
   }
 

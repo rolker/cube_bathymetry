@@ -1979,7 +1979,7 @@ bool resolveSlopeRequest(
   // ask is refused at once. (A function-static, released at exit, keeps main()
   // within the cpplint size limit.)
   static std::unique_ptr<cube::StoreLock> held_lock;
-  if (!slope_run && !bs_store_dir.empty()) {
+  if (!slope_run && !bs_store_dir.empty() && !store_dir.empty()) {
     std::string lock_error;
     held_lock = cube::StoreLock::acquire(bs_store_dir, lock_error);
     if (!held_lock) {
