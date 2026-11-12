@@ -23,6 +23,7 @@
 #ifndef CUBE_BATHYMETRY__SOUNDING_H_
 #define CUBE_BATHYMETRY__SOUNDING_H_
 
+#include <array>
 #include <cmath>
 
 #include "cube_bathymetry/backscatter_table.h"
@@ -150,11 +151,15 @@ namespace cube
   /// relative to nadir, the per-beam geometry retained for the deferred
   /// node-output backscatter correction (ADR-0007 D3). NaN when not reported.
   ///
-  /// SIGN-CONVENTION VERIFICATION REQUIRED (cube_bathymetry#15): before the
-  /// deferred GeoCoder grazing-angle reconstruction consumes this field, the
-  /// sign/zero convention of rx_angles[i] (e.g., "+= to starboard") MUST be
-  /// cross-checked against the marine_acoustic_msgs producer. A sign error
-  /// would bias the incidence correction and corrupt the settled backscatter.
+  /// Sign convention: positive to starboard. Checked against the producer's
+  /// message definition (marine_acoustic_msgs/SonarDetections `rx_angles`: "+ to
+  /// starboard, - to port for a downlooking sonar") and against the
+  /// `sonar_relative_position.y = range * sin(rx_angle)` built above, so a
+  /// positive angle puts the touchdown on the +y (starboard) side of the sonar
+  /// head. `test_beam_geometry` pins that, and that the earth-frame beam
+  /// direction of a ping under a rotated transform lands on the starboard side
+  /// when the sonar frame is the documented forward-starboard-down one
+  /// (cube_bathymetry#173; the check #15 left open).
     float beam_angle = std::nan("");
 
   /// Per-beam slant range R from the sonar head to the touchdown, in meters
@@ -175,6 +180,25 @@ namespace cube
   /// records it uncorrected. Set by the importer / live node, read by
   /// `Hypothesis::recordBeam` through `correctBeamIntensity`.
     uint16_t correction_idx = kCorrectionUnresolved;
+
+  /// Unit vector in the local east-north-up frame at the sensor, pointing from
+  /// the sensor toward the touchdown (cube_bathymetry#173): the beam's
+  /// earth-frame arrival direction under the straight-ray assumption, built from
+  /// the same ENU offset the georeferencing already computes, so it carries the
+  /// vessel attitude and the sonar mounting that `beam_angle` alone lacks. NaN
+  /// (the default) when the producer did not compute it. Double precision on
+  /// purpose: near nadir an angle taken from a float vector is good to only
+  /// ~0.03 deg.
+    std::array < double, 3 > beam_dir_enu {std::nan(""), std::nan(""), std::nan("")};
+
+  /// Angle between @ref beam_dir_enu and the seabed normal, radians in [0, pi]
+  /// (above pi/2 means the beam hit a back-facing slope), stamped by the slope
+  /// run of `import_bag` (`slope_incidence.h`). Where there is no surface the
+  /// normal is the vertical, so this is then the earth-frame angle from
+  /// vertical. NaN (the default) when not stamped or when the beam has no
+  /// vector. Read by the estimator only under
+  /// `Parameters::backscatter_angle_basis == Incidence`.
+    float incidence_angle = std::nan("");
 
   // Position relative to the sonar head, in meters.
   // For a typical down looking sonar, x is along the heading, y is to starboard, and z is down.

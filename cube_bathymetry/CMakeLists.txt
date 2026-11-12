@@ -549,6 +549,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
 
+  # Sign of rx_angle and the earth-frame beam vector of a georeferenced ping (#173).
+  ament_add_gtest(test_beam_geometry test/test_beam_geometry.cpp)
+  target_link_libraries(test_beam_geometry cube_bathymetry)
+
   # Run-summary text for the three offline tools (#144): header-only, so the
   # test needs the include dir and nothing else.
   ament_add_gtest(test_projection_summary test/test_projection_summary.cpp)

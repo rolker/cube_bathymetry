@@ -105,6 +105,16 @@ std::vector<GeoSounding> georeferencePing(
     // D4) and the geoid offset would coarsen every tile by one to two levels.
     // Left unread by the estimator itself (batch_regen.cpp:55).
     gs.sounding.sonar_relative_position = s.sonar_relative_position;
+    // The beam's arrival direction (cube_bathymetry#173): the chord from the
+    // sensor origin to the touchdown, as a unit vector in the sensor's ENU
+    // frame. `local` is exactly that offset, so no extra transform is needed.
+    // Against the touchdown's own ENU frame the chord is off by about
+    // range / R_earth (1e-5 rad at 100 m) and the projector traces no
+    // refraction, so the chord is also the direction of arrival.
+    const double chord = std::sqrt(local[0] * local[0] + local[1] * local[1] + local[2] * local[2]);
+    if (chord > 0.0 && std::isfinite(chord)) {
+      gs.sounding.beam_dir_enu = {local[0] / chord, local[1] / chord, local[2] / chord};
+    }
     soundings.push_back(gs);
   }
   return soundings;
