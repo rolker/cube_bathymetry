@@ -1362,6 +1362,7 @@ import_bag --backscatter-angle-basis incidence --slope-surface depth_store \
 | `--slope-surface <bathy store>` | The finished depth store the slopes are read from: its `processed` layer, and `draft`, each if it holds at least one tile. Never `reference`, `chart` or `overviews/`. Required with `incidence`, refused without it. A mistyped path, or a store with no tiles, is an error before any bag is read |
 | `--slope-baseline-deg <deg>` | The angle the differencing baseline subtends at the sonar, in (0, 30]; default 5. **Provisional**: the default has not been measured on real data |
 | `--bs-store <dir>` | Required with `incidence`: the one thing a slope run publishes |
+| `--beam-ledger-out <file>` | Write the incidence each beam was given to this file (see *Fitting an incidence table*). Slope runs only; made atomically and only by a run that publishes; an unwritable path is refused before any bag is read |
 | `--scratch-dir <dir>` | For a slope run, the directory its unique scratch directory is made in (default: the parent of `--bs-store`). Allowed without `--depth-adaptive` only here |
 
 A slope run refuses `-o` (it writes no depths), `--depth-adaptive` (it is
@@ -1510,13 +1511,42 @@ no ping resolved a pulse mode; nothing was published. A bad request exits throug
 build running (24 % of baselines at the floor), so on the order of half an hour
 per 60 million beams. Measure on your own data before a long run.
 
+**Fitting an incidence table (`--beam-ledger-out`, `derive_angular_response.py`).**
+A table is fitted on exactly the angles the importer applies, never on angles
+recomputed elsewhere. Run a slope run with `--backscatter-correction none` and
+`--beam-ledger-out ledger.bin`; it writes, atomically and only when it publishes,
+a binary file (format in `beam_ledger.h`, little-endian): a JSON header with the
+run's store inputs and the identity of each bag, then per ping its stamp and bag
+and, for each beam that survived the projector's range gate, the beam's index in
+the ping's detection arrays, its incidence in 0.01 deg (`-32768` = none) and how
+the angle was obtained (`0` the seabed normal; `1` to `6` the vertical, by
+marine_backscatter's fallback reason; `7` no beam vector; `8` invalid angle).
+Then:
+
+```bash
+derive_angular_response.py <bag> ... -t <topic> -o table_incidence.csv --by-mode \
+  --angle-basis incidence --beam-ledger ledger.bin[,other_ledger.bin]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--angle-basis beam\|incidence` | `beam` (default) is the tool as it was. `incidence` bins by the ledger's angle, keeping the sign of `rx_angles` as the port/starboard side, and writes `# format: angular-response-table v2` with `# angle_basis`, `# slope_baseline_deg`, `# slope_layers` (from the ledger) and `# angle_source` (the ledgers' SHA-256). Needs `--by-mode` and `--beam-ledger`; refused with `--accumulation-cache` |
+| `--beam-ledger FILE[,FILE...]` | The ledger(s) covering the bags given. Several must agree on baseline, layers and level |
+
+A beam absent from the ledger, and a beam the ledger marks as having no seabed
+surface (the importer gave it the vertical angle, which is not slope-corrected), is
+left out of the fit and counted; a ping absent from the ledger is dropped and
+counted. The report gives the beams with a surface, those without, and the mean
+incidence minus `|rx_angle|` per bin. The tool refuses a ledger that does not cover
+every bag given, a bag whose `metadata.yaml` hash differs from the ledger's, and a
+ledger made under another gain declaration than `--gain-declaration` (or with one
+when none is given).
+
 **Limits.** The surface-tile extent test does not wrap at the antimeridian
 (longitude +-180), so a site there would miss depth tiles on the other side in
 `depth_tiles`. A refusal for missing contributors names the bags of the
 conservative reach of each batch, so near a tile edge it can name a bag that
-contributed no cell. Incidence tables cannot be derived with `derive_angular_response.py`
-yet: the per-beam ledger it needs is later work, so an incidence table is written
-by hand or by a script until then. The default baseline angle is provisional, and
+contributed no cell. The default baseline angle is provisional, and
 the default angle basis stays `beam` until an upslope and downslope comparison on
 real data shows the correction helps.
 
