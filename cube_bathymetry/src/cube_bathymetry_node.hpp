@@ -38,6 +38,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -1343,6 +1344,12 @@ private:
   // revisit. GridIndex is tiny (~level+row+col) so this set is negligible next to
   // the 920k-cell grids it lets us drop; it is the revisit-detection signal.
   std::set<gggs::GridIndex> evicted_indices_;
+  /// Draft tiles on disk that could not be read at configure/reset; never saved
+  /// over (cube_bathymetry#135). Cleared by adoptSession().
+  std::set<std::string> unreadable_draft_tiles_;
+  /// True when the prime left the on-disk draft layer unaccounted for; saves are
+  /// refused wholesale rather than risk overwriting unloaded tiles (#135).
+  bool draft_saves_blocked_ = false;
 
   // How many prior-store tiles primed the running sheet's predicted surface; zero
   // means the session runs without the prior's blunder gate. Describes the session,
@@ -2129,6 +2136,13 @@ private:
     /// Zero means the session has no blunder gate from the prior. The reset compares
     /// the running session's count with the rebuild's (see resetSession).
     std::size_t prior_tiles_primed = 0;
+    /// Draft-layer tile files that could not be read at prime time. saveDirtyTiles()
+    /// never writes these: the sheet holds none of their earlier content, so a save
+    /// would erase it (cube_bathymetry#135).
+    std::set<std::string> unreadable_draft_tiles;  // file names, e.g. 10_17800_13982.tif
+    /// The prime failed in a way that left the on-disk draft layer unaccounted for
+    /// (not a per-tile read error): no draft tile may be saved this session.
+    bool draft_saves_blocked = false;
   };
 
   /// Build a fresh sheet from the stored configuration: the same sheet-level
@@ -2249,7 +2263,20 @@ private:
         marine_bathymetry_store::BathymetryStore store =
           marine_bathymetry_store::BathymetryStore::fromCellSize(
           static_cast<float>(cell_size_));
-        marine_bathymetry_store::load(store, draft_dir_);
+        // One damaged tile must not cost the store its good tiles, and must never
+        // be overwritten by a sheet that never held its contents (#135).
+        const std::vector<cube::UnreadableTile> unreadable =
+          cube::loadStoreSkippingUnreadable(store, draft_dir_);
+        for (const auto & bad : unreadable) {
+          RCLCPP_ERROR(get_logger(),
+            "Unreadable store tile %s (%s): skipped. It is NOT overwritten while "
+            "unreadable; new soundings for it are not saved until it is repaired "
+            "or removed.", bad.path.c_str(), bad.reason.c_str());
+          if (bad.layer == marine_bathymetry_store::SourceLayer::Draft) {
+            session.unreadable_draft_tiles.insert(
+              std::filesystem::path(bad.path).filename().string());
+          }
+        }
         // The live node WRITES the `draft` layer (ADR-0010 D8), but it PRIMES
         // from Processed union Draft. On a boat's first boot after co-land, load()
         // auto-migrates a legacy `survey/` dir to `processed/` (ADR-0010 D8), so
@@ -2357,6 +2384,17 @@ private:
         RCLCPP_WARN(get_logger(),
           "Could not load existing draft tiles from %s: %s (starting empty)",
           draft_dir_.c_str(), e.what());
+        // The sheet holds nothing of what is on disk, and the failure was not a
+        // per-tile read error the loader could name, so no tile can be proven safe
+        // to overwrite (#135). Only an existing store dir is at risk.
+        std::error_code exists_ec;
+        if (std::filesystem::exists(draft_dir_, exists_ec)) {
+          session.draft_saves_blocked = true;
+          RCLCPP_ERROR(get_logger(),
+            "Draft saves are DISABLED this session so the unloaded tiles under %s "
+            "are not overwritten. Fix the cause above and reconfigure/reset.",
+            draft_dir_.c_str());
+        }
       }
     }
     return session;
@@ -2397,6 +2435,8 @@ private:
     // stale index would trigger a spurious reload (#70 r2) and a stale registry
     // would advertise phantom tiles in the catalog (#78, ADR-0008 D4).
     evicted_indices_ = std::move(fresh.evicted_indices);
+    unreadable_draft_tiles_ = std::move(fresh.unreadable_draft_tiles);
+    draft_saves_blocked_ = fresh.draft_saves_blocked;
     catalog_builder_ = std::move(fresh.catalog_builder);
     // Last: the swap itself, which destroys the old sheet.
     prior_tiles_primed_ = fresh.prior_tiles_primed;
@@ -2720,8 +2760,9 @@ private:
   }
 
   // Persist every grid touched since the last save as a marine_bathymetry_store
-  // draft tile (via tile_io::saveTile -- a direct, flush/close-checked write, not
-  // crash-atomic), then clear the dirty set. A no-op when persistence is disabled or
+  // draft tile (via cube::saveTileAtomic -- write beside and rename, #135), then
+  // clear the dirty set. Tiles whose on-disk file was unreadable at configure are
+  // never written (unreadable_draft_tiles_). A no-op when persistence is disabled or
   // nothing changed.
   //
   // NOTE: geoGridToTile() calls GeoGrid::values(), which flushes the median
@@ -2738,6 +2779,12 @@ private:
     if (dirty.empty()) {
       return;
     }
+    if (draft_saves_blocked_) {
+      RCLCPP_ERROR_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
+        "Not saving draft tiles: the existing store under " << draft_dir_ <<
+        " could not be loaded at configure, so saving would overwrite it.");
+      return;
+    }
 
     // Single fused draft grid (unh_marine_autonomy#221): tiles go directly under
     // <draft_dir>/draft/ with no per-day epoch segment. The live node writes the
@@ -2752,6 +2799,7 @@ private:
       marine_bathymetry_store::SourceLayer::Draft);
 
     std::size_t written = 0;
+    std::size_t refused = 0;
     try {
       std::filesystem::create_directories(dir);
       for (const auto & index : dirty) {
@@ -2770,9 +2818,20 @@ private:
           // (same idiom as mapSheetToTiles).
           continue;
         }
-        const std::string path =
-          dir + "/" + marine_bathymetry_store::tileFilename(index);
-        marine_bathymetry_store::saveTile(tile, path);
+        const std::string name = marine_bathymetry_store::tileFilename(index);
+        if (unreadable_draft_tiles_.count(name) != 0) {
+          // The file on disk holds earlier surveys this session never loaded;
+          // writing the sheet over it would erase them (#135). Leave it.
+          ++refused;
+          RCLCPP_ERROR_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
+            "Not saving draft tile " << name << ": the file on disk is unreadable "
+            "and would be overwritten with this session's soundings alone. Repair or "
+            "remove " << dir << "/" << name << " to resume saving it.");
+          continue;
+        }
+        // Crash-atomic (write beside, fsync, rename): a kill mid-save leaves the
+        // previous tile intact and a concurrent reader never sees a partial one.
+        cube::saveTileAtomic(tile, dir + "/" + name);
         ++written;
       }
     } catch (const std::exception & e) {
@@ -2786,7 +2845,8 @@ private:
 
     geo_map_sheet_->clearDirtyGrids();
     RCLCPP_INFO_STREAM_THROTTLE(get_logger(), *get_clock(), 30000,
-      "Saved " << written << " draft tile(s) to " << dir);
+      "Saved " << written << " draft tile(s) to " << dir <<
+      (refused ? " (" + std::to_string(refused) + " refused, unreadable on disk)" : ""));
   }
 
   // Look up target<-source at the exact stamp; on extrapolation (the requested
