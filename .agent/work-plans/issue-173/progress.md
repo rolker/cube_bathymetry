@@ -237,3 +237,30 @@ Sources: two Claude adversarial passes (lens A and B), Gemini and Codex (local r
 - [ ] (suggestion) eager hashing covers every surface tile, so an unrelated tile rewritten mid-run fails the publish (stricter than needed) — `slope_run.cpp`
 - [ ] (suggestion) two beam runs into one store are now serialized (documented in the README)
 - [ ] (suggestion) manifests written by earlier builds of this branch no longer load (new required keys)
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-12 14:42 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+**Verdict**: approved
+
+**Branch**: feature/issue-173-incidence-fit
+**Mode**: pre-push (PR 2: beam index, ledger, incidence fit)
+**Depth**: Deep (reason: new file format, publish ordering, stale-data checks)
+**Must-fix**: 0 open | **Suggestions**: 3 open
+**Round**: 1 | **Ship**: recommended — every must-fix and every silent-failure or stale-data finding was fixed in place
+
+Sources: two Claude adversarial passes (derive tool; C++ ledger and publish), Gemini and Codex (local review not run, --no-local).
+
+### Findings
+- [x] (must-fix) a failed publish deleted the ledger of the store that was still current — fixed: sealed before the publish, put in place after (or right after a commit-point failure); hash in the manifest
+- [x] (must-fix) a crash between the ledger rename and the commit left a ledger beside an unpublished store — fixed by the same ordering
+- [x] (must-fix) a port beam of incidence 0 was binned starboard — fixed (side carried explicitly)
+- [x] (must-fix) a malformed ledger header could raise a non-ValueError — fixed, with tests
+- [x] (must-fix) conflicting bag identities across ledgers accepted — refused
+- [x] (must-fix) a ledger of another detections topic of the same bags passed every check — topic recorded and checked
+- [x] (must-fix) two writers could share a temporary file — per-process name
+- [x] (suggestion) unreadable metadata.yaml skipped the bag check; a beam index beyond the ping was dropped silently; a ledger matching almost nothing still wrote a table; beams counted under the wrong heading; silent narrowing of beam count and bag index; two messages with one stamp; little-endian assumption; fallback source code 0 — fixed
+- [ ] (suggestion) the Python reader holds every ping of a ledger in memory (a few hundred bytes per ping) — `derive_angular_response.py`
+- [ ] (suggestion) a crash after the manifest publish but before the ledger rename leaves the previous ledger; the manifest's ledger_sha256 would show it, but no tool compares them yet — `slope_run.cpp`
+- [ ] (suggestion) .agents/README.md does not exist; the parameter documentation is in the package README — repository
