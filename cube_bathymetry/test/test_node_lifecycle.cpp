@@ -621,7 +621,8 @@ TEST_F(NodeLifecycle, AnUnreadableTileIsNeverOverwritten)
     // The operator removes the damaged file: saving resumes and cleanup goes through.
     std::filesystem::remove(tile);
     EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
-    EXPECT_TRUE(std::filesystem::exists(tile)) << "the tile is written once the damaged file is gone";
+    EXPECT_TRUE(std::filesystem::exists(tile)) <<
+      "the tile is written once the damaged file is gone";
   }
   std::filesystem::remove_all(dir);
 }
