@@ -472,6 +472,7 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
     // outdated state for this tile.
     std::error_code ec;
     std::filesystem::remove(path, ec);
+    spilled_.erase(index);
     return;
   }
 
@@ -498,6 +499,7 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
   if (!out) {
     throw std::runtime_error("import_bag: failed writing spill file " + path);
   }
+  spilled_.insert(index);
 }
 
 void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
@@ -599,11 +601,16 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
 {
   // Best-effort: a missing/corrupt/truncated spill only degrades backscatter for
   // this tile to the post-reload samples; the depth reload already succeeded.
+  // A tile whose spill was written must find it again: a missing file then is a
+  // lost population, not "nothing to restore" (cube#173 review).
+  const bool expected = spilled_.count(index) > 0;
   if (scratch_dir_.empty()) {
+    spill_failures_ += expected ? 1 : 0;
     return;
   }
   const std::string path = scratch_dir_ + "/" + spillFileName(index);
   if (!std::filesystem::is_regular_file(path)) {
+    spill_failures_ += expected ? 1 : 0;
     return;
   }
   std::ifstream in(path, std::ios::binary);

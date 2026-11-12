@@ -232,7 +232,7 @@ Sources: two Claude adversarial passes (lens A and B), Gemini and Codex (local r
 - [x] (must-fix) batch_regen_bag dry run took the store lock and could fail or create a directory — fixed
 - [x] (must-fix) import_bag took the lock before argument validation — now only for a run with -o
 - [x] (suggestion) referenceStoreDigest ignored a directory read error — now throws
-- [ ] (suggestion) a spill file that went missing is not counted by integrityProblem — `store_import.cpp`
+- [x] (suggestion) a spill file that went missing is not counted by integrityProblem — `store_import.cpp` (fixed: tiles with a written spill are tracked, a missing file counts)
 - [ ] (suggestion) the reference-store digest is not re-verified at the end of the run — `import_bag_main.cpp`
 - [ ] (suggestion) eager hashing covers every surface tile, so an unrelated tile rewritten mid-run fails the publish (stricter than needed) — `slope_run.cpp`
 - [ ] (suggestion) two beam runs into one store are now serialized (documented in the README)

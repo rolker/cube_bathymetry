@@ -391,6 +391,26 @@ TEST(ImportEviction, DamagedSpillIsReportedAsAnIntegrityProblem)
   std::filesystem::remove_all(root);
 }
 
+// A spill that was written and then goes missing mid-run is a lost population too.
+TEST(ImportEviction, MissingSpillFileIsReportedAsAnIntegrityProblem)
+{
+  const std::string root = makeTempDir("integrity_missing");
+  GeoMapSheet sheet(kCellSize);
+  ImportAccumulator accumulator(
+    sheet, makeConfig(root + "/store", root + "/bs", /*budget=*/3));
+  for (int i = 0; i < 8; ++i) {
+    accumulator.addBatch(surveyCell(43.0 + 0.02 * i, -70.0, 10.0f + i, 30.0f + i));
+  }
+  ASSERT_FALSE(accumulator.scratchDir().empty());
+  EXPECT_TRUE(accumulator.integrityProblem().empty());
+  for (const auto & entry : std::filesystem::directory_iterator(accumulator.scratchDir())) {
+    std::filesystem::remove(entry.path());
+  }
+  accumulator.addBatch(surveyCell(43.0, -70.0, 10.0f, 30.0f));  // reload an evicted tile
+  EXPECT_FALSE(accumulator.integrityProblem().empty());
+  std::filesystem::remove_all(root);
+}
+
 // Lossless guarantee: if a cold tile's persist FAILS, it must NOT be dropped
 // (that would lose unsaved data). Force the failure by planting a regular file
 // where the layer directory must be created, then survey past the budget.

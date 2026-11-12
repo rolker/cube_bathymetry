@@ -565,6 +565,9 @@ private:
   /// evicted tile was seeded, so it reloads (from its own written survey tile)
   /// rather than re-seeding from the reference prior.
     std::set < gggs::GridIndex > seeded_;
+  /// Tiles whose intensity spill was written and not since dropped: a reload that
+  /// cannot find one of these files has lost beams (counted, see integrityProblem).
+    std::set < gggs::GridIndex > spilled_;
     std::string scratch_dir_;  // lazily created on first eviction; "" = none
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
