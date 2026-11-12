@@ -6,7 +6,7 @@ https://github.com/rolker/cube_bathymetry/issues/173
 
 This work is "Part of rolker/unh_marine_autonomy#304". No PR for it may close #304. The PR(s) for this plan close #173 only when the last one lands (earlier ones say "Part of #173").
 
-**Revision 2 (2026-11-12).** The operator replaced the single-run two-pass design of revision 1 (commit `6213722`) with a two-layer design and confirmed three points (Decisions 12 to 14). This revision rewrites the Approach around them and folds in the plan review of 2026-11-10 (`progress.md`, "Plan Review"); the section "How the plan review is resolved" maps each finding.
+**Revision 3 (2026-11-12).** Revision 2 (commit `12682f7`) rewrote the Approach around the operator's two-layer design (Decisions 12 to 14) and folded in the plan review of 2026-11-10. Revision 3 folds in the review of revision 2 (`progress.md`, "Plan Review" at `bce012f`): bag identity and contributor tracking, one set of inputs per slope store, the publish protocol, the scratch mechanics, the commit order. "How the plan reviews are resolved" maps the findings.
 
 ## Context
 
@@ -61,39 +61,49 @@ One **angle definition**: `incidence = angle between the beam's earth-frame arri
 
 Selected by `--backscatter-angle-basis incidence` (default `beam`, decision 10). Requirements, each a usage error naming the flag when not met:
 
-- `--slope-surface <bathy store>` and `--bs-store <dir>` are required; `-o` is **refused** (a slope run writes no depths).
-- `--depth-adaptive` and the mixed-level flags are refused (single-level backscatter store, uma#383).
-- A correction is required to be either `none` (the ledger-producing run of PR 2) or a table or curve file whose header says `# angle_basis: incidence`. A SonarInfo-delivered curve has no marker, so by the absence rule it is beam-basis and is **refused**, including under the default `--backscatter-correction auto`.
-- `--bs-store` must be empty or already a slope-run store (it holds `derived_tiles.json`, below). A beam-angle backscatter store is refused. The reverse also: an ordinary run refuses a `--bs-store` that holds `derived_tiles.json`.
+- `--slope-surface <bathy store>` and `--bs-store <dir>` are required; `-o` is **refused** (a slope run writes no depths). Today `-o` is mandatory (`import_bag_main.cpp` argument check); the check becomes "`-o`, or a slope run".
+- `--depth-adaptive`, the mixed-level flags and `-l` (a ping limit would publish tiles with incomplete contributors) are refused.
+- `--slope-baseline-deg` must be in (0, 30].
+- The correction is either `none` or a **table** whose format line is the incidence one (section 5). The legacy single curve, and a SonarInfo-delivered curve, are refused on incidence, including under the default `--backscatter-correction auto`.
+- `--bs-store` must be empty or already a slope-run store (it holds `derived_tiles.json`). A beam-angle backscatter store is refused. The reverse also: an ordinary run, `batch_regen_bag` and the live node refuse a backscatter store that holds `derived_tiles.json`.
+- Two given bags with the same name are refused (contributor identity, below).
 
 Mechanics:
 
-1. The ordinary per-ping loop runs unchanged up to georeferencing and the gain shift. Then `stampIncidence(soundings, sampler, options, counters)` (new `slope_incidence.h/.cpp`, the only code that touches the module) sets `Sounding::incidence_angle` and counts fallbacks. **Then** the per-beam table accounting (`stampCorrectionIndex`, `BackscatterModeResolver::countBeam`) runs on the stamped incidence, so "at or beyond 90 deg", "beyond the outermost bin", `beams_correctable` and the exit-4 `table-unresolved` report are computed on the angle actually applied. Because the slope run is the bag loop itself, the resolver, the ping stamp and the beam index are all at hand; no spill is involved.
-2. The estimator runs as in an ordinary import, but its `ImportAccumulator` is pointed at **fresh scratch directories** for both the depth store and the backscatter store (under `--scratch-dir`, default beside `--bs-store`; refused if the chosen scratch path exists and is not empty). A fresh pair means no warm start from any earlier tile, by construction, and eviction and reload work as they do today. `--reference-store` priors are honoured as in an ordinary run. The scratch depth store is deleted at the end; it is never published.
-3. **Contributors.** The run keeps, per tile, the set of bag basenames that touched it: after each ping's `addBatch`, the sheet's dirty-grid set (`GeoMapSheet::dirtyGrids()` or the equivalent hook; the implementer confirms which set survives eviction and adds a small "touched since last asked" accessor if neither does) is attributed to the bag being read. This catches soundings that spread across a tile edge, which a position-only rule would miss.
-4. **Publish.** After `finalize`, and before any file of the destination is changed: for every tile in the scratch backscatter store, read the destination's `derived_tiles.json`; if the tile is recorded there with a contributor that is not among this run's bags, the run **fails, naming the tile and the missing bags**, and the destination is untouched (decision 13). Otherwise the scratch tiles are moved into `<bs-store>/survey/` (rename when on one filesystem, copy then rename otherwise) and `derived_tiles.json` is rewritten atomically with the new entries merged over the old. A marker file `derived_tiles.publishing` is written before the first move and removed after the manifest; a later slope run that finds it reports the interrupted publish and requires the same bag set (it then republishes everything and clears it).
-5. Depth is not compared between the passes. The depths are pass one's; the slope run's in-memory estimate exists only to attribute beams to hypotheses. It can differ slightly from pass one where pass one warm-started from earlier tiles; the README says so.
+1. **Order per ping.** Georeference, gain shift, then `stampIncidence(soundings, sampler, options, counters)` (new `slope_incidence.h/.cpp`, the only code that touches the module), **then** the per-beam table accounting (`stampCorrectionIndex`, `BackscatterModeResolver::countBeam`) on the stamped incidence, so "at or beyond 90 deg", "beyond the outermost bin" and `beams_correctable` are computed on the angle applied. The "table given, nothing resolved" outcome (exit 4) is taken from the resolver report directly, since the slope run writes no fingerprint.
+2. **Scratch.** The `ImportAccumulator` is pointed at a fresh depth store and a fresh backscatter store inside one scratch directory unique to the run (`<scratch root>/slope-run-<pid>-<time>`; the root is `--scratch-dir`, which becomes legal for a slope run, default the parent directory of `--bs-store`). `ImportAccumulatorConfig` gains a spill root so the per-tile intensity spill, which today goes to `temp_directory_path()`, lands in the same scratch directory. Fresh stores mean no warm start from any earlier tile by construction; eviction and reload work as today. The scratch directory is removed on every exit path (a guard object; also on a thrown error). A leftover from a killed process cannot block a later run, because names are unique; a slope run that sees leftovers beside its own prints their paths and that they can be deleted.
+3. **Bag identity and contributors.** `BagReaders::Message` gains the index of the bag it came from, and a ping keeps the bag index of its detections message while it waits in `pending` for the TF frontier, so the bag is known when the ping is finally added. Immediately before each `addBatch`, `gridIndicesForSoundings` (`geo_map_sheet.h`) gives the tiles the batch can reach, and the ping's bag is added to each tile's contributor set. This over-attributes at edges, which costs at most an extra refusal, never a missed contributor. (`GeoMapSheet::dirtyGrids()` is not used: eviction erases from it.) A bag's identity is its normalised directory name (trailing slash stripped) together with the SHA-256 of its `metadata.yaml`; a copy of a bag on another disk is the same bag, two different bags that share a name are told apart. A recorded name that matches with a different hash is refused by name.
+4. **Early refusal.** The destination's `derived_tiles.json` is loaded before any bag is read. Its store-level inputs (section 3) must equal this run's, or the run is refused at once. The first time a batch reaches a tile that the manifest records with a contributor not among this run's bags, the run fails there, naming the tile and the missing bags. Nothing has been published at that point.
+5. **Publish only a complete run.** Nothing is published after a fatal read or I/O error, a failed `finalize`, an early refusal, or exit 4. The scratch directory is removed and the destination is as it was.
+6. **Publish protocol** (new `derived_tiles` library), under an exclusive `flock` on `<bs-store>/.slope-run.lock` held from start to end of the slope run (a second run on the same store is refused at once, not queued):
+   1. Copy each scratch backscatter tile to `<bs-store>/survey/.incoming-<run>/` (same filesystem as its final place), fsync each file and the directory.
+   2. Write the complete new manifest as `derived_tiles.json.pending` (temp name, fsync, rename). It lists this run's tiles, the tiles to delete, and the store metadata. **Its existence is the commit point.**
+   3. Rename each incoming tile over its final name; delete each tile that this run reached but produced no cells for (its contributors were all given, so its old content is stale) and drop its entry; write `registry.json` as an ordinary run does.
+   4. Rename `derived_tiles.json.pending` to `derived_tiles.json`; remove the incoming directory.
+   Recovery, on the next slope run and before anything else: a `.pending` manifest means the run committed, so the remaining steps are **rolled forward** from it (no bags needed, any bag set); an incoming directory with no `.pending` manifest means the run did not commit, so it is deleted and the store is as it was. Both are reported.
+7. Depth is not compared between the passes. The depths are pass one's; the slope run's in-memory estimate exists only to attribute beams to hypotheses. It stays fixed-level, like pass one. It can differ slightly from pass one where pass one warm-started from earlier tiles; the README says so.
 
-### 3. `derived_tiles.json` (per-tile record, decision 13)
+### 3. `derived_tiles.json` (decision 13)
 
-At the root of a slope-run backscatter store. One entry per tile file name:
+At the root of a slope-run backscatter store. A `format` line, `schema_version: 1`, then:
 
-- `contributors`: sorted bag basenames.
-- `inputs`: `angle_basis`, `slope_baseline_deg`, `slope_layers`, the table or curve SHA-256 (or `none`), the gain-declaration SHA-256 and reference state (or absent), and `depth_tiles`: the SHA-256 of the **content** of every `--slope-surface` tile the stencil could have read for this tile, that is the tile of the same index and its eight neighbours where they exist (streamed hash, computed once per depth tile per run). File sizes are not used: store tiles are fixed-size.
-- `written`: timestamp from the clock, and the code version.
+- **Store-level `inputs`**, the same for every tile in the store: `angle_basis`, `slope_baseline_deg`, `slope_layers`, the correction (`none`, or the table's SHA-256), the gain-declaration SHA-256 and reference state (or absent), the store level. A slope run whose inputs differ is refused (this mirrors the gain-state refusal of #176): one store holds one correction. A new table means a new store directory, or deleting the old one. A `none` run (the ledger-producing run of PR 2) may publish; its store says `none` and can never receive corrected tiles.
+- **Per tile** (keyed by tile file name): `contributors` (sorted list of `{name, metadata_sha256}`); `depth_tiles`: path relative to the surface store and SHA-256 of the **content** of every tile file, at any level, under the `--slope-surface` layers used, whose bounds intersect this tile's bounds grown by `stencil_margin_m`; `stencil_margin_m`: the largest half-baseline the run used (bounded by the 30 deg cap and the largest range); `written` (from the clock) and the code version. Each surface tile is hashed once per run (streamed).
 
-Plus a top-level `format` line and `schema_version: 1`. A strict loader (unknown version, malformed entry, duplicate key = error). This file, not `build_fingerprint.json`, is the staleness record of a slope-run store; a later tool can compare `inputs` with the present state of the depth store, table and declaration to list stale tiles. That tool is not in this plan.
+A strict loader (unknown version, malformed entry, duplicate key = error) and an atomic writer. This file, not `build_fingerprint.json`, is the staleness record of a slope-run store; a later tool can compare it with the present depth store to list stale tiles. That tool is not in this plan.
 
-`build_fingerprint.json` is written only by runs with `-o`, so the slope run writes none, ordinary runs' fingerprints are unchanged byte for byte, and schema 3 stays as it is.
+`build_fingerprint.json` is written only through `writeFingerprint(store_dir)` by runs with `-o`, so the slope run writes none, ordinary runs' fingerprints are unchanged byte for byte, and schema 3 stays as it is.
 
 ### 4. The estimator side
 
-`Sounding::incidence_angle` (float, radians, NaN = none). `Parameters::backscatter_angle_basis` selects which angle `Node::insert(double, const Sounding &, const Parameters &)` hands on: `beam` (today's `beam_angle`, byte-identical output, the default) or `incidence` (a NaN one sends the beam to the existing fallback policy). The median queue, `Hypothesis::recordBeam`, `correctBeamIntensity`'s signature and persistence are unchanged. One guard is added in the legacy single-curve path for the incidence basis only: an angle at or beyond 90 deg is not looked up. The recon spill record (`SpilledSounding`) is **not** changed: the slope run does not use it, so `test_recon`'s size bound and every depth-adaptive run are untouched.
+`Sounding::incidence_angle` (float, radians, NaN = none). `Parameters::backscatter_angle_basis` selects which angle `Node::insert(double, const Sounding &, const Parameters &)` hands on: `beam` (today's `beam_angle`, byte-identical output, the default) or `incidence` (a NaN one sends the beam to the existing fallback policy). The median queue, `Hypothesis::recordBeam`, `correctBeamIntensity`'s signature and persistence are unchanged. The recon spill record (`SpilledSounding`) is **not** changed.
+
+The beam vector is the chord from the sensor to the touchdown in the sensor's ENU frame; against the touchdown's own ENU frame it is off by about 1e-5 rad at 100 m, and the projector traces no refraction. Both are stated in the header comment.
 
 ### 5. Angle basis in tables and loaders
 
-- **Marker.** A table or curve file may carry `# angle_basis: incidence` plus `# slope_baseline_deg:` and `# slope_layers:`. Absence means `beam`. The derive tool writes the marker **only** for incidence, so default derive output and every existing table SHA-256 are unchanged. Malformed or repeated records are errors in the C++ loaders, the derive tool and the node, following the #176 rules.
-- **Check.** `import_bag` refuses a file whose basis differs from the run's, in both directions (decision 9). `batch_regen_bag` refuses an incidence-marked table or curve given as `--backscatter-curve`, and refuses a `--bs-store` that holds `derived_tiles.json` (decision 5); the message points at the slope run. The live node refuses an incidence-marked file at configure (it has no incidence mode in this plan).
+- **Marker.** An incidence table has its **own format line** (the per-mode table format with a new version), plus the records `# angle_basis: incidence`, `# slope_baseline_deg:` and `# slope_layers:`, each required exactly once. The loader already refuses a format line it does not know, so a binary built before this change refuses an incidence table instead of applying it on beam angle (an unknown `#` key under the old format line would have been skipped silently). Existing tables are untouched and mean `beam`. The legacy single curve (CSV) has no incidence form.
+- **Check.** `import_bag` refuses a table whose basis differs from the run's, in both directions (decision 9). `batch_regen_bag` and the live node refuse an incidence table (decision 5); the message points at the slope run.
 
 ### 6. The live node
 
@@ -101,9 +111,10 @@ Not changed beyond the refusal in section 5. See "Question for the operator".
 
 ### 7. The derive tool and the beam ledger (PR 2)
 
-- `import_bag --beam-ledger-out <file>` (slope runs only): a JSON header (basis, baseline angle, layers, the `depth_tiles` digest set, bag basenames, gain-declaration digest, code version) then per ping `stamp_ns` (int64), beam count (uint16) and per beam a uint16 beam index (the index in the ping's detection arrays, explicit because the projector or the gate may drop beams), an int16 incidence in 0.01 deg (`-32768` = none) and a uint8 fallback reason. Written atomically. It records the angle as applied, so derive and import use the same number by construction.
-- `derive_angular_response.py --angle-basis incidence --beam-ledger <file>[,...]`: bins by the ledger's incidence, keeping the sign of `rx_angle` as the port/starboard side. Beams absent from the ledger are dropped and counted. It writes the incidence marker and refuses a ledger whose header disagrees with the supplied gain declaration or bag basenames. Without `--angle-basis` it behaves exactly as today.
-- Workflow (README): (a) ordinary import, giving the depths and the beam-angle layer; (b) slope run with `--backscatter-correction none --beam-ledger-out L` into a scratch backscatter store; (c) derive on `L`; (d) slope run with the table into the slope-corrected store.
+- **Beam index.** Nothing carries a beam's index in the ping's detection arrays today, and the projector drops beams by range. PR 2 adds a `uint16 beam_index` to the projector's per-beam output and to `Sounding`.
+- `import_bag --beam-ledger-out <file>` (slope runs only): a JSON header (the store-level inputs of section 3, bag identities, code version) then per ping `stamp_ns` (int64), beam count (uint16) and per beam the beam index, an int16 incidence in 0.01 deg (`-32768` = none) and a uint8 fallback reason. Written atomically, and only by a run that completes.
+- `derive_angular_response.py --angle-basis incidence --beam-ledger <file>[,...]`: bins by the ledger's incidence, keeping the sign of `rx_angle` as the port/starboard side. Beams absent from the ledger are dropped and counted. It writes the incidence format line and records and refuses a ledger whose header disagrees with the supplied gain declaration or bags. Without `--angle-basis` it behaves exactly as today.
+- Workflow (README): (a) ordinary import, giving the depths and the beam-angle layer; (b) slope run with `--backscatter-correction none --beam-ledger-out L` into its own store; (c) derive on `L`; (d) slope run with the table into the slope-corrected store.
 - The report also prints per-bin mean incidence minus `|rx_angle|` and the fraction of beams with a surface.
 
 ### 8. Sign check (`sounding.h`)
@@ -114,7 +125,10 @@ A test with a synthetic ping: beams with `rx_angle > 0` have `sonar_relative_pos
 
 - **Known-answer sloped seabed** (gtest, no store): a `SeabedHeightSampler` over a plane at slopes 0, 5, 15 deg and four aspects; `stampIncidence` reproduces the closed form to 1e-6 rad; zero slope equals the earth-frame angle from vertical; fallback counts and reasons pinned for a missing cell, a layer seam and a prior-only region; `step_m` follows range x angle and the floor count is pinned.
 - **Level independent of aspect** (gtest through `Node`/`Hypothesis`): synthetic response `f(incidence)`, beams over four aspects of a tilted plane; with `incidence` the corrected mean is the same for every aspect; with `beam` the aspects differ by the known amount (negative control).
-- **End to end** (pytest, extending the synthetic bags of `test_import_bag_mode_table`): ordinary import of a tilted-plane bag, then a slope run: per-cell backscatter independent of aspect; no depth tile written anywhere outside scratch and scratch removed; `derived_tiles.json` contents (contributors, depth tile hashes incl. neighbours); a second slope run with the same bags rebuilds and gives identical tiles; a second run with a subset of the bags is refused and leaves the store byte-identical; a run adding a bag over the same tiles succeeds when all recorded contributors are given; an interrupted publish (marker present) is reported; every refusal in section 2 and 5, both directions; changing one depth tile changes the recorded hash of it and of its neighbours' entries.
+- **End to end** (pytest, extending the synthetic bags of `test_import_bag_mode_table`, with a hand-written incidence table): ordinary import of a tilted-plane bag, then a slope run: per-cell backscatter independent of aspect; no depth tile anywhere after the run and the scratch directory gone, also after a refused and a failed run; manifest contents (store inputs, contributors, depth tile hashes with the margin); a second run with the same bags gives identical tiles; a run with a subset of the bags is refused at first touch and leaves the store byte-identical; a run adding a bag succeeds when all recorded contributors are given; two bags over one tile edge both appear as contributors of both tiles; contributors correct under forced eviction (`max_resident_tiles` 1); a run with a different table, declaration or baseline is refused before reading bags; same-named bags refused; `-l` refused; a tile that loses all its cells is deleted and its entry dropped; changing one depth tile changes the recorded hash in the entries whose margin reaches it.
+- **Table accounting on incidence**: a ping whose beam angle is inside the table and whose incidence is beyond the outermost bin (steep slope) is counted as beyond the bin, and the reverse; this fails if the stamping runs after the accounting.
+- **Publish and recovery** (gtest on the `derived_tiles` library, with an injected failure point): a failure before the commit point leaves the store byte-identical and the next run cleans the incoming directory; a failure after it is rolled forward by the next run to the same bytes a clean publish gives; a held lock refuses a second run.
+- **Sampler cost**: a micro-benchmark of `stampIncidence` against a real-sized `BathyDem` store, in the group that adds it, so the cost is known before the Appledore run.
 - **Unchanged behaviour**: `beam` basis output byte-identical on the existing end-to-end fixtures, `build_fingerprint.json` included; `test_recon`, `test_mixed_level_import`, `test_import_eviction`, `test_build_fingerprint`, `test_batch_regen` unchanged and green.
 - **PR 2**: ledger round trip (C++ writer, Python reader, golden bytes), derive on incidence recovers `f`, header cases like #176.
 - **Appledore acceptance** (numbers in the PR description, not the repo): slope run over the August 2026 bags; upslope versus downslope level difference on overlapping cells by slope class, before and after; the baseline distribution and floor fraction; time and sampler cost as measured.
@@ -125,45 +139,72 @@ A section "Incidence-angle addendum (cube#173)" in the ADR-0007 addendum file (n
 
 ### Commit groups
 
-**PR 1** (Part of #173): **A** `Sounding` fields and the beam vector in `georeferencePing`, sign-check test and comment (the uncommitted draft in the worktree covers part of A and B; it fails uncrustify and is to be reworked, not committed as is); **B** `Parameters::backscatter_angle_basis`, the selection in `Node::insert`, the 90 deg guard; **C** the `angle_basis` header record in the table and curve loaders and the refusals in `import_bag`, `batch_regen_bag` and the node; **D** `slope_incidence` with the `marine_backscatter` dependency and its known-answer tests; **E** the slope run: flags, scratch stores, incidence before table accounting, contributor tracking, pass report; **F** `derived_tiles.json`, the contributor check and the publish step; **G** README, ADR text.
+**PR 1** (Part of #173), each group buildable and green by itself:
 
-**PR 2** (closes #173): ledger writer, derive tool changes, workflow docs.
+- **A0** move `georeferencePing` and its helpers out of the anonymous namespace of `import_bag_main.cpp` into a library unit (`ping_georeference.h/.cpp`), no behaviour change; `main` is at cpplint's length limit and the tests of A and D need to reach it.
+- **A** `Sounding::beam_dir_enu` and `incidence_angle`, the beam vector, sign-check test and comment. (The uncommitted draft in the worktree covers part of A and B; it fails uncrustify and is to be reworked, not committed as is.)
+- **B** `Parameters::backscatter_angle_basis` and the selection in `Node::insert`.
+- **C** the incidence table format and the refusals in `import_bag`, `batch_regen_bag` and the node.
+- **D** `slope_incidence` with the `marine_backscatter` dependency, known-answer tests, the micro-benchmark.
+- **E** the `derived_tiles` library: manifest, strict loader, bag identity, depth-tile hashing, lock, publish and recovery, with its tests.
+- **F** the slope run in `import_bag`: flags and refusals, scratch, bag index on messages, contributors, early refusal, report, publish through E; the end-to-end tests.
+- **G** README, ADR text.
 
-## How the plan review is resolved
+**PR 2** (closes #173): beam index, ledger writer, derive tool changes, workflow docs.
 
-| Review finding (2026-11-10) | Resolution |
+The operator's decision 8 was "two PRs, split after group D" of revision 1's grouping. That grouping no longer exists; the split here (everything needed to run a slope correction, then the tooling to fit a table on incidence) is this plan's reading of it and is flagged for confirmation.
+
+## How the plan reviews are resolved
+
+**Review of revision 1 (2026-11-10)**
+
+| Finding | Resolution |
 |---|---|
-| Warm start differs between the passes; populated `-o` | Gone: the slope run has no `-o`, runs on fresh scratch stores, and publishes afterwards |
-| Depth equality not established under eviction | Gone: depths are not compared; pass one's depths are the only depths |
-| `batch_regen_bag` section on a wrong premise | Rewritten (section 5): refuse an incidence-marked file and a slope-run store |
-| `SpilledSounding` growth breaks `test_recon` | Gone: the spill is not used or changed |
-| Ledger cannot be written from the spill | Gone: written from the bag loop with explicit `stamp_ns` and beam index |
-| SonarInfo curve on incidence only warned | Refused (section 2) |
-| Table accounting on the wrong angle | Incidence is stamped before the accounting (section 2.1) |
-| `--slope-surface` identity by sizes is empty | Per-tile content hashes of the depth tiles read (section 3) |
-| Derive writes the marker everywhere | Only for incidence |
-| Byte-identity versus new fingerprint keys | No new fingerprint keys; the slope run writes no fingerprint |
-| Fingerprint only when a correction applies; equal results, equal identity | Superseded by `derived_tiles.json`, whose `inputs` are content digests |
-| `Node::update` does not exist | Corrected to `Node::insert` |
-| Half-width versus baseline; `max(3 cells, 4 m)` not expressible | Replaced by the angle baseline; `step_m` is stated as the half-width; the floor is the module's own |
-| `BathyDem` throws on an empty store | Named error, warnings printed |
-| Node basis must be configure-only | No node basis parameter in this plan |
-| Beam vector float versus double | Double |
-| Stale text | Rewritten |
-| Which pass writes `-o`; incremental imports under incidence; 4 m half or full | Settled by decisions 12, 13 and 14 |
+| Warm start differs between the passes; populated `-o` | Resolved by design: no `-o`, fresh scratch stores, publish afterwards |
+| Depth equality not established under eviction | No compare; pass one's depths are the only depths. Holds because the slope run stays fixed-level |
+| `batch_regen_bag` section on a wrong premise | Rewritten (sections 2, 5) |
+| `SpilledSounding` growth breaks `test_recon` | The spill is not used or changed |
+| Ledger cannot be written from the spill | Written from the bag loop; the beam index is new work in PR 2 (section 7) |
+| SonarInfo curve on incidence only warned | Refused |
+| Table accounting on the wrong angle | Incidence stamped first, with a test that fails otherwise |
+| `--slope-surface` identity by sizes is empty | Content hashes of the surface tiles within the stencil margin |
+| Derive writes the marker everywhere; fingerprint byte-identity | Marker only in the incidence format; no fingerprint change |
+| `Node::update`; half-width; empty store; float vector; stale text | Corrected |
+
+**Review of revision 2 (2026-11-12)**
+
+| Finding | Resolution |
+|---|---|
+| 1. No bag identity when `addBatch` runs | Bag index on `BagReaders::Message`, kept on the pending ping (2.3) |
+| 2. `dirtyGrids()` not usable | `gridIndicesForSoundings` before `addBatch` (2.3) |
+| 3. Inputs never compared across tiles | Store-level inputs, a differing run refused (3, 2.4) |
+| 4. `depth_tiles` scope undefined | Geometric: bounds grown by the recorded margin, any level; baseline angle capped at 30 deg (3, 2) |
+| 5. Publish gating | Only a complete run publishes; `-l` refused; exit 4 from the resolver report (2.5) |
+| 6. Stale tile when a touched tile yields no cells; `registry.json` | Deleted and dropped in publish; registry written (2.6) |
+| 7. Scratch mechanics do not match the code | `-o` check, `--scratch-dir`, spill root, unique directory, removal on every path (2.2) |
+| 8. Crash recovery | Incoming directory in the destination, pending manifest as commit point, roll forward, fsync, flock (2.6) |
+| 9. Basename identity | Name plus `metadata.yaml` hash; same-named bags refused (2.3) |
+| 10. `georeferencePing` unreachable | Group A0 |
+| 11. E and F not meaningful alone | Library first (E), then the run (F) |
+| 12. Beam index has no source | Added in PR 2, listed in Files |
+| 13. Tests would not catch a no-op | Tests added (section 9) |
+| Suggestions | First-touch refusal, new format line, micro-benchmark in D, chord precision note, unique scratch: all taken |
+
+Operator-level points the review raised, and what this plan does pending a word from the operator: mixed corrections in one slope store are **refused**; a `none` run **may** publish (into a store that says `none`); the PR split is as in "Commit groups"; the live node question stands.
 
 ## Files to Change
 
 | File | Change |
 |------|--------|
 | `include/cube_bathymetry/sounding.h` | `beam_dir_enu`, `incidence_angle`; sign-check comment |
-| `src/import_bag_main.cpp` (and a new `src/slope_run.cpp` / header if `main` would pass cpplint's length limit) | beam vector; slope-run flags, refusals, scratch stores, ordering, contributors, report; PR 2: `--beam-ledger-out` |
+| `src/import_bag_main.cpp`, new `ping_georeference.h/.cpp`, new `slope_run.h/.cpp` | extraction (A0); beam vector; bag index on `BagReaders::Message` and pending pings; slope-run flags, refusals, scratch, ordering, contributors, report; PR 2: `--beam-ledger-out` |
+| `include/cube_bathymetry/store_import.h`, `src/store_import.cpp` | spill root in `ImportAccumulatorConfig` |
+| `src/detections_projector.cpp` and header | PR 2: `beam_index` |
 | `include/cube_bathymetry/slope_incidence.h`, `src/slope_incidence.cpp` | new: `stampIncidence`, options, counters |
-| `include/cube_bathymetry/derived_tiles.h`, `src/derived_tiles.cpp` | new: manifest model, strict loader, atomic writer, contributor check, depth-tile hashing, publish |
+| `include/cube_bathymetry/derived_tiles.h`, `src/derived_tiles.cpp` | new: manifest model, strict loader, bag identity, contributor check, depth-tile hashing, lock, publish and recovery |
 | `include/cube_bathymetry/parameters.h`, `src/parameters.cpp`, `src/node.cpp` | angle basis and its selection |
-| `src/angular_response_curve.cpp`, `src/backscatter_table.cpp` and headers | `angle_basis` record |
+| `src/backscatter_table.cpp` and header | incidence format line and records |
 | `src/batch_regen_main.cpp`, `src/cube_bathymetry_node.hpp` | refusals |
-| `include/cube_bathymetry/geo_map_sheet.h`, `src/geo_map_sheet.cpp` | only if a touched-tiles accessor is needed |
 | `scripts/derive_angular_response.py` | PR 2 |
 | `CMakeLists.txt`, `package.xml` | `marine_backscatter` dependency, new sources and tests |
 | `test/test_slope_incidence.cpp`, `test_incidence_basis.cpp`, `test_derived_tiles.cpp`, `test_beam_geometry.cpp`, `test_import_bag_slope.py`, extensions to `test_backscatter_table`, `test_batch_regen` | section 9 |
