@@ -215,3 +215,25 @@ Sources: two Claude adversarial passes (lens A and B), Gemini and Codex (local r
 - [ ] (suggestion) beam importers do not take the store lock while checking for derived_tiles.json — `import_bag_main.cpp`
 - [ ] (suggestion) layers decided by directory existence, not tile presence — `slope_run.cpp`
 - [ ] (suggestion) over-attribution makes a refusal conservative; message could say so — `slope_run.cpp`
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-12 11:56 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+**Verdict**: approved
+
+**Branch**: feature/issue-173
+**Mode**: pre-push (delta: the follow-up commit after the jazzy merge)
+**Depth**: Light (reason: review of a delta)
+**Must-fix**: 0 open | **Suggestions**: 5 open
+**Round**: 2 | **Ship**: recommended — the two must-fix found were fixed
+
+### Findings
+- [x] (must-fix) batch_regen_bag dry run took the store lock and could fail or create a directory — fixed
+- [x] (must-fix) import_bag took the lock before argument validation — now only for a run with -o
+- [x] (suggestion) referenceStoreDigest ignored a directory read error — now throws
+- [ ] (suggestion) a spill file that went missing is not counted by integrityProblem — `store_import.cpp`
+- [ ] (suggestion) the reference-store digest is not re-verified at the end of the run — `import_bag_main.cpp`
+- [ ] (suggestion) eager hashing covers every surface tile, so an unrelated tile rewritten mid-run fails the publish (stricter than needed) — `slope_run.cpp`
+- [ ] (suggestion) two beam runs into one store are now serialized (documented in the README)
+- [ ] (suggestion) manifests written by earlier builds of this branch no longer load (new required keys)
