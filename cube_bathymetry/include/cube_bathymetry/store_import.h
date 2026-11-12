@@ -326,7 +326,7 @@ namespace cube
 /// (`std::runtime_error` for the fsync/rename steps).
   void writeFileAtomically(
     const std::string & path,
-    const std::function<void(const std::string & temp_path)> & write_to);
+    const std::function < void(const std::string & temp_path) > &write_to);
 
 /// @brief `marine_bathymetry_store::saveTile` made crash-atomic with
 ///        @ref writeFileAtomically.
@@ -353,7 +353,7 @@ namespace cube
 /// would replace those surveys with this session's soundings only. Empty on the
 /// normal, healthy path. Only `processed/` and `draft/` are salvaged (the layers the
 /// node primes from; `reference/` and `chart/` are write-gated in the store).
-  std::vector<UnreadableTile> loadStoreSkippingUnreadable(
+  std::vector < UnreadableTile > loadStoreSkippingUnreadable(
     marine_bathymetry_store::BathymetryStore & store, const std::string & store_dir);
 
 /// @brief Configuration for @ref ImportAccumulator (cube_bathymetry#92, #96).

@@ -22,6 +22,9 @@
 
 #include "cube_bathymetry/store_import.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -41,9 +44,6 @@
 #include <system_error>
 #include <utility>
 #include <vector>
-
-#include <fcntl.h>
-#include <unistd.h>
 
 #include "cube_bathymetry/common.h"
 #include "cube_bathymetry/hypothesis.h"

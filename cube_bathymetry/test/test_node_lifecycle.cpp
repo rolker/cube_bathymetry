@@ -54,6 +54,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -521,7 +522,7 @@ TEST_F(NodeLifecycle, ADamagedNeighbourTileDoesNotEraseAnEarlierSurvey)
   const auto first = good_name.find('_');
   const auto second = good_name.find('_', first + 1);
   const std::string level = good_name.substr(0, first);
-  const long row = std::stol(good_name.substr(first + 1, second - first - 1));
+  const std::int64_t row = std::stoll(good_name.substr(first + 1, second - first - 1));
   const std::string rest = good_name.substr(second);
   const auto damaged = dir / "draft" / (level + "_" + std::to_string(row + 1) + rest);
   {
