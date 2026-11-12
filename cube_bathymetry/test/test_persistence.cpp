@@ -33,6 +33,9 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <stdexcept>
 #include <set>
 #include <string>
 #include <vector>
@@ -316,5 +319,149 @@ TEST(Persistence, RevisitAfterEvictPreservesData)
   std::filesystem::remove_all(dir);
   std::filesystem::remove_all(dir_ctrl);
 }
+
+// ---------------------------------------------------------------------------
+// cube_bathymetry#135: crash-atomic tile writes and a loader that does not let
+// one damaged tile take the store's good tiles with it.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+std::string slurp(const std::string & path)
+{
+  std::ifstream in(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Save a one-patch sheet; return the (single or first) draft tile path written.
+std::string saveOnePatch(const std::string & dir)
+{
+  GeoMapSheet sheet(1.0f);
+  sheet.addSoundings(makeSoundings());
+  saveDirty(sheet, dir);
+  for (const auto & e : std::filesystem::directory_iterator(dir + "/draft")) {
+    return e.path().string();
+  }
+  return "";
+}
+}  // namespace
+
+TEST(Persistence, AtomicWriteReplacesTheFileAndLeavesNoTemp)
+{
+  const std::string dir = makeTempDir("atomic_ok");
+  const std::string path = dir + "/f.bin";
+  writeFileAtomically(path, [](const std::string & t) {std::ofstream(t) << "old";});
+  writeFileAtomically(path, [](const std::string & t) {std::ofstream(t) << "new";});
+  EXPECT_EQ(slurp(path), "new");
+  EXPECT_FALSE(std::filesystem::exists(path + ".partial"));
+  std::filesystem::remove_all(dir);
+}
+
+// A write that dies part-way (the writer throws after emitting some bytes) must
+// leave the previous content untouched and no temp behind.
+TEST(Persistence, AtomicWriteFailureKeepsTheOriginalTile)
+{
+  const std::string dir = makeTempDir("atomic_fail");
+  const std::string path = saveOnePatch(dir);
+  ASSERT_FALSE(path.empty());
+  const std::string before = slurp(path);
+  ASSERT_GT(before.size(), 4096u);
+
+  EXPECT_THROW(
+    writeFileAtomically(
+      path, [](const std::string & t) {
+        std::ofstream(t) << "truncated garbage";
+        throw std::runtime_error("disk full");
+      }),
+    std::runtime_error);
+  EXPECT_EQ(slurp(path), before) << "a failed write must not touch the good tile";
+  EXPECT_FALSE(std::filesystem::exists(path + ".partial"));
+
+  // A leftover temp from an earlier crash is replaced, not tripped over, and a
+  // store scan ignores it.
+  std::ofstream(path + ".partial") << "stale";
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  EXPECT_NO_THROW(marine_bathymetry_store::load(store, dir));
+  std::filesystem::remove_all(dir);
+}
+
+TEST(Persistence, SaveTileAtomicRoundTrips)
+{
+  const std::string dir = makeTempDir("atomic_tile");
+  GeoMapSheet sheet(1.0f);
+  sheet.addSoundings(makeSoundings());
+  const auto tiles = mapSheetToTiles(sheet);
+  ASSERT_FALSE(tiles.empty());
+  std::filesystem::create_directories(dir + "/draft");
+  for (const auto & [index, tile] : tiles) {
+    saveTileAtomic(tile, dir + "/draft/" + marine_bathymetry_store::tileFilename(index));
+  }
+  marine_bathymetry_store::BathymetryStore loaded =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  EXPECT_EQ(marine_bathymetry_store::load(loaded, dir), tiles.size());
+  std::filesystem::remove_all(dir);
+}
+
+// The reproduction of the data-loss path: one truncated tile used to abort load()
+// and leave the store empty. The tolerant loader keeps every good tile and names
+// the damaged one.
+TEST(Persistence, SkippingLoaderKeepsGoodTilesAndNamesTheDamagedOne)
+{
+  const std::string dir = makeTempDir("skip");
+  const std::string good = saveOnePatch(dir);
+  ASSERT_FALSE(good.empty());
+  const std::string bad =
+    dir + "/draft/" + std::string("10_1_1.tif");   // a valid-looking name, truncated body
+  {
+    std::ofstream out(bad, std::ios::binary);
+    out << slurp(good).substr(0, 4096);
+  }
+
+  marine_bathymetry_store::BathymetryStore plain =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  ASSERT_THROW(marine_bathymetry_store::load(plain, dir), std::exception)
+    << "premise: plain load() aborts on the damaged tile";
+
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  const auto unreadable = loadStoreSkippingUnreadable(store, dir);
+  ASSERT_EQ(unreadable.size(), 1u);
+  EXPECT_EQ(unreadable[0].path, bad);
+  EXPECT_EQ(unreadable[0].layer, marine_bathymetry_store::SourceLayer::Draft);
+  EXPECT_FALSE(unreadable[0].reason.empty());
+  EXPECT_EQ(store.tiles(marine_bathymetry_store::SourceLayer::Draft).size(), 1u);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(Persistence, SkippingLoaderOnAHealthyStoreReportsNothing)
+{
+  const std::string dir = makeTempDir("skip_ok");
+  ASSERT_FALSE(saveOnePatch(dir).empty());
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  EXPECT_TRUE(loadStoreSkippingUnreadable(store, dir).empty());
+  EXPECT_EQ(store.tiles(marine_bathymetry_store::SourceLayer::Draft).size(), 1u);
+
+  // A missing store directory is a normal first run.
+  marine_bathymetry_store::BathymetryStore empty =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  EXPECT_TRUE(loadStoreSkippingUnreadable(empty, dir + "/nonexistent").empty());
+  std::filesystem::remove_all(dir);
+}
+
+// A refused legacy layout stays a loud, whole-store failure: it must not be
+// "salvaged" into a partial store.
+TEST(Persistence, SkippingLoaderRethrowsARefusedLegacyStore)
+{
+  const std::string dir = makeTempDir("skip_legacy");
+  std::filesystem::create_directories(dir + "/survey");
+  std::filesystem::create_directories(dir + "/processed");
+  marine_bathymetry_store::BathymetryStore store =
+    marine_bathymetry_store::BathymetryStore::fromCellSize(1.0f);
+  EXPECT_THROW(loadStoreSkippingUnreadable(store, dir), std::exception);
+  std::filesystem::remove_all(dir);
+}
+
 
 }  // namespace cube
