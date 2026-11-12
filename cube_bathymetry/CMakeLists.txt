@@ -64,6 +64,7 @@ add_library(cube_bathymetry
   src/map_sheet.cpp
   src/node.cpp
   src/parameters.cpp
+  src/ping_georeference.cpp   # earth-frame georeferencing of one projected ping (#173)
 )
 
 target_include_directories(cube_bathymetry PUBLIC
