@@ -932,7 +932,7 @@ def test_the_ledger_is_made_by_a_completed_run_only(world, tmp_path):
     # A refused run (a subset of the bags) writes none.
     rc, out = run_import(slope_args(world['depth'], store, world['table'],
                                     ['--beam-ledger-out', str(ledger)]), bags[:2])
-    assert rc != 0 and not ledger.exists() and not pathlib.Path(str(ledger) + '.partial').exists()
+    assert rc != 0 and not ledger.exists() and not list(tmp_path.glob('ledger.bin.partial*'))
     # Neither does a run with no finite backscatter.
     empty_bag = tmp_path / 'no_intensity'
     write_plane_bag(empty_bag, 0.0, 3000.0, thetas=[-10.0, 0.0, 10.0],
@@ -1051,3 +1051,83 @@ def test_without_angle_basis_the_tool_behaves_as_before(world, tmp_path):
     assert helpers.dar.main(argv) == 0
     assert table.read_text().startswith('# format: angular-response-table v1\n')
     assert 'angle_basis' not in table.read_text()
+
+
+def test_a_port_beam_of_zero_incidence_stays_on_the_port_side():
+    import numpy as np
+
+    class Ping:
+        intensities = [-20.0, -21.0]
+        rx_angles = [-0.3, 0.3]
+        two_way_travel_times = [0.04, 0.04]
+        sound_speed = 1500.0
+        flags = None
+        source = helpers.dar.IncidenceSource.__new__(helpers.dar.IncidenceSource)
+
+    stats = Ping.source
+    stats.beams_surface = stats.beams_no_surface = stats.beams_not_in_ledger = 0
+    stats.beams_filtered = 0
+    stats.diff_sum = __import__('collections').defaultdict(float)
+    stats.diff_n = __import__('collections').Counter()
+    ping = Ping()
+    ping.incidence = (np.array([0, 1], dtype=np.uint16), np.array([0.0, 0.0]),
+                      np.array([0, 0], dtype=np.uint8))
+    abs_bin, side, cell, y = helpers.dar.ping_beams(ping, 2.0, 45)
+    assert list(side) == [0, 1], 'port beam of incidence 0 must stay on the port side'
+    assert list(abs_bin) == [0, 0]
+    assert stats.beams_surface == 2
+
+
+def test_a_malformed_ledger_header_is_a_value_error(tmp_path):
+    import struct
+    for header in (b'[]', b'null', b'{"format": "beam-ledger v1"}',
+                   b'{"format": "beam-ledger v1", "inputs": {}, "bags": []}',
+                   b'{"format": "beam-ledger v1", "inputs": {"slope_baseline_deg": 5, '
+                   b'"slope_layers": "p"}, "bags": [{"name": "a"}]}',
+                   b'{"format": "beam-ledger v1", "inputs": {"slope_baseline_deg": 5, '
+                   b'"slope_layers": "p"}, "bags": [{"name": "a", "metadata_sha256": "x"}, '
+                   b'{"name": "a", "metadata_sha256": "y"}]}'):
+        path = tmp_path / 'm.bin'
+        path.write_bytes(b'CUBELDG1' + struct.pack('<I', len(header)) + header)
+        with pytest.raises(ValueError):
+            helpers.dar.BeamLedger(str(path))
+
+
+def test_conflicting_ledgers_topic_and_unrelated_ledgers_are_refused(
+        world, ledger_run, tmp_path):
+    bags = list(world['bags'].values())
+    table = tmp_path / 't.csv'
+    # Another detections topic of the same bags.
+    with pytest.raises(SystemExit, match='detections topic'):
+        argv = [str(b) for b in bags] + ['-t', '/other/detections', '-o', str(table),
+                                         '--by-mode', '--sonar-info-topic', helpers.INFO_TOPIC,
+                                         '--angle-basis', 'incidence', '--beam-ledger',
+                                         str(ledger_run['ledger'])]
+        helpers.dar.main(argv)
+    # Two ledgers that name one bag with different hashes.
+    a = helpers.dar.BeamLedger(str(ledger_run['ledger']))
+    b = helpers.dar.BeamLedger(str(ledger_run['ledger']))
+    b.pings = {}
+    b.bags = [dict(x, metadata_sha256='0' * 64) for x in b.bags]
+    b.path = 'second'
+    source = helpers.dar.IncidenceSource([a, b])
+    with pytest.raises(ValueError, match='disagree on bag'):
+        source.check(bags, [p.name for p in bags], None, helpers.TOPIC)
+
+
+def test_a_ledger_that_matches_almost_nothing_writes_no_table(world, ledger_run, tmp_path):
+    # The side bag carries pings the full-fan ledger never saw (other stamps).
+    table = tmp_path / 't.csv'
+    other = tmp_path / 'ledger_other.bin'
+    rc, out = run_import(slope_args(world['depth'], tmp_path / 'bs', None,
+                                    ['--beam-ledger-out', str(other)]), [world['side'][0.0]])
+    assert rc == 0, out
+    # Pretend the ledger is for the pass_000 bag: same name, different stamps.
+    blob = other.read_bytes().replace(b'side_000', b'pass_000')
+    blob = blob.replace(sha(world['side'][0.0] / 'metadata.yaml').encode(),
+                        sha(world['bags'][0.0] / 'metadata.yaml').encode())
+    fake = tmp_path / 'fake.bin'
+    fake.write_bytes(blob)
+    with pytest.raises(SystemExit, match='lacks'):
+        derive([world['bags'][0.0]], fake, table)
+    assert not table.exists()

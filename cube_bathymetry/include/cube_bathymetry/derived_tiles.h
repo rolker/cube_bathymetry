@@ -177,6 +177,9 @@ namespace cube
     std::vector < std::string > removed;
   /// Whether `registry.json` was installed.
     bool registry = false;
+  /// SHA-256 of the beam ledger this publish was made with (empty = none), so a
+  /// ledger found beside the store can be told from one of another run.
+    std::string ledger_sha256;
   };
 
   struct DerivedTiles
@@ -352,6 +355,8 @@ private:
     std::vector < std::string > delete_tiles;
   /// The scratch `registry.json` to install at the store root, or empty.
     std::string registry_source;
+  /// SHA-256 of the sealed beam ledger written with this run, or empty.
+    std::string ledger_sha256;
   /// The complete manifest after the publish; `last_publish` is filled in here.
     DerivedTiles manifest;
   };

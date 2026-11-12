@@ -178,7 +178,8 @@ void stampIncidence(
     }
     s.incidence_source = normal.from_surface ? 0 :
       static_cast<uint8_t>(std::min<std::size_t>(
-        static_cast<std::size_t>(normal.reason), IncidenceCounters::kReasonCount - 1));
+        std::max<std::size_t>(static_cast<std::size_t>(normal.reason), 1),
+        IncidenceCounters::kReasonCount - 1));
     if (angle.rad >= M_PI / 2.0) {
       ++counters.back_facing;
     }

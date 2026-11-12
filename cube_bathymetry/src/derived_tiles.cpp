@@ -544,6 +544,9 @@ std::string DerivedTiles::toJson() const
     p["written"] = last_publish->written;
     p["removed"] = last_publish->removed;
     p["registry"] = last_publish->registry;
+    if (!last_publish->ledger_sha256.empty()) {
+      p["ledger_sha256"] = last_publish->ledger_sha256;
+    }
     j["last_publish"] = p;
   }
   return j.dump(2) + "\n";
@@ -574,7 +577,7 @@ DerivedTiles DerivedTiles::fromJson(const std::string & text)
   }
   if (j.contains("last_publish")) {
     const json & p = j.at("last_publish");
-    checkKeys(p, "last_publish", {"run", "written", "removed", "registry"});
+    checkKeys(p, "last_publish", {"run", "written", "removed", "registry"}, {"ledger_sha256"});
     PublishRecord r;
     r.run = getString(p, "run", "last_publish");
     r.written = getStringList(p, "written", "last_publish");
@@ -583,6 +586,12 @@ DerivedTiles DerivedTiles::fromJson(const std::string & text)
       fail("last_publish.registry must be a boolean");
     }
     r.registry = p.at("registry").get<bool>();
+    if (p.contains("ledger_sha256")) {
+      r.ledger_sha256 = getString(p, "ledger_sha256", "last_publish");
+      if (!isHexDigest(r.ledger_sha256)) {
+        fail("last_publish.ledger_sha256 must be a sha256");
+      }
+    }
     if (!isBareName(r.run)) {
       fail("last_publish.run must be a bare name");
     }
@@ -1046,6 +1055,7 @@ void publishDerived(const PublishPlan & plan, const PublishFailpoint & failpoint
   record.run = plan.run_id;
   record.written = plan.put_tiles;
   record.removed = plan.delete_tiles;
+  record.ledger_sha256 = plan.ledger_sha256;
   if (!plan.registry_source.empty()) {
     const fs::path to = incoming / kRegistryName;
     fs::copy_file(plan.registry_source, to, fs::copy_options::overwrite_existing, ec);

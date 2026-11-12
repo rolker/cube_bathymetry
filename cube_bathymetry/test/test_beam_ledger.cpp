@@ -33,6 +33,7 @@
 #include <nlohmann/json.hpp>
 
 #include "cube_bathymetry/beam_ledger.h"
+#include "cube_bathymetry/build_fingerprint.h"
 
 /// @file
 /// @brief The beam ledger file (cube_bathymetry#173, second part): writer, reader,
@@ -54,6 +55,17 @@ std::string freshDir(const std::string & tag)
   fs::remove_all(dir);
   fs::create_directories(dir);
   return dir.string();
+}
+
+// Any temporary file of the writer left in @p dir.
+bool hasPartial(const std::string & dir)
+{
+  for (const auto & entry : fs::directory_iterator(dir)) {
+    if (entry.path().filename().string().find(".partial") != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::string readFile(const std::string & path)
@@ -102,19 +114,20 @@ TEST(BeamLedger, RoundTripsThroughTheFile)
   const std::string dir = freshDir("roundtrip");
   const std::string path = dir + "/ledger.bin";
   std::string error;
-  auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), error);
+  auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), "/sonar/detections", error);
   ASSERT_TRUE(w) << error;
   writeGolden(*w);
   EXPECT_EQ(w->pings(), 3u);
   EXPECT_FALSE(fs::exists(path)) << "nothing under the final name before finish";
-  EXPECT_TRUE(fs::exists(path + ".partial"));
+  EXPECT_TRUE(hasPartial(dir));
   w->finish();
   EXPECT_TRUE(fs::exists(path));
-  EXPECT_FALSE(fs::exists(path + ".partial"));
+  EXPECT_FALSE(hasPartial(dir));
 
   const BeamLedger ledger = readBeamLedger(path);
   const auto header = nlohmann::json::parse(ledger.header_json);
   EXPECT_EQ(header.at("format"), kBeamLedgerFormat);
+  EXPECT_EQ(header.at("detections_topic"), "/sonar/detections");
   EXPECT_EQ(header.at("inputs").at("slope_baseline_deg"), 5.0);
   EXPECT_EQ(header.at("inputs").at("slope_layers"), "processed");
   ASSERT_EQ(header.at("bags").size(), 2u);
@@ -139,15 +152,15 @@ TEST(BeamLedger, AnUnfinishedLedgerLeavesNothingBehind)
   const std::string path = dir + "/ledger.bin";
   std::string error;
   {
-    auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), error);
+    auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), "/sonar/detections", error);
     ASSERT_TRUE(w) << error;
     writeGolden(*w);
   }
   EXPECT_FALSE(fs::exists(path));
-  EXPECT_FALSE(fs::exists(path + ".partial"));
+  EXPECT_FALSE(hasPartial(dir));
   // And one that was finished can be discarded (the run failed after it).
   {
-    auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), error);
+    auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), "/sonar/detections", error);
     writeGolden(*w);
     w->finish();
     w->discard();
@@ -156,11 +169,46 @@ TEST(BeamLedger, AnUnfinishedLedgerLeavesNothingBehind)
   fs::remove_all(dir);
 }
 
+// Sealing leaves the file under its temporary name; only the commit puts it in
+// place, and replaces an existing ledger. Two writers never share a temporary file.
+TEST(BeamLedger, SealThenCommitAndTemporaryNamesAreUnique)
+{
+  const std::string dir = freshDir("seal");
+  const std::string path = dir + "/ledger.bin";
+  {
+    std::ofstream(path) << "an earlier ledger";
+  }
+  std::string error;
+  auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), "/t", error);
+  ASSERT_TRUE(w) << error;
+  writeGolden(*w);
+  const std::string sha = w->seal();
+  EXPECT_EQ(sha.size(), 64u);
+  EXPECT_EQ(readFile(path), "an earlier ledger") << "sealed, not yet in place";
+  w->commit();
+  EXPECT_NE(readFile(path), "an earlier ledger");
+  EXPECT_FALSE(hasPartial(dir));
+  EXPECT_EQ(sha256File(path), sha);
+  fs::remove_all(dir);
+}
+
+TEST(BeamLedger, APingTooWideForTheFormatIsRefused)
+{
+  const std::string dir = freshDir("wide");
+  std::string error;
+  auto w = BeamLedgerWriter::open(dir + "/l.bin", goldenInputs(), goldenBags(), "/t", error);
+  ASSERT_TRUE(w) << error;
+  EXPECT_THROW(w->addPing(1, 0, std::vector<LedgerBeam>(65536)), std::runtime_error);
+  EXPECT_NO_THROW(w->addPing(1, 0, std::vector<LedgerBeam>(65535)));
+  fs::remove_all(dir);
+}
+
 TEST(BeamLedger, AnUnwritableLocationIsRefusedAtOnce)
 {
   std::string error;
   auto w = BeamLedgerWriter::open(
-    "/nonexistent_dir_for_ledger/ledger.bin", goldenInputs(), goldenBags(), error);
+    "/nonexistent_dir_for_ledger/ledger.bin", goldenInputs(), goldenBags(), "/sonar/detections",
+      error);
   EXPECT_FALSE(w);
   EXPECT_NE(error.find("cannot create the beam ledger"), std::string::npos) << error;
 }
@@ -177,7 +225,7 @@ TEST(BeamLedger, TheReaderRefusesWhatIsNotALedger)
   const std::string path = dir + "/ledger.bin";
   std::string error;
   {
-    auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), error);
+    auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), "/sonar/detections", error);
     writeGolden(*w);
     w->finish();
   }
@@ -192,7 +240,7 @@ TEST(BeamLedger, WriterOutputMatchesTheGoldenFile)
   const std::string dir = freshDir("golden");
   const std::string path = dir + "/ledger.bin";
   std::string error;
-  auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), error);
+  auto w = BeamLedgerWriter::open(path, goldenInputs(), goldenBags(), "/sonar/detections", error);
   ASSERT_TRUE(w) << error;
   writeGolden(*w);
   w->finish();

@@ -28,6 +28,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cube_bathymetry/angle_basis.h"
@@ -101,6 +102,9 @@ namespace cube
   /// Where to write the beam ledger (empty = none): a file made only by a run
   /// that completes.
     std::string beam_ledger_path;
+  /// The detections topic the bags are read on; recorded in the ledger so a fit
+  /// on another topic of the same bags is refused.
+    std::string detections_topic;
     double baseline_deg = kDefaultSlopeBaselineDeg;
   /// The store-level inputs of this run (basis, baseline, layers, correction,
   /// gain declaration, level).
@@ -182,6 +186,7 @@ private:
     std::string leftover_text_;
     IncidenceCounters counters_;
     uint64_t dropped_georef_ = 0;
+    std::set < std::pair < uint16_t, int64_t >> ledger_keys_;
     double max_influence_m_ = 0.0;
     double surface_pad_m_ = 0.0;
     std::map < gggs::GridIndex, std::set < std::size_t >> reached_;

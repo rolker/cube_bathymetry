@@ -21,6 +21,8 @@
 
 #include "cube_bathymetry/beam_ledger.h"
 
+#include <unistd.h>
+
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -28,6 +30,12 @@
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
+
+#include "cube_bathymetry/build_fingerprint.h"
+
+static_assert(
+  __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+  "the beam ledger is written and read little-endian by copying native integers");
 
 namespace cube
 {
@@ -73,11 +81,13 @@ int16_t ledgerIncidence(float radians)
 
 std::unique_ptr<BeamLedgerWriter> BeamLedgerWriter::open(
   const std::string & path, const StoreInputs & inputs, const std::vector<BagIdentity> & bags,
-  std::string & error)
+  const std::string & detections_topic, std::string & error)
 {
   error.clear();
   std::unique_ptr<BeamLedgerWriter> w(new BeamLedgerWriter(path));
-  const std::string partial = path + ".partial";
+  // Unique per process, so two runs writing ledgers cannot share a temporary file.
+  const std::string partial = path + ".partial-" + std::to_string(::getpid());
+  w->partial_ = partial;
   w->out_.open(partial, std::ios::binary | std::ios::trunc);
   if (!w->out_) {
     error = "cannot create the beam ledger " + partial;
@@ -86,6 +96,7 @@ std::unique_ptr<BeamLedgerWriter> BeamLedgerWriter::open(
   nlohmann::json header;
   header["format"] = kBeamLedgerFormat;
   header["code_version"] = kDerivedTilesCodeVersion;
+  header["detections_topic"] = detections_topic;
   header["inputs"] = nlohmann::json::parse(storeInputsJson(inputs));
   header["incidence_unit_deg"] = 0.01;
   header["incidence_none"] = kLedgerNoIncidence;
@@ -110,14 +121,19 @@ BeamLedgerWriter::~BeamLedgerWriter()
   if (!finished_) {
     out_.close();
     std::error_code ec;
-    fs::remove(path_ + ".partial", ec);
+    fs::remove(partial_, ec);
   }
 }
 
 void BeamLedgerWriter::addPing(
   int64_t stamp_ns, uint16_t bag_index, const std::vector<LedgerBeam> & beams)
 {
-  const std::size_t count = std::min<std::size_t>(beams.size(), 0xFFFF);
+  if (beams.size() > 0xFFFF) {
+    throw std::runtime_error(
+            "beam ledger: a ping of " + std::to_string(beams.size()) +
+            " beams does not fit the format (65535 at most)");
+  }
+  const std::size_t count = beams.size();
   putLe<int64_t>(out_, stamp_ns);
   putLe<uint16_t>(out_, bag_index);
   putLe<uint16_t>(out_, static_cast<uint16_t>(count));
@@ -129,23 +145,41 @@ void BeamLedgerWriter::addPing(
   ++pings_;
 }
 
-void BeamLedgerWriter::finish()
+std::string BeamLedgerWriter::seal()
 {
   out_.flush();
   if (!out_) {
-    throw std::runtime_error("beam ledger: write error on " + path_ + ".partial");
+    throw std::runtime_error("beam ledger: write error on " + partial_);
   }
   out_.close();
-  const std::string partial = path_ + ".partial";
-  fsyncFile(partial);
+  fsyncFile(partial_);
+  sealed_ = true;
+  return sha256File(partial_);
+}
+
+void BeamLedgerWriter::commit()
+{
+  if (!sealed_) {
+    throw std::runtime_error("beam ledger: commit before seal");
+  }
   std::error_code ec;
-  fs::rename(partial, path_, ec);
+  fs::rename(partial_, path_, ec);
   if (ec) {
-    throw std::runtime_error("beam ledger: cannot rename " + partial + ": " + ec.message());
+    throw std::runtime_error("beam ledger: cannot rename " + partial_ + ": " + ec.message());
   }
   finished_ = true;
-  fsyncDirectory(fs::path(path_).parent_path().empty() ? "." :
-      fs::path(path_).parent_path().string());
+  try {
+    fsyncDirectory(
+      fs::path(path_).parent_path().empty() ? "." : fs::path(path_).parent_path().string());
+  } catch (const std::exception &) {
+    // Durability of the rename only; the ledger is in place.
+  }
+}
+
+void BeamLedgerWriter::finish()
+{
+  seal();
+  commit();
 }
 
 void BeamLedgerWriter::discard()

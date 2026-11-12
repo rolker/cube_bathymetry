@@ -101,17 +101,26 @@ public:
   /// before it reads a bag.
     static std::unique_ptr < BeamLedgerWriter > open(
       const std::string & path, const StoreInputs & inputs, const std::vector < BagIdentity > &bags,
-      std::string & error);
+      const std::string & detections_topic, std::string & error);
 
-  /// Removes the partial file unless @ref finish succeeded.
+  /// Removes the partial file unless the ledger was committed.
     ~BeamLedgerWriter();
     BeamLedgerWriter(const BeamLedgerWriter &) = delete;
     BeamLedgerWriter & operator = (const BeamLedgerWriter &) = delete;
 
+  /// @throws std::runtime_error for a ping of more beams than the format can hold.
     void addPing(int64_t stamp_ns, uint16_t bag_index, const std::vector < LedgerBeam > &beams);
     uint64_t pings() const {return pings_;}
 
-  /// Flush, fsync and rename into place. @throws std::runtime_error on failure.
+  /// Flush and fsync the partial file, leaving it where it is, and return its
+  /// SHA-256. @throws std::runtime_error on failure.
+    std::string seal();
+
+  /// Rename a sealed ledger into place (an existing ledger is replaced). The
+  /// directory fsync is best effort: the rename is atomic either way.
+    void commit();
+
+  /// `seal` then `commit`. @throws std::runtime_error on failure.
     void finish();
 
   /// Delete the file `finish` made (the run failed after it).
@@ -122,6 +131,8 @@ private:
     : path_(path) {
     }
     std::string path_;
+    std::string partial_;
+    bool sealed_ = false;
     std::ofstream out_;
     uint64_t pings_ = 0;
     bool finished_ = false;

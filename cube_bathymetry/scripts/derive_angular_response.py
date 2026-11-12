@@ -1041,15 +1041,26 @@ class BeamLedger:
             self.header = json.loads(data[12:12 + header_len].decode('utf-8'))
         except ValueError as e:
             raise ValueError('%s: header is not JSON (%s)' % (path, e))
+        if not isinstance(self.header, dict):
+            raise ValueError('%s: the header is not a JSON object' % path)
         if self.header.get('format') != BEAM_LEDGER_FORMAT:
             raise ValueError('%s: unsupported ledger format %r (this tool reads %r)'
                              % (path, self.header.get('format'), BEAM_LEDGER_FORMAT))
-        try:
-            self.inputs = self.header['inputs']
-            self.bags = self.header['bags']
-            self.bag_names = [b['name'] for b in self.bags]
-        except (KeyError, TypeError):
+        self.inputs = self.header.get('inputs')
+        self.bags = self.header.get('bags')
+        if not isinstance(self.inputs, dict) or not isinstance(self.bags, list):
             raise ValueError('%s: the header lacks inputs or bags' % path)
+        for key in ('slope_baseline_deg', 'slope_layers'):
+            if key not in self.inputs:
+                raise ValueError('%s: the header inputs lack %s' % (path, key))
+        for b in self.bags:
+            if not (isinstance(b, dict) and isinstance(b.get('name'), str)
+                    and isinstance(b.get('metadata_sha256'), str)):
+                raise ValueError('%s: a bags entry needs a name and a metadata_sha256' % path)
+        self.bag_names = [b['name'] for b in self.bags]
+        if len(set(self.bag_names)) != len(self.bag_names):
+            raise ValueError('%s: the header lists a bag name twice' % path)
+        self.detections_topic = self.header.get('detections_topic')
         beam = np.dtype([('i', '<u2'), ('c', '<i2'), ('s', 'u1')])
         self.pings = {}
         pos = 12 + header_len
@@ -1112,10 +1123,11 @@ class IncidenceSource:
         self.beams_surface = 0
         self.beams_no_surface = 0
         self.beams_not_in_ledger = 0
+        self.beams_filtered = 0
         self.diff_sum = collections.defaultdict(float)
         self.diff_n = collections.Counter()
 
-    def check(self, bag_paths, bag_names, gain):
+    def check(self, bag_paths, bag_names, gain, topic=None):
         """Refuse a ledger made from other bags or under another gain declaration."""
         want_sha = gain.sha256() if gain is not None else ''
         for ledger in self.ledgers:
@@ -1128,17 +1140,28 @@ class IncidenceSource:
                     % (ledger.path,
                        'under gain declaration ' + got if got else 'with no gain declaration',
                        'gain declaration ' + want_sha if want_sha else 'none'))
+        for ledger in self.ledgers:
+            if topic is not None and ledger.detections_topic not in (None, topic):
+                raise ValueError(
+                    'ledger %s was made on the detections topic %r but this derivation reads '
+                    '%r: another sonar of the same bags would be given the wrong angles'
+                    % (ledger.path, ledger.detections_topic, topic))
         known = {}
         for ledger in self.ledgers:
             for b in ledger.bags:
-                known[b['name']] = b['metadata_sha256']
+                if known.setdefault(b['name'], b['metadata_sha256']) != b['metadata_sha256']:
+                    raise ValueError('the ledgers disagree on bag %r (different metadata.yaml '
+                                     'hashes): they were made from different bags' % b['name'])
         for path, name in zip(bag_paths, bag_names):
             if name not in known:
                 raise ValueError('bag %r is not in the ledger(s) %s: its pings would all be '
                                  'dropped; derive from the bags the ledger covers'
                                  % (name, ', '.join(x.path for x in self.ledgers)))
             sha = bag_metadata_sha256(path)
-            if sha is not None and sha != known[name]:
+            if sha is None:
+                raise ValueError('bag %r has no readable metadata.yaml, so it cannot be '
+                                 'checked against the ledger (give the bag directory)' % name)
+            if sha != known[name]:
                 raise ValueError('bag %r differs from the one the ledger was made from '
                                  '(metadata.yaml hash %s vs %s)' % (name, sha, known[name]))
 
@@ -1149,12 +1172,15 @@ class IncidenceSource:
     def report_lines(self):
         """Return the report: beams with a surface, without, not listed, mean shift per bin."""
         total = self.beams_surface + self.beams_no_surface + self.beams_not_in_ledger
+        total += self.beams_filtered
         lines = ['incidence from %d ledger(s) (slope baseline %s deg, layers %s): %d beam(s) '
-                 'with a seabed surface (%.1f%%), %d without one (left out), %d not in the '
-                 'ledger (left out), %d ping(s) not in the ledger (left out)'
+                 'with a seabed surface (%.1f%% of those seen), %d without one (left out), '
+                 '%d not in the ledger (left out), %d with a back-facing angle or outside the '
+                 'range and bin limits (left out), %d ping(s) not in the ledger (left out)'
                  % (len(self.ledgers), self.baseline_deg, self.layers, self.beams_surface,
                     100.0 * self.beams_surface / total if total else 0.0,
-                    self.beams_no_surface, self.beams_not_in_ledger, self.pings_missing)]
+                    self.beams_no_surface, self.beams_not_in_ledger, self.beams_filtered,
+                    self.pings_missing)]
         if self.diff_n:
             lines.append('mean incidence minus |rx_angle| per angle bin (deg): ' + ' '.join(
                 '%d:%+.1f' % (b, self.diff_sum[b] / self.diff_n[b]) for b in sorted(self.diff_n)))
@@ -2577,43 +2603,57 @@ def ping_beams(ping, bin_width_deg, n_half, offset_db=0.0):
         stats = ping.source
         inc = np.full(count, np.nan)
         src = np.full(count, 255, dtype=np.uint8)
-        valid = index < count
-        inc[index[valid]] = inc_deg[valid]
-        src[index[valid]] = source[valid]
-        in_ledger = np.isfinite(inc) & (src != 255)
+        if len(index) and int(index.max()) >= count:
+            # The strongest sign of a ledger that is not this bag's.
+            raise SystemExit(
+                'error: the ledger lists beam index %d of a ping with %d beams: it was not '
+                'made from these detections' % (int(index.max()), count))
+        inc[index] = inc_deg
+        src[index] = source
+        in_ledger = src != 255
         stats.beams_not_in_ledger += int((ok & ~in_ledger).sum())
-        surface = in_ledger & (src == LEDGER_SOURCE_SURFACE)
+        surface = in_ledger & (src == LEDGER_SOURCE_SURFACE) & np.isfinite(inc)
         stats.beams_no_surface += int((ok & in_ledger & ~surface).sum())
         ok = ok & surface
         if not ok.any():
             return None
         shift_deg = (inc - np.abs(np.degrees(ang)))[ok]
+        # The side is carried explicitly: a port beam of incidence 0 must stay port
+        # (a signed zero would read as starboard).
+        port = (ang < 0.0)[ok]
         ang = np.where(ang >= 0.0, 1.0, -1.0) * np.radians(inc)
     y, ang, rng = y[ok] + offset_db, ang[ok], rng[ok]
     deg = np.degrees(ang)
+    n_before = len(deg)
     # |theta| < 90 explicitly, BEFORE the bin cast: the last bin reaches past
     # 90 when the bin width does not divide 90, a beam at or beyond 90 deg is
     # not a seabed return, and a huge finite angle would overflow the cast.
     in_range = np.abs(deg) < 90.0
     if not in_range.all():
         if not in_range.any():
+            if shift_deg is not None:
+                stats.beams_filtered += n_before
             return None
         y, rng, deg = y[in_range], rng[in_range], deg[in_range]
         if shift_deg is not None:
-            shift_deg = shift_deg[in_range]
+            shift_deg, port = shift_deg[in_range], port[in_range]
     abs_bin = np.floor(np.abs(deg) / bin_width_deg).astype(np.int64)
     cell = np.floor((np.log10(rng) - RANGE_CELL_LOG10_MIN)
                     / RANGE_CELL_DECADES).astype(np.int64)
     keep = (abs_bin >= 0) & (abs_bin < n_half) & (cell >= 0) & (cell < RANGE_CELL_COUNT)
     if not keep.all():
         if not keep.any():
+            if shift_deg is not None:
+                stats.beams_filtered += n_before
             return None
         abs_bin, cell, y, deg = abs_bin[keep], cell[keep], y[keep], deg[keep]
         if shift_deg is not None:
-            shift_deg = shift_deg[keep]
+            shift_deg, port = shift_deg[keep], port[keep]
     side = (deg >= 0.0).astype(np.int64)
     if shift_deg is not None:
+        side = (~port).astype(np.int64)
         stats.beams_surface += len(abs_bin)
+        stats.beams_filtered += n_before - len(abs_bin)
         for b in np.unique(abs_bin):
             sel = abs_bin == b
             stats.diff_sum[int(b)] += float(shift_deg[sel].sum())
@@ -4000,6 +4040,12 @@ def main_by_mode(args, source_bags, gain=None, incidence=None):
             print(warning, file=sys.stderr)
         if box_stats['kept'] == 0:
             raise SystemExit('error: no pings inside --box; nothing to derive')
+    if incidence is not None and (n_msgs == 0 or incidence.pings_missing * 2 > n_msgs):
+        for line in incidence.report_lines():
+            print(line)
+        raise SystemExit('error: the ledger lacks %d of the %d pings read: it was not made '
+                         'from these bags and topic; no table written'
+                         % (incidence.pings_missing, n_msgs))
     table = builder.finish(args.reference_mode, args.range_ref_m, args.misfit_threshold_db,
                            args.range_node_spacing_decades)
     for warning in table['warnings']:
@@ -4045,7 +4091,7 @@ def main(argv=None):
     if args.angle_basis == 'incidence':
         try:
             incidence = IncidenceSource([BeamLedger(path) for path in args.beam_ledger_paths])
-            incidence.check(args.bag, source_bags, gain)
+            incidence.check(args.bag, source_bags, gain, args.topic)
         except (ValueError, OSError) as e:
             raise SystemExit('error: --beam-ledger: %s' % e)
     if args.by_mode:

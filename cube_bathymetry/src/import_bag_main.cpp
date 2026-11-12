@@ -1947,6 +1947,7 @@ struct SlopeFlags
   std::string basis_text = "beam";
   std::string surface_dir;
   std::string beam_ledger_out;
+  std::string detections_topic;
   double baseline_deg = cube::kDefaultSlopeBaselineDeg;
   bool baseline_given = false;
   cube::BackscatterAngleBasis basis = cube::BackscatterAngleBasis::Beam;
@@ -2064,6 +2065,7 @@ std::unique_ptr<cube::SlopeRun> startSlopeRun(
   config.bs_store_dir = bs_store_dir;
   config.scratch_root = scratch_dir;
   config.beam_ledger_path = flags.beam_ledger_out;
+  config.detections_topic = flags.detections_topic;
   config.baseline_deg = flags.baseline_deg;
   for (const std::string & layer : layers) {
     config.inputs.slope_layers += (config.inputs.slope_layers.empty() ? "" : ",") + layer;
@@ -2804,6 +2806,7 @@ int importBagMain(int argc, char * argv[])
     }
   }
 
+  slope_flags.detections_topic = detections_topic;
   const bool slope_run = resolveSlopeRequest(
     slope_flags, store_dir, bs_store_dir, depth_adaptive, ping_count_limit);
   if ((store_dir.empty() && !slope_run) || detections_topic.empty() || bagfile_names.empty()) {
