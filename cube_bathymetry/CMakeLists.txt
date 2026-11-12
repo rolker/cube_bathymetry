@@ -191,6 +191,25 @@ install(TARGETS cube_bathymetry_slope_incidence EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
+# The record of what a slope-corrected backscatter store was derived from, and
+# its crash-safe publish (#173). Its own target: it needs the SHA-256 of the
+# level-plan library and the JSON library, and nothing of the estimator.
+add_library(cube_bathymetry_derived_tiles src/derived_tiles.cpp)
+target_include_directories(cube_bathymetry_derived_tiles PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_derived_tiles
+  cube_bathymetry_level_plan         # sha256File / sha256Text
+  marine_autonomy::marine_autonomy   # gggs tile geometry
+  nlohmann_json::nlohmann_json
+)
+install(TARGETS cube_bathymetry_derived_tiles EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
 # GeoMapSheet -> map-frame grid_map projection (#21). In its own target so the
 # live publish path is unit-testable (publish-equivalence regression test) with
 # only grid_map_core -- no ROS node, no message conversion.
@@ -578,6 +597,11 @@ if(BUILD_TESTING)
     cube_bathymetry_slope_incidence
     marine_bathymetry_store::marine_bathymetry_store
   )
+
+  # The slope-run store record, its strict loader, bag identity, depth-tile
+  # selection, the lock, and publish/recovery with an injected failure (#173).
+  ament_add_gtest(test_derived_tiles test/test_derived_tiles.cpp)
+  target_link_libraries(test_derived_tiles cube_bathymetry_derived_tiles)
 
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
