@@ -447,8 +447,11 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
   // per process, leaving the ns the only distinguisher, and two processes can read
   // the same coarse ns tick.
   if (scratch_dir_.empty()) {
-    std::string tmpl =
-      (std::filesystem::temp_directory_path() / "cube_import_spill_XXXXXX").string();
+    std::filesystem::path spill_root = cfg_.spill_root.empty() ?
+      std::filesystem::temp_directory_path() : std::filesystem::path(cfg_.spill_root);
+    std::error_code root_ec;
+    std::filesystem::create_directories(spill_root, root_ec);
+    std::string tmpl = (spill_root / "cube_import_spill_XXXXXX").string();
     std::vector<char> buf(tmpl.begin(), tmpl.end());
     buf.push_back('\0');
     if (::mkdtemp(buf.data()) == nullptr) {

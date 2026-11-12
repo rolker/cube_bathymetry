@@ -56,6 +56,7 @@
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/batch_regen.h"
 #include "cube_bathymetry/build_fingerprint.h"
+#include "cube_bathymetry/derived_tiles.h"
 #include "cube_bathymetry/gain_declaration.h"
 #include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/projection_summary.h"
@@ -357,6 +358,22 @@ std::string jsonEscape(const std::string & s)
     }
   }
   return out;
+}
+
+/// True (after saying why) when @p bs_store_dir is a slope-run backscatter store
+/// (cube#173): it holds derived_tiles.json, its tiles are derived per tile from
+/// their bags on the incidence angle, and a beam-angle regen would blend into
+/// them. Only the slope run of import_bag writes there.
+bool slopeStoreRefused(const std::string & bs_store_dir)
+{
+  if (bs_store_dir.empty() || !cube::hasDerivedTilesRecord(bs_store_dir)) {
+    return false;
+  }
+  std::cerr << "error: --bs-store " << bs_store_dir << " holds derived_tiles.json: it is a "
+    "slope-run store, derived per tile from its bags, and batch_regen would write beam-angle "
+    "values into it. Only the slope run of import_bag (--backscatter-angle-basis incidence) "
+    "writes there\n";
+  return true;
 }
 
 /// Load and vet the `--level-plan` file (cube#143; lifted out of main(), which
@@ -1001,7 +1018,7 @@ int main(int argc, char * argv[])
   const std::shared_ptr<const cube::LevelPlan> level_plan = loadLevelPlan(
     level_plan_path, bs_store_dir, capture_spacing_scale, capture_spacing_scale_given,
     &level_plan_failed);
-  if (level_plan_failed) {
+  if (level_plan_failed || slopeStoreRefused(bs_store_dir)) {
     return 1;
   }
 

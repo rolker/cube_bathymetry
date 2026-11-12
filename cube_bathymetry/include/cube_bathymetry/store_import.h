@@ -339,6 +339,11 @@ namespace cube
   /// Optional MBES backscatter store directory (the importer's `--bs-store`).
   /// Empty disables backscatter co-persistence. Always writes the `survey` layer.
     std::string bs_store_dir;
+  /// Directory the per-cell intensity spill goes under (a unique subdirectory
+  /// is made there on the first eviction). Empty = the system temp directory,
+  /// as before. The slope run of `import_bag` points it into its own scratch
+  /// directory so that one removal clears everything the run wrote (#173).
+    std::string spill_root;
   /// Maximum resident GeoGrid tiles before persist-then-drop eviction runs.
   /// 0 = unbounded (never evict — the pre-#92 whole-survey-in-RAM behavior).
     std::size_t max_resident_tiles = 0;

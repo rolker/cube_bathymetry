@@ -55,6 +55,7 @@
 
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/coverage_refresh.h"
+#include "cube_bathymetry/derived_tiles.h"
 #include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/projection_summary.h"
 #include "cube_bathymetry/geo_map_sheet.h"
@@ -65,6 +66,7 @@
 #include "cube_bathymetry/level_plan.h"
 #include "cube_bathymetry/multi_level_accumulator.h"
 #include "cube_bathymetry/recon.h"
+#include "cube_bathymetry/slope_run.h"
 #include "cube_bathymetry/store_import.h"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
 #include "marine_autonomy/gz4d_geo.h"
@@ -157,7 +159,8 @@ bool loadCurveFromBagSonarInfo(
   std::cout << "usage: import_bag [options] -o <store_dir> "
     "-d <detections_topic> <bag> [<bag> ...]\n";
   std::cout << "  -o <store_dir>: Output bathymetry-store directory (created if "
-    "needed). The off-boat CUBE re-run is authoritative, so it always writes the "
+    "needed; required except for a slope run, which refuses it). The off-boat CUBE re-run "
+    "is authoritative, so it always writes the "
     "`survey` layer (uma#248 collapsed the draft/processed split into one)\n";
   std::cout << "  --reference-store <store_dir>: seed the CUBE predicted surface "
     "lazily, per tile on first touch, from this store's `reference` (prior) layer "
@@ -224,6 +227,28 @@ bool loadCurveFromBagSonarInfo(
     "run is refused; a curve or table that records a declaration is refused when none "
     "is given. Per-segment ping counts are printed after the pass, and the "
     "declaration is recorded in the build fingerprint.\n";
+  std::cout << "  --backscatter-angle-basis beam|incidence: the angle the backscatter "
+    "correction is indexed by (cube#173). 'beam' (default) is the sonar-frame receive angle, "
+    "exactly as before. 'incidence' is the SLOPE RUN: the bags are re-read, each beam's "
+    "incidence against the local seabed normal is stamped from a finished depth store "
+    "(--slope-surface), the estimator runs in memory with the correction applied on that "
+    "angle, and ONLY backscatter tiles are published to --bs-store, with a per-tile record "
+    "(derived_tiles.json: the bags and depth tiles that went into each). It needs "
+    "--slope-surface and --bs-store; -o, --depth-adaptive and -l are refused; the correction "
+    "is 'none' or an incidence-angle per-mode table (a single curve, and a SonarInfo curve "
+    "under 'auto', are beam-angle curves and are refused); --bs-store must be empty or "
+    "already a slope-run store with the same inputs. A table is only valid on the basis it "
+    "was fitted on, in both directions. The depths are the ordinary import's; run that "
+    "first.\n";
+  std::cout << "  --slope-surface <bathy store>: the finished depth store the slopes are read "
+    "from (its processed layer, and draft if present; never reference, chart or "
+    "overviews). A beam with no surface cell is stamped with the angle from vertical and "
+    "counted per reason, never slope-corrected.\n";
+  std::cout << "  --slope-baseline-deg <deg>: the angle the differencing baseline subtends at "
+    "the sonar, so it grows with range: full baseline = slant range x angle, floored at one "
+    "native cell either side. In (0, 30], default 5. PROVISIONAL until measured on real "
+    "data; the pass report gives the baseline distribution actually used and how often the "
+    "floor decided.\n";
   std::cout << "  --tile-size-report <csv>: measure the live coverage stream's "
     "per-message size instead of guessing it (cube_bathymetry#112). Every "
     "--tile-report-interval seconds of BAG time, each dirty tile is quantized "
@@ -282,7 +307,9 @@ bool loadCurveFromBagSonarInfo(
     "--achieved-percentile <p> "
     "(95: percentile of the level of aggregation over a tile that decides its "
     "achieved level).\n";
-  std::cout << "    --scratch-dir <dir>: where the recon spill goes (default: beside "
+  std::cout << "    --scratch-dir <dir>: (slope run: the directory the run's unique scratch "
+    "directory is made in, default the parent of --bs-store.) Where the recon spill goes "
+    "(default: beside "
     "the -o store, never /tmp -- it is often tmpfs). The count grid spills "
     "there too, so the free-space check run before the pass starts budgets the "
     "projected sounding spill plus an allowance for the count-tile spill (that "
@@ -382,13 +409,19 @@ public:
   {
     std::string data_type;
     rosbag2_storage::SerializedBagMessageSharedPtr message;
+    /// Which bag (index into the bag list given to BagReaders) this came from.
+    /// A ping keeps it while it waits for the TF frontier, so the slope run
+    /// knows whose beams it is attributing when the ping is finally added
+    /// (cube#173).
+    std::size_t bag_index = 0;
 
     using ConstPtr = std::shared_ptr<const Message>;
 
     Message(
       rosbag2_storage::SerializedBagMessageSharedPtr message,
-      const std::unordered_map<std::string, std::string> & topic_types)
-    : message(message)
+      const std::unordered_map<std::string, std::string> & topic_types,
+      std::size_t bag_index = 0)
+    : message(message), bag_index(bag_index)
     {
       // Look the type up in the bag's cached topic->type map (built once per bag
       // in Bag::open). Previously this called reader.get_all_topics_and_types()
@@ -405,8 +438,8 @@ public:
     const std::vector<std::string> & bagfile_names,
     const std::vector<std::string> & filter_topics)
   {
-    for (const auto & bagfile_name : bagfile_names) {
-      readers_[bagfile_name].open(bagfile_name, filter_topics);
+    for (std::size_t i = 0; i < bagfile_names.size(); ++i) {
+      readers_[bagfile_names[i]].open(bagfile_names[i], filter_topics, i);
     }
   }
 
@@ -476,11 +509,13 @@ private:
     Message::ConstPtr next_message;
     // topic -> type for this bag, built once at open (cube#107).
     std::unordered_map<std::string, std::string> topic_types_;
+    std::size_t index_ = 0;
 
     void open(
       const std::string & file_name,
-      const std::vector<std::string> & filter_topics)
+      const std::vector<std::string> & filter_topics, std::size_t index)
     {
+      index_ = index;
       rosbag2_storage::StorageOptions storage_options;
       storage_options.uri = file_name;
       reader = rosbag2_transport::ReaderWriterFactory::make_reader(storage_options);
@@ -511,7 +546,7 @@ private:
         reader->set_filter(filter);
       }
       if (reader->has_next()) {
-        next_message = std::make_shared<Message>(reader->read_next(), topic_types_);
+        next_message = std::make_shared<Message>(reader->read_next(), topic_types_, index_);
       }
     }
 
@@ -529,7 +564,7 @@ private:
     {
       auto return_value = next_message;
       if (reader->has_next()) {
-        next_message = std::make_shared<Message>(reader->read_next(), topic_types_);
+        next_message = std::make_shared<Message>(reader->read_next(), topic_types_, index_);
       } else {
         next_message.reset();
       }
@@ -1354,6 +1389,15 @@ void maybePrintProgress(
   }
 }
 
+/// A detections message waiting for the TF frontier to pass its stamp, with the
+/// bag it was read from (cube#173: the slope run attributes beams per bag).
+struct PendingPing
+{
+  int64_t ns;
+  marine_acoustic_msgs::msg::SonarDetections detections;
+  std::size_t bag_index;
+};
+
 /// Feed one recorded odometry message to the speed-over-ground map (cube#107).
 void feedOdometry(
   const rosbag2_storage::SerializedBagMessage & message, std::map<int64_t, double> & speed_by_ns,
@@ -1377,15 +1421,21 @@ void feedOdometry(
 /// correction index on every sounding of it, so the record-time correction
 /// picks the ping's table entry; each beam is counted against the table (a
 /// beam of a resolved ping the table cannot correct is reported per reason).
+///
+/// The beam is counted on the angle the run corrects by (cube#173): the beam
+/// angle, or on an incidence run the incidence just stamped, so "at or beyond
+/// 90 deg", "beyond the outermost bin" and beams_correctable describe the angle
+/// that is applied.
 void stampCorrectionIndex(
   std::vector<cube::GeoSounding> & soundings, int64_t ping_ns, float frequency_hz,
-  cube::BackscatterModeResolver & resolver)
+  cube::BackscatterModeResolver & resolver, cube::BackscatterAngleBasis basis)
 {
   const uint16_t correction_idx = resolver.resolve(ping_ns, frequency_hz);
   for (auto & s : soundings) {
     s.sounding.correction_idx = correction_idx;
-    resolver.countBeam(
-      correction_idx, s.sounding.intensity, s.sounding.beam_angle, s.sounding.slant_range);
+    const float angle = basis == cube::BackscatterAngleBasis::Incidence ?
+      s.sounding.incidence_angle : s.sounding.beam_angle;
+    resolver.countBeam(correction_idx, s.sounding.intensity, angle, s.sounding.slant_range);
   }
 }
 
@@ -1406,7 +1456,7 @@ void feedSonarInfo(
   // detections are out of stamp order would hold from a newer ping, and the
   // cap could then drop the state an older waiting ping needs.
   resolver.holdFrom(
-    pending.empty() ? std::nullopt : std::optional<int64_t>(pending.front().first));
+    pending.empty() ? std::nullopt : std::optional<int64_t>(pending.front().ns));
   try {
     rclcpp::SerializedMessage sm(*message.serialized_data);
     marine_interfaces::msg::SonarInfo info;
@@ -1518,6 +1568,60 @@ void warnAboutOrphanedSpills(const std::string & spill_root, const std::string &
             << std::endl;
   for (const auto & path : orphans) {
     std::cerr << "  " << path << std::endl;
+  }
+}
+
+/// Guarded numeric parses: std::stod/std::stoi/std::stoll THROW on a non-numeric value
+/// and, uncaught in main, would std::terminate the process with an opaque message.
+/// Catch and route to usage() with a clear diagnostic instead (mirrors the sibling
+/// batch_regen_main). usage() is [[noreturn]], so these never fall through.
+/// (Free functions rather than lambdas in main() to keep it within cpplint's
+/// function-size limit, cube#173.)
+double parse_double(const char * flag, const std::string & value)
+{
+  try {
+    std::size_t consumed = 0;
+    const double parsed = std::stod(value, &consumed);
+    if (consumed != value.size()) {
+      throw std::invalid_argument("trailing characters");
+    }
+    return parsed;
+  } catch (const std::exception &) {
+    std::cerr << "error: option '" << flag << "' expects a number, got '"
+              << value << "'\n";
+    usage();
+  }
+}
+
+int parse_int(const char * flag, const std::string & value)
+{
+  try {
+    std::size_t consumed = 0;
+    const int parsed = std::stoi(value, &consumed);
+    if (consumed != value.size()) {
+      throw std::invalid_argument("trailing characters");
+    }
+    return parsed;
+  } catch (const std::exception &) {
+    std::cerr << "error: option '" << flag << "' expects an integer, got '"
+              << value << "'\n";
+    usage();
+  }
+}
+
+int64_t parse_long(const char * flag, const std::string & value)
+{
+  try {
+    std::size_t consumed = 0;
+    const int64_t parsed = std::stoll(value, &consumed);
+    if (consumed != value.size()) {
+      throw std::invalid_argument("trailing characters");
+    }
+    return parsed;
+  } catch (const std::exception &) {
+    std::cerr << "error: option '" << flag << "' expects an integer, got '"
+              << value << "'\n";
+    usage();
   }
 }
 
@@ -1829,6 +1933,162 @@ int reportFatalPassError(
   return abortDirtyReplay(
     store_dir, detail + ". The import stopped after " + std::to_string(pings) +
     " ping(s); a full device is the usual cause.");
+}
+
+/// The slope-run command-line state (cube_bathymetry#173).
+struct SlopeFlags
+{
+  std::string basis_text = "beam";
+  std::string surface_dir;
+  double baseline_deg = cube::kDefaultSlopeBaselineDeg;
+  bool baseline_given = false;
+  cube::BackscatterAngleBasis basis = cube::BackscatterAngleBasis::Beam;
+};
+
+/// Parse the angle basis and check the request: which flags a slope run needs
+/// and refuses (exits via usage() on a problem). Also refuses an ordinary run
+/// onto a slope-run backscatter store, which a beam-angle layer would be blended
+/// into. Returns true for a slope run (`--backscatter-angle-basis incidence`).
+bool resolveSlopeRequest(
+  SlopeFlags & flags, const std::string & store_dir, const std::string & bs_store_dir,
+  bool depth_adaptive, int ping_limit)
+{
+  if (!cube::parseBackscatterAngleBasis(flags.basis_text, flags.basis)) {
+    std::cerr << "error: --backscatter-angle-basis must be 'beam' or 'incidence' (got '"
+              << flags.basis_text << "')\n";
+    usage();
+  }
+  cube::SlopeRunRequest request;
+  request.basis = flags.basis;
+  request.store_dir = store_dir;
+  request.bs_store_dir = bs_store_dir;
+  request.surface_dir = flags.surface_dir;
+  request.baseline_given = flags.baseline_given;
+  request.baseline_deg = flags.baseline_deg;
+  request.depth_adaptive = depth_adaptive;
+  request.ping_limit = ping_limit;
+  const std::string problem = cube::slopeRunRequestProblem(request);
+  if (!problem.empty()) {
+    std::cerr << "error: " << problem << "\n";
+    usage();
+  }
+  const bool slope_run = flags.basis == cube::BackscatterAngleBasis::Incidence;
+  if (!slope_run && !bs_store_dir.empty() && cube::hasDerivedTilesRecord(bs_store_dir)) {
+    std::cerr << "error: --bs-store " << bs_store_dir << " holds derived_tiles.json: it is a "
+      "slope-run store, derived per tile from its bags, and an ordinary import would blend "
+      "beam-angle values into it. Use another directory\n";
+    usage();
+  }
+  return slope_run;
+}
+
+/// Everything about a slope run that can be refused before a bag is opened:
+/// the correction it was given, the bags' identities, the store (lock, repair of
+/// an interrupted publish, inputs, kind) and the surface. Null (after saying why)
+/// when refused; exits via usage() for a bad request.
+std::unique_ptr<cube::SlopeRun> startSlopeRun(
+  const SlopeFlags & flags, const std::string & bs_store_dir, const std::string & scratch_dir,
+  const std::vector<std::string> & bagfile_names, const BackscatterSetup & backscatter,
+  const GainSetup & gain, uint8_t level)
+{
+  std::string problem = cube::slopeCorrectionProblem(
+    backscatter.provenance.kind, backscatter.provenance.source);
+  cube::SlopeRunConfig config;
+  if (problem.empty()) {
+    try {
+      for (const std::string & bag : bagfile_names) {
+        config.bags.push_back(cube::bagIdentity(bag));
+      }
+    } catch (const std::exception & e) {
+      problem = e.what();
+    }
+  }
+  if (problem.empty()) {
+    problem = cube::duplicateBagProblem(config.bags);
+  }
+  const std::vector<std::string> layers = cube::slopeSurfaceLayers(flags.surface_dir);
+  if (problem.empty() && layers.empty()) {
+    problem = "--slope-surface " + flags.surface_dir +
+      " has neither a processed nor a draft layer directory";
+  }
+  if (!problem.empty()) {
+    std::cerr << "error: " << problem << "\n";
+    usage();
+  }
+  config.surface_dir = flags.surface_dir;
+  config.bs_store_dir = bs_store_dir;
+  config.scratch_root = scratch_dir;
+  config.baseline_deg = flags.baseline_deg;
+  for (const std::string & layer : layers) {
+    config.inputs.slope_layers += (config.inputs.slope_layers.empty() ? "" : ",") + layer;
+  }
+  config.inputs.slope_baseline_deg = flags.baseline_deg;
+  config.inputs.correction = backscatter.provenance.kind == "table" ?
+    "table:" + backscatter.provenance.sha256 : "none";
+  if (gain.resolver) {
+    config.inputs.gain_declaration_sha256 = gain.sha256;
+    config.inputs.gain_reference_state = gain.declaration.reference_state;
+  }
+  config.inputs.level = level;
+  const cube::BackscatterTable & table = backscatter.table;
+  if (backscatter.provenance.kind == "table" &&
+    (table.slope_baseline_deg != flags.baseline_deg ||
+    table.slope_layers != config.inputs.slope_layers))
+  {
+    std::cerr << "warning: the incidence table was fitted with a " << table.slope_baseline_deg
+              << " deg baseline on layer(s) '" << table.slope_layers << "', and this run uses "
+              << flags.baseline_deg << " deg on '" << config.inputs.slope_layers
+              << "': the incidence angles it is applied to differ slightly in distribution.\n";
+  }
+  std::string error;
+  auto run = cube::SlopeRun::create(config, error);
+  if (!run) {
+    std::cerr << "error: " << error << std::endl;
+    return nullptr;
+  }
+  std::cout << run->recoveryText() << run->leftoverText();
+  std::cout << "Slope run: incidence against the " << config.inputs.slope_layers
+            << " layer(s) of " << flags.surface_dir << ", baseline " << flags.baseline_deg
+            << " deg of range (floor: one native cell); " << bagfile_names.size()
+            << " bag(s); publishing backscatter only to " << bs_store_dir << " (scratch "
+            << run->scratchDir() << ")." << std::endl;
+  return run;
+}
+
+/// Slope-run finish: report, then finalize into the scratch stores and publish.
+/// Nothing reaches the destination on exit 4 (a table that resolved no ping), a
+/// failed finalize or a failed publish. Returns the process exit code.
+int slopeRunFinish(
+  cube::SlopeRun & run, cube::ImportAccumulator & accumulator,
+  const marine_mbes_backscatter_store::StoreMetadata & bs_metadata, bool table_unresolved)
+{
+  std::cout << "The per-beam table counts above are on each beam's incidence angle, the angle "
+    "applied, not the sonar-frame beam angle.\n" << run.counters().report();
+  if (table_unresolved) {
+    std::cerr << "error: the per-pulse-mode table corrected no ping (see the error after the "
+      "pass), so nothing was published: a slope-corrected layer with no correction in it "
+      "would pass for a corrected one. The run exits 4." << std::endl;
+    return 4;
+  }
+  try {
+    accumulator.finalize(nullptr, bs_metadata.empty() ? nullptr : &bs_metadata);
+  } catch (const std::exception & e) {
+    std::cerr << "error: the scratch stores could not be finalized (" << e.what()
+              << "). Nothing was published." << std::endl;
+    return 1;
+  }
+  // Cumulative scratch writes (evictions included): shows that a bounded run
+  // really evicted and reloaded, as for an ordinary one.
+  std::cout << "Scratch stores: " << accumulator.bathyTilesPersisted()
+            << " depth tile write(s), " << accumulator.backscatterTilesPersisted()
+            << " backscatter tile write(s) (evictions included)." << std::endl;
+  std::string error, summary;
+  if (!run.publish(error, summary)) {
+    std::cerr << "error: " << error << std::endl;
+    return 1;
+  }
+  std::cout << summary << "done!" << std::endl;
+  return 0;
 }
 
 /// Fixed-level finish (cube#143: lifted out of main(), which is at the cpplint
@@ -2291,6 +2551,7 @@ int main(int argc, char * argv[])
   double count_spill_allowance = 1.0;
   bool count_spill_allowance_given = false;
   std::string scratch_dir;
+  SlopeFlags slope_flags;  // the slope run (cube#173)
   std::string level_plan_out;
   std::string level_plan_in;
   std::string count_grid_out;
@@ -2318,53 +2579,6 @@ int main(int argc, char * argv[])
       return *arg;
     };
 
-  // Guarded numeric parses: std::stod/std::stoi/std::stoll THROW on a non-numeric value
-  // and, uncaught in main, would std::terminate the process with an opaque message.
-  // Catch and route to usage() with a clear diagnostic instead (mirrors the sibling
-  // batch_regen_main). usage() is [[noreturn]], so these never fall through.
-  auto parse_double = [&](const char * flag, const std::string & value) -> double {
-      try {
-        std::size_t consumed = 0;
-        const double parsed = std::stod(value, &consumed);
-        if (consumed != value.size()) {
-          throw std::invalid_argument("trailing characters");
-        }
-        return parsed;
-      } catch (const std::exception &) {
-        std::cerr << "error: option '" << flag << "' expects a number, got '"
-                  << value << "'\n";
-        usage();
-      }
-    };
-  auto parse_int = [&](const char * flag, const std::string & value) -> int {
-      try {
-        std::size_t consumed = 0;
-        const int parsed = std::stoi(value, &consumed);
-        if (consumed != value.size()) {
-          throw std::invalid_argument("trailing characters");
-        }
-        return parsed;
-      } catch (const std::exception &) {
-        std::cerr << "error: option '" << flag << "' expects an integer, got '"
-                  << value << "'\n";
-        usage();
-      }
-    };
-  auto parse_long = [&](const char * flag, const std::string & value) -> int64_t {
-      try {
-        std::size_t consumed = 0;
-        const int64_t parsed = std::stoll(value, &consumed);
-        if (consumed != value.size()) {
-          throw std::invalid_argument("trailing characters");
-        }
-        return parsed;
-      } catch (const std::exception &) {
-        std::cerr << "error: option '" << flag << "' expects an integer, got '"
-                  << value << "'\n";
-        usage();
-      }
-    };
-
   for (; arg != arguments.end(); arg++) {
     if (*arg == "-h") {
       usage();
@@ -2384,6 +2598,14 @@ int main(int argc, char * argv[])
       iho_order = next_value("--iho-order");
     } else if (*arg == "--backscatter-correction") {
       backscatter_correction_str = next_value("--backscatter-correction");
+    } else if (*arg == "--backscatter-angle-basis") {
+      slope_flags.basis_text = next_value("--backscatter-angle-basis");
+    } else if (*arg == "--slope-surface") {
+      slope_flags.surface_dir = next_value("--slope-surface");
+    } else if (*arg == "--slope-baseline-deg") {
+      slope_flags.baseline_deg =
+        parse_double("--slope-baseline-deg", next_value("--slope-baseline-deg"));
+      slope_flags.baseline_given = true;
     } else if (*arg == "--backscatter-curve") {
       backscatter_curve_file = next_value("--backscatter-curve");
     } else if (*arg == "--backscatter-gain-declaration") {
@@ -2517,20 +2739,25 @@ int main(int argc, char * argv[])
     }
   }
 
-  if (store_dir.empty() || detections_topic.empty() || bagfile_names.empty()) {
-    std::cerr << "error: -o <store_dir>, -d <detections_topic>, and "
+  const bool slope_run = resolveSlopeRequest(
+    slope_flags, store_dir, bs_store_dir, depth_adaptive, ping_count_limit);
+  if ((store_dir.empty() && !slope_run) || detections_topic.empty() || bagfile_names.empty()) {
+    std::cerr << "error: -o <store_dir> (not for a slope run), -d <detections_topic>, and "
       "at least one bag are all required\n";
     usage();
   }
 
+  // --scratch-dir is legal for a slope run (its scratch root), not for a plan.
   validateDepthAdaptiveOptions(
     depth_adaptive, level_policy, count_level_given, count_resident_tiles_given,
-    count_spill_allowance_given, level_plan_out, level_plan_in, count_grid_out, scratch_dir,
-    tile_size_report_path, bs_store_dir);
+    count_spill_allowance_given, level_plan_out, level_plan_in, count_grid_out,
+    slope_run ? std::string() : scratch_dir, tile_size_report_path, bs_store_dir);
 
   std::cout << "Detections topic: " << detections_topic
             << " (offline projection, vessel_speed = NaN)" << std::endl;
-  std::cout << "Store dir: " << store_dir << std::endl;
+  const std::string store_dir_label =
+    slope_run ? "(none: a slope run writes backscatter only)" : store_dir;
+  std::cout << "Store dir: " << store_dir_label << std::endl;
 
   cube::DetectionsProjector projector(projector_params);
 
@@ -2546,11 +2773,23 @@ int main(int argc, char * argv[])
   BackscatterSetup backscatter;
   setupBackscatter(backscatter, backscatter_correction_str, backscatter_curve_file,
     sonar_info_topic, detections_topic, bagfile_names, backscatter_mode_fallback_str,
-    backscatter_mode_min_pings, cube::BackscatterAngleBasis::Beam);
+    backscatter_mode_min_pings, slope_flags.basis);
   cube::BackscatterModeResolver * mode_resolver = backscatter.resolver.get();
   GainSetup gain;
   setupGainOrUsage(gain, gain_declaration_file, backscatter, backscatter_curve_file);
   const std::string & effective_sonar_info_topic = backscatter.sonar_info_topic;
+  // The slope run's early refusals (lock, interrupted publish, store inputs,
+  // surface, bag identities) all come before any bag is opened. Declared before
+  // the accumulator so its scratch directory outlives it and is removed last.
+  std::unique_ptr<cube::SlopeRun> slope;
+  if (slope_run) {
+    slope = startSlopeRun(
+      slope_flags, bs_store_dir, scratch_dir, bagfile_names, backscatter, gain,
+      gggs::Level::fromCellSize(static_cast<float>(resolution)).level());
+    if (!slope) {
+      return 1;
+    }
+  }
 
   // Main-pass read filter (cube#107): restrict each reader to the topics the
   // projection consumes. /tf and /tf_static are added per-bag inside Bag::open
@@ -2604,6 +2843,7 @@ int main(int argc, char * argv[])
   if (!backscatter.table.empty()) {
     geo_map_sheet.setBackscatterTable(backscatter.table, backscatter.fallback);
   }
+  geo_map_sheet.setBackscatterAngleBasis(slope_flags.basis);
 
   // Reference-prior seeding (#89, #96) is now LAZY, per tile on first touch, driven
   // by the accumulator's seedNewTile (see ImportAccumulatorConfig::reference_store_dir
@@ -2630,13 +2870,16 @@ int main(int argc, char * argv[])
   bs_metadata.date = store_metadata.date;
 
   cube::ImportAccumulatorConfig accumulator_config;
-  accumulator_config.store_dir = store_dir;
+  // A slope run accumulates into fresh scratch stores (no warm start from any
+  // earlier tile, by construction) and publishes only backscatter afterwards.
+  accumulator_config.store_dir = slope ? slope->scratchDepthDir() : store_dir;
+  accumulator_config.spill_root = slope ? slope->scratchSpillDir() : std::string();
   accumulator_config.reference_store_dir = reference_store_dir;
   // Match the store level to the sheet's actual (GGGS-snapped) cell size so the
   // reload/seed/merge scratch stores tile identically.
   accumulator_config.cell_size_m =
     static_cast<float>(geo_map_sheet.nominalCellSizeMeters());
-  accumulator_config.bs_store_dir = bs_store_dir;
+  accumulator_config.bs_store_dir = slope ? slope->scratchBsDir() : bs_store_dir;
   accumulator_config.max_resident_tiles = max_resident_tiles;
   cube::ImportAccumulator accumulator(geo_map_sheet, accumulator_config);
 
@@ -2703,8 +2946,8 @@ int main(int argc, char * argv[])
   size_t tf_count = 0;
   int64_t tf_frontier_ns = std::numeric_limits<int64_t>::min();
 
-  // Detections awaiting their bracketing TF (ping stamp ns -> message).
-  std::deque<std::pair<int64_t, marine_acoustic_msgs::msg::SonarDetections>> pending;
+  // Detections awaiting their bracketing TF.
+  std::deque<PendingPing> pending;
 
   bool limit_reached = false;
   // A fatal I/O failure raised from inside the per-ping work (cube#143 triage):
@@ -2727,7 +2970,8 @@ int main(int argc, char * argv[])
 
   // Project + georeference one ping into the GeoMapSheet.
   auto process_detection =
-    [&](const marine_acoustic_msgs::msg::SonarDetections & detections, int64_t ping_ns) {
+    [&](const marine_acoustic_msgs::msg::SonarDetections & detections, int64_t ping_ns,
+    std::size_t bag_index) {
       // Real speed-over-ground from odom (Fix B) if available, else NaN -- the
       // error model floors the speed-dependent horizontal-TPU terms to 0 (Fix A).
       const float vessel_speed = speedAt(speed_by_ns, ping_ns);
@@ -2760,10 +3004,18 @@ int main(int argc, char * argv[])
         // intensity FIRST, for every ping of every mode, resolved or not -- it
         // is a receiver calibration, not part of the mode table.
         applyGainState(gain, soundings, ping_ns);
+        // Slope run (cube#173): incidence is stamped BEFORE the table accounting
+        // below, so every per-beam count describes the angle that is applied.
+        std::string refusal;
+        if (slope && !slope->prepare(soundings, bag_index, geo_map_sheet, refusal)) {
+          fatal_error = refusal;
+          return;
+        }
         if (mode_resolver) {
           // One pulse mode per ping (cube#172): the latest SonarInfo at or
           // before the ping stamp plus the ping's own frequency.
-          stampCorrectionIndex(soundings, ping_ns, detections.ping_info.frequency, *mode_resolver);
+          stampCorrectionIndex(
+            soundings, ping_ns, detections.ping_info.frequency, *mode_resolver, slope_flags.basis);
         }
         if (recon) {
           // Recon pass (cube#143): count, reservoir and spill; no estimation.
@@ -2807,13 +3059,13 @@ int main(int argc, char * argv[])
   auto drain_pending = [&](bool flush) {
       int64_t last_drained_ns = std::numeric_limits<int64_t>::min();
       while (!pending.empty() && !limit_reached && fatal_error.empty()) {
-        const int64_t ping_ns = pending.front().first;
+        const int64_t ping_ns = pending.front().ns;
         if (!flush && (tf_frontier_ns == std::numeric_limits<int64_t>::min() ||
           ping_ns > tf_frontier_ns - kGuardNs))
         {
           break;
         }
-        process_detection(pending.front().second, ping_ns);
+        process_detection(pending.front().detections, ping_ns, pending.front().bag_index);
         last_drained_ns = ping_ns;
         pending.pop_front();
         if (ping_count_limit > 0 && ping_count >= ping_count_limit) {
@@ -2878,7 +3130,7 @@ int main(int argc, char * argv[])
           &sm, &detections);
         const int64_t ping_ns = static_cast<int64_t>(detections.header.stamp.sec) * 1000000000LL +
           detections.header.stamp.nanosec;
-        pending.emplace_back(ping_ns, std::move(detections));
+        pending.push_back({ping_ns, std::move(detections), message->bag_index});
       } catch (const std::exception & e) {
         std::cerr << e.what() << '\n';
       }
@@ -2890,6 +3142,12 @@ int main(int argc, char * argv[])
   }
   // Flush detections still pending at end-of-stream against available coverage.
   drain_pending(true);
+  if (!fatal_error.empty() && slope) {
+    std::cerr << "\nerror: " << fatal_error << std::endl;
+    std::cerr << "The slope run stopped after " << ping_count << " ping(s); nothing was published "
+      "and the scratch directory is removed." << std::endl;
+    return 1;
+  }
   if (!fatal_error.empty()) {
     return reportFatalPassError(fatal_error, recon != nullptr, ping_count, store_dir);
   }
@@ -2910,6 +3168,9 @@ int main(int argc, char * argv[])
   proj_totals.georeferenced_pings = static_cast<size_t>(ping_count);
   cube::report_projection_summary(proj_totals, std::cout, std::cerr);
   const bool table_unresolved = reportModeResolution(backscatter, gain);
+  if (slope) {
+    return slopeRunFinish(*slope, accumulator, bs_metadata, table_unresolved);
+  }
 
   if (recon) {
     return withTableResolution(cube_depth_adaptive_finish(
