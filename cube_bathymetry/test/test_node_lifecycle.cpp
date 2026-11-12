@@ -597,7 +597,7 @@ TEST_F(NodeLifecycle, AnUnreadableTileIsNeverOverwritten)
     std::ifstream in(tile, std::ios::binary);
     after.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
   }
-  EXPECT_EQ(after, before) << "the unreadable tile must be left exactly as found";
+  EXPECT_TRUE(after == before) << "the unreadable tile must be left exactly as found";
   EXPECT_FALSE(std::filesystem::exists(tile.string() + ".partial"));
   std::filesystem::remove_all(dir);
 }

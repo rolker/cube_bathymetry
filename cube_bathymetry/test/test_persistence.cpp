@@ -374,7 +374,7 @@ TEST(Persistence, AtomicWriteFailureKeepsTheOriginalTile)
         throw std::runtime_error("disk full");
       }),
     std::runtime_error);
-  EXPECT_EQ(slurp(path), before) << "a failed write must not touch the good tile";
+  EXPECT_TRUE(slurp(path) == before) << "a failed write must not touch the good tile";
   EXPECT_FALSE(std::filesystem::exists(path + ".partial"));
 
   // A leftover temp from an earlier crash is replaced, not tripped over, and a
