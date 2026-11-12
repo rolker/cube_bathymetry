@@ -19,6 +19,7 @@
   <depend>marine_acoustic_msgs</depend>
   <depend>nav_msgs</depend>  <!-- odometry for speed-over-ground -->
   <depend>marine_autonomy</depend>
+  <depend>marine_backscatter</depend>  <!-- seabed normal + incidence angle for the slope run (#173) -->
   <depend>marine_bathymetry_store</depend>  <!-- store tile import (#57, flat grid #69) -->
   <depend>marine_interfaces</depend>  <!-- SonarVisualizationTile transport (#230) -->
   <depend>marine_tiled_raster_store</depend>  <!-- TileCatalogBuilder (#230) -->

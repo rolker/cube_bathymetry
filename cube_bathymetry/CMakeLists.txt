@@ -29,6 +29,7 @@ find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
+find_package(marine_backscatter REQUIRED)  # seabed normal and incidence angle (#173)
 find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
 find_package(marine_interfaces REQUIRED)  # SonarVisualizationTile transport (#230)
 find_package(marine_tiled_raster_store REQUIRED)  # TileCatalogBuilder (#230)
@@ -170,6 +171,25 @@ install(TARGETS cube_bathymetry_survey_index_query EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
+
+# Incidence angle against the local seabed normal (#173). Its own target so the
+# marine_backscatter dependency (the shared seabed-geometry module, plus the
+# store reader behind BathyDem) stays out of the core cube_bathymetry library
+# and the live node.
+add_library(cube_bathymetry_slope_incidence src/slope_incidence.cpp)
+target_include_directories(cube_bathymetry_slope_incidence PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_slope_incidence
+  cube_bathymetry
+  marine_backscatter::marine_backscatter
+)
+install(TARGETS cube_bathymetry_slope_incidence EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
 
 # GeoMapSheet -> map-frame grid_map projection (#21). In its own target so the
 # live publish path is unit-testable (publish-equivalence regression test) with
@@ -550,6 +570,15 @@ if(BUILD_TESTING)
   ament_add_gtest(test_coverage_refresh test/test_coverage_refresh.cpp)
   target_link_libraries(test_coverage_refresh cube_bathymetry)
 
+  # Incidence angle against the seabed normal: known-answer planes, the
+  # fallback counts, the baseline, the aspect-independence of the corrected
+  # level, and a measurement of the sampler cost over a real-sized store (#173).
+  ament_add_gtest(test_slope_incidence test/test_slope_incidence.cpp TIMEOUT 300)
+  target_link_libraries(test_slope_incidence
+    cube_bathymetry_slope_incidence
+    marine_bathymetry_store::marine_bathymetry_store
+  )
+
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
 
@@ -695,7 +724,7 @@ endif()
 # must find OpenSSL too or that imported target names a target that does not
 # exist.
 ament_export_dependencies(
-  rclcpp marine_bathymetry_store marine_mbes_backscatter_store OpenSSL)
+  rclcpp marine_bathymetry_store marine_mbes_backscatter_store marine_backscatter OpenSSL)
 
 # Export old-style CMake variables
 ament_export_include_directories(include/${PROJECT_NAME})
