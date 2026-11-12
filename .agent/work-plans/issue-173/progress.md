@@ -208,8 +208,8 @@ Sources: two Claude adversarial passes (lens A and B), Gemini and Codex (local r
 - [x] (suggestion) registry.json overwritten by every publish; unrecorded tile deleted; put/delete overlap; counters not adding up; NaN guards; baseline text precision; "never committed" text for an empty incoming dir — fixed
 - [ ] (suggestion) accumulator reload/restore failures do not block a slope publish (Codex) — `store_import.cpp`
 - [ ] (suggestion) depth tiles are hashed at publish time, not at first read (both lenses) — `slope_run.cpp`
-- [ ] (suggestion) a run with no finite backscatter, or with dropped georeferencing, exits 0 with a warning — `slope_run.cpp`
-- [ ] (suggestion) a table's recorded baseline/layers only warn on mismatch — `import_bag_main.cpp`
+- [x] (suggestion) a run with no finite backscatter, or with dropped georeferencing, exits 0 with a warning — `slope_run.cpp` (fixed in a06fed1, merged with PR 179: no cells exits 1 and publishes nothing; dropped georeferencing keeps the ordinary run's tolerance and is counted in the report and recorded per tile as `dropped_georef_pings`, as instructed then)
+- [x] (suggestion) a table's recorded baseline/layers only warn on mismatch — `import_bag_main.cpp` (fixed in a06fed1, merged with PR 179: refused, naming both values)
 - [ ] (suggestion) --reference-store is not recorded in the store inputs — `import_bag_main.cpp`
 - [ ] (suggestion) longitude intersection in SurfaceTileIndex does not wrap at the antimeridian — `derived_tiles.cpp`
 - [ ] (suggestion) beam importers do not take the store lock while checking for derived_tiles.json — `import_bag_main.cpp`
