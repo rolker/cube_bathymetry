@@ -457,6 +457,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_gain_state_resolver test/test_gain_state_resolver.cpp)
   target_link_libraries(test_gain_state_resolver cube_bathymetry)
 
+  # Which angle the angular-response correction is indexed by (#173).
+  ament_add_gtest(test_incidence_basis test/test_incidence_basis.cpp)
+  target_link_libraries(test_incidence_basis cube_bathymetry)
+
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
 

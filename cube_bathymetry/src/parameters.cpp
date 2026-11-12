@@ -29,6 +29,12 @@
 namespace cube
 {
 
+float Parameters::correctionAngle(const Sounding & sounding) const
+{
+  return backscatter_angle_basis == BackscatterAngleBasis::Incidence ?
+         sounding.incidence_angle : sounding.beam_angle;
+}
+
 Parameters::Parameters(CellSizes sizes, std::string order)
 :iho_order(order)
 {

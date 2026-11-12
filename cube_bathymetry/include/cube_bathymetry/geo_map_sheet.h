@@ -104,6 +104,13 @@ public:
       BackscatterTable table,
       BackscatterModeFallback fallback = BackscatterModeFallback::Identity);
 
+  /// @brief Choose the angle the backscatter correction is indexed by
+  ///        (cube_bathymetry#173): the sonar-frame beam angle (default) or the
+  ///        incidence angle stamped on each sounding. Reaches every owned grid
+  ///        like setBackscatterCorrection. Set once, before the first sounding:
+  ///        changing it mid-run would mix bases inside one node's sums.
+    void setBackscatterAngleBasis(BackscatterAngleBasis basis);
+
   /// @brief Set the spacing term of the node capture distance
   ///        (`Parameters::capture_spacing_scale`, cube_bathymetry#143).
   ///

@@ -98,6 +98,11 @@ void GeoMapSheet::setBackscatterTable(BackscatterTable table, BackscatterModeFal
   parameters_.backscatter_mode_fallback = fallback;
 }
 
+void GeoMapSheet::setBackscatterAngleBasis(BackscatterAngleBasis basis)
+{
+  parameters_.backscatter_angle_basis = basis;
+}
+
 void GeoMapSheet::setCaptureSpacingScale(float scale)
 {
   if (!std::isfinite(scale) || scale <= 0.0f) {
