@@ -196,7 +196,7 @@ TEST(BackscatterTable, DetectsTablesByTheFormatLineOnly)
 // cube_bathymetry#172 review: a near-miss first line must not fall through to
 // the single-curve loader (an empty curve and only a WARN). A BOM or leading
 // blank lines are tolerated; another version is a table, and refused.
-TEST(BackscatterTable, NearMissFormatLinesAreTablesAndOnlyV1Loads)
+TEST(BackscatterTable, NearMissFormatLinesAreTablesAndOnlyV1AndV2Load)
 {
   const std::string header(kHeader);
   const std::string body = header.substr(header.find('\n') + 1) + kGoodRows;
@@ -210,7 +210,7 @@ TEST(BackscatterTable, NearMissFormatLinesAreTablesAndOnlyV1Loads)
     {"bom", "\xEF\xBB\xBF# format: angular-response-table v1\n", true},
     {"blank_lines", "\n  \n# format: angular-response-table v1\r\n", true},
     {"trailing_blank", "# format: angular-response-table v1  \n", true},
-    {"v2", "# format: angular-response-table v2\n", false},
+    {"v3", "# format: angular-response-table v3\n", false},
     {"no_version", "# format: angular-response-table\n", false},
   };
   for (const auto & c : cases) {
@@ -228,7 +228,7 @@ TEST(BackscatterTable, NearMissFormatLinesAreTablesAndOnlyV1Loads)
   // Review round 3: the first line is read before the per-line bound, so the
   // error quotes only its start.
   const auto long_first = writeTemp(
-    "long_first", "# format: angular-response-table v2" + std::string(1000000, 'x') + "\n" +
+    "long_first", "# format: angular-response-table v3" + std::string(1000000, 'x') + "\n" +
     body);
   std::string long_error;
   EXPECT_TRUE(loadBackscatterTable(long_first, long_error).empty());
@@ -925,6 +925,116 @@ TEST(BackscatterTable, OverlappingGroupsAreRejected)
   EXPECT_TRUE(loadBackscatterTable(path, error).empty());
   EXPECT_NE(error.find("overlapping"), std::string::npos) << error;
   std::filesystem::remove(path);
+}
+
+
+// Incidence tables (cube_bathymetry#173): their own format line, plus the three
+// records, each required exactly once.
+namespace
+{
+const char * kIncidenceRecords =
+  "# angle_basis: incidence\n"
+  "# slope_baseline_deg: 5\n"
+  "# slope_layers: processed,draft\n";
+
+/// kHeader with the format line swapped for the incidence one and @p records
+/// inserted after it.
+std::string incidenceTable(const std::string & records, const std::string & format_line)
+{
+  const std::string header(kHeader);
+  return format_line + "\n" + records + header.substr(header.find('\n') + 1) + kGoodRows;
+}
+const char * kV2 = "# format: angular-response-table v2";
+}  // namespace
+
+TEST(BackscatterTableBasis, AnIncidenceTableLoadsWithItsSlopeSettings)
+{
+  const auto path = writeTemp("inc_good", incidenceTable(kIncidenceRecords, kV2));
+  std::string error;
+  const auto table = loadBackscatterTable(path, error);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_EQ(table.entries.size(), 1u);
+  EXPECT_EQ(table.angle_basis, BackscatterAngleBasis::Incidence);
+  EXPECT_DOUBLE_EQ(table.slope_baseline_deg, 5.0);
+  EXPECT_EQ(table.slope_layers, "processed,draft");
+  std::filesystem::remove(path);
+}
+
+TEST(BackscatterTableBasis, ABeamTableIsABeamTableWithNoSlopeSettings)
+{
+  const auto path = writeTemp("beam_basis", std::string(kHeader) + kGoodRows);
+  std::string error;
+  const auto table = loadBackscatterTable(path, error);
+  ASSERT_TRUE(error.empty()) << error;
+  EXPECT_EQ(table.angle_basis, BackscatterAngleBasis::Beam);
+  EXPECT_TRUE(std::isnan(table.slope_baseline_deg));
+  EXPECT_TRUE(table.slope_layers.empty());
+  std::filesystem::remove(path);
+}
+
+// Each record is required, once, and with a value; none is allowed under v1.
+TEST(BackscatterTableBasis, TheRecordsAreRequiredOnceAndOnlyInTheIncidenceFormat)
+{
+  struct Case
+  {
+    const char * tag;
+    std::string records;
+    const char * format;
+    const char * expect;
+  };
+  const std::string basis = "# angle_basis: incidence\n";
+  const std::string base = "# slope_baseline_deg: 5\n";
+  const std::string layers = "# slope_layers: processed\n";
+  const std::vector<Case> cases = {
+    {"no_basis", base + layers, kV2, "angle_basis"},
+    {"no_baseline", basis + layers, kV2, "slope_baseline_deg"},
+    {"no_layers", basis + base, kV2, "slope_layers"},
+    {"empty_layers", basis + base + "# slope_layers:\n", kV2, "slope_layers"},
+    {"basis_beam", "# angle_basis: beam\n" + base + layers, kV2, "must read 'incidence'"},
+    {"basis_twice", basis + basis + base + layers, kV2, "given twice"},
+    {"baseline_twice", basis + base + base + layers, kV2, "given twice"},
+    {"layers_twice", basis + base + layers + layers, kV2, "given twice"},
+    {"baseline_zero", basis + "# slope_baseline_deg: 0\n" + layers, kV2, "(0, 30]"},
+    {"baseline_big", basis + "# slope_baseline_deg: 31\n" + layers, kV2, "(0, 30]"},
+    {"baseline_nan", basis + "# slope_baseline_deg: nan\n" + layers, kV2, "(0, 30]"},
+    {"baseline_text", basis + "# slope_baseline_deg: wide\n" + layers, kV2, "(0, 30]"},
+    // The records under the v1 line: a table that says two things.
+    {"v1_with_records", basis + base + layers, "# format: angular-response-table v1",
+      "belong to the incidence format"},
+    {"v1_with_basis_only", basis, "# format: angular-response-table v1",
+      "belong to the incidence format"},
+  };
+  for (const auto & c : cases) {
+    const auto path = writeTemp(c.tag, incidenceTable(c.records, c.format));
+    std::string error;
+    const auto table = loadBackscatterTable(path, error);
+    EXPECT_TRUE(table.empty()) << c.tag;
+    EXPECT_NE(error.find(c.expect), std::string::npos) << c.tag << ": " << error;
+    std::filesystem::remove(path);
+  }
+}
+
+// Decision 9, both directions, with the message naming what is wrong.
+TEST(BackscatterTableBasis, ATableIsRefusedOnTheOtherBasis)
+{
+  const auto inc_path = writeTemp("basis_inc", incidenceTable(kIncidenceRecords, kV2));
+  const auto beam_path = writeTemp("basis_beam", std::string(kHeader) + kGoodRows);
+  std::string error;
+  const auto incidence = loadBackscatterTable(inc_path, error);
+  const auto beam = loadBackscatterTable(beam_path, error);
+  ASSERT_FALSE(incidence.empty());
+  ASSERT_FALSE(beam.empty());
+
+  EXPECT_TRUE(angleBasisProblem(incidence, BackscatterAngleBasis::Incidence, "t").empty());
+  EXPECT_TRUE(angleBasisProblem(beam, BackscatterAngleBasis::Beam, "t").empty());
+  const std::string on_beam = angleBasisProblem(incidence, BackscatterAngleBasis::Beam, "table T");
+  EXPECT_NE(on_beam.find("table T is an incidence-angle table"), std::string::npos) << on_beam;
+  const std::string on_incidence =
+    angleBasisProblem(beam, BackscatterAngleBasis::Incidence, "table T");
+  EXPECT_NE(on_incidence.find("table T is a beam-angle table"), std::string::npos)
+    << on_incidence;
+  std::filesystem::remove(inc_path);
+  std::filesystem::remove(beam_path);
 }
 
 }  // namespace cube

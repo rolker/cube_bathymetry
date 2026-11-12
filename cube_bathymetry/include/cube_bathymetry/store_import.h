@@ -382,6 +382,11 @@ namespace cube
   /// Optional MBES backscatter store directory (the importer's `--bs-store`).
   /// Empty disables backscatter co-persistence. Always writes the `survey` layer.
     std::string bs_store_dir;
+  /// Directory the per-cell intensity spill goes under (a unique subdirectory
+  /// is made there on the first eviction). Empty = the system temp directory,
+  /// as before. The slope run of `import_bag` points it into its own scratch
+  /// directory so that one removal clears everything the run wrote (#173).
+    std::string spill_root;
   /// Maximum resident GeoGrid tiles before persist-then-drop eviction runs.
   /// 0 = unbounded (never evict — the pre-#92 whole-survey-in-RAM behavior).
     std::size_t max_resident_tiles = 0;
@@ -508,6 +513,11 @@ public:
     std::size_t bathyTilesPersisted() const {return bathy_persisted_;}
   /// @brief Cumulative backscatter tile writes (eviction + finalize).
     std::size_t backscatterTilesPersisted() const {return bs_persisted_;}
+  /// @brief Non-empty when a reload, a seed or a spill restore failed, so that
+  ///        some tile holds a partial population (cube_bathymetry#173). The
+  ///        ordinary import warns and carries on; the slope run, whose tiles are
+  ///        a derived product, refuses to publish.
+    std::string integrityProblem() const;
   /// @brief The scratch spill directory (empty until the first eviction). Exposed
   ///        for tests that assert it is cleaned up after @ref finalize.
     const std::string & scratchDir() const {return scratch_dir_;}
@@ -555,9 +565,14 @@ private:
   /// evicted tile was seeded, so it reloads (from its own written survey tile)
   /// rather than re-seeding from the reference prior.
     std::set < gggs::GridIndex > seeded_;
+  /// Tiles whose intensity spill was written and not since dropped: a reload that
+  /// cannot find one of these files has lost beams (counted, see integrityProblem).
+    std::set < gggs::GridIndex > spilled_;
     std::string scratch_dir_;  // lazily created on first eviction; "" = none
     std::size_t bathy_persisted_ = 0;
     std::size_t bs_persisted_ = 0;
+    std::size_t reload_failures_ = 0;
+    std::size_t spill_failures_ = 0;
   };
 
 }  // namespace cube

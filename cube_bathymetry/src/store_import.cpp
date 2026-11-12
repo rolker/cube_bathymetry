@@ -451,8 +451,11 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
   // per process, leaving the ns the only distinguisher, and two processes can read
   // the same coarse ns tick.
   if (scratch_dir_.empty()) {
-    std::string tmpl =
-      (std::filesystem::temp_directory_path() / "cube_import_spill_XXXXXX").string();
+    std::filesystem::path spill_root = cfg_.spill_root.empty() ?
+      std::filesystem::temp_directory_path() : std::filesystem::path(cfg_.spill_root);
+    std::error_code root_ec;
+    std::filesystem::create_directories(spill_root, root_ec);
+    std::string tmpl = (spill_root / "cube_import_spill_XXXXXX").string();
     std::vector<char> buf(tmpl.begin(), tmpl.end());
     buf.push_back('\0');
     if (::mkdtemp(buf.data()) == nullptr) {
@@ -469,6 +472,7 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
     // outdated state for this tile.
     std::error_code ec;
     std::filesystem::remove(path, ec);
+    spilled_.erase(index);
     return;
   }
 
@@ -495,6 +499,7 @@ void ImportAccumulator::spillIntensitySamples(const gggs::GridIndex & index)
   if (!out) {
     throw std::runtime_error("import_bag: failed writing spill file " + path);
   }
+  spilled_.insert(index);
 }
 
 void ImportAccumulator::persistBathyTile(const gggs::GridIndex & index)
@@ -596,15 +601,21 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
 {
   // Best-effort: a missing/corrupt/truncated spill only degrades backscatter for
   // this tile to the post-reload samples; the depth reload already succeeded.
+  // A tile whose spill was written must find it again: a missing file then is a
+  // lost population, not "nothing to restore" (cube#173 review).
+  const bool expected = spilled_.count(index) > 0;
   if (scratch_dir_.empty()) {
+    spill_failures_ += expected ? 1 : 0;
     return;
   }
   const std::string path = scratch_dir_ + "/" + spillFileName(index);
   if (!std::filesystem::is_regular_file(path)) {
+    spill_failures_ += expected ? 1 : 0;
     return;
   }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
+    ++spill_failures_;
     return;
   }
   uint32_t magic = 0;
@@ -612,6 +623,7 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
   in.read(reinterpret_cast<char *>(&magic), sizeof(magic));
   in.read(reinterpret_cast<char *>(&ncells), sizeof(ncells));
   if (!in || magic != kSpillMagic) {
+    ++spill_failures_;
     return;
   }
   for (uint32_t c = 0; c < ncells; ++c) {
@@ -624,6 +636,7 @@ void ImportAccumulator::restoreSpilledSamples(const gggs::GridIndex & index)
     in.read(reinterpret_cast<char *>(&w.mean), sizeof(w.mean));
     in.read(reinterpret_cast<char *>(&w.m2), sizeof(w.m2));
     if (!in) {
+      ++spill_failures_;
       return;  // truncated record -> stop (what was restored already stands)
     }
     sheet_.setSettledIntensityWelfordAt(gggs::CellIndex(index, row, col), w);
@@ -1283,6 +1296,7 @@ void ImportAccumulator::addBatch(
     // falls in a failed tile (a sounding can also spread into neighbour tiles, so
     // this is a conservative floor, not an exact cell tally -- see
     // GeoMapSheet::gridIndexForSounding).
+    reload_failures_ += reload_failed.size();
     const std::set<gggs::GridIndex> failed_set(
       reload_failed.begin(), reload_failed.end());
     std::size_t dropped_soundings = 0;
@@ -1302,6 +1316,16 @@ void ImportAccumulator::addBatch(
   }
 
   evictColdTiles();
+}
+
+std::string ImportAccumulator::integrityProblem() const
+{
+  if (reload_failures_ == 0 && spill_failures_ == 0) {
+    return "";
+  }
+  return std::to_string(reload_failures_) + " tile reload/seed failure(s) (their soundings were "
+         "dropped) and " + std::to_string(spill_failures_) + " unreadable intensity spill(s) "
+         "(their earlier beams were not restored): the tiles hold a partial population";
 }
 
 void ImportAccumulator::finalize(

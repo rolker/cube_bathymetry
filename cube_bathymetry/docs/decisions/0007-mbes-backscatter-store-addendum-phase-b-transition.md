@@ -393,6 +393,76 @@ state behind), and writes no fingerprint, so a node resuming
 from a store built under another declaration is not detected. The Appledore
 declaration file itself is campaign configuration, not part of this repository.
 
+## Incidence-angle addendum — slope-aware correction as a separate, derived layer (cube_bathymetry#173)
+
+**Context.** The correction above is indexed by the sonar-frame receive angle.
+On a sloping seabed the angle the seabed sees differs from it by up to the slope,
+so an upslope and a downslope pass over one ground read different levels. The
+shared seabed-geometry module (`marine_backscatter::seabed`,
+unh_marine_autonomy#304) gives the normal from a height surface and the
+incidence against it. This addendum records how cube uses it. It does not claim
+that slope explains any particular artefact; it makes the slope term
+measurable.
+
+**Decisions** (the operator's, 2026-11-10 and 2026-11-12, as recorded in the work
+plan for #173).
+
+1. **Two backscatter layers, never mixed.** The ordinary import stays as it is
+   and writes the depths and the beam-angle layer. The slope-corrected layer is
+   produced by a separate run (`import_bag --backscatter-angle-basis incidence`)
+   that re-reads the bags, takes the slope from the finished depth layer and
+   publishes a backscatter store of its own, with no depths. The status-quo layer
+   always exists and the slope run can be re-run by itself. The default basis
+   stays `beam` until an upslope and downslope comparison on real data shows the
+   correction helps.
+2. **The slope-corrected layer is a derived product, regenerated per tile.** Each
+   tile records its contributing bags and the depth tiles it read (including the
+   stencil margin), and the store records the inputs that must be the same for
+   every tile (`derived_tiles.json`). A slope run rebuilds every tile it touches,
+   refuses to rebuild a tile whose recorded contributors are not all among the
+   bags it was given, and refuses a run whose inputs differ from the store's. It
+   publishes only a complete run, crash-safely. Automatic detection of stale
+   tiles and the lookup of bags are later work.
+3. **The slope baseline is an angle.** The differencing baseline subtends a fixed
+   angle at the sonar, so it scales with range (full baseline = slant range x
+   angle, floored at one native cell either side). The parameter is in degrees,
+   the run reports the baseline actually used and how often the floor decided,
+   and the default (5 deg) is provisional until measured on Appledore.
+4. **Where there is no surface the angle is the earth-frame angle from
+   vertical**, not the sonar-frame angle, and the beam is counted per reason and
+   never reported as slope-corrected.
+5. **A table is only valid on the basis it was fitted on**, in both directions,
+   and `batch_regen_bag` refuses incidence work. How the table says which basis
+   it has is the implementation's: an incidence table has its own format line
+   (`angular-response-table v2`) plus `angle_basis`, `slope_baseline_deg` and
+   `slope_layers` records, so that an older binary refuses it instead of
+   applying it to the beam angle.
+
+**Live node.** The live node stays on the beam angle: it refuses an incidence
+table at `configure` and has no incidence mode. The operator's earlier decision
+(2026-11-10) for a flat-normal, earth-frame live mode was withdrawn on
+2026-11-12: with two layers it would put a third kind of value into the
+status-quo layer. The operator also confirmed that mixed corrections in one slope
+store are refused and that a `none` slope run may publish into a store marked
+`none`.
+
+**Consequences.**
+
+- A slope-run backscatter store carries `derived_tiles.json` instead of a build
+  fingerprint (ADR-0003). Ordinary runs and `batch_regen_bag` refuse such a store
+  and the slope run refuses a beam-angle one.
+- The per-beam table accounting is done on the incidence angle that is applied.
+- The depths of the slope run's in-memory estimate are not compared with the
+  ordinary run's: the slope run stays fixed-level and the depths are the ordinary
+  import's.
+- Cost: one normal is five height lookups; about 32 us per beam was measured
+  over a real-sized processed store (README, *Slope-aware incidence correction*).
+
+**Not done here.** Deriving an incidence table needs the slope run's per-beam
+ledger (the beam index is not carried on the projector's output yet), which is
+the second part of #173. The stale-tile tool, a live incidence mode, and a
+sidescan use of the same layer record are not part of this addendum.
+
 ## Deferred (explicit follow-ups)
 
 - **Full radiometric GeoCoder (tier-3)** — insonified-area, beam-pattern, TVG
@@ -401,7 +471,8 @@ declaration file itself is campaign configuration, not part of this repository.
   flat bottom; tier-2 makes it range/depth transferable; the per-mode table
   (#172 addendum above) absorbs the sonar's own range gain and mode offsets;
   the slope-aware incidence correction (cube_bathymetry#173, the shared
-  seabed-geometry module of unh_marine_autonomy#304) and the area/beam-pattern
+  seabed-geometry module of unh_marine_autonomy#304) is the incidence-angle
+  addendum above (its table derivation is still to come); the area/beam-pattern
   terms remain future work. **Follow-up to file:** author the full,
   canonical `docs/decisions/0007-mbes-backscatter-store.md` document (this
   addendum folds into it).

@@ -28,6 +28,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "cube_bathymetry/angle_basis.h"
 #include "cube_bathymetry/backscatter_table.h"
 #include "cube_bathymetry/common.h"
 
@@ -286,6 +287,16 @@ namespace cube
   /// entry, unanchored mode, unweighable angle bin, no finite range):
   /// `Identity` records it uncorrected, `Exclude` drops its backscatter.
     BackscatterModeFallback backscatter_mode_fallback = BackscatterModeFallback::Identity;
+
+  /// Which angle the correction (curve or table) is indexed by
+  /// (cube_bathymetry#173). `Beam` = `Sounding::beam_angle`, exactly the
+  /// behaviour before #173; `Incidence` = `Sounding::incidence_angle`, where a
+  /// NaN one (no beam vector) is a beam with no finite angle and goes to the
+  /// table's fallback policy. Set via GeoMapSheet::setBackscatterAngleBasis().
+    BackscatterAngleBasis backscatter_angle_basis = BackscatterAngleBasis::Beam;
+
+  /// The angle @p sounding is corrected by under @ref backscatter_angle_basis.
+    float correctionAngle(const Sounding & sounding) const;
   };
 
 }  // namespace cube

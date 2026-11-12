@@ -29,6 +29,7 @@ find_package(lifecycle_msgs)
 find_package(marine_acoustic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)  # odometry for speed-over-ground
 find_package(marine_autonomy REQUIRED)
+find_package(marine_backscatter REQUIRED)  # seabed normal and incidence angle (#173)
 find_package(marine_bathymetry_store REQUIRED)  # store epoch import (#57)
 find_package(marine_interfaces REQUIRED)  # SonarVisualizationTile transport (#230)
 find_package(marine_tiled_raster_store REQUIRED)  # TileCatalogBuilder (#230)
@@ -64,6 +65,7 @@ add_library(cube_bathymetry
   src/map_sheet.cpp
   src/node.cpp
   src/parameters.cpp
+  src/ping_georeference.cpp   # earth-frame georeferencing of one projected ping (#173)
 )
 
 target_include_directories(cube_bathymetry PUBLIC
@@ -169,6 +171,66 @@ install(TARGETS cube_bathymetry_survey_index_query EXPORT export_${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
+
+# Incidence angle against the local seabed normal (#173). Its own target so the
+# marine_backscatter dependency (the shared seabed-geometry module, plus the
+# store reader behind BathyDem) stays out of the core cube_bathymetry library
+# and the live node.
+add_library(cube_bathymetry_slope_incidence src/slope_incidence.cpp)
+target_include_directories(cube_bathymetry_slope_incidence PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_slope_incidence
+  cube_bathymetry
+  marine_backscatter::marine_backscatter
+)
+install(TARGETS cube_bathymetry_slope_incidence EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# The record of what a slope-corrected backscatter store was derived from, and
+# its crash-safe publish (#173). Its own target: it needs the SHA-256 of the
+# level-plan library and the JSON library, and nothing of the estimator.
+add_library(cube_bathymetry_derived_tiles src/derived_tiles.cpp)
+target_include_directories(cube_bathymetry_derived_tiles PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_derived_tiles
+  cube_bathymetry_level_plan         # sha256File / sha256Text
+  marine_autonomy::marine_autonomy   # gggs tile geometry
+  nlohmann_json::nlohmann_json
+)
+install(TARGETS cube_bathymetry_derived_tiles EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+# The slope run of import_bag (#173): request validation, the store lock and
+# recovery, the surface, the scratch directory, contributor attribution and the
+# publish. Its own target so the marine_backscatter dependency stays scoped to
+# the offline tool and its test.
+add_library(cube_bathymetry_slope_run src/slope_run.cpp)
+target_include_directories(cube_bathymetry_slope_run PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(cube_bathymetry_slope_run
+  cube_bathymetry
+  cube_bathymetry_slope_incidence
+  cube_bathymetry_derived_tiles
+  marine_backscatter::marine_backscatter
+  marine_mbes_backscatter_store::marine_mbes_backscatter_store
+)
+install(TARGETS cube_bathymetry_slope_run EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
 
 # GeoMapSheet -> map-frame grid_map projection (#21). In its own target so the
 # live publish path is unit-testable (publish-equivalence regression test) with
@@ -345,6 +407,8 @@ install(TARGETS bag_to_geotiff
 # Offline detections-bag -> CUBE GeoMapSheet -> bathymetry-store epoch importer (#57).
 add_executable(import_bag src/import_bag_main.cpp)
 target_link_libraries(import_bag
+  cube_bathymetry_derived_tiles  # refuse a slope-run backscatter store (#173)
+  cube_bathymetry_slope_run      # --backscatter-angle-basis incidence (#173)
   cube_bathymetry_quantize_tile  # --tile-size-report coverage sizing (#112)
   cube_bathymetry_sonar_info_curve  # SonarInfo curve pre-pass (#102)
   cube_bathymetry_store_import   # brings in cube_bathymetry + marine_bathymetry_store
@@ -368,6 +432,7 @@ install(TARGETS import_bag
 # each tile in one unbounded pass (no eviction -> bit-exact output) (#96).
 add_executable(batch_regen_bag src/batch_regen_main.cpp)
 target_link_libraries(batch_regen_bag
+  cube_bathymetry_derived_tiles  # refuse a slope-run backscatter store (#173)
   cube_bathymetry_store_import   # BatchRegen + cube_bathymetry + marine_bathymetry_store
   cube_bathymetry_survey_index_query  # --index-db dirty-tile query (#111)
   marine_mbes_backscatter_store::marine_mbes_backscatter_store  # --bs-store output (#80)
@@ -456,6 +521,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_gain_state_resolver test/test_gain_state_resolver.cpp)
   target_link_libraries(test_gain_state_resolver cube_bathymetry)
 
+  # Which angle the angular-response correction is indexed by (#173).
+  ament_add_gtest(test_incidence_basis test/test_incidence_basis.cpp)
+  target_link_libraries(test_incidence_basis cube_bathymetry)
+
   ament_add_gtest(test_angular_response_curve test/test_angular_response_curve.cpp)
   target_link_libraries(test_angular_response_curve cube_bathymetry)
 
@@ -513,6 +582,15 @@ if(BUILD_TESTING)
       "IMPORT_BAG_EXE=${CMAKE_CURRENT_BINARY_DIR}/import_bag"
       "BATCH_REGEN_EXE=${CMAKE_CURRENT_BINARY_DIR}/batch_regen_bag")
 
+  # The slope run of import_bag over synthetic plane bags (#173): the correction
+  # against the aspect, the manifest, the refusals, eviction, publish gating.
+  ament_add_pytest_test(test_import_bag_slope
+    test/test_import_bag_slope.py
+    TIMEOUT 900
+    ENV ${CUBE_ISOLATED_TEST_ENV}
+      "IMPORT_BAG_EXE=${CMAKE_CURRENT_BINARY_DIR}/import_bag"
+      "BATCH_REGEN_EXE=${CMAKE_CURRENT_BINARY_DIR}/batch_regen_bag")
+
   ament_add_gtest(test_sonar_info_curve test/test_sonar_info_curve.cpp)
   target_link_libraries(test_sonar_info_curve cube_bathymetry_sonar_info_curve)
 
@@ -545,8 +623,34 @@ if(BUILD_TESTING)
   ament_add_gtest(test_coverage_refresh test/test_coverage_refresh.cpp)
   target_link_libraries(test_coverage_refresh cube_bathymetry)
 
+  # Incidence angle against the seabed normal: known-answer planes, the
+  # fallback counts, the baseline, the aspect-independence of the corrected
+  # level, and a measurement of the sampler cost over a real-sized store (#173).
+  ament_add_gtest(test_slope_incidence test/test_slope_incidence.cpp TIMEOUT 300)
+  target_link_libraries(test_slope_incidence
+    cube_bathymetry_slope_incidence
+    marine_bathymetry_store::marine_bathymetry_store
+  )
+
+  # The slope-run store record, its strict loader, bag identity, depth-tile
+  # selection, the lock, and publish/recovery with an injected failure (#173).
+  ament_add_gtest(test_derived_tiles test/test_derived_tiles.cpp)
+  target_link_libraries(test_derived_tiles cube_bathymetry_derived_tiles)
+
+  # The slope run's bookkeeping without bags: request rules, early refusals,
+  # contributor attribution, publish (#173).
+  ament_add_gtest(test_slope_run test/test_slope_run.cpp TIMEOUT 300)
+  target_link_libraries(test_slope_run
+    cube_bathymetry_slope_run
+    marine_bathymetry_store::marine_bathymetry_store
+  )
+
   ament_add_gtest(test_detections_projector test/test_detections_projector.cpp)
   target_link_libraries(test_detections_projector cube_bathymetry)
+
+  # Sign of rx_angle and the earth-frame beam vector of a georeferenced ping (#173).
+  ament_add_gtest(test_beam_geometry test/test_beam_geometry.cpp)
+  target_link_libraries(test_beam_geometry cube_bathymetry)
 
   # Run-summary text for the three offline tools (#144): header-only, so the
   # test needs the include dir and nothing else.
@@ -654,6 +758,7 @@ if(BUILD_TESTING)
   target_compile_definitions(test_mixed_level_import PRIVATE
     IMPORT_BAG_EXE="$<TARGET_FILE:import_bag>"
     BATCH_REGEN_EXE="$<TARGET_FILE:batch_regen_bag>"
+    MODE_TABLE_FIXTURE_FILE="${CMAKE_CURRENT_SOURCE_DIR}/test/data/angular_response_table_v1.csv"
   )
   add_dependencies(test_mixed_level_import import_bag batch_regen_bag)
 
@@ -685,7 +790,7 @@ endif()
 # must find OpenSSL too or that imported target names a target that does not
 # exist.
 ament_export_dependencies(
-  rclcpp marine_bathymetry_store marine_mbes_backscatter_store OpenSSL)
+  rclcpp marine_bathymetry_store marine_mbes_backscatter_store marine_backscatter OpenSSL)
 
 # Export old-style CMake variables
 ament_export_include_directories(include/${PROJECT_NAME})

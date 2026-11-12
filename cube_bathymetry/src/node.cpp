@@ -219,7 +219,7 @@ bool Node::insert(double distance, const Sounding & sounding, const Parameters &
   nominated_hypothesis_.reset();
 
   return queueEstimate(sounding.depth + offset, variance, parameters,
-      sounding.intensity, sounding.beam_angle, sounding.slant_range,
+      sounding.intensity, parameters.correctionAngle(sounding), sounding.slant_range,
       sounding.correction_idx);
 }
 

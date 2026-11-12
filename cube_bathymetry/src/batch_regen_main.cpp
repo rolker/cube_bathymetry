@@ -56,6 +56,7 @@
 #include "cube_bathymetry/angular_response_curve.h"
 #include "cube_bathymetry/batch_regen.h"
 #include "cube_bathymetry/build_fingerprint.h"
+#include "cube_bathymetry/derived_tiles.h"
 #include "cube_bathymetry/gain_declaration.h"
 #include "cube_bathymetry/detections_projector.h"
 #include "cube_bathymetry/projection_summary.h"
@@ -359,6 +360,36 @@ std::string jsonEscape(const std::string & s)
   return out;
 }
 
+/// True (after saying why) when @p bs_store_dir is a slope-run backscatter store
+/// (cube#173): it holds derived_tiles.json, its tiles are derived per tile from
+/// their bags on the incidence angle, and a beam-angle regen would blend into
+/// them. Only the slope run of import_bag writes there.
+/// (A dry run, --index-db, writes nothing: the caller passes an empty directory.)
+bool slopeStoreRefused(const std::string & bs_store_dir)
+{
+  if (bs_store_dir.empty()) {
+    return false;
+  }
+  // Hold the store lock (non-blocking) for the life of the process, taken before
+  // the derived_tiles.json check, so a slope run and this run cannot start on
+  // the same empty store: the second to ask is refused at once.
+  static std::unique_ptr<cube::StoreLock> held_lock;
+  std::string lock_error;
+  held_lock = cube::StoreLock::acquire(bs_store_dir, lock_error);
+  if (!held_lock) {
+    std::cerr << "error: --bs-store " << bs_store_dir << ": " << lock_error << "\n";
+    return true;
+  }
+  if (!cube::hasDerivedTilesRecord(bs_store_dir)) {
+    return false;
+  }
+  std::cerr << "error: --bs-store " << bs_store_dir << " holds derived_tiles.json: it is a "
+    "slope-run store, derived per tile from its bags, and batch_regen would write beam-angle "
+    "values into it. Only the slope run of import_bag (--backscatter-angle-basis incidence) "
+    "writes there\n";
+  return true;
+}
+
 /// Load and vet the `--level-plan` file (cube#143; lifted out of main(), which
 /// is at the cpplint function-size limit). Returns the plan, or nullptr with
 /// @p failed set when the run must stop -- an unreadable or empty plan, a
@@ -655,6 +686,21 @@ struct GainSetup
   std::string sha256;
   std::unique_ptr<cube::GainStateResolver> resolver;
 };
+
+/// Refuse a per-pulse-mode table (cube#172) before any bag opens. A table needs
+/// each ping's pulse mode from the SonarInfo stream, which batch_regen does not
+/// read: accepting it would be a silent identity on every beam (same class as
+/// 'auto'). An incidence-angle table (cube#173) is refused for a second reason.
+[[noreturn]] void refuseModeTable(const std::string & file)
+{
+  std::cerr << "error: --backscatter-curve '" << file
+            << "' is a per-pulse-mode table (angular-response-table, cube#172); "
+    "batch_regen has no SonarInfo source to resolve pulse modes, so it cannot "
+    "apply one -- rebuild with import_bag, or pass a single-curve CSV. An "
+    "incidence-angle table (cube#173) is also refused for a second reason: "
+    "batch_regen has no beam vector or seabed surface to compute incidence from\n";
+  usage();
+}
 
 /// What is wrong with the file given as --backscatter-curve before either
 /// loader reads it, or empty: not a regular file, or a gain-state declaration
@@ -986,7 +1032,9 @@ int main(int argc, char * argv[])
   const std::shared_ptr<const cube::LevelPlan> level_plan = loadLevelPlan(
     level_plan_path, bs_store_dir, capture_spacing_scale, capture_spacing_scale_given,
     &level_plan_failed);
-  if (level_plan_failed) {
+  if (level_plan_failed ||
+    slopeStoreRefused(index_db_path.empty() ? bs_store_dir : std::string()))
+  {
     return 1;
   }
 
@@ -1046,6 +1094,9 @@ int main(int argc, char * argv[])
       std::cerr << "error: --backscatter-curve '" << backscatter_curve_file << "' " << problem
                 << "\n";
       usage();
+    }
+    if (cube::isAngularResponseTable(backscatter_curve_file)) {
+      refuseModeTable(backscatter_curve_file);
     }
   }
 
@@ -1128,16 +1179,6 @@ int main(int argc, char * argv[])
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&
     !backscatter_curve_file.empty())
   {
-    if (cube::isAngularResponseTable(backscatter_curve_file)) {
-      // A per-mode table (cube#172) needs each ping's pulse mode from the
-      // SonarInfo stream, which batch_regen does not read: accepting it
-      // would be a silent identity on every beam. Same class as 'auto'.
-      std::cerr << "error: --backscatter-curve '" << backscatter_curve_file
-                << "' is a per-pulse-mode table (angular-response-table v1, cube#172); "
-        "batch_regen has no SonarInfo source to resolve pulse modes, so it cannot "
-        "apply one -- rebuild with import_bag, or pass a single-curve CSV\n";
-      usage();
-    }
     backscatter_curve = loadCurveOrUsage(backscatter_curve_file);
   }
   if (backscatter_mode == cube::BackscatterAngleCorrection::Empirical &&

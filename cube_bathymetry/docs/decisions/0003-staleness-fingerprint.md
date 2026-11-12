@@ -289,3 +289,7 @@ migration").
 | `gain_declaration.source` differs | No effect |
 
 All the schema-2 rules above stand with `schema_version` read as 3.
+
+## Note 2026-11-12 — slope-run stores carry `derived_tiles.json` ([cube_bathymetry#173](https://github.com/rolker/cube_bathymetry/issues/173))
+
+A backscatter store written by the slope run of `import_bag` carries `derived_tiles.json` (per-tile contributors and depth-tile hashes, ADR-0007 incidence addendum) instead of a build fingerprint, and the slope run writes no `build_fingerprint.json`. No key of this schema changed, and the fingerprint of every other run is byte for byte what it was.
