@@ -134,6 +134,13 @@ namespace cube
     std::string gain_declaration_sha256;
     std::string gain_reference_state;
     int level = 0;
+  /// `--backscatter-mode-fallback` (identity or exclude), the ping floor
+  /// (`--backscatter-mode-min-pings`), `--iho-order` and the capture spacing
+  /// scale: each changes which beams reach a tile or what a tile holds.
+    std::string mode_fallback = "identity";
+    int64_t mode_min_pings = 0;
+    std::string iho_order = "order1a";
+    double capture_spacing_scale = 0.71;
 
     bool operator == (const StoreInputs & o) const;
   /// Empty when @p o equals this; otherwise the first difference, in words.
@@ -276,6 +283,9 @@ private:
     std::string rolled_run;
   /// Incoming directories removed because their publish never committed.
     std::vector < std::string > removed_incoming;
+  /// Parallel to @ref removed_incoming: the directory held nothing, which is what a
+  /// publish that had already completed leaves behind.
+    std::vector < bool > incoming_was_empty;
     bool nothing() const {return !rolled_forward && removed_incoming.empty();}
     std::string text() const;
   };

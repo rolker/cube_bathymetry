@@ -1989,7 +1989,8 @@ bool resolveSlopeRequest(
 std::unique_ptr<cube::SlopeRun> startSlopeRun(
   const SlopeFlags & flags, const std::string & bs_store_dir, const std::string & scratch_dir,
   const std::vector<std::string> & bagfile_names, const BackscatterSetup & backscatter,
-  const GainSetup & gain, uint8_t level)
+  const GainSetup & gain, uint8_t level, int64_t min_pings, const std::string & iho_order,
+  float capture_spacing_scale)
 {
   std::string problem = cube::slopeCorrectionProblem(
     backscatter.provenance.kind, backscatter.provenance.source);
@@ -2030,6 +2031,10 @@ std::unique_ptr<cube::SlopeRun> startSlopeRun(
     config.inputs.gain_reference_state = gain.declaration.reference_state;
   }
   config.inputs.level = level;
+  config.inputs.mode_fallback = cube::toString(backscatter.fallback);
+  config.inputs.mode_min_pings = min_pings;
+  config.inputs.iho_order = iho_order;
+  config.inputs.capture_spacing_scale = std::round(capture_spacing_scale * 1e6) / 1e6;
   const cube::BackscatterTable & table = backscatter.table;
   if (backscatter.provenance.kind == "table" &&
     (table.slope_baseline_deg != flags.baseline_deg ||
@@ -2488,7 +2493,9 @@ int cube_depth_adaptive_finish(
 
 }  // namespace
 
-int main(int argc, char * argv[])
+namespace
+{
+int importBagMain(int argc, char * argv[])
 {
   std::vector<std::string> arguments(argv + 1, argv + argc);
   if (arguments.empty()) {
@@ -2785,7 +2792,8 @@ int main(int argc, char * argv[])
   if (slope_run) {
     slope = startSlopeRun(
       slope_flags, bs_store_dir, scratch_dir, bagfile_names, backscatter, gain,
-      gggs::Level::fromCellSize(static_cast<float>(resolution)).level());
+      gggs::Level::fromCellSize(static_cast<float>(resolution)).level(), backscatter_mode_min_pings,
+      iho_order, capture_spacing_scale);
     if (!slope) {
       return 1;
     }
@@ -3133,6 +3141,11 @@ int main(int argc, char * argv[])
         pending.push_back({ping_ns, std::move(detections), message->bag_index});
       } catch (const std::exception & e) {
         std::cerr << e.what() << '\n';
+        if (slope) {
+          // A damaged message means the tiles would be built from incomplete
+          // contributors while recording them as complete (cube#173 review).
+          fatal_error = std::string("a detections message could not be read: ") + e.what();
+        }
       }
     }
 
@@ -3187,4 +3200,18 @@ int main(int argc, char * argv[])
     store_metadata, bs_metadata, tile_reporter, tile_size_report_path,
     tile_refresh_interval_s, tile_refresh_tiles_per_cycle, phase_secs(),
     backscatter.provenance, gain.record), table_unresolved, false);
+}
+}  // namespace
+
+// An exception escaping the run (an unreadable bag, bad_alloc) is reported and
+// unwinds every destructor, so a slope run's scratch directory is removed
+// instead of being left behind by std::terminate (cube#173 review).
+int main(int argc, char * argv[])
+{
+  try {
+    return importBagMain(argc, argv);
+  } catch (const std::exception & e) {
+    std::cerr << "error: " << e.what() << std::endl;
+    return 1;
+  }
 }

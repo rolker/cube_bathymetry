@@ -438,12 +438,13 @@ plan for #173).
    `slope_layers` records, so that an older binary refuses it instead of
    applying it to the beam angle.
 
-**Left open.** The live node stays on the beam angle: it refuses an incidence
+**Live node.** The live node stays on the beam angle: it refuses an incidence
 table at `configure` and has no incidence mode. The operator's earlier decision
-(2026-11-10) for a flat-normal, earth-frame live mode predates the two-layer
-design; with two layers it would put a third kind of value into the status-quo
-layer, so it is not built, and whether it is still wanted is a question for the
-operator.
+(2026-11-10) for a flat-normal, earth-frame live mode was withdrawn on
+2026-11-12: with two layers it would put a third kind of value into the
+status-quo layer. The operator also confirmed that mixed corrections in one slope
+store are refused and that a `none` slope run may publish into a store marked
+`none`.
 
 **Consequences.**
 

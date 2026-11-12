@@ -1447,10 +1447,11 @@ tile:
 
 - **Store-level `inputs`**, the same for every tile: the angle basis, the baseline
   angle, the surface layers, the correction (`none` or `table:<sha256 of the
-  table>`), the gain declaration's digest and reference state, and the store
-  level. A run whose inputs differ is refused before any bag is read, naming the
+  table>`), the gain declaration's digest and reference state, the table fallback and
+  ping floor, `--iho-order`, the capture spacing scale, and the store level. A run whose inputs differ is refused before any bag is read, naming the
   first difference: one store holds one correction. A new table means a new
-  store directory, or deleting the old one.
+  store directory, or deleting the old one. `registry.json` is installed by the
+  first publish only; later runs leave it as it is.
 - **Per tile**: the contributing bags (directory name and the SHA-256 of the
   bag's `metadata.yaml`, so a copy of a bag on another disk is the same bag and
   two different bags of one name are told apart), the content SHA-256 of every

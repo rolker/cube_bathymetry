@@ -34,6 +34,9 @@ namespace seabed = marine_backscatter::seabed;
 
 void IncidenceCounters::addBaseline(double full_baseline_m)
 {
+  if (!std::isfinite(full_baseline_m)) {
+    return;
+  }
   ++baseline_count_;
   const double bin = std::floor(full_baseline_m / kBaselineBinM);
   const std::size_t index = bin < 0.0 ? 0 :
@@ -43,6 +46,9 @@ void IncidenceCounters::addBaseline(double full_baseline_m)
 
 void IncidenceCounters::addSlope(double slope_deg)
 {
+  if (!std::isfinite(slope_deg)) {
+    return;
+  }
   // Nearest degree: floor() would put a 12.0 deg plane computed as 11.9999999
   // in the 11 bin.
   const double bin = std::round(slope_deg);
@@ -153,17 +159,20 @@ void stampIncidence(
         ++counters.at_floor;
       }
     }
-    if (normal.from_surface) {
-      ++counters.from_surface;
-      counters.addSlope(std::acos(std::min(1.0, std::max(-1.0, normal.normal.u))) / kDegToRad);
-    } else {
-      ++counters.fallback[static_cast<std::size_t>(normal.reason)];
-    }
     const seabed::AngleResult angle = seabed::incidenceAngle(
       seabed::Enu{v[0], v[1], v[2]}, normal.normal);
     if (!angle.valid) {
       ++counters.invalid_angle;
       continue;
+    }
+    // Counted only once the beam really got an angle, so the parts add up to
+    // the beams (cube#173 review).
+    if (normal.from_surface) {
+      ++counters.from_surface;
+      counters.addSlope(std::acos(std::min(1.0, std::max(-1.0, normal.normal.u))) / kDegToRad);
+    } else {
+      const std::size_t reason = static_cast<std::size_t>(normal.reason);
+      ++counters.fallback[reason < IncidenceCounters::kReasonCount ? reason : 1];
     }
     if (angle.rad >= M_PI / 2.0) {
       ++counters.back_facing;

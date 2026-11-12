@@ -268,6 +268,15 @@ TEST(DerivedTiles, TheStoreInputsNameTheirFirstDifference)
   b.gain_reference_state = "";
   EXPECT_NE(a.difference(b).find("gain declaration"), std::string::npos);
   b = a;
+  b.mode_fallback = "exclude";
+  EXPECT_NE(a.difference(b).find("table fallback"), std::string::npos);
+  b = a;
+  b.iho_order = "order2";
+  EXPECT_NE(a.difference(b).find("IHO order"), std::string::npos);
+  b = a;
+  b.slope_baseline_deg = 5.0000001;
+  EXPECT_NE(a.difference(b).find("5.0000001"), std::string::npos);
+  b = a;
   b.level = 13;
   EXPECT_NE(a.difference(b).find("store level"), std::string::npos);
   b = a;

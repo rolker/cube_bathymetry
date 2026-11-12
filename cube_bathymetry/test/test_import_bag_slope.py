@@ -398,7 +398,8 @@ def test_manifest_records_inputs_contributors_and_depth_hashes(world, all_run):
     assert m['inputs'] == {
         'angle_basis': 'incidence', 'slope_baseline_deg': 5.0, 'slope_layers': 'processed',
         'correction': 'table:' + sha(world['table']), 'gain_declaration_sha256': '',
-        'gain_reference_state': '', 'level': 10}
+        'gain_reference_state': '', 'level': 10, 'mode_fallback': 'exclude',
+        'mode_min_pings': 0, 'iho_order': 'order1a', 'capture_spacing_scale': 0.71}
     assert sorted(m['tiles']) == sorted(TILES)
     bags = sorted((bag_identity(b) for b in world['bags'].values()), key=lambda b: b['name'])
     depth = pathlib.Path(world['depth']) / 'processed'
@@ -745,3 +746,22 @@ def test_table_accounting_is_on_the_incidence_angle(accounting):
     assert int(outside.group(1)) == not_correctable, out
     assert 'no finite beam angle' not in out, out
     assert "are on each beam's incidence angle" in out, out
+
+
+def test_a_trailing_slash_on_the_store_does_not_put_the_scratch_inside_it(world, tmp_path):
+    store = tmp_path / 'bs'
+    rc, out = run_import(slope_args(world['depth'], str(store) + '/', world['table']),
+                         [world['side'][0.0]])
+    assert rc == 0, out
+    assert scratch_dirs(tmp_path) == [] and scratch_dirs(store) == []
+    assert ('(scratch %s/slope-run-' % tmp_path) in out, out
+
+
+def test_an_unreadable_bag_storage_leaves_no_scratch_behind(world, tmp_path):
+    broken = tmp_path / 'broken_bag'
+    shutil.copytree(world['side'][0.0], broken)
+    for f in broken.glob('*.mcap'):
+        f.write_bytes(b'not an mcap')
+    rc, out = run_import(slope_args(world['depth'], fresh(tmp_path), world['table']), [broken])
+    assert rc != 0
+    assert scratch_dirs(tmp_path) == [], out

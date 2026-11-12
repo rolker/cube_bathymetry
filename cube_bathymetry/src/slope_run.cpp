@@ -218,8 +218,13 @@ std::unique_ptr<SlopeRun> SlopeRun::create(const SlopeRunConfig & config, std::s
     return nullptr;
   }
   // 5. A scratch directory unique to this run.
+  // A trailing slash on --bs-store would make parent_path() the store itself.
+  fs::path store_path = fs::path(bs).lexically_normal();
+  if (store_path.filename().empty()) {
+    store_path = store_path.parent_path();
+  }
   fs::path root = config.scratch_root.empty() ?
-    fs::path(bs).parent_path() : fs::path(config.scratch_root);
+    store_path.parent_path() : fs::path(config.scratch_root);
   if (root.empty()) {
     root = ".";
   }
@@ -351,9 +356,8 @@ bool SlopeRun::publish(
     }
     // Reached but left with no cells: any tile already published for it is stale.
     const bool recorded = previous_ && previous_->tiles.count(name);
-    const bool on_disk = fs::exists(
-      fs::path(config_.bs_store_dir) / mbs::layerDirName(mbs::SourceLayer::Survey) / name, ec);
-    if (recorded || on_disk) {
+    // Only a tile the manifest owns is deleted; an unrecorded file is not ours.
+    if (recorded) {
       remove.push_back(name);
     }
   }
@@ -413,7 +417,11 @@ bool SlopeRun::publish(
   plan.put_tiles = put;
   plan.delete_tiles = remove;
   const fs::path registry = fs::path(scratchBsDir()) / "registry.json";
-  if (fs::exists(registry, ec)) {
+  // registry.json (platform, sensor, survey) describes the store, not this run's
+  // subset of tiles: the first publish installs it and later ones leave it be.
+  if (fs::exists(registry, ec) && !fs::exists(fs::path(config_.bs_store_dir) / "registry.json",
+      ec))
+  {
     plan.registry_source = registry.string();
   }
   plan.manifest = manifest;

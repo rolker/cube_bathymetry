@@ -256,6 +256,14 @@ bool isBareName(const std::string & s)
          s.find('\\') == std::string::npos && s.find('\0') == std::string::npos;
 }
 
+std::string exactNumber(double v)
+{
+  std::ostringstream os;
+  os.precision(17);
+  os << v;
+  return os.str();
+}
+
 json inputsToJson(const StoreInputs & in)
 {
   json j;
@@ -266,6 +274,10 @@ json inputsToJson(const StoreInputs & in)
   j["gain_declaration_sha256"] = in.gain_declaration_sha256;
   j["gain_reference_state"] = in.gain_reference_state;
   j["level"] = in.level;
+  j["mode_fallback"] = in.mode_fallback;
+  j["mode_min_pings"] = in.mode_min_pings;
+  j["iho_order"] = in.iho_order;
+  j["capture_spacing_scale"] = in.capture_spacing_scale;
   return j;
 }
 
@@ -274,7 +286,8 @@ StoreInputs inputsFromJson(const json & j)
   const std::string where = "inputs";
   checkKeys(
     j, where, {"angle_basis", "slope_baseline_deg", "slope_layers", "correction",
-      "gain_declaration_sha256", "gain_reference_state", "level"});
+      "gain_declaration_sha256", "gain_reference_state", "level", "mode_fallback",
+      "mode_min_pings", "iho_order", "capture_spacing_scale"});
   StoreInputs in;
   in.angle_basis = getString(j, "angle_basis", where);
   if (in.angle_basis != "incidence") {
@@ -297,6 +310,13 @@ StoreInputs inputsFromJson(const json & j)
     fail("inputs.level must be an integer");
   }
   in.level = j.at("level").get<int>();
+  in.mode_fallback = getString(j, "mode_fallback", where);
+  if (!j.at("mode_min_pings").is_number_integer()) {
+    fail("inputs.mode_min_pings must be an integer");
+  }
+  in.mode_min_pings = j.at("mode_min_pings").get<int64_t>();
+  in.iho_order = getString(j, "iho_order", where);
+  in.capture_spacing_scale = getNumber(j, "capture_spacing_scale", where);
   return in;
 }
 
@@ -443,8 +463,8 @@ std::string StoreInputs::difference(const StoreInputs & o) const
   }
   if (slope_baseline_deg != o.slope_baseline_deg) {
     return describe(
-      "the slope baseline angle", std::to_string(slope_baseline_deg),
-      std::to_string(o.slope_baseline_deg));
+      "the slope baseline angle", exactNumber(slope_baseline_deg),
+      exactNumber(o.slope_baseline_deg));
   }
   if (slope_layers != o.slope_layers) {
     return describe("the slope surface layers", slope_layers, o.slope_layers);
@@ -458,6 +478,20 @@ std::string StoreInputs::difference(const StoreInputs & o) const
     return describe(
       "the gain declaration", gain_declaration_sha256.empty() ? "none" : gain_declaration_sha256,
       o.gain_declaration_sha256.empty() ? "none" : o.gain_declaration_sha256);
+  }
+  if (mode_fallback != o.mode_fallback) {
+    return describe("the table fallback", mode_fallback, o.mode_fallback);
+  }
+  if (mode_min_pings != o.mode_min_pings) {
+    return describe("the table ping floor", std::to_string(mode_min_pings),
+             std::to_string(o.mode_min_pings));
+  }
+  if (iho_order != o.iho_order) {
+    return describe("the IHO order", iho_order, o.iho_order);
+  }
+  if (capture_spacing_scale != o.capture_spacing_scale) {
+    return describe("the capture spacing scale", std::to_string(capture_spacing_scale),
+             std::to_string(o.capture_spacing_scale));
   }
   if (level != o.level) {
     return describe("the store level", std::to_string(level), std::to_string(o.level));
@@ -817,9 +851,14 @@ std::string RecoveryReport::text() const
        << "): it had committed, so its remaining moves were completed from "
        << DerivedTiles::kPendingFilename << ".\n";
   }
-  for (const std::string & dir : removed_incoming) {
-    os << "Removed " << dir << ": a slope-run publish that never committed; the store is as it "
-      "was before that run.\n";
+  for (std::size_t i = 0; i < removed_incoming.size(); ++i) {
+    if (i < incoming_was_empty.size() && incoming_was_empty[i]) {
+      os << "Removed " << removed_incoming[i] << ": empty, left by a publish that had already "
+        "completed.\n";
+    } else {
+      os << "Removed " << removed_incoming[i] << ": a slope-run publish that never committed; "
+        "the store is as it was before that run.\n";
+    }
   }
   return os.str();
 }
@@ -862,6 +901,7 @@ RecoveryReport recoverInterruptedPublish(const std::string & store_dir)
     }
     std::sort(leftovers.begin(), leftovers.end());
     for (const fs::path & dir : leftovers) {
+      report.incoming_was_empty.push_back(fs::is_empty(dir, ec));
       fs::remove_all(dir, ec);
       if (ec) {
         fail("cannot remove the abandoned publish directory " + dir.string() + ": " +
@@ -893,6 +933,11 @@ void publishDerived(const PublishPlan & plan, const PublishFailpoint & failpoint
   for (const std::string & name : plan.delete_tiles) {
     if (!isTileFileName(name)) {
       fail("publish: '" + name + "' is not a tile file name");
+    }
+  }
+  for (const std::string & name : plan.delete_tiles) {
+    if (std::find(plan.put_tiles.begin(), plan.put_tiles.end(), name) != plan.put_tiles.end()) {
+      fail("publish: '" + name + "' is both installed and deleted");
     }
   }
   std::error_code ec;
