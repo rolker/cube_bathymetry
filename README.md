@@ -1550,6 +1550,79 @@ contributed no cell. The default baseline angle is provisional, and
 the default angle basis stays `beam` until an upslope and downslope comparison on
 real data shows the correction helps.
 
+### Recipe: from bags to a backscatter map
+
+The whole chain, in order. Every flag below is one the tools take (see the sections
+above and each tool's `-h`); paths and the box are placeholders. `$BAGS` stands for
+the detections bag directories, `$TOPIC` for the SonarDetections topic. Use a fresh
+output directory for every import: importing again over the tiles of an earlier
+import double-counts their soundings.
+
+```bash
+# 0. If the sonar's receiver gain changed without a record, write the gain-state
+#    declaration (see "Gain-state declaration") and pass it to every derive and import
+#    below with the same file.
+GAIN="--backscatter-gain-declaration gain.csv"          # leave out if there is none
+
+# 1. Depths, and the uncorrected backscatter. The depth store is the surface the slope
+#    run reads, so it is made first and left alone afterwards.
+import_bag -o depths --bs-store raw_bs -d $TOPIC --backscatter-correction none $GAIN $BAGS
+
+# 2. Fit the sonar-frame (beam angle) table, one entry per pulse mode.
+derive_angular_response.py $BAGS -t $TOPIC -o table_beam.csv --by-mode \
+  --gain-declaration gain.csv --box LATMIN LONMIN LATMAX LONMAX
+
+# 3. The beam-angle map layer: the same bags again, corrected by that table.
+import_bag -o depths_beam --bs-store beam_bs -d $TOPIC --backscatter-correction empirical \
+  --backscatter-curve table_beam.csv --backscatter-mode-fallback exclude $GAIN $BAGS
+
+# 4. The slope run without a correction, writing the beam ledger (the incidence each
+#    beam was given). It publishes a throwaway backscatter store.
+import_bag --backscatter-angle-basis incidence --slope-surface depths \
+  --bs-store ledger_bs --backscatter-correction none --beam-ledger-out ledger.bin \
+  -d $TOPIC $GAIN $BAGS
+
+# 5. Fit the incidence table on exactly those angles.
+derive_angular_response.py $BAGS -t $TOPIC -o table_incidence.csv --by-mode \
+  --angle-basis incidence --beam-ledger ledger.bin --gain-declaration gain.csv \
+  --box LATMIN LONMIN LATMAX LONMAX
+
+# 6. The slope-corrected map layer: a slope run with that table, into its own store.
+import_bag --backscatter-angle-basis incidence --slope-surface depths \
+  --bs-store slope_bs --backscatter-correction empirical \
+  --backscatter-curve table_incidence.csv --backscatter-mode-fallback exclude \
+  -d $TOPIC $GAIN $BAGS
+
+# 7. One GeoTIFF per layer (marine_tiled_raster_store, unh_marine_autonomy). The layer
+#    directory is <store>/survey; --box is LATMIN LONMIN LATMAX LONMAX in degrees.
+ros2 run marine_tiled_raster_store export_geotiff beam_bs/survey \
+  --box LATMIN LONMIN LATMAX LONMAX -o beam_angle.tif
+ros2 run marine_tiled_raster_store export_geotiff slope_bs/survey \
+  --box LATMIN LONMIN LATMAX LONMAX -o slope_corrected.tif
+```
+
+Notes, each from the tool that states it:
+
+- `--box` on `derive_angular_response.py` keeps the pings inside the box (it needs the
+  vehicle's `/tf` in the bags); the box is recorded in the table. Leave it out to fit on
+  every ping. A bag set that crosses a gain step is fitted per declaration, not split.
+- `--angle-basis incidence` needs `--by-mode` and a ledger made from the same bags (name
+  and `metadata.yaml` hash) under the same gain declaration; otherwise the tool refuses.
+  The incidence table records the slope baseline and layers of the ledger, and
+  `import_bag` refuses it on a run whose `--slope-baseline-deg` or surface layers differ.
+- The slope run's `--bs-store` holds one correction: step 4 and step 6 use different
+  stores for that reason, and a new table needs a new store directory.
+- `export_geotiff` mosaics one level (default: the finest level holding a native tile in
+  the box) into a north-up EPSG:4326 Float32 GeoTIFF that keeps the tile's bands (a
+  backscatter tile is mean, standard error and sample sd, band 1 the mean), reads the store
+  and never writes into it, and refuses a box larger than `--max-pixels` (default
+  250,000,000 per band). It exits 0 when written, 1 when refused or failed, 2 on a usage
+  error. Its options are in the marine_tiled_raster_store README, "Whole-area GeoTIFF
+  export".
+- Example only, not a default: a season on one survey area would pass its own gain
+  declaration, the box around the survey and, for the slope run, a depth store built from
+  the same bags.
+
 ## Live prior-gate prime (`prior_store_dir`)
 
 `cube_bathymetry_node` accepts an optional **`prior_store_dir`** parameter (empty
