@@ -44,6 +44,7 @@ Decided by the operator on 2026-11-10 (1 to 11) and 2026-11-12 (12 to 14). Where
 12. **Two backscatter layers.** Pass one is today's import, unchanged: it writes the depths and the beam-angle backscatter (corrected for everything except slope). Pass two is a separate run that re-reads the bags, takes the slope from the finished depth layer, and writes a separate slope-corrected backscatter layer. Pass two writes no depths. The two never mix, the status-quo layer always exists, and pass two can be re-run by itself.
 13. **The slope-corrected layer is a derived product, regenerated per tile.** The beam-angle layer keeps accumulating as today. Each slope-corrected tile records its contributors (which bags) and an input fingerprint (the depth tiles it read including stencil neighbours, the table, the gain declaration, the angle basis and slope settings). In the first PR a slope run always rebuilds every tile it touches, records both from day one, and refuses to rebuild a tile whose recorded contributors are not all among the bags it was given. Automatic stale-tile detection and bag lookup come later.
 14. **The slope baseline is an angle.** The differencing baseline subtends a fixed angle at the sonar, so it scales with range: full baseline = slant range x angle, with a floor of one native cell either side. The parameter is in degrees, the run report gives the distribution of the baseline actually used and how often the floor applied, and the default angle is provisional until measured on Appledore.
+15. **Confirmed 2026-11-12.** Mixed corrections in one slope store are refused; a `none` slope run may publish into a store marked `none`; the PR split is as in "Commit groups"; the live node stays on beam angle with no flat-normal incidence mode (decision 4 withdrawn).
 
 ## Approach
 
@@ -192,7 +193,7 @@ The operator's decision 8 was "two PRs, split after group D" of revision 1's gro
 | 13. Tests would not catch a no-op | Tests added (section 9) |
 | Suggestions | First-touch refusal, new format line, micro-benchmark in D, chord precision note, unique scratch: all taken |
 
-Operator-level points the review raised, and what this plan does pending a word from the operator: mixed corrections in one slope store are **refused**; a `none` run **may** publish (into a store that says `none`); the PR split is as in "Commit groups"; the live node question stands.
+Operator-level points the review raised, and what this plan does (all four confirmed by the operator on 2026-11-12, decision 15 below): mixed corrections in one slope store are **refused**; a `none` run **may** publish (into a store that says `none`); the PR split is as in "Commit groups"; the live node question stands.
 
 ## Files to Change
 
@@ -249,9 +250,9 @@ Operator-level points the review raised, and what this plan does pending a word 
 - **Stale docs** (land in PR 1): `README.md` (Backscatter fidelity, parameters tables, per-mode tables, `batch_regen` limits), the ADR-0007 addendum file, ADR-0003, the `sounding.h` comment.
 - **Agent-instruction candidate** (proposal only): "a table is only valid on the angle basis it was fitted on; check `# angle_basis` before reusing one". The repo has no `.agents/README.md` yet.
 
-## Question for the operator
+## Operator confirmation (decision 15)
 
-Decision 4 (live node: earth-frame angle with a flat normal) predates the two-layer design. Under decision 12 the live node produces the status-quo beam-angle layer, and a live incidence mode without slope would be a third kind of value in that same layer. This plan therefore leaves the live node on beam angle and builds no live incidence mode. Confirm, or say that the flat-normal live mode is still wanted.
+Confirmed by the operator on 2026-11-12 (relayed by the coordinator): (a) mixed corrections in one slope store are refused; (b) a `none` slope run may publish, into a store marked `none`; (c) the PR split is as in "Commit groups" (PR 1 = A0 to G, PR 2 = beam index, ledger, derive); (d) the live node stays on beam angle and gets no flat-normal incidence mode, so decision 4 is withdrawn. This section replaces the former "Question for the operator".
 
 ## Estimated Scope
 
