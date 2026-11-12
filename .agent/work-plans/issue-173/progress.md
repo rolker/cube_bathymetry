@@ -185,3 +185,33 @@ Listed in the plan's "Implementation record (PR 1)": the slope-run library split
 ### Open
 - [ ] Action needed: `/review-code` (pre-push, `--no-local`) and a full-scope `ci_local.sh` attestation on the final head.
 - [ ] Operator: the live-node question (decision 4) is unchanged by this work and stays open.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-12 10:49 -05:00
+**By**: Claude Code Agent (Claude Sonnet 5.5)
+**Verdict**: approved
+
+**Branch**: feature/issue-173
+**Mode**: pre-push
+**Depth**: Deep (reason: large cross-cutting change)
+**Must-fix**: 0 open | **Suggestions**: 9 open
+**Round**: 1 | **Ship**: recommended — all must-fix found were fixed in place
+
+Sources: two Claude adversarial passes (lens A and B), Gemini and Codex (local review not run, --no-local).
+
+### Findings
+- [x] (must-fix) store inputs omitted fallback, ping floor, IHO order, capture spacing — fixed
+- [x] (must-fix) trailing slash on --bs-store put the scratch inside the store — fixed
+- [x] (must-fix) exception escaping main leaked the scratch directory — fixed
+- [x] (must-fix) damaged detections message not fatal for a slope run — fixed
+- [x] (suggestion) registry.json overwritten by every publish; unrecorded tile deleted; put/delete overlap; counters not adding up; NaN guards; baseline text precision; "never committed" text for an empty incoming dir — fixed
+- [ ] (suggestion) accumulator reload/restore failures do not block a slope publish (Codex) — `store_import.cpp`
+- [ ] (suggestion) depth tiles are hashed at publish time, not at first read (both lenses) — `slope_run.cpp`
+- [ ] (suggestion) a run with no finite backscatter, or with dropped georeferencing, exits 0 with a warning — `slope_run.cpp`
+- [ ] (suggestion) a table's recorded baseline/layers only warn on mismatch — `import_bag_main.cpp`
+- [ ] (suggestion) --reference-store is not recorded in the store inputs — `import_bag_main.cpp`
+- [ ] (suggestion) longitude intersection in SurfaceTileIndex does not wrap at the antimeridian — `derived_tiles.cpp`
+- [ ] (suggestion) beam importers do not take the store lock while checking for derived_tiles.json — `import_bag_main.cpp`
+- [ ] (suggestion) layers decided by directory existence, not tile presence — `slope_run.cpp`
+- [ ] (suggestion) over-attribution makes a refusal conservative; message could say so — `slope_run.cpp`
