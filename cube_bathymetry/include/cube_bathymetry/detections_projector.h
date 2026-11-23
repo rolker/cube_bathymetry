@@ -32,8 +32,8 @@
 #include "cube_bathymetry/sounding.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "marine_acoustic_msgs/msg/sonar_detections.hpp"
-#include "tf2/buffer_core.h"
-#include "tf2/time.h"
+#include "tf2/buffer_core.hpp"
+#include "tf2/time.hpp"
 
 // This header is intentionally rclcpp-free. It is part of the no-rclcpp
 // cube_bathymetry library target so the projection math can be unit-tested and
