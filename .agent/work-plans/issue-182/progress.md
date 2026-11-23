@@ -292,3 +292,28 @@ Read: the Integrated Review of pull request 183 at `0f68fb4`: four valid suggest
 - `./test.sh` same selection: 93% tests passed, 1 tests failed out of 15 (`test_frame_chain`, by design until Part 2).
 - Node test (domain 86 checked clear first) as 30 separate processes: pass=30 fail=0.
 - CI on `0f68fb4` (run 45220509531, `ROS 2 Jazzy (industrial_ci)`): pass in 16m50s; 19 upstream packages built, cube_bathymetry 53/53 and coverage_assessment 15/15 tests passed on Jazzy. The commits of this pass have no Jazzy check until CI runs on the push.
+
+## Local Review
+**Status**: complete
+**When**: 2026-11-23 12:55 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Verdict**: approved
+**Dispatch**: resumed (agent adb5d0cfb8e4238fd, resume 1 of 3)
+
+**PR**: #183 at `f366b9f`
+**Depth**: Standard (reason: round 2 narrow check per handoff: the round-1 pre-push findings and the fix diff `0f68fb4..f366b9f`; no cross-model reviewers, per the owner's rule after a round with no must-fix)
+**Must-fix**: 0 | **Suggestions**: 0
+
+Fix diff: `f80d56c` (ci-image.yml guard), `41e8476` (static_assert), `6cbd24b` (test), plus records. The only non-test code change is the `static_assert` and its two comment lines in `make_transform_listener.hpp`.
+
+- `static_assert(!std::is_pointer_v<NodeT>)`: it applies to the caller's type before the `if constexpr`, so it covers both branches. Jazzy's internal `&node` is unaffected. It rejects only a raw pointer (including a reference to a pointer), which is the silent Rolling case. Probed on Rolling with the node test's compile flags: a `rclcpp::Node &` compiles; a `rclcpp::Node *` fails at `make_transform_listener.hpp:62` "static assertion failed: pass the node by reference". A `std::shared_ptr<rclcpp::Node> &` passes the assert but fails loudly in `NodeInterfaces` ("has no member named get_node_base_interface"). It does not compile silently: `shared_ptr`'s `operator bool` is explicit. No legitimate call is rejected.
+- `if: github.ref == 'refs/heads/jazzy'`: the default branch is `jazzy` (checked), so the schedule trigger's ref is `refs/heads/jazzy`; push is limited to `[jazzy]`; `workflow_dispatch` gets the chosen ref, so only a dispatch from `jazzy` publishes. A job skipped by `if` reports success, so the run is not red. ci-image.yml has no pull_request trigger.
+- Test: a vector of groups per topic, with exactly one asserted for each of `/tf` and `/tf_static`; the checks run on `.front()` after the size assert. The implementer's mutation record (raw `this`; `spin_thread = false`) still fails it.
+- The fourth round-1 suggestion (the Jazzy listener destruction race) was deferred by the host to the follow-up issue; settled.
+
+CI on `f366b9f` (run 45229921366, `ROS 2 Jazzy (industrial_ci)`): pass in 15m46s. Log lines: "Summary: 19 packages finished [3min 15s]" (upstream); "Summary: 2 packages finished [3min 55s]"; "100% tests passed, 0 tests failed out of 53"; "100% tests passed, 0 tests failed out of 15"; "Summary: 2143 tests, 0 errors, 0 failures, 158 skipped"; listener test on Jazzy: "[       OK ] NodeTest.TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode (9 ms)".
+
+Re-run here (Rolling): build with `--packages-select coverage_assessment --packages-ignore cube_bathymetry`: 1 package finished. The listener test and the two group-audit tests: 20 of 20 separate runs on domain 86 (checked empty with `ros2 node list --no-daemon`). The static_assert probe is described above.
+
+### Findings
+- [ ] No issues found. LGTM.
