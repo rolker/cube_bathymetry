@@ -60,6 +60,7 @@
 #include "coverage_assessment/polygon_raster.h"
 #include "coverage_assessment/source_accumulator.h"
 #include "frame_chain.hpp"
+#include "make_transform_listener.hpp"
 
 /// A log line at most once per kWarnPeriodSeconds PER NODE and call site: the rclcpp
 /// *_THROTTLE macros keep their state per call site for the whole process, so a
@@ -542,10 +543,11 @@ private:
 
     // The listener holds a reference to the buffer and feeds it from the node's
     // /tf subscription: it is destroyed first on every release path, and created
-    // after the buffer here.
+    // after the buffer here. makeTransformListener keeps that subscription on this
+    // node, in the listener's own group on its own thread, on Jazzy and Rolling.
     tf_listener_.reset();
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
+    tf_listener_ = makeTransformListener(*tf_buffer_, *this);
 
     assessment_publisher_ = create_publisher<marine_interfaces::msg::CoverageAssessment>(
       "coverage_assessment", rclcpp::QoS(kLatchedDepth).reliable().transient_local());
