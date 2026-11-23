@@ -1988,12 +1988,12 @@ TEST_F(NodeTest, TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode
   ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
 
   const auto base = h.node_->get_node_base_interface();
-  std::map<std::string, rclcpp::CallbackGroup::SharedPtr> group_of;
+  std::map<std::string, std::vector<rclcpp::CallbackGroup::SharedPtr>> groups_of;
   base->for_each_callback_group(
     [&](rclcpp::CallbackGroup::SharedPtr group) {
       group->collect_all_ptrs(
         [&](const rclcpp::SubscriptionBase::SharedPtr & sub) {
-          group_of[sub->get_topic_name()] = group;
+          groups_of[sub->get_topic_name()].push_back(group);
         },
         [](const rclcpp::ServiceBase::SharedPtr &) {},
         [](const rclcpp::ClientBase::SharedPtr &) {},
@@ -2002,16 +2002,18 @@ TEST_F(NodeTest, TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode
     });
   for (const std::string topic : {"/tf", "/tf_static"}) {
     SCOPED_TRACE(topic);
-    ASSERT_EQ(group_of.count(topic), 1u)
+    ASSERT_EQ(groups_of.count(topic), 1u)
       << "this node holds no subscription to " << topic
       << ": the TF listener was built on a node of its own (#415 cause 14)";
-    EXPECT_NE(group_of[topic].get(), base->get_default_callback_group().get())
+    ASSERT_EQ(groups_of[topic].size(), 1u)
+      << "this node holds more than one subscription to " << topic;
+    EXPECT_NE(groups_of[topic].front().get(), base->get_default_callback_group().get())
       << "the TF listener's subscription is in the executor's default group "
       "(spin_thread false), not on a thread of its own";
-    EXPECT_FALSE(group_of[topic]->automatically_add_to_executor_with_node())
+    EXPECT_FALSE(groups_of[topic].front()->automatically_add_to_executor_with_node())
       << "the TF listener's group would be spun by the node's executor";
   }
-  EXPECT_EQ(group_of["/tf"].get(), group_of["/tf_static"].get());
+  EXPECT_EQ(groups_of["/tf"].front().get(), groups_of["/tf_static"].front().get());
   EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
