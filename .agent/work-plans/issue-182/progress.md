@@ -348,3 +348,13 @@ Previous round (Integrated Review at `0f68fb4`): I checked each fix against the 
 **Decision**: merge
 
 The owner's answers, 2026-11-23: "Merge when CI is green (Recommended)" for pull request 183 (Part 1); "Backport right after (Recommended)" for the hand backport to `jazzy`; "Post it (Recommended)" for the comment on rolker/unh_marine_autonomy#415 (cause 14 extended to the broadcasters, cause 16 for `rclcpp::Waitable` subclasses); "Open it (Recommended)" for the follow-up issue in this repository. The host merges only after the CI run on the pushed records passes.
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 13:14 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (part 1 merged as pull request 183 at `7d1d3cb`; the plan was written before part 1's reviews and its part 2 section predates what part 1 found, so it is refreshed rather than implemented as it stands)
+**After**: plan
+**Decision**: revise
+
+Part 1 (CI for `rolling`, `coverage_assessment`) is merged; its backport to `jazzy` is pull request 185. The plan is refreshed for part 2, the `cube_bathymetry` package, and then for the plain-container Rolling CI job (the owner's choice "B: plain container job", added after part 2 with its measured run time reported to him). To carry into the refreshed plan: part 1's helper and `static_assert` pattern for the TF listener (cause 14, `spin_thread = true`); causes 15 to 16 on rolker/unh_marine_autonomy#415; the unused `tf2_ros/message_filter.h` include goes in part 2; the validation statement must say that this package feeds the Nav2 costmap; a comparison of produced tiles before and after is owed; left-alone items go to rolker/cube_bathymetry#184 as a comment drafted for the owner.
