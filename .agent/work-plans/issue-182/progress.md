@@ -426,3 +426,13 @@ The code commits (1 to 7) are right. Every error they fix was confirmed by readi
 - [ ] Commit 6: name the `qos_overrides` parameter move (finding 4).
 - [ ] (b), if run: measure the run-to-run spread first (finding 5).
 - [ ] Correct the three factual slips (finding 6).
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 13:54 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (the plan review's verdict is needs-work; the one finding that was the owner's has his answer, quoted below; the rest are corrections the planner makes)
+**After**: plan
+**Decision**: revise
+
+Read: the Plan Review at `33371b1`, verdict needs-work, six findings. Finding 1 went to the owner: the Rolling CI job cannot be built without `nav2_msgs` and `nav2_common` from navigation2 source, and he had said about Nav2 in CI "Let me think about it more before we do anything else about it." Asked on 2026-11-23 with options A (build the two packages), B and C (change the code), **his answer: "B: no Rolling job yet (Recommended)"**: Part 2's code merges on the Jazzy job plus recorded hand runs on Rolling; the Rolling job waits for his Nav2-in-CI decision or a Nav2 Rolling release and is tracked in rolker/cube_bathymetry#184. So commit 8 (the Rolling job) and its "Rolling job green" in Done-when leave the plan, and the hand runs on Rolling that replace it are named. Findings 2 to 6 are taken as written: the tile comparison gets a pass rule fixed before the run (file lists, NaN masks, a stated tolerance, the count of differing cells as well as the maximum), names which side writes the bags (Jazzy writes, Rolling reads) and the `jazzy` head the owner builds (`0b70b46`), states that it measures the platform and not the port, and comes as a script the owner can run on his Jazzy machine without this session; commit 6's message and the validation paragraph say that the `qos_overrides./tf*` parameters move onto the cube node on Rolling, as on Jazzy; comparison (b) needs a run-to-run noise baseline if it is run at all; the three factual slips are corrected. Finding 3 (CI step details) falls away with commit 8 and is recorded for when the job is written.
