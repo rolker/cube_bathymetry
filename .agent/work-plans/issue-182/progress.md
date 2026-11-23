@@ -556,3 +556,31 @@ Nothing here was built or run on Jazzy. By reading only: the `.hpp` headers exis
 - `libgdal-dev` only as `build_depend` while `bag_to_geotiff` links GDAL at run time; `find_package(lifecycle_msgs)` without `REQUIRED` (`CMakeLists.txt:28`); `bag_to_geotiff.cpp:622-623`.
 - The pre-existing Jazzy listener-destruction race (Part 1's note).
 - Found here: rosbag2's Python writer leaves two CDR padding bytes unset in some messages, so the same synthetic bag is not byte-identical run to run (values are); harmless, upstream.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-23 15:12 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Verdict**: changes-requested
+
+**Branch**: feature/issue-182 at `f950830`
+**Base**: origin/rolling
+**Depth**: Deep (reason: navigation-path package, cross-layer build + manifest + live-node TF change; 15 files, +1130 -158 including records)
+**Must-fix**: 1 | **Suggestions**: 5
+**Round**: 1 | **Ship**: continue — round 1: 1 must-fix (mechanical, in the records tool `tile_compare.sh`, not in the port's code); first round always re-reviews after fixes
+
+Round 1 for Part 2 (`cube_bathymetry`). Specialists: static analysis (xmllint clean on `package.xml`; `bash -n` clean on `tile_compare.sh`; shellcheck not installed here, so not run; cppcheck no findings on the new header), governance, plan drift (none: the seven code commits match the plan's Approach 1 to 7 and Files to Change; `batch_regen_bag` left out of the tool per the 13:59 Checkpoint), a fresh Claude adversarial subagent, and cross-model Gemini and Codex (both completed).
+
+**The port's code: no defect found.** Checked line by line: the importer and gridding sources (`import_bag_main.cpp`, `batch_regen_main.cpp`, `detections_projector.{h,cpp}`) change only include names, and every `tf2/*.h` named is, on geometry2 `jazzy` and on Rolling, a wrapper that includes the `.hpp` (read on `jazzy`: `time.h`, `buffer_core.h`, `exceptions.h`, `LinearMath/Quaternion.h`, `LinearMath/Matrix3x3.h`), so the preprocessed code is the same. `cube_bathymetry_grid_projection` keeps its Eigen plugin definitions: they come from `grid_map_core-extras.cmake` (`add_definitions`, directory scope), identical on Rolling's underlay and grid_map `jazzy`, whose `grid_map_core` exports `grid_map_core::grid_map_core` (`ament_export_targets(export_grid_map_core)`). On Jazzy the helper calls `TransformListener(buffer, &node, true)`: the `NodeT&&` template, as `(buffer, this)` did, so nothing changes there; on Rolling, TF moves from a hidden node to this node and stays on a dedicated thread (the old `this` converted to `spin_thread = true`), so which thread delivers TF does not change on either distro and the buffer is the same. Helper identical to `coverage_assessment`'s apart from the namespace. The code commits touch no `.agent/` file and cherry-pick clean onto `origin/jazzy` (`0b70b46`, trial in a scratch worktree, removed); `git diff origin/jazzy origin/rolling -- cube_bathymetry` is empty.
+
+Re-run here: `build.sh --packages-select cube_bathymetry` up to date at `f950830`; `test_node_lifecycle` run directly on `ROS_DOMAIN_ID` 173 (checked empty): "[  PASSED  ] 68 tests", binary sha256 `58bd753e…` (the recorded restored binary). `tile_compare.sh compare` on two empty result directories: "VERDICT (depth stores, 1 mm rule): PASS" (finding 2).
+
+Dropped as false or settled: Gemini's "`tf2_ros/*.hpp` may not exist on Jazzy" (`buffer.hpp` and `transform_listener.hpp` exist on geometry2 `jazzy`; the helper passed Part 1's Jazzy CI); Gemini's CI-image sync (the CI job's own `rosdep install` adds new keys and the Dockerfile copies the manifest); Gemini's `-Wsuggest-override` on `get_timers()` (not enabled; `override` impossible on Jazzy); Gemini's `shared_ptr` argument (fails to compile on Jazzy, not silent; the one call site passes `*this`); the remaining `tf2_ros/*.h` includes (issue 184).
+
+### Findings
+- [ ] (must-fix) tile_compare.sh compares band count, size and geotransform but not the CRS, each band's data type or its nodata value: a depth tile with the same values in another CRS (GDAL 3.8 against 3.12, PROJ axis order) or written as Float32 passes; `is_int` reads side A only. Fail on a CRS mismatch (`GetSpatialRef().IsSame`), a data type mismatch or a nodata mismatch in the gated stores — `.agent/work-plans/issue-182/tile_compare.sh:244-262`
+- [ ] (suggestion) The depth rule passes with no tile compared: "absent on both sides" returns True, and two empty stores give "tile lists: same" (shown here: two empty result dirs give PASS). Require at least one tile in `depth` — `.agent/work-plans/issue-182/tile_compare.sh:227-235`
+- [ ] (suggestion) Each side builds its `import_bag` arguments from its own `--src` checkout of `test_import_bag_slope.py`, and nothing compares them, so a difference in arguments would be read as the platform. Compare the logs' `$` lines with paths normalised; `real_depth` on one side only is "not compared" rather than a failure — `.agent/work-plans/issue-182/tile_compare.sh:141-156,393-399`
+- [ ] (suggestion) The named test proves ownership and group flags but would pass if the dedicated executor never spun; assert the buffer's `isUsingDedicatedThread()` through the test peer, or publish a transform and see it reach the buffer with the node's executor idle (Claude adversarial, Codex) — `cube_bathymetry/test/test_node_lifecycle.cpp:2172-2205`
+- [ ] (suggestion) The exported `cube_bathymetry_grid_projection` links `grid_map_core::grid_map_core` but `ament_export_dependencies` does not list `grid_map_core`, so a downstream `find_package(cube_bathymetry)` alone cannot resolve the target; the old `ament_target_dependencies` had the same gap (not a regression): add one line, or carry to issue 184 (Codex, Gemini, Claude adversarial) — `cube_bathymetry/CMakeLists.txt:249,805`
+- [ ] (suggestion) Include guard `MAKE_TRANSFORM_LISTENER_HPP_` is the same as `coverage_assessment`'s copy; harmless while both are private, but prefix it with the package name before any consolidation — `cube_bathymetry/src/make_transform_listener.hpp:22`
