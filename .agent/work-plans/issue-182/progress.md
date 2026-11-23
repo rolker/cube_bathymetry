@@ -338,3 +338,13 @@ Previous round (Integrated Review at `0f68fb4`): I checked each fix against the 
 
 ### False positives
 - (Gemini, pre-push round) "`tf2_ros/transform_listener.hpp` does not exist on Jazzy" — confirmed false by the Jazzy CI build at `f366b9f`
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 13:03 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: owner
+**After**: merge
+**Decision**: merge
+
+The owner's answers, 2026-11-23: "Merge when CI is green (Recommended)" for pull request 183 (Part 1); "Backport right after (Recommended)" for the hand backport to `jazzy`; "Post it (Recommended)" for the comment on rolker/unh_marine_autonomy#415 (cause 14 extended to the broadcasters, cause 16 for `rclcpp::Waitable` subclasses); "Open it (Recommended)" for the follow-up issue in this repository. The host merges only after the CI run on the pushed records passes.
