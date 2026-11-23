@@ -182,3 +182,25 @@ Read: `plan.md` at `90b0eb7` and the Plan Review of it (needs-work; nine finding
 - F9: the unreproduced failure of three timing tests in `test_coverage_assessment_node` is settled by evidence before the pull request: the final binary 50 times under a deliberate CPU load with nothing else on its `ROS_DOMAIN_ID` (86); if any run fails, the same with the pre-fix binary; the result goes to the owner if it is not zero.
 
 **For Part 2's plan revision** (recorded here so the next `plan-task` reads them): F2, the validation statement is wrong, `cube_bathymetry` feeds the Nav2 costmap through `marine_bathymetry_store` and `bathymetry_layer`, and a Jazzy/Rolling comparison of imported tiles on the same bag is owed before it runs on Rolling on a boat; F1, F3, F4, the corrected facts on the cut, option (iii) and the estimates; the Rolling job (owner's choice B) is added after Part 2 with an `actions/cache` step considered and its measured time reported.
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-23 11:38 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Branch**: feature/issue-182 at `73372b5`
+
+Part 1 only (CI layer (a) and `coverage_assessment`), with the checkpoint's corrections F5 to F9:
+- `c323928` CI: `ci.yml` triggers `[jazzy, rolling]`; Dockerfile "MUST match" comment widened (F6), behaviour unchanged. Backport.
+- `a171fca` CI: `upstream.repos` pins unh_marine_autonomy at `rolling`, with a comment that the file is never taken whole onto `jazzy`. Not backported.
+- `3fac5ea` cause 1: `target_link_libraries(coverage_assessment_core grid_map_core::grid_map_core)`. Backport.
+- `873c0fc` cause 2: `tf2/exceptions.hpp`, `tf2/time.hpp`. Backport.
+- `0f7ad1a` new cause: `InertWaitable` overrides Rolling's pure `Waitable` members, `get_timers()` without `override`. Backport.
+- `a9a5941` new cause: broadcasters built from `*io_`. Backport.
+- `3819efa` cause 14: `src/make_transform_listener.hpp` (listener type as template parameter, `spin_thread` explicitly `true` in both branches), call site, test `NodeTest.TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode` (only this node's callback groups). Backport.
+- `73372b5` cause 11: `rcl_interfaces` and `lifecycle_msgs` as `depend` (the latter was test-only; the installed launch file imports it), `launch_testing` and `rcutils` as `test_depend`. Backport.
+
+Verified on Rolling (no Jazzy here; the CI job is the only Jazzy check):
+- `./build.sh --packages-select coverage_assessment --packages-ignore cube_bathymetry` (cold): 1 package finished, 37 s; only the tf2_ros `.h` deprecation `#warning`s. Without `--packages-ignore cube_bathymetry` colcon refuses (cube_bathymetry's `package.sh` missing).
+- `./test.sh` with the same selection: 93% passed, 14 of 15; `test_frame_chain` fails by design (`cube_bathymetry` not installed). In a scratch copy with Part 2's build fixes for `cube_bathymetry`: `test_frame_chain` passed (13 tests).
+- Mutations (scratch copy, test executable relinked): raw `this` and `spin_thread = false` each fail the new test and `CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor`, 51 others pass.
+- Repeats as separate processes: 4 core gtests 50 of 50 each; launch test 50 of 50; `test_coverage_assessment_node` 50 of 50 under 17 busy loops on 20 cores (load 17.1 to 17.7), domain 86 empty before every tenth run and holding only the test's own nodes during one, run time 62 to 64 s. The unreproduced failure did not recur; no pre-fix run was needed.
