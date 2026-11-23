@@ -204,3 +204,31 @@ Verified on Rolling (no Jazzy here; the CI job is the only Jazzy check):
 - `./test.sh` with the same selection: 93% passed, 14 of 15; `test_frame_chain` fails by design (`cube_bathymetry` not installed). In a scratch copy with Part 2's build fixes for `cube_bathymetry`: `test_frame_chain` passed (13 tests).
 - Mutations (scratch copy, test executable relinked): raw `this` and `spin_thread = false` each fail the new test and `CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor`, 51 others pass.
 - Repeats as separate processes: 4 core gtests 50 of 50 each; launch test 50 of 50; `test_coverage_assessment_node` 50 of 50 under 17 busy loops on 20 cores (load 17.1 to 17.7), domain 86 empty before every tenth run and holding only the test's own nodes during one, run time 62 to 64 s. The unreproduced failure did not recur; no pre-fix run was needed.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-23 11:47 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Verdict**: approved
+
+**Branch**: feature/issue-182 at `4572289`
+**Base**: origin/rolling
+**Depth**: Standard (reason: CI workflow and upstream pin change plus one change to running code, the TF listener; about 170 changed lines outside the records)
+**Must-fix**: 0 | **Suggestions**: 4
+**Round**: 1 | **Ship**: recommended — no must-fix findings; remaining suggestions can be applied or tracked
+
+Part 1 only (CI plumbing and `coverage_assessment`). Specialists: static analysis (cppcheck on the new header clean; ament linters pass in the package's test run; YAML parses), governance, plan drift (matches the plan as corrected by the Checkpoint: the Dockerfile comment is F6, `lifecycle_msgs`/`launch_testing` are F7, explicit `spin_thread` and templated detection are F8), Claude adversarial (no must-fix), Gemini and Codex (both completed).
+
+Listener (cause 14): read line by line against `/opt/ros/rolling/include/tf2_ros/tf2_ros/transform_listener.hpp` and geometry2 `jazzy` `transform_listener.hpp`. Rolling takes the `RequiredInterfaces` constructor (the `(BufferCore&, bool, bool)` one is not viable for a node reference); Jazzy has no `RequiredInterfaces` and `(buffer, &node, true)` picks the `NodeT&&` template by exact match over the pointer-to-bool overload, which is the old call. Same node, `spin_thread = true`, same QoS and option defaults, `static_only = false`, on both. Both `if constexpr` branches depend on `ListenerT`. The new test fails for a hidden node (no `/tf` on this node) and for `spin_thread = false` (default group, auto-added), and reads only this node's callback groups.
+
+CI: upstream rolker/unh_marine_autonomy `rolling` (ec4fd5d7) and `jazzy` (c4bc9ed7) have the same 18 manifests with no manifest, CMake or source difference, so the prune list and `ROSDEP_SKIP_KEYS` fit unchanged; upstream's own Jazzy job is green on both branches (2026-11-20, 2026-11-23). The `:jazzy` image (last built 2026-11-16) predates upstream's 2026-11-20 keys; job-time `rosdep install` covers them. Expected first run: green; if red, the step names whose it is (Checkpoint F5).
+
+Dismissed: Gemini's "`tf2_ros/transform_listener.hpp` may not exist on Jazzy" (it does, geometry2 `jazzy`); Gemini's plain `target_link_libraries` signature, `lifecycle_msgs` as `depend`, and Dockerfile drift (Checkpoint F6/F7); the adversarial reviewer's `tf2_ros/*.h` includes (left for the follow-up issue by rule). Codex's Jazzy teardown hang (listener destroyed before its spin thread enters `spin()`: `cancel()` is then overwritten by `spinning.exchange(true)`) is real in Jazzy's tf2_ros/rclcpp but not introduced here: the old `TransformListener(*tf_buffer_, this)` had the same thread and destructor, and the test file already has nine configure/cleanup cycles; kept as a follow-up suggestion, not a must-fix.
+
+Re-run here (Rolling): `./build.sh --packages-select coverage_assessment --packages-ignore cube_bathymetry` up to date, 1 package finished; `./test.sh` same selection: 14 of 15, `test_frame_chain` fails by design; the new test plus the two group-audit tests, 20 of 20 separate runs on domain 86 (checked empty with `ros2 node list --no-daemon`). Mutations not re-run (implementer's record). Nothing run on Jazzy.
+
+### Findings
+- [ ] (suggestion) The new test keeps one group per topic (`group_of[topic] = group`), so a second `/tf` or `/tf_static` subscription on this node would go unnoticed; collect a list per topic and assert exactly one — `coverage_assessment/test/test_coverage_assessment_node.cpp:1996`
+- [ ] (suggestion) Guard the helper against a pointer argument: on Rolling a `Node *` lvalue would silently select `(BufferCore&, bool spin_thread, bool static_only)` (hidden node, `static_only = true`); add `static_assert(!std::is_pointer_v<NodeT>)` — `coverage_assessment/src/make_transform_listener.hpp:58`
+- [ ] (suggestion) `ci-image.yml`'s `workflow_dispatch` publishes the `:jazzy` tag from whatever ref it is run on; run from `rolling` it bakes `rolling`'s upstream pins, contrary to the Dockerfile comment; restrict the job to `refs/heads/jazzy` (a CI commit, backported) — `.github/workflows/ci-image.yml:14`
+- [ ] (suggestion) Record in the follow-up issue the pre-existing Jazzy race where a `TransformListener` destroyed before its thread enters `spin()` can hang in `join()` (Codex); not introduced by this branch — `coverage_assessment/src/coverage_assessment_node.hpp:548`
