@@ -242,3 +242,22 @@ Re-run here (Rolling): `./build.sh --packages-select coverage_assessment --packa
 **Decision**: publish
 
 Read: the Local Review (Pre-Push) at `4572289`, verdict approved, ship recommended, four suggestions open: the new test keeps one callback group per topic, so a second `/tf` or `/tf_static` subscription would go unnoticed (`coverage_assessment/test/test_coverage_assessment_node.cpp:1996`); guard the helper against a pointer argument with a `static_assert` (`coverage_assessment/src/make_transform_listener.hpp:58`); `ci-image.yml`'s manual dispatch publishes the `:jazzy` image tag from whatever branch it is run on (`.github/workflows/ci-image.yml:14`); record in the follow-up issue a pre-existing Jazzy race where a `TransformListener` destroyed before its thread enters `spin()` can hang (`coverage_assessment_node.hpp:548`). They stay open and go through triage after publish, so the first CI run starts now. This is a project issue, so the host runs no full pre-commit pass. The pull request says `Part of #182`.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-11-23 11:59 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+
+**PR**: #183 at `0f68fb4`
+**Sources**: 4 (Local Review (Pre-Push) @ `4572289` (covers `0f68fb4` via bookkeeping), Gemini and Codex via that review, GitHub reviews (none), CI rollup)
+**Cross-source confirmations**: 0 at head (the ci-image finding was raised by Codex and the pre-push reviewer in the same round, and the pointer-guard finding by Gemini and the pre-push reviewer; both sources sit in that one entry, not two at this head)
+**CI**: pending (run 45220509531, `ROS 2 Jazzy (industrial_ci)`, still in its `industrial_ci` step at 11:58 -05:00, about 11 minutes in; no result to record; the host re-checks before the merge checkpoint)
+
+### Findings
+- [ ] (suggestion, Local Review @ `4572289` + Codex) `ci-image.yml`'s `workflow_dispatch` publishes `:jazzy` from any ref, so run from `rolling` it bakes `rolling`'s upstream pins into the Jazzy image. Fix: add `if: github.ref == 'refs/heads/jazzy'` to the `build-and-push` job. The file stays identical on both branches: on `jazzy` the schedule trigger (runs on the default branch, `jazzy`) and the push trigger (`branches: [jazzy]`) both have `github.ref == refs/heads/jazzy`, so they are unaffected; on `rolling` only a dispatch can fire it, and that is now skipped. A CI commit, backported by hand — `.github/workflows/ci-image.yml:25`
+- [ ] (suggestion, Local Review @ `4572289` + Gemini) Guard the helper against a pointer argument: with a `Node *` lvalue `NodeT` deduces as `Node *`, and on Rolling `make_shared<ListenerT>(buffer, node, true)` selects `(BufferCore &, bool spin_thread, bool static_only)` silently. Fix: `static_assert(!std::is_pointer_v<NodeT>, "pass the node by reference");` as the first line of `makeTransformListener`. It is on the caller's argument type only; the Jazzy branch's internal `&node` is `Node *` when `NodeT = Node`, so it is unaffected (a `Node *` argument would already fail to compile there as `Node **`). `<type_traits>` is already included. The only caller (`*this`) is fine today — `coverage_assessment/src/make_transform_listener.hpp:58`
+- [ ] (suggestion, Local Review @ `4572289`) The new test records one group per topic (`group_of[topic] = group`), so a second `/tf` or `/tf_static` subscription on this node goes unnoticed. Fix: collect `std::map<std::string, std::vector<rclcpp::CallbackGroup::SharedPtr>>`, `ASSERT_EQ(groups_of[topic].size(), 1u)`, then run the existing checks on `groups_of[topic].front()` — `coverage_assessment/test/test_coverage_assessment_node.cpp:1991`
+- [ ] (suggestion, Local Review @ `4572289` + Codex) Record in the follow-up issue (with the deprecated `tf2_ros/*.h` includes) the pre-existing Jazzy race: a `TransformListener` destroyed before its thread enters `spin()` can hang in `join()`, because Jazzy's `spin()` resets the cancel flag on entry. Not introduced by this branch (Jazzy's `TransformListener(buffer, this)` had the same thread); a note is the whole action, per the port rule of no big changes — `coverage_assessment/src/coverage_assessment_node.hpp:548`
+
+### False positives
+- (Gemini, pre-push round) "`tf2_ros/transform_listener.hpp` does not exist on Jazzy" — Jazzy's tf2_ros ships the `.hpp` headers (the `.h` ones are the deprecated shims); this was already ruled on in the pre-push review, and the Jazzy CI run settles it either way
