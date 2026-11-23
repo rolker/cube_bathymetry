@@ -584,3 +584,32 @@ Dropped as false or settled: Gemini's "`tf2_ros/*.hpp` may not exist on Jazzy" (
 - [x] (suggestion) The named test proves ownership and group flags but would pass if the dedicated executor never spun; assert the buffer's `isUsingDedicatedThread()` through the test peer, or publish a transform and see it reach the buffer with the node's executor idle (Claude adversarial, Codex) — `cube_bathymetry/test/test_node_lifecycle.cpp:2172-2205`
 - [x] (suggestion) The exported `cube_bathymetry_grid_projection` links `grid_map_core::grid_map_core` but `ament_export_dependencies` does not list `grid_map_core`, so a downstream `find_package(cube_bathymetry)` alone cannot resolve the target; the old `ament_target_dependencies` had the same gap (not a regression): add one line, or carry to issue 184 (Codex, Gemini, Claude adversarial) — `cube_bathymetry/CMakeLists.txt:249,805` (deferred: not this pull request's: pre-existing export gap; recorded for rolker/cube_bathymetry#184)
 - [x] (suggestion) Include guard `MAKE_TRANSFORM_LISTENER_HPP_` is the same as `coverage_assessment`'s copy; harmless while both are private, but prefix it with the package name before any consolidation — `cube_bathymetry/src/make_transform_listener.hpp:22`
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-23 15:29 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+
+**Branch**: feature/issue-182 at `452c903`
+**Addressed**: Local Review (Pre-Push) at `f950830` (2026-11-23 15:12 -05:00)
+**Commits**: `e006804` (code), `452c903` (test), `15dedc2` (records), `855dccb` (records: boxes)
+
+### Actions
+- [x] (must-fix) tile_compare.sh now checks the CRS per tile (`IsSame`; no CRS on both sides is the same and noted, on one side only it differs), each band's data type on both sides and its nodata value (NaN on both sides the same); `is_int` looks at both sides. Fails a depth store, reported in the backscatter stores. `15dedc2` — `.agent/work-plans/issue-182/tile_compare.sh`
+- [x] (suggestion) A depth store needs at least one tile on each side; two empty result directories now FAIL. `15dedc2` — `tile_compare.sh`
+- [x] (suggestion) The `$` lines of the import logs are compared with the import_bag path and the paths under `bags/` and `stores/` normalised; a difference or a missing log FAILs. `real_depth` on one side only is "not compared" in the summary, the side named. `tile_compare.md` updated for all three. `15dedc2` — `tile_compare.sh`, `tile_compare.md`
+- [x] (suggestion) The cause-14 test also asks `isUsingDedicatedThread()` on the buffer, through a new `CubeBathymetryTestAccess::tfBufferHasDedicatedThread`; TransformListener sets it right after starting its thread on Jazzy (geometry2 `jazzy` `transform_listener.hpp:269-271`, `337-338`) and Rolling (installed header `:205-209`). Deterministic, so chosen over publish-and-wait. `452c903` — `cube_bathymetry/test/test_node_lifecycle.cpp`
+- [x] (suggestion) Include guard now `CUBE_BATHYMETRY__MAKE_TRANSFORM_LISTENER_HPP_`; ament_cpplint derives `MAKE_TRANSFORM_LISTENER_HPP_` for a file under `src/` and flags any other, so the `#ifndef`/`#endif` lines carry `NOLINT(build/header_guard)` with a comment. `e006804` — `cube_bathymetry/src/make_transform_listener.hpp:22`
+- [x] (suggestion) `ament_export_dependencies` lacks `grid_map_core` — `cube_bathymetry/CMakeLists.txt:249,805` (deferred: not this pull request's: pre-existing export gap; recorded for rolker/cube_bathymetry#184)
+
+### Verification
+- Mutations of the cause-14 test (Rolling, test_node_lifecycle run directly on domains 161 to 164, each checked empty): raw `this`: 66 pass, 2 fail (the test at its `/tf` ownership ASSERT `:2202`, plus AllCallbacksShareTheDefaultGroup). Helper with `spin_thread` false: 66 pass, 2 fail (the test at `:2207`, `:2210` for both topics and the new `:2216`). New third mutation, `spin_thread` false with both subscriptions in a group not added to the executor that nothing spins: 67 pass, 1 fail, the new `:2216` only; the test before this change passed it 68 of 68. Restored and rebuilt: 68 of 68.
+- test_node_lifecycle 30 times as separate processes, domains 170 to 199, each checked empty first: 30 of 30, "[  PASSED  ] 68 tests".
+- tile_compare.sh on a Rolling dry run and altered copies: a depth tile in EPSG:32619, without a CRS, with nodata -9999, as Float32: each FAIL with its line, exit 1; the same alterations (Float64 for the type) in `beam_bs`: reported, PASS; no CRS on both sides: PASS with a note; identical copy: PASS; two empty dirs: FAIL; one side's depth store empty: FAIL; `-r 2.0` on one side: FAIL; a missing log: FAIL; only other absolute paths: PASS; `real_depth` on one side: "not compared (side B only)", PASS.
+- `MAKEFLAGS=-j8 ./build.sh --parallel-workers 2 --packages-select cube_bathymetry`: finished. Warnings: only the pre-existing `TRANSFORM_LISTENER_HEADER_DEPRECATION` in the rebuilt units (from `cube_bathymetry_node.hpp:46`, `#include "tf2_ros/transform_listener.h"`, which `0193873` left as `.h`); none new.
+- `./test.sh --parallel-workers 2 --packages-select cube_bathymetry` (domains 86, 87 empty first): "100% tests passed, 0 tests failed out of 53"; "Summary: 2148 tests, 0 errors, 0 failures, 152 skipped".
+- No code commit touches `.agent/`. Cherry-pick trial onto `origin/jazzy` in a scratch worktree: the earlier seven plus `e006804` and `452c903` apply cleanly (hooks off in that throwaway worktree only); removed.
+
+### For the follow-up issue
+- Part 1's `coverage_assessment` cause-14 test has the same gap (no check that the listener's thread runs); not changed here.
+- `cube_bathymetry_node.hpp:46` still includes the deprecated `tf2_ros/transform_listener.h`.
