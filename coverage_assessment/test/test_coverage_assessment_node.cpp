@@ -1974,6 +1974,47 @@ TEST_F(NodeTest, CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor)
   }
 }
 
+// rolker/unh_marine_autonomy#415 cause 14: on Rolling, `TransformListener(buffer, this)`
+// compiles and converts the node pointer to `bool spin_thread`, so the listener makes
+// a hidden node of its own and this node holds no /tf subscription at all; with
+// spin_thread false instead, the subscriptions land in the default group that the
+// executor spins. Either breaks the onReset design. Only this node's own callback
+// groups are inspected, never the graph of the domain.
+TEST_F(NodeTest, TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+
+  const auto base = h.node_->get_node_base_interface();
+  std::map<std::string, rclcpp::CallbackGroup::SharedPtr> group_of;
+  base->for_each_callback_group(
+    [&](rclcpp::CallbackGroup::SharedPtr group) {
+      group->collect_all_ptrs(
+        [&](const rclcpp::SubscriptionBase::SharedPtr & sub) {
+          group_of[sub->get_topic_name()] = group;
+        },
+        [](const rclcpp::ServiceBase::SharedPtr &) {},
+        [](const rclcpp::ClientBase::SharedPtr &) {},
+        [](const rclcpp::TimerBase::SharedPtr &) {},
+        [](const rclcpp::Waitable::SharedPtr &) {});
+    });
+  for (const std::string topic : {"/tf", "/tf_static"}) {
+    SCOPED_TRACE(topic);
+    ASSERT_EQ(group_of.count(topic), 1u)
+      << "this node holds no subscription to " << topic
+      << ": the TF listener was built on a node of its own (#415 cause 14)";
+    EXPECT_NE(group_of[topic].get(), base->get_default_callback_group().get())
+      << "the TF listener's subscription is in the executor's default group "
+      "(spin_thread false), not on a thread of its own";
+    EXPECT_FALSE(group_of[topic]->automatically_add_to_executor_with_node())
+      << "the TF listener's group would be spun by the node's executor";
+  }
+  EXPECT_EQ(group_of["/tf"].get(), group_of["/tf_static"].get());
+  EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
+}
+
 TEST_F(NodeTest, TheCallbackGroupAuditNoticesWhatItIsFor)
 {
   Harness::Options opt;
