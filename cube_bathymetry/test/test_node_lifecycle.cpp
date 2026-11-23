@@ -126,6 +126,14 @@ struct CubeBathymetryTestAccess
     return {response->success, response->message};
   }
 
+  /// Whether the TF buffer was told a thread of its own feeds it. configure()
+  /// builds a fresh buffer, and only a listener that starts its dedicated thread
+  /// sets this flag (spin_thread true, on Jazzy and on Rolling).
+  static bool tfBufferHasDedicatedThread(const CubeBathymetry & n)
+  {
+    return n.tf_buffer_ && n.tf_buffer_->isUsingDedicatedThread();
+  }
+
   /// Make buildSession() throw once the candidate sheet exists.
   static void setBuildFault(CubeBathymetry & n, std::function<void()> fault)
   {
@@ -2168,7 +2176,9 @@ TEST_F(NodeLifecycle, AllCallbacksShareTheDefaultGroup)
 // it on its own thread. On Rolling, `TransformListener(buffer, this)` converts the
 // pointer to `bool spin_thread` and builds a hidden node (#415 cause 14), and a
 // listener with spin_thread false puts the subscriptions in the default group; this
-// test names each of those, where the audit above only notices a missing group.
+// test names each of those, where the audit above only notices a missing group. It
+// also asks the buffer whether the listener started its dedicated thread, which a
+// group outside the executor that nothing spins would not show.
 TEST_F(NodeLifecycle, TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode)
 {
   auto node = std::make_shared<CubeBathymetry>();
@@ -2201,6 +2211,10 @@ TEST_F(NodeLifecycle, TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHidde
       << "the TF listener's group would be spun by the node's executor";
   }
   EXPECT_EQ(groups_of["/tf"].front().get(), groups_of["/tf_static"].front().get());
+  // A group outside the executor that nothing spins would pass every check above;
+  // the listener sets this flag only once it has started the thread that spins it.
+  EXPECT_TRUE(CubeBathymetryTestAccess::tfBufferHasDedicatedThread(*node))
+    << "the TF buffer has no dedicated listener thread: nothing spins the TF group";
   EXPECT_EQ(node->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
