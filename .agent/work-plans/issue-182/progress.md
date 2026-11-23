@@ -640,3 +640,13 @@ Verified: `e006804` and `452c903` touch nothing under `.agent/`. The nine code c
 
 ### Findings
 - [ ] (suggestion) Revert `e006804`; round 1's suggestion 6 does not hold up. The collision it guarded against cannot happen: both copies are private `src/` headers, and a consolidation into `marine_autonomy` replaces both with one header and a new guard. The fix costs two `NOLINT(build/header_guard)` suppressions, makes the two copies differ by more than their namespace, and its `__` name is a reserved identifier in strict C++ (Codex; ROS 2 uses that form for `include/` guards, so this is minor). The plain `MAKE_TRANSFORM_LISTENER_HPP_` that cpplint expects was the better trade. If it is kept, nothing breaks — `cube_bathymetry/src/make_transform_listener.hpp:22-26,75`
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 15:55 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (the round 2 pre-push review approved with no must-fix; Jazzy cannot be built on the development machine, so the pushed branch's Jazzy run is the first evidence for part 2)
+**After**: publish
+**Decision**: publish
+
+Read: the Local Review (Pre-Push) at `4a3291a`, round 2, verdict approved, ship recommended, one suggestion open: revert `e006804` (the package-prefixed include guard), because the collision it guarded against cannot happen and it costs two lint suppressions; the reviewer withdrew its own round 1 suggestion. It stays open and goes through triage after publish with what the Jazzy run shows, so one fix pass serves both. Part 2 has no Rolling CI job (owner: "B: no Rolling job yet"); recorded hand runs on Rolling stand in for it. The Rolling-against-Jazzy tile comparison is not a merge criterion for part 2: the owner's field server holds unimported `jazzy` commits that change this package's gridding code, so the comparison is to be done after that import, against the code the boats run (host decision, listed for the owner's veto; the tool and the owner's instructions are in the records). The owner on ordering, 2026-11-23: "the order we do things doesn't matter much since we are not running anything on real boats in the near future. Keep on working on what makes sense meanwhile". The pull request says `Part of #182`.
