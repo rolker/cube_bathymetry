@@ -74,3 +74,18 @@ issue: 182
 - [ ] Add `libsqlite3-dev` to `cube_bathymetry/package.xml` (cause 11) in the first build-fixing commit, and look for other keys the development machine hides (`libssl-dev` and `nlohmann-json-dev` are declared).
 - [ ] Add the `rolling` branch to the `ci.yml` and `ci-image.yml` triggers in a CI-only commit, whatever the owner chooses for the Rolling job, since a `rolling` pull request gets no check today.
 - [ ] State a repeat count in "Done when" for the launch and lifecycle tests (the issue says "a few hundred times"); #415 found intermittent failures only at that scale.
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 09:05 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (the Issue Review found the issue well-scoped as a port delivered in parts; its actions correct the cause list and narrow it, and the one CI point it raises is inside what the issue already asks, that the existing Jazzy job keeps checking both branches)
+**After**: issue-actions
+**Decision**: proceed
+
+Read: the Issue Review of 182 (well-scoped, right repository, no design change). Its actions go to the planner as inputs:
+
+- The corrected cause list: 2 real `ament_target_dependencies` calls (`cube_bathymetry/CMakeLists.txt:248`, `coverage_assessment/CMakeLists.txt:54`); the removed tf2 headers as listed; `message_filters/subscriber.h` and `tf2_ros/message_filter.h` in `cube_bathymetry_node.hpp` are unused includes, the first of which does not exist on Rolling; `sqlite3` should be `libsqlite3-dev`; causes 4, 5, 6, 7, 12 and 13 do not apply (confirm 12 against the build).
+- The cut into three parts (`coverage_assessment`; the `cube_bathymetry` build fixes; the `cube_bathymetry` tests and repeated runs) is the plan's to settle from a baseline build.
+- CI: `ci.yml` and `ci-image.yml` trigger only on `jazzy`, so a pull request into `rolling` gets no CI at all today. Making the existing Jazzy job run for `rolling` is inside the issue ("the existing job ... must keep passing on both branches") and is planned as a CI-only commit. Whether and how to add a Rolling job stays the owner's decision at the plan checkpoint; the plan sets out the options with what each costs.
+- A stated repeat count for the launch and lifecycle tests goes into the plan's done-when.
