@@ -261,3 +261,13 @@ Read: the Local Review (Pre-Push) at `4572289`, verdict approved, ship recommend
 
 ### False positives
 - (Gemini, pre-push round) "`tf2_ros/transform_listener.hpp` does not exist on Jazzy" — Jazzy's tf2_ros ships the `.hpp` headers (the `.h` ones are the deprecated shims); this was already ruled on in the pre-push review, and the Jazzy CI run settles it either way
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 11:59 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (four valid suggestions are open and each has a small, named fix or is a note for the follow-up issue; merging past open findings is the owner's answer only)
+**After**: findings
+**Decision**: address
+
+Read: the Integrated Review of pull request 183 at `0f68fb4`: four valid suggestions, one false positive, CI pending (the Jazzy job was still running when the triage ended; its result is read by the host and handed to the fix pass if it arrives in time, and CI on the fix push is the check either way). Addressed: (1) `ci-image.yml`: `if: github.ref == 'refs/heads/jazzy'` on the `build-and-push` job, so a manual run from `rolling` cannot publish the `:jazzy` image; (2) `make_transform_listener.hpp`: a `static_assert` refusing a pointer argument; (3) the listener test collects every callback group per topic and asserts exactly one. (4) the pre-existing Jazzy race (a `TransformListener` destroyed before its thread enters `spin()` can hang in `join()`, `coverage_assessment_node.hpp:548`) is not this pull request's to fix: it is recorded for the follow-up issue the host drafts for the owner, and its box is ticked as deferred there.
