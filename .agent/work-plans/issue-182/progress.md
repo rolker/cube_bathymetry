@@ -681,3 +681,17 @@ Test count: 2148 against Part 1's Jazzy 2143 (run 45229921366); skipped 159 agai
 **Decision**: address
 
 Read: the Integrated Review of pull request 186 at `4cbfffe`: one valid suggestion, no false positives, CI all-pass (run 45264438157, Jazzy: 19 upstream packages and both of this repository's built; 53 and 15 test targets pass; 2148 tests, 0 errors, 0 failures, 159 skipped; the strengthened listener test passes on Jazzy; no new rosdep key needed installing). Addressed: `e006804` (the package-prefixed include guard) is reverted with `git revert`, in a code commit of its own that touches nothing under `.agent/`; the backport leaves out both that commit and its revert. The finding's box is ticked in a separate records commit.
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-23 16:15 -05:00
+**By**: Claude Code Agent (claude-sonnet-5-5)
+
+**PR**: #186 at 688d152
+**Addressed**: Integrated Review at `4cbfffe` (2026-11-23 16:10 -05:00)
+**Commits**: 688d152
+
+### Actions
+- [x] Revert `e006804` (package-prefixed include guard) — `cube_bathymetry/src/make_transform_listener.hpp:22-25,75`
+
+Verification: `make_transform_listener.hpp` is byte-identical to its state at `e006804^`; build finished cube_bathymetry; ctest `cpplint|uncrustify|test_node_lifecycle` 100% passed, 0 failed out of 3. Full pre-commit pass left to the host.
