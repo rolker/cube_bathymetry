@@ -157,3 +157,28 @@ Part 1's content is right: the Jazzy and Rolling header facts behind causes 14, 
 - [ ] Commit 8: add `lifecycle_msgs` as `exec_depend` and `launch_testing` as `test_depend` (finding 7).
 - [ ] Helper: pass `spin_thread = true` explicitly in both branches; listener type as a template parameter (finding 8).
 - [ ] Unreproduced failure: record the domain-86 cross-talk alternative and the settling run (50 under load, domain checked clear; pre-fix binary only if one fails) (finding 9).
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 10:11 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (the two questions that were the owner's, the Rolling CI job and the order of the parts, he answered, quoted below; the Plan Review's remaining findings each state their resolution and go to the implementer as binding corrections, which gives the same result as a plan revision without another plan and review round on a plan that took 52 minutes to write)
+**After**: plan
+**Decision**: proceed
+
+Read: `plan.md` at `90b0eb7` and the Plan Review of it (needs-work; nine findings; the six points the host asked about confirmed, with gaps).
+
+**The owner's decisions** (asked in one dialog, with the review's corrections to the plan's facts in front of him: that `cube_bathymetry` is in the navigation path through the tiles `bathymetry_layer` reads; that option (iii) would not work as described; that the Rolling job estimate is roughly 15 to 25 minutes cold with `grid_map` unmeasured; that neither order leaves `rolling` fully green after the first part):
+
+- Rolling CI: "B: plain container job (Recommended)": a `ros:rolling-ros-core` container job like rolker/unh_marine_autonomy's, added after Part 2 as its own CI commit, its real run time reported to him from the first run.
+- Order of the parts: "coverage_assessment first (Recommended)".
+
+**Part 1 is implemented now** (CI layer (a) and `coverage_assessment`), with these corrections overriding the plan where they differ:
+
+- F7: cause 11 for `coverage_assessment` also needs `lifecycle_msgs` as `exec_depend` (the installed launch file imports it; today it is a `test_depend` only) and `launch_testing` as `test_depend`.
+- F8: the cause-14 helper passes `spin_thread` explicitly as `true` in both branches, because Jazzy's `TransformListener(buffer, this)` defaulted to `true` and this node's design depends on TF being on its own thread; the listener type is a template parameter of the detection, so both `if constexpr` branches are dependent; the commit says the fix keeps TF on a dedicated thread.
+- F6: `upstream.repos` is the one file never taken whole from `rolling` onto `jazzy`; say so in the pull request, and widen or correct the `.github/ci/Dockerfile` comment that says it must match `upstream.repos`.
+- F5: Part 1's first CI run is also the first run of this repository's Jazzy job since 2026-11-12, before upstream's manifest and CMake changes of 2026-11-20; a red in `setup_upstream_workspace`, `rosdep` or an upstream package's build is upstream's, a red in `cube_bathymetry` or `coverage_assessment` is this change's.
+- F9: the unreproduced failure of three timing tests in `test_coverage_assessment_node` is settled by evidence before the pull request: the final binary 50 times under a deliberate CPU load with nothing else on its `ROS_DOMAIN_ID` (86); if any run fails, the same with the pre-fix binary; the result goes to the owner if it is not zero.
+
+**For Part 2's plan revision** (recorded here so the next `plan-task` reads them): F2, the validation statement is wrong, `cube_bathymetry` feeds the Nav2 costmap through `marine_bathymetry_store` and `bathymetry_layer`, and a Jazzy/Rolling comparison of imported tiles on the same bag is owed before it runs on Rolling on a boat; F1, F3, F4, the corrected facts on the cut, option (iii) and the estimates; the Rolling job (owner's choice B) is added after Part 2 with an `actions/cache` step considered and its measured time reported.
