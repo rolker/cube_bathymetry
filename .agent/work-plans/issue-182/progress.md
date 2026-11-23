@@ -89,3 +89,11 @@ Read: the Issue Review of 182 (well-scoped, right repository, no design change).
 - The cut into three parts (`coverage_assessment`; the `cube_bathymetry` build fixes; the `cube_bathymetry` tests and repeated runs) is the plan's to settle from a baseline build.
 - CI: `ci.yml` and `ci-image.yml` trigger only on `jazzy`, so a pull request into `rolling` gets no CI at all today. Making the existing Jazzy job run for `rolling` is inside the issue ("the existing job ... must keep passing on both branches") and is planned as a CI-only commit. Whether and how to add a Rolling job stays the owner's decision at the plan checkpoint; the plan sets out the options with what each costs.
 - A stated repeat count for the launch and lifecycle tests goes into the plan's done-when.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-11-23 09:58 -05:00
+**By**: Claude Code Agent (claude-sonnet-5-5)
+**Plan**: `.agent/work-plans/issue-182/plan.md` at `90b0eb7`
+
+Planned from a Rolling build and test run on a scratch copy (deleted). Baseline: both packages fail at `ament_target_dependencies` (2.4 s); with the fixes both build cold in 1 min 33 s and the suite runs in 5 min 34 s. The build also showed three causes not on #415 (`bag_to_geotiff` needs `tf2_sensor_msgs` linked for Eigen; `InertWaitable` in two tests is abstract on Rolling; `StaticTransformBroadcaster(shared_ptr)` no longer compiles). Cause 14 (`TransformListener(buffer, this)` silently makes a hidden `transform_listener_impl_*` node on Rolling) was sent by the host during planning; it is confirmed here in both packages by a failing audit test and a probe, and the plan gives a helper that builds on Jazzy (whose constructor needs a pointer, so `*this` alone does not). Cut: Part 1 CI plumbing plus `coverage_assessment`, Part 2 `cube_bathymetry`, Part 3 repeat runs and the Rolling job if chosen. Repeat runs: 0 failures in 52 test names (50x, 20x for the node and launch tests, 10x for nine heavy ones); one unreproduced load-related failure of three timing-sensitive coverage node tests is recorded. Open for the owner: cut order, Rolling job option (recommendation: plain-container job), upstream pins on `rolling`.
