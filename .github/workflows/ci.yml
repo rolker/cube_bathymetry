@@ -1,10 +1,15 @@
 name: CI
 
+# This job is the Jazzy build. It runs for both branches: on `jazzy` it checks
+# the release line, on `rolling` it checks that the Rolling-first code still
+# builds and passes on Jazzy before it is backported (#182). This file is the
+# same on both branches; upstream.repos is not (`rolling` pins the upstream
+# `rolling` branches), and is never copied whole from `rolling` to `jazzy`.
 on:
   push:
-    branches: [jazzy]
+    branches: [jazzy, rolling]
   pull_request:
-    branches: [jazzy]
+    branches: [jazzy, rolling]
 
 jobs:
   industrial_ci:
