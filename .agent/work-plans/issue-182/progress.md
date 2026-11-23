@@ -749,3 +749,13 @@ The target dependency step again installed nothing ("'install_target_dependencie
 
 ### Findings
 No open findings. The pull request is ready for the merge decision.
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 16:43 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: owner
+**After**: merge
+**Decision**: merge
+
+The owner's answers, 2026-11-23: "Merge when CI is green (Recommended)" for pull request 186 (part 2); "Backport right after (Recommended)" for the hand backport to `jazzy` of eight commits (the seven fixes and the strengthened listener test; `e006804` and its revert `688d152` left out); "Post it (Recommended)" for the comment on rolker/cube_bathymetry#184 listing what part 2 left alone. The host merges only after the CI run on the pushed records passes.
