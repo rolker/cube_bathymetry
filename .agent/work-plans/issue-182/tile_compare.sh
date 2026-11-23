@@ -51,6 +51,8 @@
 #   different computation to be explained, not a hypothesis switch to accept.
 
 set -eo pipefail
+# Importing the test modules by path must leave no __pycache__ in the checkout.
+export PYTHONDONTWRITEBYTECODE=1
 
 usage() {
   sed -n '2,20p' "$0" >&2
