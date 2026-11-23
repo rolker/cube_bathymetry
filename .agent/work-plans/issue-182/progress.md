@@ -671,3 +671,13 @@ Test count: 2148 against Part 1's Jazzy 2143 (run 45229921366); skipped 159 agai
 
 ### Findings
 - [ ] (suggestion, Local Review (Pre-Push) @ `4a3291a` (covers `4cbfffe` via bookkeeping)) The package-prefixed include guard guards against a collision that cannot happen, so revert `e006804`. Checked: neither `make_transform_listener.hpp` is installed, because both packages install only `include/` (`cube_bathymetry/CMakeLists.txt:97`, `coverage_assessment/CMakeLists.txt:61`). The only translation unit that crosses packages, coverage_assessment's `test_frame_chain`, adds its own `src/` and cube_bathymetry's installed include dirs, never cube_bathymetry's `src/` (`coverage_assessment/CMakeLists.txt:150-152`). Both copies are included as `"make_transform_listener.hpp"`, so one translation unit resolves at most one of them anyway. The guard costs two `NOLINT(build/header_guard)` suppressions and makes the two copies differ by more than their namespace. Fix: `git revert e006804`, which restores `MAKE_TRANSFORM_LISTENER_HPP_` (the guard cpplint derives). The backport to `jazzy` then simply leaves both commits out. It holds on both distros (Part 1's Jazzy CI already passed cpplint with the plain guard in coverage_assessment's copy) — `cube_bathymetry/src/make_transform_listener.hpp:22-25,75`
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 16:09 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (one valid suggestion is open with a one-commit fix; merging past open findings is the owner's answer only)
+**After**: findings
+**Decision**: address
+
+Read: the Integrated Review of pull request 186 at `4cbfffe`: one valid suggestion, no false positives, CI all-pass (run 45264438157, Jazzy: 19 upstream packages and both of this repository's built; 53 and 15 test targets pass; 2148 tests, 0 errors, 0 failures, 159 skipped; the strengthened listener test passes on Jazzy; no new rosdep key needed installing). Addressed: `e006804` (the package-prefixed include guard) is reverted with `git revert`, in a code commit of its own that touches nothing under `.agent/`; the backport leaves out both that commit and its revert. The finding's box is ticked in a separate records commit.
