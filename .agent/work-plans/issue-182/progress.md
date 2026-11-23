@@ -445,3 +445,55 @@ Read: the Plan Review at `33371b1`, verdict needs-work, six findings. Finding 1 
 **Plan**: `.agent/work-plans/issue-182/plan.md` at `44605af`
 
 Revised after the Plan Review at `33371b1` and the owner's answer "B: no Rolling job yet". Changes: the Rolling CI job (commit 8) is removed and kept as a deferred section for issue 184 (Nav2 reason, shape, pins, review finding 3's step details, estimate). Hand runs on Rolling replace it and are recorded in `progress.md`: a clean build, the full test run with result lines, the repeats, `rosdep install --simulate` without `-r` over both packages plus `rosdep resolve` on resolute and noble, and the two cause-14 mutations. The tile comparison now measures the platform, not the port. Jazzy at `0b70b46` writes the bags and Rolling reads them. Pass rule fixed in advance: equal file lists and NaN masks, every finite cell within 1 mm, with the counts and the largest difference always reported. `tile_compare.sh` is planned to run on deadpool on its own; the plan states what is claimed if the owner's side has not run. Commit 6 names the `qos_overrides./tf*` parameter move. Comparison (b) is dropped. The three factual slips are corrected. Seven code commits, all backported. No new build was run.
+
+## Plan Review
+**Status**: complete
+**When**: 2026-11-23 14:00 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Dispatch**: resumed (agent a99d83b4d294af6cc, resume 1 of 3)
+**Verdict**: ready
+
+**Issue**: #182 — Build on ROS 2 Rolling: port cube_bathymetry and coverage_assessment, add a rolling branch
+**Plan**: `.agent/work-plans/issue-182/plan.md` at `44605af`
+**Branch**: `feature/issue-182`
+
+This re-review covers the six findings of the Plan Review at `33371b1` and the revision `git diff 33371b1 44605af`. It is not a full review of the plan again. I read the Checkpoint (the owner's answer "B: no Rolling job yet (Recommended)") and the new Plan Authored entry. I checked these sources: the `tile_io.cpp` of `marine_bathymetry_store` and of `marine_mbes_backscatter_store`, `test_import_bag_slope.py`, and the `add_executable` lines of `cube_bathymetry/CMakeLists.txt`. I ran one command here, hand run 4's `rosdep install --simulate` (with `env.sh` sourced, then without it), and ran `rosdep resolve` on the new ROS keys for rolling and for jazzy/noble. Nothing was built.
+
+### Evaluation
+
+| Dimension | Verdict | Notes |
+|---|---|---|
+| Scope | Good | Seven code commits plus records. The Rolling job is a "Deferred" section for issue 184. |
+| Issue alignment | Good | The plan follows the owner's answer B. Nothing in the plan still requires or implies a Rolling job: Done when, Open Questions, the principle table, Files to Change and the estimated scope were all checked. **Serves**: "none: this repository has no written goals or design document (`AGENTS.md` names none); the port serves rolker/unh_marine_autonomy#415." Accepted. |
+| File targeting | Good | `ci.yml` is out of the plan. `tile_compare.sh` goes in the records. |
+| Consequences | Good | The navigation-path statement is kept. The tile comparison now has a pass rule set in advance, a direction for the bags, a script the owner can run on deadpool, and a fallback claim (findings 1 to 3 below are refinements). Commit 6's `qos_overrides` change is named. |
+| Principle alignment | Good | The hand runs replace the job and are recorded with their result lines. Comparison (b) is dropped with its reason. |
+| ADR compliance | Good | ADR-0013 is followed. No other ADR is triggered. |
+| ROS conventions | Good | Unchanged from the last review. |
+
+### Earlier findings
+
+1. **Nav2 hold**: settled by the owner (B). No part of the plan still assumes a Rolling job: "Rolling job green" is gone from Done when, the Open Questions no longer ask about one, commit 7's reasoning no longer depends on commit 8, and the pull request text the plan prescribes promises no Rolling job. Hand runs 1 to 5 cover what the job would have checked: a clean build, both packages' tests, repeats, keys and mutations. On keys, see finding 4: hand run 4 is a real check of the system keys on resolute. Noble is covered by the Jazzy job: `industrial_ci` installs the `rolling` branch's manifest for real on noble with no `-r`, its skip keys being only `marine_nav_*` and `marine_ais_msgs`. What the job would have added and the hand runs do not: a clean container, so no undeclared dependency hidden by this machine's installs, and a check on every push.
+2. **Tile comparison**: taken. The 1 mm rule is sound for depth and uncertainty. Float64 rounding differences are around 1e-12 m, and even a long run of CUBE updates keeps them many orders of magnitude below 1 mm. A hypothesis switch moves a cell by the distance between hypotheses, which is centimetres or more. Jazzy writes the bags and Rolling reads them, both at metadata version 9. `0b70b46` is named. The fallback claim is honest: it says the platform question is "not shown" and owed before Rolling runs on a boat with `bathymetry_layer`. Refinements are in findings 1 to 3.
+3. **CI step details**: kept in the deferred section, every item included, the C launcher too.
+4. **`qos_overrides`**: in commit 6's message and in the validation paragraph.
+5. **(b)**: dropped. The reason holds: without a noise baseline it could only ever show "within the noise", and the named test and its two mutations are the stronger evidence for commit 6.
+6. **Factual slips**: all three corrected. `DetectionsToPointCloud` is a `LifecycleNode` (`:37`), Jazzy's `static_only` constructor is now listed, and `tf2_utils.h:50` is described as `Transformations`' constructor.
+
+### Findings
+
+1. **[Consequences — tile comparison: what is compared] (minor)**: "Tiles are written by `marine_bathymetry_store` as Float64" is true of the depth store only: 2 bands, depth and uncertainty (`marine_bathymetry_store/src/tile_io.cpp`, `saveTile<double>`). The runs taken from `test_import_bag_slope.py` also write the beam and slope backscatter stores. Those are 3-band Float32 tiles in dB (`marine_mbes_backscatter_store/src/tile_io.cpp`, `float` nodata), so a rule written in metres does not apply to them. Also, `batch_regen_bag` appears in that test only in refusal cases (`:637-640`, `:846-852`), so "the same `import_bag` and `batch_regen_bag` commands" produces no regenerated tiles. The depth layers the costmap reads are still covered, because `import_bag` writes the store through `store_import`. Resolution: limit the pass rule to the depth store, or state a tolerance in dB for the backscatter stores (which are not on the navigation path, so they could be reported only). Either define a `batch_regen_bag` run that writes tiles or leave the tool out.
+2. **[Consequences — reading a difference beyond 1 mm] (minor)**: The plan hands any cell beyond 1 mm to the owner, "who decides whether it is a hypothesis switch to accept". A result between the two extremes need not be a switch. Many cells off by millimetres to centimetres, varying smoothly across the survey, would mean a computation that differs: a tf2 interpolation, a beam projection, or the uncertainty model. That must be explained, not accepted as a switch. Resolution: have the report show the pattern as well as the counts (how many tiles are affected, a histogram of the differences, and whether the cells beyond 1 mm are isolated or contiguous), and say in the plan that a widespread or smooth difference is "a different computation, to be explained".
+3. **[Consequences — fallback record] (minor)**: The fallback claim is honest, but the owed item lives only in the records and in `progress.md`. Resolution: put "Rolling platform tile comparison owed before Rolling runs on a boat with `bathymetry_layer`" into the issue-184 comment the plan drafts, so it outlives the pull request. Also make the dry run on Rolling run twice and compare the `sha256sum` lists, so that "byte-deterministic run to run" is measured, not assumed.
+4. **[Hand run 4 — what `--simulate` checks] (minor)**: I ran the command here with `env.sh` sourced: it prints nothing (nothing to install) and exits 0. `--ignore-src` counts every package on `AMENT_PREFIX_PATH` as present, `/opt/ros/rolling` included. So the check resolves the system keys (`libsqlite3-dev`, `zlib`, GDAL and the others) on resolute, but for the ROS-package keys it shows only that a package of that name is installed, not that a rosdep rule exists. Without `env.sh` it fails on the source-only keys (`marine_survey_index`, `marine_interfaces`), as expected. With `rosdep resolve --rosdistro rolling`, the new ROS keys `tf2_msgs`, `rcl_interfaces`, `std_msgs`, `builtin_interfaces`, `rcutils`, `launch` and `launch_ros` all resolve to `ros-rolling-*`, and all resolve for jazzy/noble. `grid_map_msgs` has no Rolling rule, which is expected: it is built from source. Resolution: add that `rosdep resolve` of the new ROS keys to hand run 4, naming `grid_map_msgs` as source-only on Rolling.
+
+### Summary
+
+The revision handles all six findings. The owner's answer B runs through the whole plan, finding 3 is kept for the deferred job, and the tile comparison is now a real test with a rule set in advance and an honest fallback. Four small refinements remain: which stores the rule covers and what `batch_regen_bag` contributes, how to read a difference beyond 1 mm that is not a switch, a durable record of the owed comparison, and a `rosdep resolve` of the new ROS keys. None blocks implementation.
+
+### Recommended Actions
+
+- [ ] Limit the 1 mm rule to the depth store, or give the backscatter stores their own tolerance in dB; define a `batch_regen_bag` run that writes tiles, or drop the tool (finding 1).
+- [ ] Have the report show the pattern of differences beyond 1 mm, and read a widespread or smooth difference as a computation to explain (finding 2).
+- [ ] Carry the owed comparison into the issue-184 comment; run the Rolling dry run twice and compare checksums (finding 3).
+- [ ] Hand run 4: add `rosdep resolve --rosdistro rolling` of the new ROS keys (finding 4).
