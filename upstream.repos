@@ -1,11 +1,17 @@
 # Unreleased source dependencies for cube_bathymetry CI, cloned by
 # industrial_ci (UPSTREAM_WORKSPACE) into the upstream workspace and built
 # before this package. Mirrors the deps the previous hand-rolled CI cloned.
+#
+# BRANCH-SPECIFIC FILE: on the `rolling` branch unh_marine_autonomy is pinned
+# at its `rolling` branch (the code the Rolling port builds against; the Jazzy
+# CI job checks that pair still builds on Jazzy), on `jazzy` at `jazzy`. Never
+# take this file whole from `rolling` onto `jazzy`; on a cherry-pick that
+# touches it, keep the target branch's pins.
 repositories:
   unh_marine_autonomy:
     type: git
     url: https://github.com/rolker/unh_marine_autonomy.git
-    version: jazzy
+    version: rolling
   mru_transform:
     type: git
     url: https://github.com/rolker/mru_transform.git

@@ -251,8 +251,10 @@ public:
   : opt_(opt), prefix_("/t" + std::to_string(g_next_namespace++))
   {
     io_ = std::make_shared<rclcpp::Node>("coverage_test_io");
-    static_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(io_);
-    dynamic_tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(io_);
+    // By reference: Rolling's broadcasters take the node's interfaces, which a
+    // shared_ptr does not convert to; Jazzy's accept a node reference as well.
+    static_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*io_);
+    dynamic_tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*io_);
 
     std::vector<std::string> topics;
     for (const auto & s : opt_.sources) {
@@ -1918,11 +1920,22 @@ GroupAudit auditGroups(CoverageAssessmentNode & node)
 
 // A waitable of no use: stands for an action server or any other waitable that a
 // callback group outside the executor could hold.
+//
+// Rolling's rclcpp::Waitable makes the five wait-set and on-ready members pure and
+// adds a pure get_timers(); Jazzy's has the five as virtuals with defaults and no
+// get_timers(). Overriding the five builds on both; get_timers() carries no
+// `override` because Jazzy has nothing to override.
 class InertWaitable : public rclcpp::Waitable
 {
 public:
+  void add_to_wait_set(rcl_wait_set_t &) override {}
+  bool is_ready(const rcl_wait_set_t &) override {return false;}
   std::shared_ptr<void> take_data() override {return nullptr;}
+  std::shared_ptr<void> take_data_by_entity_id(size_t) override {return nullptr;}
   void execute(const std::shared_ptr<void> &) override {}
+  void set_on_ready_callback(std::function<void(size_t, int)>) override {}
+  void clear_on_ready_callback() override {}
+  std::vector<std::shared_ptr<rclcpp::TimerBase>> get_timers() const {return {};}
 };
 }  // namespace
 
@@ -1959,6 +1972,49 @@ TEST_F(NodeTest, CallbackGroupsHoldNothingButTfAndClockOutsideTheExecutor)
     EXPECT_EQ(h.node_->deactivate().id(), State::PRIMARY_STATE_INACTIVE);
     EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
   }
+}
+
+// rolker/unh_marine_autonomy#415 cause 14: on Rolling, `TransformListener(buffer, this)`
+// compiles and converts the node pointer to `bool spin_thread`, so the listener makes
+// a hidden node of its own and this node holds no /tf subscription at all; with
+// spin_thread false instead, the subscriptions land in the default group that the
+// executor spins. Either breaks the onReset design. Only this node's own callback
+// groups are inspected, never the graph of the domain.
+TEST_F(NodeTest, TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode)
+{
+  Harness::Options opt;
+  opt.sources = {"A"};
+  Harness h(opt);
+  ASSERT_EQ(h.node_->configure().id(), State::PRIMARY_STATE_INACTIVE);
+
+  const auto base = h.node_->get_node_base_interface();
+  std::map<std::string, std::vector<rclcpp::CallbackGroup::SharedPtr>> groups_of;
+  base->for_each_callback_group(
+    [&](rclcpp::CallbackGroup::SharedPtr group) {
+      group->collect_all_ptrs(
+        [&](const rclcpp::SubscriptionBase::SharedPtr & sub) {
+          groups_of[sub->get_topic_name()].push_back(group);
+        },
+        [](const rclcpp::ServiceBase::SharedPtr &) {},
+        [](const rclcpp::ClientBase::SharedPtr &) {},
+        [](const rclcpp::TimerBase::SharedPtr &) {},
+        [](const rclcpp::Waitable::SharedPtr &) {});
+    });
+  for (const std::string topic : {"/tf", "/tf_static"}) {
+    SCOPED_TRACE(topic);
+    ASSERT_EQ(groups_of.count(topic), 1u)
+      << "this node holds no subscription to " << topic
+      << ": the TF listener was built on a node of its own (#415 cause 14)";
+    ASSERT_EQ(groups_of[topic].size(), 1u)
+      << "this node holds more than one subscription to " << topic;
+    EXPECT_NE(groups_of[topic].front().get(), base->get_default_callback_group().get())
+      << "the TF listener's subscription is in the executor's default group "
+      "(spin_thread false), not on a thread of its own";
+    EXPECT_FALSE(groups_of[topic].front()->automatically_add_to_executor_with_node())
+      << "the TF listener's group would be spun by the node's executor";
+  }
+  EXPECT_EQ(groups_of["/tf"].front().get(), groups_of["/tf_static"].front().get());
+  EXPECT_EQ(h.node_->cleanup().id(), State::PRIMARY_STATE_UNCONFIGURED);
 }
 
 TEST_F(NodeTest, TheCallbackGroupAuditNoticesWhatItIsFor)
