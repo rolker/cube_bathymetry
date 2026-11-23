@@ -271,3 +271,24 @@ Read: the Local Review (Pre-Push) at `4572289`, verdict approved, ship recommend
 **Decision**: address
 
 Read: the Integrated Review of pull request 183 at `0f68fb4`: four valid suggestions, one false positive, CI pending (the Jazzy job was still running when the triage ended; its result is read by the host and handed to the fix pass if it arrives in time, and CI on the fix push is the check either way). Addressed: (1) `ci-image.yml`: `if: github.ref == 'refs/heads/jazzy'` on the `build-and-push` job, so a manual run from `rolling` cannot publish the `:jazzy` image; (2) `make_transform_listener.hpp`: a `static_assert` refusing a pointer argument; (3) the listener test collects every callback group per topic and asserts exactly one. (4) the pre-existing Jazzy race (a `TransformListener` destroyed before its thread enters `spin()` can hang in `join()`, `coverage_assessment_node.hpp:548`) is not this pull request's to fix: it is recorded for the follow-up issue the host drafts for the owner, and its box is ticked as deferred there.
+
+## Implementation
+**Status**: complete
+**When**: 2026-11-23 12:39 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+
+**PR**: #183 at `f9524b5`
+**Addressed**: Integrated Review at `0f68fb4` (2026-11-23 11:59 -05:00)
+**Commits**: `f80d56c` (CI), `41e8476` (code), `6cbd24b` (test), `f9524b5` (box checks)
+
+### Actions
+- [x] `ci-image.yml`: `if: github.ref == 'refs/heads/jazzy'` on `build-and-push`, with a one-line reason; triggers unchanged, file identical for both branches — `.github/workflows/ci-image.yml:27`
+- [x] `static_assert(!std::is_pointer_v<NodeT>, "pass the node by reference")` as the first statement of `makeTransformListener`. Builds on Rolling; on a scratch TU a `rclcpp::Node *` argument now fails with `make_transform_listener.hpp:62:23: error: static assertion failed: pass the node by reference`, the same TU against the previous header compiled silently, and a reference argument compiles — `coverage_assessment/src/make_transform_listener.hpp:62`
+- [x] Listener test collects a vector of groups per topic and asserts exactly one for `/tf` and `/tf_static`, checks on `.front()`. Mutations (in the worktree, rebuilt with `build.sh` each time, restored with `git checkout`, tree clean after): (a) raw `TransformListener(*tf_buffer_, this)` fails at line 2005 "this node holds no subscription to /tf"; (b) helper with `spin_thread = false` fails at lines 2010/2013 "in the executor's default group" and "would be spun by the node's executor"; the distinct messages and a relinked executable (new mtime, size) show the mutated code ran; restored passes — `coverage_assessment/test/test_coverage_assessment_node.cpp:1991`
+- [x] Pre-existing Jazzy listener-destruction race — `coverage_assessment/src/coverage_assessment_node.hpp:548` (deferred: not this pull request's: pre-existing on Jazzy; recorded for the follow-up issue the host drafts for the owner)
+
+### Checks
+- `./build.sh --packages-select coverage_assessment --packages-ignore cube_bathymetry`: 1 package finished (only the known tf2_ros `.h` deprecation warnings).
+- `./test.sh` same selection: 93% tests passed, 1 tests failed out of 15 (`test_frame_chain`, by design until Part 2).
+- Node test (domain 86 checked clear first) as 30 separate processes: pass=30 fail=0.
+- CI on `0f68fb4` (run 45220509531, `ROS 2 Jazzy (industrial_ci)`): pass in 16m50s; 19 upstream packages built, cube_bathymetry 53/53 and coverage_assessment 15/15 tests passed on Jazzy. The commits of this pass have no Jazzy check until CI runs on the push.
