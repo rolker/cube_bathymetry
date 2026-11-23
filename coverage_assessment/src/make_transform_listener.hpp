@@ -57,6 +57,9 @@ struct TakesNodeInterfaces<ListenerT, std::void_t<typename ListenerT::RequiredIn
 template<class ListenerT = tf2_ros::TransformListener, class NodeT>
 std::shared_ptr<ListenerT> makeTransformListener(tf2::BufferCore & buffer, NodeT & node)
 {
+  // A `Node *` argument would select Rolling's (BufferCore &, bool spin_thread,
+  // bool static_only) constructor without a word.
+  static_assert(!std::is_pointer_v<NodeT>, "pass the node by reference");
   constexpr bool spin_thread = true;
   if constexpr (TakesNodeInterfaces<ListenerT>::value) {
     return std::make_shared<ListenerT>(buffer, node, spin_thread);
