@@ -358,3 +358,11 @@ The owner's answers, 2026-11-23: "Merge when CI is green (Recommended)" for pull
 **Decision**: revise
 
 Part 1 (CI for `rolling`, `coverage_assessment`) is merged; its backport to `jazzy` is pull request 185. The plan is refreshed for part 2, the `cube_bathymetry` package, and then for the plain-container Rolling CI job (the owner's choice "B: plain container job", added after part 2 with its measured run time reported to him). To carry into the refreshed plan: part 1's helper and `static_assert` pattern for the TF listener (cause 14, `spin_thread = true`); causes 15 to 16 on rolker/unh_marine_autonomy#415; the unused `tf2_ros/message_filter.h` include goes in part 2; the validation statement must say that this package feeds the Nav2 costmap; a comparison of produced tiles before and after is owed; left-alone items go to rolker/cube_bathymetry#184 as a comment drafted for the owner.
+
+## Plan Authored
+**Status**: complete
+**When**: 2026-11-23 13:39 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Plan**: `.agent/work-plans/issue-182/plan.md` at `33371b1`
+
+Refreshed for Part 2 (`cube_bathymetry`) from a measured Rolling baseline: as the branch is, CMake fails at `CMakeLists.txt:248` (cause 1); past it, cause 2 (9 includes, 6 files), the unused `message_filters/subscriber.h` include (new; removing it needs `tf2_ros/buffer.hpp`), Eigen missing for `bag_to_geotiff` (new), cause 16 (`InertWaitable`), then cause 14 as one failing test (`AllCallbacksShareTheDefaultGroup`). With fixes in a scratch copy: 53 of 53 tests, `test_frame_chain` green, no intermittent failure in repeats (node test 20x, 34 fast tests 10x, 9 slow 3x). Plan: 7 code commits (all backported), the Part 1 listener helper copied per package with a named test and two mutations (both already shown to fail the existing audit test), and the plain-container Rolling CI job as the last commit (needs `grid_map` and, newly found, `nav2_msgs` from source; estimated 17 to 22 min cold). States that the package feeds the Nav2 costmap and proposes a Jazzy-before/Rolling-after tile comparison on synthetic bags (Rolling side here, Jazzy side on deadpool).
