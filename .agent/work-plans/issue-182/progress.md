@@ -232,3 +232,13 @@ Re-run here (Rolling): `./build.sh --packages-select coverage_assessment --packa
 - [ ] (suggestion) Guard the helper against a pointer argument: on Rolling a `Node *` lvalue would silently select `(BufferCore&, bool spin_thread, bool static_only)` (hidden node, `static_only = true`); add `static_assert(!std::is_pointer_v<NodeT>)` — `coverage_assessment/src/make_transform_listener.hpp:58`
 - [ ] (suggestion) `ci-image.yml`'s `workflow_dispatch` publishes the `:jazzy` tag from whatever ref it is run on; run from `rolling` it bakes `rolling`'s upstream pins, contrary to the Dockerfile comment; restrict the job to `refs/heads/jazzy` (a CI commit, backported) — `.github/workflows/ci-image.yml:14`
 - [ ] (suggestion) Record in the follow-up issue the pre-existing Jazzy race where a `TransformListener` destroyed before its thread enters `spin()` can hang in `join()` (Codex); not introduced by this branch — `coverage_assessment/src/coverage_assessment_node.hpp:548`
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 11:47 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (the pre-push review approved round 1 with no must-fix; Jazzy cannot be built on the development machine and a pull request into `rolling` has had no CI until this branch's trigger change, so the pushed branch's first run is the first Jazzy evidence and the first test of that change)
+**After**: publish
+**Decision**: publish
+
+Read: the Local Review (Pre-Push) at `4572289`, verdict approved, ship recommended, four suggestions open: the new test keeps one callback group per topic, so a second `/tf` or `/tf_static` subscription would go unnoticed (`coverage_assessment/test/test_coverage_assessment_node.cpp:1996`); guard the helper against a pointer argument with a `static_assert` (`coverage_assessment/src/make_transform_listener.hpp:58`); `ci-image.yml`'s manual dispatch publishes the `:jazzy` image tag from whatever branch it is run on (`.github/workflows/ci-image.yml:14`); record in the follow-up issue a pre-existing Jazzy race where a `TransformListener` destroyed before its thread enters `spin()` can hang (`coverage_assessment_node.hpp:548`). They stay open and go through triage after publish, so the first CI run starts now. This is a project issue, so the host runs no full pre-commit pass. The pull request says `Part of #182`.
