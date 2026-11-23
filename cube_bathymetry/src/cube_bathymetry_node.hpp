@@ -79,6 +79,7 @@
 #include "marine_interfaces/msg/sonar_visualization_tile.hpp"
 #include "marine_interfaces/msg/tile_catalog.hpp"
 #include "marine_interfaces/msg/tile_request.hpp"
+#include "make_transform_listener.hpp"
 
 
 /// Test-only access to the node's private session state (defined in
@@ -518,7 +519,10 @@ public:
     // replaced, or its callback runs against a destroyed buffer (#164).
     tf_listener_.reset();
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
+    // The listener's /tf and /tf_static subscriptions belong to this node and run on
+    // a thread of their own, outside the executor; a raw `this` would make Rolling
+    // build a hidden node instead (#415 cause 14; see make_transform_listener.hpp).
+    tf_listener_ = cube_bathymetry::makeTransformListener(*tf_buffer_, *this);
 
     grid_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
 
