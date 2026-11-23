@@ -38,11 +38,18 @@
 #   batch_regen_bag is not run: no run of it in the slope test writes tiles.
 #
 # Pass rule (fixed before any run; .agent/work-plans/issue-182/plan.md):
+#   both sides ran import_bag with the same arguments (the logs' `$` lines, with
+#     the import_bag path and the paths under bags/ and stores/ normalised);
 #   depth stores (depth, real_depth; 2-band Float64, NaN nodata):
-#     1. the same set of tile files (relative paths);
-#     2. per tile and band, the same nodata (NaN) mask;
-#     3. every finite cell within 1 mm (0.001, metres); an integer band exactly equal.
-#   backscatter stores (beam_bs, slope_bs; Float32 dB): compared and reported only.
+#     1. the same set of tile files (relative paths), at least one on each side;
+#     2. per tile, the same size, band count, geotransform and CRS (no CRS on
+#        either side counts as the same); per band, the same data type and nodata
+#        value (NaN on both sides counts as the same);
+#     3. per tile and band, the same nodata (NaN) mask;
+#     4. every finite cell within 1 mm (0.001, metres); an integer band exactly equal.
+#   real_depth is compared only if both sides imported the excerpt; otherwise the
+#     summary says "not compared".
+#   backscatter stores (beam_bs, slope_bs; Float32 dB): the same checks, reported only.
 #   Always reported: tiles affected, cells that differ at all and beyond 1 mm, the
 #   largest difference with its tile, band and cell, a histogram of differences,
 #   whether cells beyond 1 mm are isolated or contiguous, byte equality of each
@@ -93,6 +100,7 @@ write_python() {
   cat > "$1" <<'PYEOF'
 import hashlib
 import json
+import math
 import os
 import pathlib
 import shutil
@@ -212,6 +220,28 @@ BINS = [(0.0, 0.0, '== 0'), (0.0, 1e-12, '(0, 1e-12]'), (1e-12, 1e-9, '(1e-12, 1
         (1e-1, float('inf'), '> 1e-1')]
 
 
+def same_crs(sa, sb):
+    """(equal, note) for two osr.SpatialReference or None. A tile without a CRS on
+    one side only differs; on both sides it is equal, and the note says so."""
+    if sa is None and sb is None:
+        return True, 'no CRS on either side'
+    if sa is None or sb is None:
+        return False, 'A %s, B %s' % ('none' if sa is None else sa.GetName(),
+                                      'none' if sb is None else sb.GetName())
+    if sa.IsSame(sb):
+        return True, None
+    return False, 'A %s, B %s' % (sa.GetName(), sb.GetName())
+
+
+def same_nodata(na, nb):
+    """Nodata values equal: both unset, both NaN, or the same number."""
+    if na is None or nb is None:
+        return na is None and nb is None
+    if math.isnan(na) or math.isnan(nb):
+        return math.isnan(na) and math.isnan(nb)
+    return na == nb
+
+
 def compare_store(name, a_root, b_root, gated, out):
     import numpy as np
     from osgeo import gdal
@@ -224,9 +254,17 @@ def compare_store(name, a_root, b_root, gated, out):
     out.append('')
     out.append('=== store %s (%s): %d tiles in A, %d in B' % (name, rule, len(a_tifs),
                                                             len(b_tifs)))
+    if gated and not (a_tifs and b_tifs):
+        # Two empty stores would otherwise pass with nothing compared.
+        out.append('  NO TILES in %s: a depth store must hold at least one tile on each '
+                   'side' % ' and '.join(s for s, t in (('A', a_tifs), ('B', b_tifs))
+                                         if not t))
+        ok = False
     if not a_files and not b_files:
         out.append('  absent on both sides')
-        return True
+        if gated:
+            out.append('  store verdict: FAIL')
+        return ok or not gated
     if a_tifs != b_tifs:
         out.append('  tile lists DIFFER: only in A %s; only in B %s'
                    % (sorted(a_tifs - b_tifs), sorted(b_tifs - a_tifs)))
@@ -238,6 +276,7 @@ def compare_store(name, a_root, b_root, gated, out):
     worst = (0.0, None)
     tiles_differ, tiles_beyond, bytes_equal = set(), set(), 0
     comp_sizes = []
+    crs_notes = set()
     for rel in sorted(a_tifs & b_tifs):
         if a_files[rel].read_bytes() == b_files[rel].read_bytes():
             bytes_equal += 1
@@ -251,13 +290,27 @@ def compare_store(name, a_root, b_root, gated, out):
             out.append('  %s: geotransform DIFFERS %s vs %s'
                        % (rel, da.GetGeoTransform(), db.GetGeoTransform()))
             ok = False
+        crs_same, crs_note = same_crs(da.GetSpatialRef(), db.GetSpatialRef())
+        if not crs_same:
+            out.append('  %s: CRS DIFFERS: %s' % (rel, crs_note))
+            ok = False
+        elif crs_note:
+            crs_notes.add(crs_note)
         for band in range(1, da.RasterCount + 1):
             ba, bb = da.GetRasterBand(band), db.GetRasterBand(band)
             xa = ba.ReadAsArray().astype(np.float64)
             xb = bb.ReadAsArray().astype(np.float64)
-            is_int = gdal.GetDataTypeName(ba.DataType).lower().startswith(('byte', 'int',
-                                                                           'uint'))
+            ta, tb = gdal.GetDataTypeName(ba.DataType), gdal.GetDataTypeName(bb.DataType)
+            if ta != tb:
+                out.append('  %s band %d: data type DIFFERS: A %s, B %s' % (rel, band, ta, tb))
+                ok = False
+            # Exact equality if either side is an integer band.
+            is_int = any(t.lower().startswith(('byte', 'int', 'uint')) for t in (ta, tb))
             nda, ndb = ba.GetNoDataValue(), bb.GetNoDataValue()
+            if not same_nodata(nda, ndb):
+                out.append('  %s band %d: nodata value DIFFERS: A %r, B %r'
+                           % (rel, band, nda, ndb))
+                ok = False
             ma = np.isnan(xa) | ((xa == nda) if nda is not None else False)
             mb = np.isnan(xb) | ((xb == ndb) if ndb is not None else False)
             mask_diff = int(np.count_nonzero(ma != mb))
@@ -293,6 +346,8 @@ def compare_store(name, a_root, b_root, gated, out):
                 worst = (float(d.max()), '%s band %d cell (row %d, col %d): A %.12g, B %.12g'
                          % (rel, band, r, c, xa[r, c], xb[r, c]))
         del da, db
+    for note in sorted(crs_notes):
+        out.append('  CRS: %s' % note)
     out.append('  tile files byte-identical: %d of %d' % (bytes_equal, len(a_tifs & b_tifs)))
     out.append('  cells: %d (%d valid on both sides); nodata-mask differences: %d'
                % (total['cells'], total['valid'], total['mask']))
@@ -371,6 +426,50 @@ def compare_bags(a_dir, b_dir):
                                                                                len(names))
 
 
+IMPORT_LOGS = ('import_depth.log', 'import_slope.log', 'import_real.log')
+
+
+def normalised_command(log):
+    """The `$ ` line a side recorded, with the import_bag path reduced to its name and
+    each path under the side's bags/ or stores/ reduced to the part from there on;
+    None if the log is missing."""
+    if not log.is_file():
+        return None
+    lines = log.read_text().splitlines()
+    if not lines or not lines[0].startswith('$ '):
+        return None
+    words = lines[0][2:].split(' ')
+    out = [os.path.basename(words[0])]
+    for w in words[1:]:
+        parts = w.split('/')
+        cut = [i for i, p in enumerate(parts[:-1]) if p in ('bags', 'stores')]
+        out.append('/'.join(parts[cut[-1]:]) if w.startswith('/') and cut else w)
+    return ' '.join(out)
+
+
+def compare_commands(a, b, real_compared, out):
+    """Whether both sides ran import_bag with the same arguments. Each side builds them
+    from its own --src checkout, so a difference would otherwise read as the platform."""
+    ok = True
+    out.append('')
+    out.append('=== import_bag command lines (paths normalised)')
+    for name in IMPORT_LOGS:
+        if name == 'import_real.log' and not real_compared:
+            continue
+        ca = normalised_command(a / 'logs' / name)
+        cb = normalised_command(b / 'logs' / name)
+        if ca is None or cb is None:
+            out.append('  %s: MISSING in %s' % (name, ' and '.join(
+                s for s, c in (('A', ca), ('B', cb)) if c is None)))
+            ok = False
+        elif ca != cb:
+            out.append('  %s: DIFFER\n    A: %s\n    B: %s' % (name, ca, cb))
+            ok = False
+        else:
+            out.append('  %s: same' % name)
+    return ok
+
+
 def cmd_compare(a, b, report):
     a, b = pathlib.Path(a), pathlib.Path(b)
     out = ['tile_compare report', 'A: %s' % a, 'B: %s' % b]
@@ -388,18 +487,28 @@ def cmd_compare(a, b, report):
     else:
         out.append('bags read: NOT the same bytes (bags.sha256 differ); decoded: %s'
                    % compare_bags(a / 'bags', b / 'bags'))
-    verdict = True
+    real_a, real_b = (a / 'stores' / 'real_depth').is_dir(), (b / 'stores' / 'real_depth').is_dir()
+    real_compared = real_a and real_b
+    not_compared = []
+    if not real_compared:
+        not_compared.append('real_depth (real excerpt imported on %s)'
+                            % ('neither side' if not (real_a or real_b) else
+                               'side %s only' % ('A' if real_a else 'B')))
+    commands_same = compare_commands(a, b, real_compared, out)
+    verdict = commands_same
     for name in DEPTH_STORES + REPORT_ONLY_STORES:
-        if name == 'real_depth' and not ((a / 'stores' / name).is_dir()
-                                         and (b / 'stores' / name).is_dir()):
+        if name == 'real_depth' and not real_compared:
             out.append('')
-            out.append('=== store real_depth: not compared (real excerpt imported on %s)'
-                       % ('neither side' if not (a / 'stores' / name).is_dir()
-                          and not (b / 'stores' / name).is_dir() else 'one side only'))
+            out.append('=== store real_depth: NOT COMPARED: %s' % not_compared[0])
             continue
         verdict &= compare_store(name, a / 'stores' / name, b / 'stores' / name,
                                  name in DEPTH_STORES, out)
     out.append('')
+    out.append('import_bag command lines: %s' % ('same' if commands_same else
+                                                 'DIFFER or missing: no like-for-like '
+                                                 'comparison'))
+    for item in not_compared:
+        out.append('not compared: %s' % item)
     out.append('VERDICT (depth stores, 1 mm rule): %s' % ('PASS' if verdict else 'FAIL'))
     text = '\n'.join(out) + '\n'
     pathlib.Path(report).write_text(text)

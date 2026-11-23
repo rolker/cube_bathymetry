@@ -83,9 +83,19 @@ Keep `~/tile_compare` until the comparison has been recorded.
 
 ## The pass rule (fixed before any run)
 
-For the depth stores: the same tile files; per tile and band, the same NaN
-mask; every finite cell within 1 mm. The backscatter stores are compared and
-reported only. The report always gives the tiles affected, the cells that
+Both sides ran `import_bag` with the same arguments: the first (`$`) line of
+each log in `logs/`, with the `import_bag` path reduced to its name and the
+paths under `bags/` and `stores/` reduced to the part from there on, must be
+equal; a difference or a missing log fails the comparison, since each side
+builds its arguments from its own checkout. For the depth stores: the same
+tile files, at least one on each side (two empty stores fail); per tile the
+same size, band count, geotransform and CRS (no CRS on either side counts as
+the same, and the report says so); per band the same data type and nodata
+value (NaN on both sides counts as the same); per tile and band, the same NaN
+mask; every finite cell within 1 mm. `real_depth` is compared only when both
+sides imported the real excerpt; otherwise the summary says "not compared"
+and which side had it. The backscatter stores get the same checks, reported
+only. The report always gives the tiles affected, the cells that
 differ at all and beyond 1 mm, the largest difference with its tile and cell,
 a histogram of differences, and whether cells beyond 1 mm are isolated or
 contiguous. A widespread or smooth difference beyond 1 mm is a different
