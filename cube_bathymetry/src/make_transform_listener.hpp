@@ -19,8 +19,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef MAKE_TRANSFORM_LISTENER_HPP_
-#define MAKE_TRANSFORM_LISTENER_HPP_
+// The guard carries the package name, which cpplint's src/-relative rule would drop,
+// so that it cannot collide with coverage_assessment's copy of this helper.
+#ifndef CUBE_BATHYMETRY__MAKE_TRANSFORM_LISTENER_HPP_  // NOLINT(build/header_guard)
+#define CUBE_BATHYMETRY__MAKE_TRANSFORM_LISTENER_HPP_
 
 #include <memory>
 #include <type_traits>
@@ -70,4 +72,4 @@ std::shared_ptr<ListenerT> makeTransformListener(tf2::BufferCore & buffer, NodeT
 
 }  // namespace cube_bathymetry
 
-#endif  // MAKE_TRANSFORM_LISTENER_HPP_
+#endif  // CUBE_BATHYMETRY__MAKE_TRANSFORM_LISTENER_HPP_  // NOLINT(build/header_guard)
