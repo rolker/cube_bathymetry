@@ -402,6 +402,9 @@ target_link_libraries(bag_to_geotiff
   rosbag2_transport::rosbag2_transport
   ${sensor_msgs_TARGETS}
   tf2_ros::tf2_ros
+  # bag_to_geotiff.cpp includes tf2_sensor_msgs/tf2_sensor_msgs.hpp, which
+  # includes Eigen; the package's target carries that include path.
+  tf2_sensor_msgs::tf2_sensor_msgs
 )
 
 install(TARGETS bag_to_geotiff
