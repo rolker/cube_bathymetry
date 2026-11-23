@@ -25,6 +25,8 @@ on:
 jobs:
   build-and-push:
     name: Build + push to GHCR
+    # The image is tagged :jazzy, so only jazzy may publish it (a manual run from rolling would bake rolling's pins into it).
+    if: github.ref == 'refs/heads/jazzy'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
