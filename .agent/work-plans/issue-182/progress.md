@@ -613,3 +613,30 @@ Dropped as false or settled: Gemini's "`tf2_ros/*.hpp` may not exist on Jazzy" (
 ### For the follow-up issue
 - Part 1's `coverage_assessment` cause-14 test has the same gap (no check that the listener's thread runs); not changed here.
 - `cube_bathymetry_node.hpp:46` still includes the deprecated `tf2_ros/transform_listener.h`.
+
+## Local Review (Pre-Push)
+**Status**: complete
+**When**: 2026-11-23 15:55 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Dispatch**: resumed (agent ae85d044d67bd4b01, resume 1 of 3)
+**Verdict**: approved
+
+**Branch**: feature/issue-182 at `4a3291a`
+**Base**: origin/rolling
+**Depth**: Deep (reason: whole-diff classification unchanged from round 1; this round reviews the round-1 findings and the fix diff `f950830..4a3291a`)
+**Must-fix**: 0 | **Suggestions**: 1
+**Round**: 2 | **Ship**: recommended — no must-fix findings; remaining suggestions can be applied or tracked
+
+Round 2: the six round-1 findings and the fix diff. Cross-model Gemini and Codex ran on the fix diff only (`--branch f950830`) and completed.
+
+- **Finding 1 (CRS, data type, nodata) — fixed** (`15dedc2`). `same_crs` uses `IsSame`, a CRS on one side only fails, and none on both sides passes with a note. That is right for a comparison of platforms: the Jazzy side is the reference, so a missing CRS on both sides is not a platform difference, and the report says so. The Rolling depth tiles carry a CRS (no note in my dry runs). Data type is compared on both sides, `is_int` is true if either side is an integer band, and nodata is compared with NaN equal to NaN. All fail the depth store and are reported only for the other stores.
+- **Finding 2 (empty store) — fixed.** Re-run here: two empty result directories give FAIL. Two fresh Rolling dry runs compared against each other give PASS, with "import_depth.log: same", "import_slope.log: same" and the tile lists the same.
+- **Finding 3 (command lines) — fixed.** Every path argument `_common_args` and `slope_args` produce lies under `bags/` or `stores/`, so normalisation leaves no machine-specific path. A missing log fails. `real_depth` on one side only now reads "NOT COMPARED", and that is not a failure. This is acceptable, because on the `--from` path the Jazzy side's excerpt is copied with its bags.
+- **Finding 4 (thread) — fixed** (`452c903`). Checked on both distros: `buffer_.setUsingDedicatedThread(true)` is called only in the `spin_thread` branch, right after `dedicated_listener_thread_` is created and after `executor_->add_callback_group(callback_group_, ...)`. On Rolling this is installed `transform_listener.hpp:204-209`; on Jazzy it is geometry2 `jazzy` `:268-271` and `:337-338`. Nothing in this package calls the setter, and the listener never clears the flag. The flag can therefore be true with no thread running only after a listener is destroyed, and `configure()` builds a fresh buffer before the new listener (`cube_bathymetry_node.hpp:521`). Codex notes that the flag does not prove a transform is delivered. That is true, but the group is added to the executor in the same branch that sets the flag, so no plausible regression in this package separates the two. Dropped.
+- **Finding 5** — settled by the host (deferred to rolker/cube_bathymetry#184).
+- **Finding 6 (include guard) — see the suggestion below.**
+
+Verified: `e006804` and `452c903` touch nothing under `.agent/`. The nine code commits cherry-pick clean onto `origin/jazzy` (`0b70b46`). I ran that trial in a scratch worktree and then removed it; the result is 11 files, +186 -18, and no `.agent/` path. `build.sh --packages-select cube_bathymetry` was up to date at `4a3291a`. `test_node_lifecycle` run directly on `ROS_DOMAIN_ID` 175 (checked empty) gives "[  PASSED  ] 68 tests", the TF listener test included. `ctest -R "cpplint|uncrustify"` with the environment sourced gives "100% tests passed, 0 tests failed out of 2".
+
+### Findings
+- [ ] (suggestion) Revert `e006804`; round 1's suggestion 6 does not hold up. The collision it guarded against cannot happen: both copies are private `src/` headers, and a consolidation into `marine_autonomy` replaces both with one header and a new guard. The fix costs two `NOLINT(build/header_guard)` suppressions, makes the two copies differ by more than their namespace, and its `__` name is a reserved identifier in strict C++ (Codex; ROS 2 uses that form for `include/` guards, so this is minor). The plain `MAKE_TRANSFORM_LISTENER_HPP_` that cpplint expects was the better trade. If it is kept, nothing breaks — `cube_bathymetry/src/make_transform_listener.hpp:22-26,75`
