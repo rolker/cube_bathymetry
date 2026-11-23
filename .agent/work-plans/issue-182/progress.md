@@ -317,3 +317,24 @@ Re-run here (Rolling): build with `--packages-select coverage_assessment --packa
 
 ### Findings
 - [ ] No issues found. LGTM.
+
+## Integrated Review
+**Status**: complete
+**When**: 2026-11-23 12:57 -05:00
+**By**: Claude Code Agent (claude-opus-5-5)
+**Dispatch**: resumed (agent a5ab5afa351fba0b8, resume 1 of 3)
+
+**PR**: #183 at `f366b9f`
+**Sources**: 3 (Local Review @ `f366b9f` (covers `c70f14e` via bookkeeping), GitHub reviews (none: no reviews, inline comments or conversation comments), CI rollup)
+**Cross-source confirmations**: 0
+**CI**: all-pass
+
+CI: `ROS 2 Jazzy (industrial_ci)` on `f366b9f` (run 45229921366) passed in 15m46s. Log lines: "Summary: 19 packages finished [3min 15s]" (upstream); "Summary: 2 packages finished [3min 55s]"; "100% tests passed, 0 tests failed out of 53" (cube_bathymetry); "100% tests passed, 0 tests failed out of 15" (coverage_assessment); "Summary: 2143 tests, 0 errors, 0 failures, 158 skipped"; "[       OK ] NodeTest.TfListenerSubscribesThroughThisNodeOnItsOwnThreadNotAHiddenNode (9 ms)". The run left pending in the previous entry (45220509531 on `0f68fb4`) completed with success.
+
+Previous round (Integrated Review at `0f68fb4`): I checked each fix against the diff `0f68fb4..f366b9f`. `f80d56c` adds `if: github.ref == 'refs/heads/jazzy'` to `build-and-push`, and the triggers are unchanged. `41e8476` adds `static_assert(!std::is_pointer_v<NodeT>, ...)` before the `if constexpr`, so the Jazzy branch's `&node` is untouched. `6cbd24b` collects a vector of groups per topic and asserts `size() == 1u` before the `.front()` checks. The Jazzy listener-destruction race was deferred by the host to the follow-up issue. The false positive from that round (Gemini's `.hpp` include claim) is settled: CI built `make_transform_listener.hpp` on Jazzy with the `tf2_ros/transform_listener.hpp` include, and the test passed. The `sources` helper lists the pre-push entry at `4572289` as stale, which is expected: its four findings were ruled on in that Integrated Review and are all closed now.
+
+### Findings
+- [x] No open findings. All four findings from the previous round are closed (three fixed, one deferred to the follow-up issue). The Local Review at `f366b9f` found nothing, there is no GitHub review, and CI passes on Jazzy.
+
+### False positives
+- (Gemini, pre-push round) "`tf2_ros/transform_listener.hpp` does not exist on Jazzy" — confirmed false by the Jazzy CI build at `f366b9f`
