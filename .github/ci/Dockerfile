@@ -27,9 +27,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rosdep init 2>/dev/null || true
 RUN rosdep update --rosdistro jazzy
 
-# Clone the same upstream source deps CI uses (this MUST match cube's CI
-# upstream.repos) plus this repo's package manifests, then bake every resolvable
-# rosdep system dep.
+# Clone the upstream source deps listed in upstream.repos plus this repo's
+# package manifests, then bake every resolvable rosdep system dep. The image is
+# built from the `jazzy` branch (ci-image.yml), so it bakes `jazzy`'s
+# upstream.repos; the `rolling` branch pins its upstreams to `rolling` in its own
+# upstream.repos, which the CI job clones at run time. That difference is
+# harmless for a deps-only image: a key the `rolling` pins add is installed by
+# the CI-time `rosdep install`. Never take upstream.repos whole from `rolling`
+# onto `jazzy`.
 WORKDIR /tmp/dep-bake
 COPY upstream.repos ./upstream.repos
 COPY cube_bathymetry/package.xml ./cube_bathymetry/package.xml
