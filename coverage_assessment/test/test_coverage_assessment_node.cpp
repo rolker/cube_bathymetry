@@ -251,8 +251,10 @@ public:
   : opt_(opt), prefix_("/t" + std::to_string(g_next_namespace++))
   {
     io_ = std::make_shared<rclcpp::Node>("coverage_test_io");
-    static_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(io_);
-    dynamic_tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(io_);
+    // By reference: Rolling's broadcasters take the node's interfaces, which a
+    // shared_ptr does not convert to; Jazzy's accept a node reference as well.
+    static_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*io_);
+    dynamic_tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*io_);
 
     std::vector<std::string> topics;
     for (const auto & s : opt_.sources) {
