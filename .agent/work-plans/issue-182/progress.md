@@ -497,3 +497,13 @@ The revision handles all six findings. The owner's answer B runs through the who
 - [ ] Have the report show the pattern of differences beyond 1 mm, and read a widespread or smooth difference as a computation to explain (finding 2).
 - [ ] Carry the owed comparison into the issue-184 comment; run the Rolling dry run twice and compare checksums (finding 3).
 - [ ] Hand run 4: add `rosdep resolve --rosdistro rolling` of the new ROS keys (finding 4).
+
+## Checkpoint
+**Status**: complete
+**When**: 2026-11-23 13:59 -05:00
+**By**: Claude Code Agent (claude-fable-5-2)
+**Decided-by**: host (the plan review's verdict is ready; its four findings are minor and each is taken during implementation; none changes scope or an owner decision)
+**After**: plan
+**Decision**: proceed
+
+Read: the Plan Review at `44605af`, verdict ready, four minor findings, all taken by the implementer. (1) The tile comparison's pass rule (same file lists, same NaN masks, every finite cell within 1 mm) applies to the depth store, the 2-band Float64 tiles the costmap reads; the Float32 backscatter stores in dB are compared and reported only, with no pass rule, since they are not on the navigation path; `batch_regen_bag` is left out unless a run that writes tiles is defined. (2) The comparison's report shows the pattern as well as the counts (tiles affected, a histogram of differences, isolated or contiguous cells), and a widespread or smooth difference is read as a different computation to be explained, not as a hypothesis switch to accept. (3) The Rolling dry run is done twice and its checksum lists compared, so run-to-run determinism is measured; "Rolling against Jazzy tile comparison owed before Rolling runs on a boat with `bathymetry_layer`" goes into the comment drafted for rolker/cube_bathymetry#184. (4) Hand run 4 adds `rosdep resolve` of the new ROS-package keys for rolling and jazzy, naming `grid_map_msgs` as source-only on Rolling, because `--simulate --ignore-src` only shows those packages are installed here. Host decisions on the planner's open points: the ROS-package keys stay in commit 7, as in part 1; comparison (b), the live node, is dropped. Part 2 has no Rolling CI job (owner: "B: no Rolling job yet"); what is lost by that is a clean container and a check on every push, and the pull request says so.
