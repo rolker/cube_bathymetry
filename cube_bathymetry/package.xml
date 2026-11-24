@@ -27,9 +27,14 @@
   <!-- Dirty-tile query for incremental regen (#111, ADR-0002). Build+link dep of
        the batch_regen tool (survey_index_query); the survey_index.db FILE is a
        runtime SOFT dep (absent -> full regen), but the library is required to
-       build. sqlite3 is the DB handle type passed to the query API. -->
+       build. SQLite's sqlite3 is the DB handle type passed to the query API, so
+       its headers and library are needed: libsqlite3-dev, not the sqlite3
+       command-line tool (#182, #415 cause 11). -->
   <depend>marine_survey_index</depend>
-  <depend>sqlite3</depend>
+  <depend>libsqlite3-dev</depend>
+  <!-- import_bag's tile-size report compresses with zlib: find_package(ZLIB),
+       <zlib.h> in import_bag_main.cpp (#112) -->
+  <depend>zlib</depend>
   <!-- The store is a static lib that propagates nlohmann_json::nlohmann_json as a
        LINK_ONLY interface dep, so a consumer's CMake still needs its config present
        at configure time. rosdep installs it from this declaration; UMA#203 removed
@@ -47,6 +52,15 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
+  <!-- Included directly, so declared directly (#182, #415 cause 11): tf2_msgs by
+       the offline tools (TFMessage), grid_map_msgs and rcl_interfaces by the node
+       header, std_msgs by bag_to_geotiff, builtin_interfaces by quantize_tile.h.
+       tf2_msgs was an exec_depend only (the Python scripts still import it). -->
+  <depend>tf2_msgs</depend>
+  <depend>grid_map_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>std_msgs</depend>
+  <depend>builtin_interfaces</depend>
 
   <!-- scripts/reset_cube_nodes.sh shells out to `ros2 lifecycle`, `ros2 param` (#164)
        and `ros2 service` (#167) -->
@@ -60,11 +74,13 @@
   <!-- the storage plugins rosbag2_py opens .mcap and .db3 bags with -->
   <exec_depend>rosbag2_storage_default_plugins</exec_depend>
   <exec_depend>rosidl_runtime_py</exec_depend>
-  <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>tf2_ros_py</exec_depend>
   <!-- derive_angular_response.py fits the per-mode table (by-mode option) with numpy and
        reads SonarInfo (marine_interfaces, already a <depend>) (#172) -->
   <exec_depend>python3-numpy</exec_depend>
+  <!-- the installed launch files import launch and launch_ros (#182, #415 cause 11) -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
@@ -75,6 +91,8 @@
   <test_depend>rosbag2_storage_mcap</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+  <!-- test_node_lifecycle.cpp includes rcutils/logging.h (#182, #415 cause 11) -->
+  <test_depend>rcutils</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

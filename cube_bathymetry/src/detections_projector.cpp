@@ -28,7 +28,7 @@
 #include <utility>
 #include <vector>
 
-#include "tf2/exceptions.h"
+#include "tf2/exceptions.hpp"
 // tf2/utils.hpp's getEulerYPR resolves the quaternion via tf2::fromMsg, whose
 // definition lives in tf2_geometry_msgs (header-only). Include it so the symbol
 // is emitted in this TU, and BEFORE tf2/utils.hpp (ODR for fromMsg). This source
