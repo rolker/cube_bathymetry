@@ -42,6 +42,7 @@
 #include <utility>
 #include <vector>
 
+#include "tf2_ros/buffer.hpp"
 #include "tf2_ros/transform_listener.h"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/create_timer.hpp"
@@ -58,8 +59,6 @@
 #include "cube_bathymetry/grid_projection.h"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
-#include "tf2_ros/message_filter.h"
-#include "message_filters/subscriber.h"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "tf2_sensor_msgs/tf2_sensor_msgs.hpp"
 #include "tf2_eigen/tf2_eigen.hpp"
@@ -80,6 +79,7 @@
 #include "marine_interfaces/msg/sonar_visualization_tile.hpp"
 #include "marine_interfaces/msg/tile_catalog.hpp"
 #include "marine_interfaces/msg/tile_request.hpp"
+#include "make_transform_listener.hpp"
 
 
 /// Test-only access to the node's private session state (defined in
@@ -519,7 +519,10 @@ public:
     // replaced, or its callback runs against a destroyed buffer (#164).
     tf_listener_.reset();
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this);
+    // The listener's /tf and /tf_static subscriptions belong to this node and run on
+    // a thread of their own, outside the executor; a raw `this` would make Rolling
+    // build a hidden node instead (#415 cause 14; see make_transform_listener.hpp).
+    tf_listener_ = cube_bathymetry::makeTransformListener(*tf_buffer_, *this);
 
     grid_publisher_ = create_publisher<grid_map_msgs::msg::GridMap>("grid", 10);
 

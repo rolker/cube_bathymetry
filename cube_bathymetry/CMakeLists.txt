@@ -243,9 +243,10 @@ target_link_libraries(cube_bathymetry_grid_projection
   cube_bathymetry
 )
 # grid_map_core ships an Eigen-plugin header that must be on the include path and
-# its -DEIGEN_*_PLUGIN definitions in scope; ament_target_dependencies wires both
-# (plus Eigen3) onto the target, which raw ${grid_map_core_LIBRARIES} does not.
-ament_target_dependencies(cube_bathymetry_grid_projection grid_map_core)
+# its -DEIGEN_*_PLUGIN definitions in scope. The definitions come from the
+# package's grid_map_core-extras.cmake, added at directory scope by find_package;
+# the exported target carries the include path (and the library).
+target_link_libraries(cube_bathymetry_grid_projection grid_map_core::grid_map_core)
 install(TARGETS cube_bathymetry_grid_projection EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -401,6 +402,9 @@ target_link_libraries(bag_to_geotiff
   rosbag2_transport::rosbag2_transport
   ${sensor_msgs_TARGETS}
   tf2_ros::tf2_ros
+  # bag_to_geotiff.cpp includes tf2_sensor_msgs/tf2_sensor_msgs.hpp, which
+  # includes Eigen; the package's target carries that include path.
+  tf2_sensor_msgs::tf2_sensor_msgs
 )
 
 install(TARGETS bag_to_geotiff

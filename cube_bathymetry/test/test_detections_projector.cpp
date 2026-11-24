@@ -26,7 +26,7 @@
 
 #include "cube_bathymetry/detections_projector.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
-#include "tf2/buffer_core.h"
+#include "tf2/buffer_core.hpp"
 
 namespace cube
 {

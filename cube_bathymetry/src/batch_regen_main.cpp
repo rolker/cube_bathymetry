@@ -80,7 +80,7 @@
 #include "rosbag2_transport/reader_writer_factory.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2_msgs/msg/tf_message.hpp"
-#include "tf2/time.h"
+#include "tf2/time.hpp"
 #include "tf2_ros/buffer.h"
 
 [[noreturn]] void usage()
